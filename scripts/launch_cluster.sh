@@ -38,7 +38,7 @@ echo "[System] Launching Cluster..."
 
 export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
 export ZE_AFFINITY_MASK=""
-export RAY_EXPERIMENTAL_NOSET_XPU_VISIBLE_DEVICES="1"
+export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR="1"
 
 # REMOVED: -f $PBS_NODEFILE
 # ADDED: Full path to python (Safety best practice)

@@ -1,0 +1,4 @@
+new packages tree,
+
+source ~/agpt/venv/llm-dev/bin/activate
+export PYTHONPATH=/home/wenyiw/agpt/venv/llm-dev/lib/python3.10/site-packages:$PYTHONPATH
