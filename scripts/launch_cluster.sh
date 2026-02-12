@@ -8,7 +8,6 @@ if [ -z "$PBS_NODEFILE" ]; then
     exit 1
 fi
 
-# Go to the project root (assuming script is run from project root or scripts dir)
 # Get the absolute path of the directory containing this script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -29,7 +28,6 @@ fi
 echo "[System] Head IP (HSN): $HEAD_IP"
 
 # --- 3. Calculate Node Count ---
-# PBS_SELECT might not be set in all interactive modes, rely on nodefile line count
 NODE_COUNT=$(wc -l < $PBS_NODEFILE)
 echo "[System] Total Nodes: $NODE_COUNT"
 
@@ -38,10 +36,14 @@ echo "[System] Launching Cluster..."
 
 export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
 export ZE_AFFINITY_MASK=""
-export RAY_EXPERIMENTAL_NOSET_XPU_VISIBLE_DEVICES="1"
 
-# REMOVED: -f $PBS_NODEFILE
-# ADDED: Full path to python (Safety best practice)
+# NOSET=1 + all-tiles-visible prevents the SYCL crash for non-GPU actors.
+# Each ModelWorker narrows ONEAPI_DEVICE_SELECTOR to its assigned tile
+# before forking the vLLM EngineCore subprocess, giving real per-tile
+# device isolation (Level Zero reads the selector fresh in the child).
+export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR="1"
+export ONEAPI_DEVICE_SELECTOR="level_zero:0,1,2,3,4,5,6,7,8,9,10,11"
+
 PYTHON_EXEC=$(which python3)
 
 mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind depth \
