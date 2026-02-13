@@ -1,0 +1,25 @@
+api_server:
+  launch_sllm_service: true
+  path_save: /home/wenyiw/agpt/mpi-vllm-nccl/results
+  requests_number: -1
+  sorted_policy: FCFS_batch
+benchmark:
+  output_result_dir: /home/wenyiw/agpt/mpi-vllm-nccl/results
+  output_trace_path: /home/wenyiw/agpt/mpi-vllm-nccl/data/output_traces/peak_300s_10x_0.jsonl
+gpu_topology:
+  num_gpus_per_node: 4
+  num_nodes: 1
+disable_continuous_batching: true
+router_replicas: 16
+local_storage_path: /local/scratch/models
+models:
+- meta-llama/Meta-Llama-3-8B:
+    mode: chat
+    node_index: null
+    num_replicas: 4
+    size: 8
+    tensor_parallel_size: 1
+port: 8000
+sllm_mem_pool_size: 128GB
+sllm_store_timeout: 900
+storage_path: /home/wenyiw/agpt/mpi-llm/models
