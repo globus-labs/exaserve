@@ -1,0 +1,30 @@
+#!/bin/bash -l
+#PBS -N {{JOB_NAME}}
+#PBS -m bae
+#PBS -M wenyiw@uchicago.edu
+#PBS -l filesystems=home:eagle
+#PBS -A AuroraGPT
+#PBS -k doe
+#PBS -l select={{NUM_NODES}}
+#PBS -l walltime={{WALLTIME}}
+#PBS -q {{QUEUE}}
+#PBS -o {{PBS_OUT_DIR}}/stdout/
+#PBS -e {{PBS_OUT_DIR}}/stderr/
+
+# Navigate to Experiment Directory
+cd {{RUN_DIR}}
+
+echo "=================================================="
+echo "PBS Job Information"
+echo "=================================================="
+echo "Job ID:     $PBS_JOBID"
+echo "Job Name:   {{JOB_NAME}}"
+echo "Hostname:   $(hostname)"
+echo "Nodes:      {{NUM_NODES}}"
+echo "Backend:    {{BACKEND}}"
+echo "Work Dir:   $(pwd)"
+echo "Config:     {{CONFIG_FILE}}"
+echo "=================================================="
+
+# Invoke Experiment Driver (using absolute path) with backend specification
+{{RUN_EXP_SCRIPT}} {{CONFIG_FILE}} --backend {{BACKEND}} {{NO_WARMUP}} --num-runs {{NUM_RUNS}}
