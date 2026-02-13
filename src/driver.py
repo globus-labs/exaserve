@@ -49,14 +49,17 @@ def get_ray_env():
 
     # Aurora Specifics for PVC (Ponte Vecchio)
     env["ZE_FLAT_DEVICE_HIERARCHY"] = "FLAT"  # Exposes all 12 tiles
-    env["ZE_AFFINITY_MASK"] = ""              # Ensure no masking hides GPUs
+    env["ZE_AFFINITY_MASK"] = ""              # All tiles visible (baseline)
     env["VLLM_TARGET_DEVICE"] = "xpu"         # Tell vLLM we are on Intel
 
     # NOSET=1 prevents Ray from writing per-worker ONEAPI_DEVICE_SELECTOR
     # (avoids the "level_zero:" empty-string SYCL crash for non-GPU actors).
-    # Global ONEAPI_DEVICE_SELECTOR lists all tiles as a safe baseline.
-    # Real isolation: each ModelWorker narrows it to one tile before forking
-    # the vLLM EngineCore subprocess (see aurora_serve.py).
+    # Global ONEAPI_DEVICE_SELECTOR lists all tiles as a safe baseline for
+    # non-GPU actors (Routers).  Real per-tile isolation: each ModelWorker
+    # overrides ZE_AFFINITY_MASK to its assigned tile and sets
+    # ONEAPI_DEVICE_SELECTOR=level_zero:0 (re-indexed).  ZE_AFFINITY_MASK
+    # provides hardware-level Level Zero isolation that is reliably inherited
+    # by the vLLM EngineCore subprocess under 'spawn' multiprocessing.
     env["RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR"] = "1"
     env["ONEAPI_DEVICE_SELECTOR"] = (
         "level_zero:" + ",".join(str(i) for i in range(NUM_GPU_TILES_PER_NODE))

@@ -46,13 +46,11 @@ NUM_ROUTERS = int(os.getenv("NUM_ROUTERS", "4"))
 WORKER_MAX_ONGOING = int(os.getenv("WORKER_MAX_ONGOING", "16"))
 
 # PVC card layout: tiles 2K and 2K+1 share card K (with ZE_FLAT_DEVICE_HIERARCHY=FLAT).
-# When tiles on the same card run vLLM's memory profiling (dummy forward pass + SYCL
-# kernel JIT compilation) concurrently, the Level Zero driver can report inflated
-# non-torch memory on some tiles (31-47 GB instead of ~3 GB), causing
-# "No available memory for the cache blocks" even though 64 GB tiles have >40 GB free.
-# Staggering the second tile on each card by INIT_STAGGER_SECONDS avoids this.
+# Tiles sharing a card share Level Zero driver resources.  A small stagger between
+# the second tile on each card avoids contention during concurrent memory profiling
+# and SYCL kernel JIT compilation.
 TILES_PER_CARD = int(os.getenv("TILES_PER_CARD", "2"))
-INIT_STAGGER_SECONDS = int(os.getenv("INIT_STAGGER_SECONDS", "20"))
+INIT_STAGGER_SECONDS = int(os.getenv("INIT_STAGGER_SECONDS", "5"))
 # Number of times to retry engine creation if it fails (e.g. transient memory spike).
 ENGINE_INIT_RETRIES = int(os.getenv("ENGINE_INIT_RETRIES", "3"))
 
@@ -96,19 +94,25 @@ class ModelWorker:
 
         # ---- Device isolation ------------------------------------------------
         # vLLM v1 spawns a separate EngineCore *subprocess* for GPU work.
-        # torch.xpu.set_device() only affects the current process — the child
-        # inherits os.environ and Level Zero reads ONEAPI_DEVICE_SELECTOR fresh
-        # at library-load time.  By restricting it here BEFORE engine creation,
-        # the subprocess sees only the assigned tile (device 0 inside the child
-        # = the physical tile we want).
+        # The child inherits os.environ; Level Zero and SYCL read their
+        # respective env vars fresh at library-load time.
+        #
+        # We must use ZE_AFFINITY_MASK for hardware-level isolation.  This
+        # is what vLLM's XPU platform expects (device_control_env_var =
+        # "ZE_AFFINITY_MASK").  ONEAPI_DEVICE_SELECTOR alone only filters
+        # at the SYCL level and is not reliably inherited by the EngineCore
+        # subprocess under 'spawn' multiprocessing inside Ray actors,
+        # causing all subprocesses to default to tile 0 and OOM.
+        #
+        # ZE_AFFINITY_MASK re-indexes visible devices: with
+        # ZE_AFFINITY_MASK=5, physical tile 5 becomes Level Zero device 0.
+        # So ONEAPI_DEVICE_SELECTOR must be "level_zero:0" (not the
+        # physical ID) to match the re-indexed device.
         gpu_ids = ray.get_gpu_ids()
         device_id = int(gpu_ids[0]) if gpu_ids else 0
 
-        os.environ["ONEAPI_DEVICE_SELECTOR"] = f"level_zero:{device_id}"
-        # We do NOT set ZE_AFFINITY_MASK here because it re-indexes devices,
-        # causing "level_zero:{device_id}" to be out of bounds if device_id > 0.
-        # Driver sets ZE_AFFINITY_MASK="" (all visible), so ONEAPI_DEVICE_SELECTOR
-        # correctly picks the physical device by index.
+        os.environ["ZE_AFFINITY_MASK"] = str(device_id)
+        os.environ["ONEAPI_DEVICE_SELECTOR"] = "level_zero:0"
 
         # NOTE: Do NOT call torch.xpu.set_device() here.
         # Initialising the XPU runtime in the parent process creates
@@ -116,12 +120,13 @@ class ModelWorker:
         # subprocess's own fresh initialisation (vLLM forces 'spawn' when
         # inside a Ray actor), causing most children to fail
         # "assert current_platform.is_xpu()".  The env-var restriction
-        # above is sufficient — the child inherits ONEAPI_DEVICE_SELECTOR
+        # above is sufficient — the child inherits ZE_AFFINITY_MASK
         # and sees only the assigned tile as device 0.
         print(
             f"[ModelWorker pid={pid}] GPU tile {device_id} "
             f"(ray.get_gpu_ids()={gpu_ids})  "
-            f"ONEAPI_DEVICE_SELECTOR=level_zero:{device_id}",
+            f"ZE_AFFINITY_MASK={device_id}  "
+            f"ONEAPI_DEVICE_SELECTOR=level_zero:0",
             flush=True,
         )
 
