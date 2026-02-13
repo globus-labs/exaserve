@@ -3,7 +3,6 @@ import yaml
 import os
 import shutil
 import stat
-from copy import deepcopy
 from aurora_rayserver.eval.exp_configs import *
 from aurora_rayserver.eval.trace_generator import TraceGenerator
 
@@ -27,15 +26,6 @@ def setup_weak_scaling(args, experiments, backend="ray"):
         experiments: List of ExpConfig objects
         backend: Either "ray" or "mpi"
     """
-    # Load template
-    print(f"Loading config template from {args.config_template}...")
-    with open(args.config_template, 'r') as f:
-        template_config = yaml.safe_load(f)
-    
-    # Init Generator
-    print("Initializing TraceGenerator...")
-    trace_gen = TraceGenerator(args.config_template)
-    
     # Prepare Submission List
     submit_cmds = []
     
@@ -61,79 +51,37 @@ def setup_weak_scaling(args, experiments, backend="ray"):
         
         # 1. Generate Trace
         print(f"  [{exp_cfg.num_nodes} Nodes] Generating trace...")
-        # Since get_weak_scaling_configs returns ExpConfigs with WeakScalingConfig in trace_config
-        trace_gen.generate_weak_scaling(exp_cfg)
         
-        # 2. Generate Experiment Config (config.yaml)
-        # Deepcopy template
-        conf = deepcopy(template_config)
+        # Initialize TraceGenerator with ExpConfig
+        trace_gen = TraceGenerator(exp_cfg)
         
-        # Update Topology
-        if "gpu_topology" not in conf: conf["gpu_topology"] = {}
-        conf["gpu_topology"]["num_nodes"] = exp_cfg.num_nodes
+        # Generate trace based on config type
+        if isinstance(exp_cfg.trace_config, WeakScalingConfig):
+            trace_gen.generate_weak_scaling(exp_cfg)
+        elif isinstance(exp_cfg.trace_config, TraceGeneratorConfig):
+            trace_gen.generate_trace(exp_cfg)
+        else:
+            print(f"!!! ERROR: Unknown trace_config type: {type(exp_cfg.trace_config)}")
+            continue
         
-        # [NEW] Scale num_replicas for models
-        # For weak scaling, we assume the provided template has a single model entry
-        # and we scale its replica count linearly with nodes.
-        # Assuming 1 node = 8 GPUs (or whatever topology says), and standard TP=1
+        # 2. Scale num_replicas for models based on num_nodes
+        # For weak scaling, we scale replica count linearly with nodes
+        gpus_per_node = exp_cfg.gpu_topology.num_gpus_per_node
         
-        # We assume the user provides a template with settings for 1 node (or 2 nodes),
-        # but for weak scaling, we want to fully utilize the requested nodes.
-        # If the template says "num_replicas: 8" for 1 node, then for 2 nodes it should be 16.
-        # Logic: 
-        #   target_replicas = num_nodes * (gpus_per_node / tp_size)
-        # OR simpler:
-        #   target_replicas = base_replicas_per_node * num_nodes
+        # Update model configs with proper replica counts
+        for model_cfg in exp_cfg.model_configs:
+            tp_size = model_cfg.tensor_parallel_size
+            replicas_per_node = gpus_per_node // tp_size
+            total_replicas = replicas_per_node * exp_cfg.num_nodes
+            model_cfg.num_replicas = total_replicas
+            print(f"      -> Scaling {model_cfg.model_id}: {total_replicas} replicas (Nodes={exp_cfg.num_nodes}, TP={tp_size})")
         
-        # Let's inspect the models section
-        if "models" in conf and conf["models"]:
-            gpus_per_node = conf.get("gpu_topology", {}).get("num_gpus_per_node", 4)
-            for model_entry in conf["models"]:
-                model_name = list(model_entry.keys())[0]
-                model_spec = model_entry[model_name]
-                
-                tp_size = model_spec.get("tensor_parallel_size", 1)
-                
-                # Calculate max possible replicas per node
-                # e.g. 4 GPUs / TP 1 = 4 replicas per node
-                # e.g. 4 GPUs / TP 2 = 2 replicas per node
-                replicas_per_node = gpus_per_node // tp_size
-                
-                # Scale total replicas
-                total_replicas = replicas_per_node * exp_cfg.num_nodes
-                
-                model_spec["num_replicas"] = total_replicas
-                print(f"      -> Scaling {model_name}: {total_replicas} replicas (Nodes={exp_cfg.num_nodes}, TP={tp_size})")
-
-        # Update Benchmark
-        if "benchmark" not in conf: conf["benchmark"] = {}
+        # 3. Generate Experiment Config (config.yaml) from ExpConfig
+        # Use the config_path specified in ExpConfig (already set to working_dir/config.yaml)
+        exp_cfg.save_yaml(exp_cfg.config_path)
+        print(f"      -> Config: {exp_cfg.config_path}")
         
-        # Extract trace path from the config object
-        ws_cfg = exp_cfg.trace_config
-        if isinstance(ws_cfg, WeakScalingConfig):
-             conf["benchmark"]["output_trace_path"] = ws_cfg.output_path
-             
-             # Also persist other weak scaling params for reference
-             conf["weak_scaling"] = {
-                "requests_per_node_per_sec": ws_cfg.rpn,
-                "duration": ws_cfg.duration,
-                "input_len": ws_cfg.input_len,
-                "output_len": ws_cfg.output_len
-             }
-        
-        # Result directory (replay_client writes result0.json, result1.json, ...)
-        conf["benchmark"]["output_result_dir"] = exp_cfg.result_dir
-
-        # [NEW] Ensure trace path is NOT in the experiment directory but in the centralized location
-        # This was already handled by get_weak_scaling_configs setting output_path to DEFAULT_OUTPUT_TRACE_DIR/...
-        # But we ensure the config.yaml reflects it (which it does via 'output_trace_path' below).
-        # We assume exp_cfg.trace_config.output_path is already pointing to the shared location.
-        
-        config_path = os.path.join(exp_cfg.working_dir, "config.yaml")
-        save_yaml(conf, config_path)
-        print(f"      -> Config: {config_path}")
-        
-        # 3. Generate PBS
+        # 4. Generate PBS
         pbs_content = pbs_template_content \
             .replace("{{JOB_NAME}}", exp_cfg.job_name) \
             .replace("{{NUM_NODES}}", str(exp_cfg.num_nodes)) \
@@ -141,7 +89,7 @@ def setup_weak_scaling(args, experiments, backend="ray"):
             .replace("{{QUEUE}}", exp_cfg.queue_name) \
             .replace("{{PBS_OUT_DIR}}", exp_cfg.pbs_output_dir) \
             .replace("{{RUN_DIR}}", os.path.abspath(exp_cfg.working_dir)) \
-            .replace("{{CONFIG_FILE}}", os.path.abspath(config_path)) \
+            .replace("{{CONFIG_FILE}}", os.path.abspath(exp_cfg.config_path)) \
             .replace("{{RUN_EXP_SCRIPT}}", run_exp_script) \
             .replace("{{BACKEND}}", backend) \
             .replace("{{NO_WARMUP}}", "--no-warmup" if exp_cfg.no_warmup else "") \
@@ -185,11 +133,6 @@ def setup_weak_scaling(args, experiments, backend="ray"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Generate weak scaling experiment configurations"
-    )
-    parser.add_argument(
-        "--config-template",
-        default=os.path.join(SCRIPT_DIR, "config-nodes.yaml"),
-        help="Base config template (default: config-nodes.yaml)",
     )
     parser.add_argument(
         "--pbs-template",

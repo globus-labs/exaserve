@@ -9,7 +9,7 @@ import sys
 from typing import Optional, Union
 from dataclasses import asdict
 
-from aurora_rayserver.eval.exp_configs import *
+from exp_configs import *
 
 try:
     from transformers import AutoTokenizer
@@ -18,46 +18,57 @@ except ImportError:
     sys.exit(1)
 
 class TraceGenerator:
-    def __init__(self, config_path):
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+    def __init__(self, exp_config: ExpConfig):
+        """
+        Initialize TraceGenerator with an ExpConfig object instead of a config file path.
         
-        # We only keep models_cfg from the base config
-        self.models_cfg = self.config.get('models', [])
+        Args:
+            exp_config: ExpConfig object containing all configuration
+        """
+        self.exp_config = exp_config
+        
+        # Extract models from ExpConfig
+        self.models_cfg = []
         self.model_specs = {}
-        for entry in self.models_cfg:
-            if not isinstance(entry, dict) or not entry:
-                continue
-            model_id = list(entry.keys())[0]
-            spec = entry[model_id] or {}
-            # required field
-            tp = spec.get('tensor_parallel_size')
-            invalid_tp = None
-            try:
-                tp_int = int(tp)
-            except (TypeError, ValueError):
-                invalid_tp = tp
-            else:
-                if tp_int < 1:
-                    invalid_tp = tp_int
-            if invalid_tp is not None:
-                print(f"!!! ERROR: tensor_parallel_size for '{model_id}' must be a positive integer, got {invalid_tp!r}.")
-                sys.exit(1)
-            spec['tensor_parallel_size'] = tp_int
-            self.model_specs[model_id] = spec
         
-        # Seed is passed via config or default 42
-        self.seed = self.config.get('seed', 42)
+        for model_cfg in exp_config.model_configs:
+            # Convert ModelConfig to the dict format expected by the rest of the code
+            model_entry = {
+                model_cfg.model_id: {
+                    'mode': model_cfg.mode,
+                    'tensor_parallel_size': model_cfg.tensor_parallel_size,
+                    'size': model_cfg.size,
+                    'num_replicas': model_cfg.num_replicas,
+                    'node_index': model_cfg.node_index,
+                    'tokenizer_path': model_cfg.tokenizer_path or model_cfg.model_id,
+                }
+            }
+            self.models_cfg.append(model_entry)
+            
+            # Store model specs
+            tp = model_cfg.tensor_parallel_size
+            if tp < 1:
+                print(f"!!! ERROR: tensor_parallel_size for '{model_cfg.model_id}' must be a positive integer, got {tp}.")
+                sys.exit(1)
+            
+            self.model_specs[model_cfg.model_id] = {
+                'tensor_parallel_size': tp,
+                'size': model_cfg.size,
+                'mode': model_cfg.mode,
+                'tokenizer_path': model_cfg.tokenizer_path or model_cfg.model_id,
+            }
+        
+        # Seed from ExpConfig
+        self.seed = exp_config.seed
         random.seed(self.seed)
         np.random.seed(self.seed)
         
-        # [NEW] Multi-Tokenizer Registry
+        # Multi-Tokenizer Registry
         self.tokenizers = {}
         self._load_tokenizers()
 
         self.prompt_bank = [] 
         self._current_prompt_path = None
-        # We don't load prompts here anymore, we load on demand based on ExpConfig
 
     def _load_tokenizers(self):
         """
@@ -184,14 +195,15 @@ class TraceGenerator:
 
     def generate_trace(self, exp_config: ExpConfig):
         trace_cfg = exp_config.trace_config
-        # Allow duck typing or check explicit type if imported
-        # if not isinstance(trace_cfg, TraceConfig): ...
+        if not isinstance(trace_cfg, TraceGeneratorConfig):
+            print("!!! ERROR: trace_config must be TraceGeneratorConfig for generate_trace()")
+            sys.exit(1)
 
-        self._load_prompt_dataset(trace_cfg.src_prompt_path)
+        self._load_prompt_dataset(trace_cfg.input_prompt_path)
 
-        source_path = trace_cfg.src_trace_path
+        source_path = trace_cfg.input_trace_path
         if not source_path:
-            print("!!! ERROR: 'src_trace_path' missing in TraceConfig.")
+            print("!!! ERROR: 'input_trace_path' missing in TraceGeneratorConfig.")
             sys.exit(1)
 
         print(f">>> [GEN] Loading Azure trace: {source_path}")
@@ -314,16 +326,11 @@ class TraceGenerator:
             })
 
         # Save
-        out_path = trace_cfg.output_path
+        out_path = trace_cfg.output_trace_path
         
-        # [NEW] Update benchmark section for downstream tools (e.g. replay_client)
-        if 'benchmark' not in self.config:
-            self.config['benchmark'] = {}
-        self.config['benchmark']['output_trace_path'] = os.path.abspath(out_path)
-
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         with open(out_path, 'w', encoding='utf-8') as f:
-            # [NEW] Write Metadata Header
+            # Write Metadata Header
             metadata = {
                 "__type__": "metadata",
                 "generator_config": asdict(trace_cfg),
@@ -333,8 +340,12 @@ class TraceGenerator:
 
             for entry in output_rows:
                 f.write(json.dumps(entry) + "\n")
-                
+        
         print(f">>> [GEN] SUCCESS. Saved {len(output_rows)} requests using multi-model tokenization to {out_path}.")
+        
+        # Save full experiment config to config_path
+        exp_config.save_yaml(exp_config.config_path)
+        print(f">>> [GEN] Saved config to {exp_config.config_path}")
   
     def generate_weak_scaling(self, exp_config: ExpConfig):
         """
@@ -342,8 +353,9 @@ class TraceGenerator:
         Goal: Constant Rate, Constant Compute, Linear Volume.
         """
         ws_cfg = exp_config.trace_config
-        # check type if imported
-        # if not isinstance(ws_cfg, WeakScalingConfig): ...
+        if not isinstance(ws_cfg, WeakScalingConfig):
+            print("!!! ERROR: trace_config must be WeakScalingConfig for generate_weak_scaling()")
+            sys.exit(1)
         
         # 1. Calculate Experiment Parameters
         # Use ExpConfig num_nodes as single source of truth
@@ -351,7 +363,7 @@ class TraceGenerator:
         rate_per_node = ws_cfg.rpn
         duration = ws_cfg.duration
         
-        self._load_prompt_dataset(ws_cfg.src_prompt_path)
+        self._load_prompt_dataset(ws_cfg.input_prompt_path)
         
         total_qps = num_nodes * rate_per_node
         total_requests = int(total_qps * duration)
@@ -416,16 +428,11 @@ class TraceGenerator:
                 print(f"\r    Generated {i}/{total_requests}", end="")
 
         # 4. Save
-        out_path = ws_cfg.output_path
+        out_path = ws_cfg.output_trace_path
         
-        # [NEW] Update benchmark section for downstream tools (e.g. replay_client)
-        if 'benchmark' not in self.config:
-            self.config['benchmark'] = {}
-        self.config['benchmark']['output_trace_path'] = os.path.abspath(out_path)
-
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         with open(out_path, 'w', encoding='utf-8') as f:
-            # [NEW] Write Metadata Header
+            # Write Metadata Header
             metadata = {
                 "__type__": "metadata",
                 "generator_config": asdict(ws_cfg),
@@ -437,24 +444,35 @@ class TraceGenerator:
                 f.write(json.dumps(entry) + "\n")
                 
         print(f"\n>>> [GEN] SUCCESS. Saved to {out_path}")
+        
+        # Save full experiment config to config_path
+        exp_config.save_yaml(exp_config.config_path)
+        print(f">>> [GEN] Saved config to {exp_config.config_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--update-config", action="store_true", help="Update the input config file with the generated trace path.")
+    parser.add_argument("--exp-type", choices=["peak", "burst", "sparse"], default="sparse", 
+                       help="Type of experiment config to use")
     args = parser.parse_args()
     
-    gen = TraceGenerator(args.config)
+    # Get ExpConfig
+    if args.exp_type == "peak":
+        exp_cfg = peak_trace_config()
+    elif args.exp_type == "burst":
+        exp_cfg = burst_trace_config()
+    elif args.exp_type == "sparse":
+        exp_cfg = sparse_trace_config()
+    else:
+        print(f"!!! ERROR: Invalid experiment type '{args.exp_type}'. Must be one of: peak, burst, sparse")
+        sys.exit(1)
     
-    # Construct a default ExpConfig for manual testing
-    # exp_cfg = get_example_trace_config()
-    exp_cfg = get_example_sparse_trace_config()
+    print(f">>> [MAIN] Running {args.exp_type} trace generation...")
     
-    print(">>> [MAIN] Running default trace generation from get_example_trace_config()...")
+    # Initialize generator with ExpConfig
+    gen = TraceGenerator(exp_cfg)
+    
+    # Generate trace
     gen.generate_trace(exp_cfg)
-
-    if args.update_config:
-        print(f">>> [MAIN] Updating config file {args.config} with new trace path...")
-        with open(args.config, 'w') as f:
-            yaml.dump(gen.config, f, default_flow_style=False)
+    
+    print(f">>> [MAIN] Complete. Trace saved to {exp_cfg.trace_config.output_trace_path}")
