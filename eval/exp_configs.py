@@ -1,7 +1,12 @@
 import os
 import yaml
+import sys
 from dataclasses import dataclass, asdict, field
 from typing import List, Union, Optional, Dict, Any
+
+# Add src directory to path to import ModelConfig
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
+from model_config import ModelConfig
 
 # Constants
 DEFAULT_DATA_ROOT = "/home/wenyiw/aurora_rayserver/data_local"
@@ -17,16 +22,6 @@ DEFAULT_PBS_OUTPUT_ROOT = os.path.join(DEFAULT_DATA_ROOT, "pbs_output")
 DEFAULT_STORAGE_PATH = "/home/wenyiw/agpt/mpi-llm/models"
 DEFAULT_LOCAL_STORAGE_PATH = "/local/scratch/models"
 
-
-@dataclass
-class ModelConfig:
-    model_id: str
-    mode: str
-    tensor_parallel_size: int
-    size: int
-    num_replicas: Optional[int] = None
-    node_index: Optional[int] = None
-    tokenizer_path: Optional[str] = None
 
 @dataclass
 class TraceGeneratorConfig:
