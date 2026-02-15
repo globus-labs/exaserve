@@ -16,9 +16,14 @@ cd "$PROJECT_ROOT"
 echo "[System] Project Root: $PROJECT_ROOT"
 echo "[System] Nodefile: $PBS_NODEFILE"
 
+# Use debug_libs
+# export PYTHONPATH="/home/wenyiw/debug_libs:$PYTHONPATH"
+echo "[System] PYTHONPATH: $PYTHONPATH"
 # --- 2. IP Resolution (The Scout) ---
 echo "[System] Resolving Head Node IP..."
-HEAD_IP=$(python3 scripts/resolve_ip.py)
+# HEAD_IP=$(python3 scripts/resolve_ip.py)
+HEAD_IP=$(getent hosts $(hostname).hsn.cm.aurora.alcf.anl.gov | awk '{ print $1 }' | tr ' ' '\n' | sort | head -n 1)
+
 
 if [ -z "$HEAD_IP" ]; then
     echo "ERROR: Failed to resolve Head IP."
@@ -36,6 +41,7 @@ echo "[System] Launching Cluster..."
 
 export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
 export ZE_AFFINITY_MASK=""
+export CCL_PROCESS_LAUNCHER="hydra"
 
 # NOSET=1 + all-tiles-visible prevents the SYCL crash for non-GPU actors.
 # Each ModelWorker narrows ONEAPI_DEVICE_SELECTOR to its assigned tile
@@ -46,5 +52,5 @@ export ONEAPI_DEVICE_SELECTOR="level_zero:0,1,2,3,4,5,6,7,8,9,10,11"
 
 PYTHON_EXEC=$(which python3)
 
-mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind depth \
+mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
     $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379

@@ -43,6 +43,24 @@ import aurora
 os.environ.setdefault("VLLM_TARGET_DEVICE", "xpu")
 
 
+def get_hsn_ip():
+    """
+    Connects to a dummy internal IP to force the OS to pick the 
+    default route interface (High Speed Network).
+    """
+    try:
+        # We don't actually send data, just open a socket to determine routing.
+        # 10.255.255.255 is a safe dummy target for internal routing.
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception as e:
+        # Fallback for login nodes or single-node testing
+        return socket.gethostbyname(socket.gethostname())
+    # return f"{socket.gethostname()}.hsn.cm.aurora.alcf.anl.gov"
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
@@ -120,7 +138,7 @@ def create_model_worker_class(config: DeploymentConfig):
             engine_args = AsyncEngineArgs(
                 model=self.model_path,
                 tensor_parallel_size=1,
-                gpu_memory_utilization=0.95,
+                gpu_memory_utilization=0.9,
                 max_model_len=4096,
                 enforce_eager=True,
             )
@@ -597,7 +615,7 @@ if __name__ == "__main__":
     overall_start = time.time()
     
     # ---- Load Configuration -------------------------------------
-    config = aurora.get_deployment_config()  # Uses AURORA_CONFIG env var
+    config = aurora.get_deployment_config("default")
     print(f"[AuroraServe] Loaded config: {config.deployment_name}", flush=True)
     print(f"[AuroraServe] Models: {len(config.model_configs)}", flush=True)
     for cfg in config.model_configs:
@@ -606,12 +624,14 @@ if __name__ == "__main__":
     # ---- Timed Stage 1: Initialize Ray Cluster ---------------------------------
     stage_start = time.time()
     print("[AuroraServe] Stage 1: Initializing Ray cluster...", flush=True)
+    
+ 
     ray_init_start = time.time()
-    ray.init(address="auto", namespace="serve")
+    ray.init(address="auto", namespace="serve", include_dashboard=False)
     ray_init_elapsed = time.time() - ray_init_start
-    print_red(f"[AuroraServe] ray.init() call: {ray_init_elapsed:.2f}s")
+    
     stage_elapsed = time.time() - stage_start
-    print_red(f"[AuroraServe] ✓ Stage 1 completed in {stage_elapsed:.2f}s")
+    print_red(f"[AuroraServe] ✓ Stage 1 ray.init() completed in {stage_elapsed:.2f}s")
 
     # ---- Detect Cluster Resources ------------------------------
     resources = ray.cluster_resources()
@@ -620,14 +640,14 @@ if __name__ == "__main__":
 
     # ---- Timed Stage 2: Stage Models (Download/Verify) -------------------------
     stage_start = time.time()
-    print(f"[AuroraServe] Stage 4: Staging models to {config.model_storage_path}...", flush=True)
+    print(f"[AuroraServe] Stage 2: Staging models to {config.model_storage_path}...", flush=True)
     model_path_map = stage_models(config.model_configs, config.model_storage_path)
     stage_elapsed = time.time() - stage_start
-    print_red(f"[AuroraServe] ✓ Stage 4 completed in {stage_elapsed:.2f}s")
+    print_red(f"[AuroraServe] ✓ Stage 2 stage_models() completed in {stage_elapsed:.2f}s")
 
     # ---- Timed Stage 3: Deploy Model Services ----------------------------------
     stage_start = time.time()
-    print("[AuroraServe] Stage 5: Deploying model services to Ray Serve...", flush=True)
+    print("[AuroraServe] Stage 3: Deploying model services to Ray Serve...", flush=True)
     
     # Deploy models based on configuration
     if len(config.model_configs) == 1:
@@ -649,7 +669,7 @@ if __name__ == "__main__":
     print_red(f"[AuroraServe] serve.run() call: {serve_run_elapsed:.2f}s")
     
     stage_elapsed = time.time() - stage_start
-    print_red(f"[AuroraServe] ✓ Stage 5 completed in {stage_elapsed:.2f}s")
+    print_red(f"[AuroraServe] ✓ Stage 3 deploy_model() andserve.run() completed in {stage_elapsed:.2f}s")
 
     # ---- All Stages Complete ---------------------------------------------
     total_elapsed = time.time() - overall_start

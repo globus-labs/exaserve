@@ -51,6 +51,7 @@ def get_ray_env():
     env["ZE_FLAT_DEVICE_HIERARCHY"] = "FLAT"  # Exposes all 12 tiles
     env["ZE_AFFINITY_MASK"] = ""              # All tiles visible (baseline)
     env["VLLM_TARGET_DEVICE"] = "xpu"         # Tell vLLM we are on Intel
+    env["RAY_ENABLE_METRICS_COLLECTION"] = "0"
 
     # NOSET=1 prevents Ray from writing per-worker ONEAPI_DEVICE_SELECTOR
     # (avoids the "level_zero:" empty-string SYCL crash for non-GPU actors).
@@ -78,7 +79,7 @@ def start_ray_head(ip, port):
         "--num-gpus=12",
         f"--node-ip-address={ip}",
         f"--port={port}",
-        "--dashboard-host=0.0.0.0",
+        # "--dashboard-host=0.0.0.0",
         "--disable-usage-stats",
         "--include-dashboard=false",
         "--block",
