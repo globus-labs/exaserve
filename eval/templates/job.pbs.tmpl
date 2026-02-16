@@ -2,7 +2,7 @@
 #PBS -N {{JOB_NAME}}
 #PBS -m bae
 #PBS -M wenyiw@uchicago.edu
-#PBS -l filesystems=home:eagle
+#PBS -l filesystems=home:flare
 #PBS -A AuroraGPT
 #PBS -k doe
 #PBS -l select={{NUM_NODES}}
@@ -27,4 +27,4 @@ echo "Config:     {{CONFIG_FILE}}"
 echo "=================================================="
 
 # Invoke Experiment Driver (using absolute path) with backend specification
-{{RUN_EXP_SCRIPT}} {{CONFIG_FILE}} --backend {{BACKEND}} {{NO_WARMUP}} --num-runs {{NUM_RUNS}}
+bash "{{RUN_EXP_SCRIPT}}" {{CONFIG_FILE}} --backend {{BACKEND}} {{NO_WARMUP}} --num-runs {{NUM_RUNS}}

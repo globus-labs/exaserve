@@ -31,35 +31,32 @@ class TraceGenerator:
         self.models_cfg = []
         self.model_specs = {}
         
-        for model_cfg in exp_config.model_configs:
-            # Convert ModelConfig to the dict format expected by the rest of the code
+        for model_cfg in exp_config.model_deployment_config.model_configs:
+            # Match model_staging convention: local dirs use model_id with "/" -> "--"
+            storage_path = exp_config.model_deployment_config.model_storage_path
+            safe_name = model_cfg.model_id.replace("/", "--")
+            local_path = os.path.join(storage_path, safe_name)
+            tokenizer_path = local_path if os.path.isdir(local_path) else model_cfg.model_id
             model_entry = {
                 model_cfg.model_id: {
-                    'mode': model_cfg.mode,
                     'tensor_parallel_size': model_cfg.tensor_parallel_size,
                     'size': model_cfg.size,
                     'num_replicas': model_cfg.num_replicas,
-                    'node_index': model_cfg.node_index,
-                    'tokenizer_path': model_cfg.tokenizer_path or model_cfg.model_id,
+                    'tokenizer_path': tokenizer_path,
                 }
             }
             self.models_cfg.append(model_entry)
-            
-            # Store model specs
             tp = model_cfg.tensor_parallel_size
             if tp < 1:
                 print(f"!!! ERROR: tensor_parallel_size for '{model_cfg.model_id}' must be a positive integer, got {tp}.")
                 sys.exit(1)
-            
             self.model_specs[model_cfg.model_id] = {
                 'tensor_parallel_size': tp,
                 'size': model_cfg.size,
-                'mode': model_cfg.mode,
-                'tokenizer_path': model_cfg.tokenizer_path or model_cfg.model_id,
+                'tokenizer_path': tokenizer_path,
+                'max_model_len': model_cfg.max_model_len,
             }
-        
-        # Seed from ExpConfig
-        self.seed = exp_config.seed
+        self.seed = exp_config.job_seed
         random.seed(self.seed)
         np.random.seed(self.seed)
         
@@ -194,7 +191,7 @@ class TraceGenerator:
         return text, len(tokens)
 
     def generate_trace(self, exp_config: ExpConfig):
-        trace_cfg = exp_config.trace_config
+        trace_cfg = exp_config.job_trace_config
         if not isinstance(trace_cfg, TraceGeneratorConfig):
             print("!!! ERROR: trace_config must be TraceGeneratorConfig for generate_trace()")
             sys.exit(1)
@@ -290,35 +287,34 @@ class TraceGenerator:
         # ---------------------------------------------------------
         # THE MULTI-TOKENIZER LOOP
         # ---------------------------------------------------------
-        SYSTEM_MAX_LEN = trace_cfg.max_model_len
-        print(f">>> [GEN] Enforcing Global Token Limit: {SYSTEM_MAX_LEN}")
-        
+        mode_keys = list(trace_cfg.modes.keys())
+        mode_weights = [trace_cfg.modes[k] for k in mode_keys]
+        if sum(mode_weights) <= 0:
+            mode_keys, mode_weights = ["chat"], [1]
+        print(f">>> [GEN] Mode distribution: {dict(zip(mode_keys, mode_weights))}")
+
         output_rows = []
         for idx, row in selected_df.iterrows():
             target_model = row['target_model']
-            
-            # 1. Budget Calculation
+            max_model_len = self.model_specs[target_model]['max_model_len']
             req_out = int(row[out_col]) if out_col else 100
             req_out = max(1, req_out)
             req_in = int(row[in_col]) if in_col else 100
-            
-            # Input space = Max - Output - Safety Buffer
-            available_input = SYSTEM_MAX_LEN - req_out - 10
-            if available_input < 1: continue
-            
+            available_input = max_model_len - req_out - 10
+            if available_input < 1:
+                continue
             final_input_len = min(req_in, available_input)
 
-            # 2. Model-Specific Generation
-            # We pass 'target_model' so it uses the correct Llama/DeepSeek tokenizer
             prompt_text, input_len = self._get_exact_content(
-                target_len=final_input_len, 
-                hard_limit=final_input_len, 
+                target_len=final_input_len,
+                hard_limit=final_input_len,
                 model_id=target_model
             )
-            
+            mode = random.choices(mode_keys, weights=mode_weights, k=1)[0]
             output_rows.append({
                 "timestamp": float(f"{row['rel_timestamp']:.4f}"),
                 "model": target_model,
+                "mode": mode,
                 "prompt": prompt_text,
                 "input_len": input_len,
                 "tensor_parallel_size": self._tensor_parallel_size(target_model),
@@ -343,23 +339,20 @@ class TraceGenerator:
         
         print(f">>> [GEN] SUCCESS. Saved {len(output_rows)} requests using multi-model tokenization to {out_path}.")
         
-        # Save full experiment config to config_path
-        exp_config.save_yaml(exp_config.config_path)
-        print(f">>> [GEN] Saved config to {exp_config.config_path}")
+        config_path = exp_config.job_replay_client_config.config_path
+        exp_config.save_yaml(config_path)
+        print(f">>> [GEN] Saved config to {config_path}")
   
     def generate_weak_scaling(self, exp_config: ExpConfig):
         """
         Generates a synthetic, deterministic weak-scaling workload.
         Goal: Constant Rate, Constant Compute, Linear Volume.
         """
-        ws_cfg = exp_config.trace_config
+        ws_cfg = exp_config.job_trace_config
         if not isinstance(ws_cfg, WeakScalingConfig):
             print("!!! ERROR: trace_config must be WeakScalingConfig for generate_weak_scaling()")
             sys.exit(1)
-        
-        # 1. Calculate Experiment Parameters
-        # Use ExpConfig num_nodes as single source of truth
-        num_nodes = exp_config.num_nodes
+        num_nodes = exp_config.model_deployment_config.num_nodes
         rate_per_node = ws_cfg.rpn
         duration = ws_cfg.duration
         
@@ -445,9 +438,9 @@ class TraceGenerator:
                 
         print(f"\n>>> [GEN] SUCCESS. Saved to {out_path}")
         
-        # Save full experiment config to config_path
-        exp_config.save_yaml(exp_config.config_path)
-        print(f">>> [GEN] Saved config to {exp_config.config_path}")
+        config_path = exp_config.job_replay_client_config.config_path
+        exp_config.save_yaml(config_path)
+        print(f">>> [GEN] Saved config to {config_path}")
 
 
 if __name__ == "__main__":
@@ -475,4 +468,4 @@ if __name__ == "__main__":
     # Generate trace
     gen.generate_trace(exp_cfg)
     
-    print(f">>> [MAIN] Complete. Trace saved to {exp_cfg.trace_config.output_trace_path}")
+    print(f">>> [MAIN] Complete. Trace saved to {exp_cfg.job_trace_config.output_trace_path}")

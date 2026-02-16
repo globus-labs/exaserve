@@ -24,6 +24,7 @@ class TraceRequest:
     output_len: int
     tensor_parallel_size: int
     req_id: str
+    mode: str = "chat"  # from trace file modes distribution, or config default
 
 TIMEOUT_S = 3600 # 1 hour
 REQ_BATCH_SIZE = 5
@@ -48,8 +49,8 @@ def _next_result_path(result_dir: str) -> str:
 
 
 async def send_request(session, base_url, req, mode_map, include_tp: bool):
-    # Determine Endpoint
-    mode = mode_map.get(req.model, "chat")
+    # Per-request mode from trace file
+    mode = getattr(req, 'mode', None) 
     url = f"{base_url}/v1/chat/completions" if mode == "chat" else f"{base_url}/v1/completions"
     
     # Construct Payload (Using FROZEN prompt)
@@ -93,13 +94,31 @@ async def send_request(session, base_url, req, mode_map, include_tp: bool):
     latency = end_time - start
     return req, latency, success, error_msg, end_time
 
+def _config_trace_path(cfg: dict) -> str:
+    """Trace path from ExpConfig-shaped config: job_trace_config.output_trace_path."""
+    jtc = cfg.get('job_trace_config') or {}
+    return jtc.get('output_trace_path', 'experiment_trace.jsonl')
+
+def _config_result_dir(cfg: dict):
+    """Result directory from ExpConfig-shaped config: pbs_result_dir."""
+    return cfg.get('pbs_result_dir')
+
+def _config_mode_map(cfg: dict) -> dict:
+    """Build model_id -> mode from ExpConfig-shaped config (model_deployment_config.model_configs)."""
+    dep = cfg.get('model_deployment_config') or {}
+    model_configs = dep.get('model_configs') or []
+    return {m.get('model_id', ''): m.get('mode', 'chat') for m in model_configs if m.get('model_id')}
+
+def _config_gpu_topology(cfg: dict) -> tuple:
+    """(num_nodes, num_gpus_per_node) from ExpConfig-shaped config."""
+    dep = cfg.get('model_deployment_config') or {}
+    return (dep.get('num_nodes', 1), dep.get('num_gpus_per_node', 4))
+
 async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bool, num_runs: int):
-    # 1. Load Config
+    # 1. Load Config (ExpConfig-shaped YAML)
     with open(config_path, 'r') as f:
-        cfg = yaml.safe_load(f)
-        
-    bench_cfg = cfg.get('benchmark', {})
-    trace_path = bench_cfg.get('output_trace_path', 'experiment_trace.jsonl')
+        cfg = yaml.safe_load(f) or {}
+    trace_path = _config_trace_path(cfg)
     port = cfg.get('port', 8000)
     base_url = f"http://localhost:{port}"
 
@@ -123,17 +142,15 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                     input_len=data.get('input_len', 0),
                     output_len=data['output_len'],
                     tensor_parallel_size=data.get('tensor_parallel_size', 1),
-                    req_id=uuid.uuid4().hex
+                    req_id=uuid.uuid4().hex,
+                    mode=data.get('mode', 'chat'),
                 ))
     except FileNotFoundError:
         print(f"!!! ERROR: Trace file {trace_path} not found. Run trace_generator.py first.")
         return
 
-    # 3. Mode Mapping
-    mode_map = {}
-    for m in cfg['models']:
-        name = list(m.keys())[0]
-        mode_map[name] = m[name].get('mode', 'chat')
+    # 3. Mode mapping (model_id -> mode; per-request mode from trace overrides when set)
+    mode_map = _config_mode_map(cfg)
 
     # 4. Early stop calculation
     target_responses = None
@@ -200,10 +217,7 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
         # WARMUP PHASE
         # ==============================================================================
         if not no_warmup:
-            # Calculate warmup count
-            gpu_topology = cfg.get('gpu_topology', {})
-            num_nodes = gpu_topology.get('num_nodes', 1)
-            num_gpus_per_node = gpu_topology.get('num_gpus_per_node', 4)
+            num_nodes, num_gpus_per_node = _config_gpu_topology(cfg)
             
             warmup_count = int(num_nodes * num_gpus_per_node * REQ_BATCH_SIZE * (1 + EXTRA_RATE))
             print(f"\n>>> [WARMUP] Starting warmup phase...")
@@ -531,7 +545,7 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
     print(f"System duration: {total_duration:.2f}s | RPS: {rps:.2f} | TPS: {tps:.2f} (Processed: {processed_tps:.2f}, Generated: {generated_tps:.2f}) | Completed: {completed_requests}/{scheduled_requests}")
     
     # Save Results
-    config_result_dir = bench_cfg.get('output_result_dir')
+    config_result_dir = _config_result_dir(cfg)
     
     final_save_path = None
     if config_result_dir:

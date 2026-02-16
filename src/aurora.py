@@ -7,7 +7,7 @@ diverse models on the Aurora Ray Server. All configuration is centralized here.
 
 import os
 from typing import List
-from model_config import ModelConfig, DeploymentConfig
+from schemas import ModelConfig, DeploymentConfig
 
 
 def get_default_config() -> DeploymentConfig:
@@ -22,49 +22,42 @@ def get_default_config() -> DeploymentConfig:
         model_configs=[
             ModelConfig(
                 model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-                mode="chat",
                 tensor_parallel_size=1,
+                max_model_len=4096,
                 size=8,
-                num_replicas=None,  # Auto-determined by cluster size
+                num_replicas=None,
+                num_routers_per_replica=0.5,
             )
         ],
-        num_gpu_tiles=12,
-        num_routers=4,
-        worker_max_ongoing=16,
         model_storage_path="/lus/flare/projects/AuroraGPT/wenyiw/models",
-        tiles_per_card=2,
-        init_stagger_seconds=5,
-        engine_init_retries=3,
+        worker_max_ongoing=32,
+        router_max_ongoing=200,
+        num_nodes=1,
     )
-
 
 def get_tp2_config() -> DeploymentConfig:
     """
-    Returns default deployment configuration with single Llama-3-8B-Instruct model.
+    Returns deployment configuration for tp2 models.
     
     Returns:
-        DeploymentConfig: Complete deployment configuration
+        DeploymentConfig: Configuration optimized for tp2 models
     """
     return DeploymentConfig(
         deployment_name="tp2",
         model_configs=[
             ModelConfig(
                 model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-                mode="chat",
                 tensor_parallel_size=2,
+                max_model_len=4096,
                 size=8,
-                num_replicas=None,  # Auto-determined by cluster size
+                num_replicas=None,
             )
         ],
-        num_gpu_tiles=12,
-        num_routers=4,
-        worker_max_ongoing=16,
         model_storage_path="/lus/flare/projects/AuroraGPT/wenyiw/models",
-        tiles_per_card=2,
-        init_stagger_seconds=5,
-        engine_init_retries=3,
+        worker_max_ongoing=32,
+        router_max_ongoing=200,
+        num_nodes=1,
     )
-
 
 def get_diverse_config() -> DeploymentConfig:
     """
@@ -78,35 +71,29 @@ def get_diverse_config() -> DeploymentConfig:
         model_configs=[
             ModelConfig(
                 model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-                mode="chat",
                 tensor_parallel_size=1,
+                max_model_len=4096,
                 size=8,
                 num_replicas=6,
             ),
             ModelConfig(
                 model_id="meta-llama/Meta-Llama-3-70B-Instruct",
-                mode="chat",
                 tensor_parallel_size=2,
+                max_model_len=4096,
                 size=70,
                 num_replicas=3,
             ),
             ModelConfig(
                 model_id="mistralai/Mistral-7B-Instruct-v0.3",
-                mode="chat",
                 tensor_parallel_size=1,
+                max_model_len=4096,
                 size=7,
                 num_replicas=3,
             ),
         ],
-        num_gpu_tiles=12,
-        num_routers=6,
         worker_max_ongoing=16,
-        model_storage_path="/lus/flare/projects/AuroraGPT/wenyiw/models",
-        tiles_per_card=2,
-        init_stagger_seconds=5,
-        engine_init_retries=3,
+        num_nodes=1,
     )
-
 
 def get_weak_scaling_config() -> DeploymentConfig:
     """
@@ -120,20 +107,14 @@ def get_weak_scaling_config() -> DeploymentConfig:
         model_configs=[
             ModelConfig(
                 model_id="meta-llama/Meta-Llama-3-8B",
-                mode="chat",
                 tensor_parallel_size=1,
+                max_model_len=4096,
                 size=8,
             )
         ],
-        num_gpu_tiles=12,
-        num_routers=4,
         worker_max_ongoing=16,
-        model_storage_path="/lus/flare/projects/AuroraGPT/wenyiw/models",
-        tiles_per_card=2,
-        init_stagger_seconds=5,
-        engine_init_retries=3,
+        num_nodes=1,
     )
-
 
 def get_deployment_config(config_name: str = None) -> DeploymentConfig:
     """

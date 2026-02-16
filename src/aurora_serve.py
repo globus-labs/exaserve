@@ -36,12 +36,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
 # Import our configuration modules
-from model_config import ModelConfig, DeploymentConfig
+from schemas import ModelConfig, DeploymentConfig
 from model_staging import stage_models, get_local_model_path, print_red
 import aurora
 
-os.environ.setdefault("VLLM_TARGET_DEVICE", "xpu")
 
+# os.environ.setdefault("VLLM_TARGET_DEVICE", "xpu")
 
 def get_hsn_ip():
     """
@@ -109,19 +109,6 @@ def create_model_worker_class(config: DeploymentConfig):
                 flush=True,
             )
 
-            # ---- Stagger init to avoid concurrent profiling on same PVC card -----
-            if config.tiles_per_card > 1 and config.init_stagger_seconds > 0:
-                position_in_card = device_id % config.tiles_per_card
-                if position_in_card > 0:
-                    stagger = position_in_card * config.init_stagger_seconds
-                    print(
-                        f"[ModelWorker pid={pid}] Staggering init by {stagger}s "
-                        f"(tile {device_id} shares PVC card with tile "
-                        f"{device_id - position_in_card})",
-                        flush=True,
-                    )
-                    time.sleep(stagger)
-
             # ---- vLLM async engine -----------------------------------------------
             engine_setup_start = time.time()
             
@@ -145,30 +132,11 @@ def create_model_worker_class(config: DeploymentConfig):
             if not hasattr(engine_args, "enable_log_requests"):
                 engine_args.enable_log_requests = True
 
-            # Retry engine creation
-            last_err: Optional[Exception] = None
-            for attempt in range(1, config.engine_init_retries + 1):
-                try:
-                    print(f"[ModelWorker pid={pid}] Creating vLLM engine (attempt {attempt}/{config.engine_init_retries})...", flush=True)
-                    engine_create_start = time.time()
-                    self.engine = AsyncLLMEngine.from_engine_args(engine_args)
-                    engine_create_elapsed = time.time() - engine_create_start
-                    print_red(f"[ModelWorker pid={pid}] vLLM engine creation: {engine_create_elapsed:.2f}s")
-                    last_err = None
-                    break
-                except Exception as exc:
-                    last_err = exc
-                    if attempt < config.engine_init_retries:
-                        wait = 15 * attempt + device_id * 2
-                        print(
-                            f"[ModelWorker pid={pid}] Engine init attempt "
-                            f"{attempt}/{config.engine_init_retries} failed: {exc}\n"
-                            f"  Retrying in {wait}s …",
-                            flush=True,
-                        )
-                        time.sleep(wait)
-            if last_err is not None:
-                raise last_err
+            print(f"[ModelWorker pid={pid}] Creating vLLM engine...", flush=True)
+            engine_create_start = time.time()
+            self.engine = AsyncLLMEngine.from_engine_args(engine_args)
+            engine_create_elapsed = time.time() - engine_create_start
+            print_red(f"[ModelWorker pid={pid}] vLLM engine creation: {engine_create_elapsed:.2f}s")
 
             engine_setup_elapsed = time.time() - engine_setup_start
             worker_total_elapsed = time.time() - worker_init_start
@@ -262,6 +230,22 @@ def create_router_class(model_configs: List[ModelConfig] = None):
             print(f"[Router pid={os.getpid()}] Ready (model={self.model_id})", flush=True)
             print_red(f"[Router pid={os.getpid()}] Tokenizer load: {tokenizer_load_elapsed:.2f}s")
             print_red(f"[Router pid={os.getpid()}] ★ ROUTER INIT TOTAL: {router_total_elapsed:.2f}s ★")
+
+        @app.get("/health")
+        async def health_check(self):
+            """Health check endpoint for readiness detection."""
+            try:
+                # Check if worker is responsive
+                is_healthy = await self.worker.check_health.remote()
+                if is_healthy:
+                    return JSONResponse({"status": "healthy", "model": self.model_id})
+                else:
+                    return JSONResponse({"status": "unhealthy"}, status_code=503)
+            except Exception as e:
+                return JSONResponse(
+                    {"status": "unhealthy", "error": str(e)}, 
+                    status_code=503
+                )
 
         @app.get("/v1/models")
         async def list_models(self):
@@ -415,6 +399,26 @@ def create_model_multiplexer_class():
                 flush=True
             )
         
+        @app.get("/health")
+        async def health_check(self):
+            """Health check endpoint for readiness detection."""
+            try:
+                # Check if all models are accessible
+                # We just check that the routers are available
+                if len(self.model_routers) > 0:
+                    return JSONResponse({
+                        "status": "healthy",
+                        "models": self.available_models,
+                        "num_models": len(self.available_models)
+                    })
+                else:
+                    return JSONResponse({"status": "unhealthy", "error": "No models available"}, status_code=503)
+            except Exception as e:
+                return JSONResponse(
+                    {"status": "unhealthy", "error": str(e)}, 
+                    status_code=503
+                )
+        
         @app.get("/v1/models")
         async def list_models(self):
             """List all available models across all deployments."""
@@ -501,8 +505,7 @@ def deploy_model(model_config: ModelConfig, model_path_map: Dict[str, str],
         # Auto-scale based on tensor parallel size
         num_workers = max(1, total_gpus // model_config.tensor_parallel_size)
     
-    # For multi-model, use fewer routers per model
-    num_routers = max(1, config.num_routers // len(config.model_configs)) if len(config.model_configs) > 1 else config.num_routers
+    num_routers = int(num_workers * model_config.num_routers_per_replica) if model_config.num_routers_per_replica > 0 else 1
     
     print(
         f"[AuroraServe] Configuring deployment for {model_id}\n"
@@ -534,7 +537,7 @@ def deploy_model(model_config: ModelConfig, model_path_map: Dict[str, str],
         name=worker_name,
         ray_actor_options={
             "num_gpus": model_config.tensor_parallel_size,
-            "num_cpus": 2,
+            "num_cpus": model_config.num_cpus_per_replica,
         },
         max_ongoing_requests=config.worker_max_ongoing,
         health_check_period_s=30,
@@ -544,9 +547,9 @@ def deploy_model(model_config: ModelConfig, model_path_map: Dict[str, str],
     router_deployment = serve.deployment(
         name=router_name,
         ray_actor_options={
-            "num_cpus": 1,
+            "num_cpus": model_config.num_router_cpus,
         },
-        max_ongoing_requests=200,
+        max_ongoing_requests=config.router_max_ongoing,
     )(serve.ingress(app)(Router))
     
     worker = worker_deployment.options(num_replicas=num_workers).bind(
@@ -599,10 +602,9 @@ def deploy_multi_model(config: DeploymentConfig, model_path_map: Dict[str, str],
         ray_actor_options={
             "num_cpus": 1,
         },
-        max_ongoing_requests=500,
+        max_ongoing_requests=config.router_max_ongoing,
     )(serve.ingress(app)(ModelMultiplexer))
     
-    # Bind the multiplexer with all model routers
     multiplexer = multiplexer_deployment.options(num_replicas=config.num_routers).bind(
         model_router_map=model_routers
     )
@@ -635,13 +637,15 @@ if __name__ == "__main__":
 
     # ---- Detect Cluster Resources ------------------------------
     resources = ray.cluster_resources()
-    total_gpus = int(resources.get("GPU", config.num_gpu_tiles))
+    default_gpus = config.num_gpus_per_node * config.num_nodes
+    total_gpus = int(resources.get("GPU", default_gpus))
     print(f"[AuroraServe] Detected {total_gpus} GPUs in cluster", flush=True)
 
     # ---- Timed Stage 2: Stage Models (Download/Verify) -------------------------
     stage_start = time.time()
-    print(f"[AuroraServe] Stage 2: Staging models to {config.model_storage_path}...", flush=True)
-    model_path_map = stage_models(config.model_configs, config.model_storage_path)
+    model_storage_path = config.model_storage_path
+    print(f"[AuroraServe] Stage 2: Staging models to {model_storage_path}...", flush=True)
+    model_path_map = stage_models(config.model_configs, model_storage_path)
     stage_elapsed = time.time() - stage_start
     print_red(f"[AuroraServe] ✓ Stage 2 stage_models() completed in {stage_elapsed:.2f}s")
 

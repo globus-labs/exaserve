@@ -45,17 +45,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate backend
-if [ "$BACKEND" != "ray" ] && [ "$BACKEND" != "mpi" ]; then
-    echo "!!! ERROR: Invalid backend '$BACKEND'. Must be 'ray' or 'mpi'."
+if [ "$BACKEND" != "ray" ]; then
+    echo "!!! ERROR: Invalid backend '$BACKEND'. Must be 'ray'."
+    # if [ "$BACKEND" != "ray" ] && [ "$BACKEND" != "mpi" ]; then
+    #    echo "!!! ERROR: Invalid backend '$BACKEND'. Must be 'ray' or 'mpi'."
     exit 1
+    # fi
 fi
 
 # Locate script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RAY_ORCHESTRATOR_SCRIPT="$SCRIPT_DIR/../multinode_server/orchestrator.py"
-MPI_API_SERVER_SCRIPT="$SCRIPT_DIR/../mpi_customized/api_server/run_api_server.py"
-REPLAY_CLIENT_SCRIPT="$SCRIPT_DIR/replay_client.py"
-ENV_SETUP_SCRIPT="/home/wenyiw/script/prepare_env"
+RAY_ORCHESTRATOR_SCRIPT="/home/wenyiw/aurora_rayserver/src/orchestrator.py"
+LAUNCH_CLUSTER_SCRIPT="/home/wenyiw/aurora_rayserver/scripts/launch_cluster.sh"
+# MPI_API_SERVER_SCRIPT="$SCRIPT_DIR/../mpi_customized/api_server/run_api_server.py"
+REPLAY_CLIENT_SCRIPT="/home/wenyiw/aurora_rayserver/eval/replay_client.py"
+ENV_SETUP_SCRIPT="/home/wenyiw/script/env_aurora"
 
 # ==============================================================================
 # VALIDATION
@@ -90,17 +94,11 @@ echo "[✓] Trace file:       $TRACE_PATH"
 
 # Check backend-specific scripts
 if [ "$BACKEND" == "ray" ]; then
-    if [ ! -f "$RAY_ORCHESTRATOR_SCRIPT" ]; then
-        echo "!!! ERROR: Ray orchestrator script not found: $RAY_ORCHESTRATOR_SCRIPT"
+    if [ ! -f "$LAUNCH_CLUSTER_SCRIPT" ]; then
+        echo "!!! ERROR: Launch cluster script not found: $LAUNCH_CLUSTER_SCRIPT"
         exit 1
     fi
-    echo "[✓] Ray Orchestrator: $RAY_ORCHESTRATOR_SCRIPT"
-elif [ "$BACKEND" == "mpi" ]; then
-    if [ ! -f "$MPI_API_SERVER_SCRIPT" ]; then
-        echo "!!! ERROR: MPI API server script not found: $MPI_API_SERVER_SCRIPT"
-        exit 1
-    fi
-    echo "[✓] MPI API Server:   $MPI_API_SERVER_SCRIPT"
+    echo "[✓] Launch Cluster Script: $LAUNCH_CLUSTER_SCRIPT"
 fi
 
 if [ ! -f "$REPLAY_CLIENT_SCRIPT" ]; then
@@ -122,19 +120,52 @@ echo "=================================================="
 # CLEANUP HANDLER
 # ==============================================================================
 
+CLEANUP_DONE=false
+
 cleanup() {
+    # Prevent duplicate cleanup calls
+    if [ "$CLEANUP_DONE" = true ]; then
+        return
+    fi
+    CLEANUP_DONE=true
+    
     echo ""
     echo ">>> [DRIVER] Caught EXIT/Signal. Cleaning up..."
-    if [ ! -z "$SERVICE_PID" ]; then
-        echo "    Killing Service (PID $SERVICE_PID)..."
-        kill $SERVICE_PID 2>/dev/null || true
+    
+    # Backend-specific cleanup - Do Ray cleanup FIRST
+    if [ "$BACKEND" == "ray" ]; then
+        echo "    Stopping Ray cluster forcefully..."
+        # Force stop Ray immediately to prevent hanging processes
+        ray stop --force 2>/dev/null || true
+        # Give it a moment to terminate
+        sleep 2
     fi
     
-    # Backend-specific cleanup
-    if [ "$BACKEND" == "ray" ]; then
-        # Force clean Ray just in case
-        ray stop --force 2>/dev/null || true
+    # Kill the service process and its children
+    if [ ! -z "$SERVICE_PID" ]; then
+        echo "    Killing Service process group (PID $SERVICE_PID)..."
+        # Kill the entire process group to catch all children
+        pkill -P $SERVICE_PID 2>/dev/null || true
+        kill -TERM $SERVICE_PID 2>/dev/null || true
+        
+        # Wait briefly for graceful termination
+        sleep 1
+        
+        # Force kill if still running
+        if kill -0 $SERVICE_PID 2>/dev/null; then
+            echo "    Force killing Service (PID $SERVICE_PID)..."
+            kill -KILL $SERVICE_PID 2>/dev/null || true
+        fi
     fi
+    
+    # Kill the background reader process
+    if [ ! -z "$READER_PID" ]; then
+        kill -TERM $READER_PID 2>/dev/null || true
+    fi
+    
+    # Clean up temporary named pipes and flag files
+    rm -f /tmp/aurora_pipe_$$_* 2>/dev/null || true
+    rm -f /tmp/aurora_ready_$$_* 2>/dev/null || true
     
     echo ">>> [DRIVER] Cleanup complete."
 }
@@ -156,57 +187,72 @@ echo "=================================================="
 
 echo ">>> [DRIVER] Setting up environment..."
 source "$ENV_SETUP_SCRIPT"
-conda activate mpi-vllm
-
-# Verify conda environment
-if [ "$CONDA_DEFAULT_ENV" != "mpi-vllm" ]; then
-    echo "!!! ERROR: Failed to activate mpi-vllm conda environment"
-    exit 1
-fi
-echo "[✓] Conda environment: $CONDA_DEFAULT_ENV"
+echo ">>> [DRIVER] Conda environment: $CONDA_DEFAULT_ENV"
 
 MAX_EXP_RETRIES=3
 RETRY_COUNT=0
 
 while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
     echo ">>> [DRIVER] Starting Experiment Attempt $((RETRY_COUNT+1))/$MAX_EXP_RETRIES"
+    
+    # Reset cleanup flag for each attempt
+    CLEANUP_DONE=false
 
     # ==============================================================================
     # LAUNCH BACKEND SERVICE
     # ==============================================================================
 
     echo ""
+    # Create a named pipe for capturing service output
+    SERVICE_PIPE="/tmp/aurora_pipe_$$_${RETRY_COUNT}"
+    mkfifo "$SERVICE_PIPE"
+    
+    # Background reader that monitors the pipe for the ready message
+    SERVICE_READY_FLAG="/tmp/aurora_ready_$$_${RETRY_COUNT}"
+    rm -f "$SERVICE_READY_FLAG"
+    
+    # Start a background process to read from pipe and detect ready message
+    while IFS= read -r line; do
+        echo "$line"  # Echo to stdout for visibility
+        if [[ "$line" == *"[AuroraServe] Service available at http://localhost:8000/v1"* ]]; then
+            touch "$SERVICE_READY_FLAG"
+        fi
+    done < "$SERVICE_PIPE" &
+    READER_PID=$!
+    
     if [ "$BACKEND" == "ray" ]; then
-        echo ">>> [DRIVER] Launching Ray Orchestrator..."
-        python "$RAY_ORCHESTRATOR_SCRIPT" --config "$CONFIG_PATH" &
+        echo ">>> [DRIVER] Launching Ray Cluster..."
+        bash "$LAUNCH_CLUSTER_SCRIPT" > "$SERVICE_PIPE" 2>&1 &
         SERVICE_PID=$!
-        echo "    Ray Orchestrator PID: $SERVICE_PID"
+        echo "    Ray Cluster PID: $SERVICE_PID"
+        echo "    Output Reader PID: $READER_PID"
         SERVICE_PORT=8000
-    elif [ "$BACKEND" == "mpi" ]; then
-        echo ">>> [DRIVER] Launching MPI API Server..."
-        python "$MPI_API_SERVER_SCRIPT" serve "$CONFIG_PATH" &
-        SERVICE_PID=$!
-        echo "    MPI API Server PID: $SERVICE_PID"
-        SERVICE_PORT=8000
+    # elif [ "$BACKEND" == "mpi" ]; then
+    #     echo ">>> [DRIVER] Launching MPI API Server..."
+    #     python "$MPI_API_SERVER_SCRIPT" serve "$CONFIG_PATH" > "$SERVICE_PIPE" 2>&1 &
+    #     SERVICE_PID=$!
+    #     echo "    MPI API Server PID: $SERVICE_PID"
+    #     echo "    Output Reader PID: $READER_PID"
+    #     SERVICE_PORT=8000
     fi
 
     # ==============================================================================
-    # WAIT FOR SERVICE HEALTH
+    # WAIT FOR SERVICE READY
     # ==============================================================================
 
     echo ""
-    echo ">>> [DRIVER] Waiting for Service Health (Port $SERVICE_PORT)..."
-    if [ "$BACKEND" == "ray" ]; then
-        URL="http://localhost:$SERVICE_PORT/health"
-    else
-        URL="http://localhost:$SERVICE_PORT/health"
-    fi
-
-    MAX_RETRIES=200
+    echo ">>> [DRIVER] Waiting for AuroraServe to be ready..."
+    MAX_RETRIES=240 # 20 minutes
     COUNT=0
     SERVICE_STARTED=true
 
-    while ! curl -s "$URL" > /dev/null 2>&1; do
+    while true; do
+        # Check if the ready flag file exists (created by background reader)
+        if [ -f "$SERVICE_READY_FLAG" ]; then
+            # Service is ready - vLLM models are loaded
+            break
+        fi
+        
         sleep 5
         COUNT=$((COUNT+1))
         
@@ -214,7 +260,7 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
         if ! kill -0 $SERVICE_PID 2>/dev/null; then
             echo ""
             echo "!!! [DRIVER] Service died unexpectedly!"
-            echo "    Check logs for errors."
+            echo "    The service process terminated before becoming ready."
             SERVICE_STARTED=false
             break
         fi
@@ -222,7 +268,8 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
         if [ $COUNT -ge $MAX_RETRIES ]; then
             echo ""
             echo "!!! [DRIVER] Timeout waiting for service (${MAX_RETRIES} retries)."
-            echo "    Service did not become healthy in 10 minutes."
+            echo "    Service did not become ready in 1000 seconds."
+            echo "    The ready message '[AuroraServe] Service available...' was not detected."
             SERVICE_STARTED=false
             break
         fi
@@ -238,25 +285,14 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
 
         echo ""
         echo ">>> [DRIVER] Starting Replay Client..."
-
-        # Add --include-tp flag for MPI backend
-        if [ "$BACKEND" == "mpi" ]; then
-            echo "    (Using --include-tp for MPI backend)"
-            python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" --include-tp $NO_WARMUP --num-runs $NUM_RUNS
-        else
             python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS
-        fi
         EXIT_CODE=$?
     else
         EXIT_CODE=1
     fi
 
-    # Stop current service
-    if [ ! -z "$SERVICE_PID" ]; then
-        echo "    Killing Service (PID $SERVICE_PID)..."
-        kill $SERVICE_PID 2>/dev/null || true
-        wait $SERVICE_PID 2>/dev/null || true
-    fi
+    # Stop current service using cleanup function
+    cleanup
 
     # Check exit code
     if [ $EXIT_CODE -eq 0 ]; then
@@ -267,16 +303,16 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
         RETRY_COUNT=$((RETRY_COUNT+1))
         if [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; then
             echo ">>> [DRIVER] Cleaning up compute nodes before retry..."
-            if [ "$BACKEND" == "mpi" ]; then
-                 # Kill python/sllm-store processes on all nodes allocated to the job
-                 if [ -n "$PBS_NODEFILE" ]; then
-                     pdsh -w ^$PBS_NODEFILE "pkill -9 python; pkill -9 sllm-store" || true
-                 else
-                     # Fallback for local testing or if pdsh/PBS_NODEFILE unavailable
-                     pkill -9 python || true
-                     pkill -9 sllm-store || true
-                 fi
-            fi
+            # if [ "$BACKEND" == "mpi" ]; then
+            #      # Kill python/sllm-store processes on all nodes allocated to the job
+            #      if [ -n "$PBS_NODEFILE" ]; then
+            #          pdsh -w ^$PBS_NODEFILE "pkill -9 python; pkill -9 sllm-store" || true
+            #      else
+            #          # Fallback for local testing or if pdsh/PBS_NODEFILE unavailable
+            #          pkill -9 python || true
+            #          pkill -9 sllm-store || true
+            #      fi
+            # fi
             sleep 5
         fi
     fi

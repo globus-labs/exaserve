@@ -1,25 +1,45 @@
-api_server:
-  launch_sllm_service: true
-  path_save: /home/wenyiw/aurora_rayserver/data_local/results
-  requests_number: -1
-  sorted_policy: FCFS_batch
-benchmark:
-  output_result_dir: /home/wenyiw/aurora_rayserver/data_local/results/sparse
+job_replay_client_config:
+  config_path: config.yaml
+  early_stop: 0.0
+  include_tp: false
+  no_warmup: false
+  num_runs: 1
+job_seed: 42
+job_trace_config:
+  duration: 300.0
+  input_prompt_path: /home/wenyiw/aurora_rayserver/data_local/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json
+  input_trace_path: /home/wenyiw/aurora_rayserver/data_local/input_traces/AzureLLMInferenceTrace_code_1week.csv
+  modes:
+    chat: 1
+    completion: 0
+  output_len: 128
   output_trace_path: /home/wenyiw/aurora_rayserver/data_local/output_traces/sparse_300s_300x.jsonl
-disable_continuous_batching: true
-gpu_topology:
-  num_gpus_per_node: 4
-  num_nodes: 1
-local_storage_path: /local/scratch/models
-models:
-- meta-llama/Meta-Llama-3-8B-Instruct:
-    mode: chat
+  sampling_strategy: sparse
+  speedup: 300.0
+model_deployment_config:
+  deployment_name: aurora_serve
+  model_configs:
+  - enable_log_requests: true
+    enforce_eager: true
+    gpu_memory_utilization: 0.9
+    max_model_len: 4096
+    model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    num_cpus_per_replica: 4
     num_replicas: 4
+    num_router_cpus: 1
+    num_routers_per_replica: 0.5
     size: 8
     tensor_parallel_size: 1
-port: 8000
-router_replicas: 16
-seed: 42
-sllm_mem_pool_size: 128GB
-sllm_store_timeout: 900
-storage_path: /home/wenyiw/agpt/mpi-llm/models
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  num_gpus_per_node: 4
+  num_nodes: 1
+  router_max_ongoing: 200
+  worker_max_ongoing: 32
+pbs_job_name: sparse
+pbs_num_nodes: 1
+pbs_queue_name: debug
+pbs_result_dir: /home/wenyiw/aurora_rayserver/data_local/results/sparse
+pbs_stderr_dir: /home/wenyiw/aurora_rayserver/data_local/pbs_output/sparse/stderr
+pbs_stdout_dir: /home/wenyiw/aurora_rayserver/data_local/pbs_output/sparse/stdout
+pbs_walltime: 00:30:00
+pbs_working_dir: .

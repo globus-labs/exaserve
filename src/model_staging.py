@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 from huggingface_hub import snapshot_download
-from model_config import ModelConfig
+from schemas import ModelConfig
 
 
 def print_red(message: str):
