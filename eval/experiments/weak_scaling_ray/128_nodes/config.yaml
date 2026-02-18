@@ -1,6 +1,7 @@
 job_replay_client_config:
-  config_path: experiments/weak_scaling_ray/32_nodes/config.yaml
+  config_path: /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/128_nodes/config.yaml
   early_stop: 0.0
+  generation_mode: deterministic
   include_tp: false
   no_warmup: false
   num_runs: 5
@@ -10,8 +11,8 @@ job_trace_config:
   input_len: 2048
   input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json
   output_len: 512
-  output_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/output_traces/weak_scaling_ray_32n.jsonl
-  rpn: 60
+  output_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/output_traces/weak_scaling_ray_128n.jsonl
+  rpn: 80
 model_deployment_config:
   deployment_name: aurora_serve
   model_configs:
@@ -28,14 +29,14 @@ model_deployment_config:
     tensor_parallel_size: 1
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   num_gpus_per_node: 12
-  num_nodes: 32
+  num_nodes: 128
   router_max_ongoing: 200
   worker_max_ongoing: 32
-pbs_job_name: weak_scaling_ray_32n
-pbs_num_nodes: 32
+pbs_job_name: weak_scaling_ray_128n
+pbs_num_nodes: 128
 pbs_queue_name: debug-scaling
-pbs_result_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/results/weak_scaling_ray/32_nodes
-pbs_stderr_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/32_nodes/stderr
-pbs_stdout_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/32_nodes/stdout
+pbs_result_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/results/weak_scaling_ray/128_nodes
+pbs_stderr_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/128_nodes/stderr
+pbs_stdout_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/128_nodes/stdout
 pbs_walltime: '1:00:00'
-pbs_working_dir: experiments/weak_scaling_ray/32_nodes
+pbs_working_dir: /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/128_nodes

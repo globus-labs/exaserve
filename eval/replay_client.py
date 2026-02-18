@@ -48,28 +48,48 @@ def _next_result_path(result_dir: str) -> str:
     return os.path.join(result_dir, f"result{next_idx}.json")
 
 
-async def send_request(session, base_url, req, mode_map, include_tp: bool):
+async def send_request(session, base_url, req, mode_map, include_tp: bool, generation_mode: str):
     # Per-request mode from trace file
     mode = getattr(req, 'mode', None) 
     url = f"{base_url}/v1/chat/completions" if mode == "chat" else f"{base_url}/v1/completions"
     
-    # Construct Payload (Using FROZEN prompt)
-    if mode == "chat":
-        payload = {
-            "model": req.model,
-            "messages": [{"role": "user", "content": req.prompt}],
-            "max_tokens": req.output_len,
-            "temperature": 0.7,
-            "ignore_eos": True
-        }
+    # Construct Payload based on generation_mode
+    if generation_mode == "deterministic":
+        # Deterministic mode: force exact output length
+        if mode == "chat":
+            payload = {
+                "model": req.model,
+                "messages": [{"role": "user", "content": req.prompt}],
+                "max_tokens": req.output_len,
+                "min_tokens": req.output_len,
+                "temperature": 0.7,
+                "ignore_eos": True
+            }
+        else:
+            payload = {
+                "model": req.model,
+                "prompt": req.prompt,
+                "max_tokens": req.output_len,
+                "min_tokens": req.output_len,
+                "temperature": 0.7,
+                "ignore_eos": True
+            }
     else:
-        payload = {
-            "model": req.model,
-            "prompt": req.prompt,
-            "max_tokens": req.output_len,
-            "temperature": 0.7,
-            "ignore_eos": True
-        }
+        # Natural mode: allow natural generation with EOS
+        if mode == "chat":
+            payload = {
+                "model": req.model,
+                "messages": [{"role": "user", "content": req.prompt}],
+                "max_tokens": req.output_len,
+                "temperature": 0.7,
+            }
+        else:
+            payload = {
+                "model": req.model,
+                "prompt": req.prompt,
+                "max_tokens": req.output_len,
+                "temperature": 0.7,
+            }
 
     if include_tp:
         payload["tensor_parallel_size"] = req.tensor_parallel_size
@@ -77,22 +97,33 @@ async def send_request(session, base_url, req, mode_map, include_tp: bool):
     start = time.time()
     success = False
     error_msg = ""
+    response_data = None
     
     try:
         # High timeout because queued requests in Ray/MPI might take time
         async with session.post(url, json=payload, timeout=TIMEOUT_S) as resp:
             success = (resp.status == 200)
             if success:
-                # Read body to force full completion
-                await resp.read() 
+                # Parse response body to extract usage information
+                response_data = await resp.json()
             else:
                 error_msg = f"HTTP {resp.status}"
+                await resp.read()  # Consume body even on error
     except Exception as e:
         error_msg = str(e)
     
     end_time = time.time()
     latency = end_time - start
-    return req, latency, success, error_msg, end_time
+    
+    # Extract token counts from response usage field (if available)
+    actual_prompt_tokens = None
+    actual_completion_tokens = None
+    if response_data and "usage" in response_data:
+        usage = response_data["usage"]
+        actual_prompt_tokens = usage.get("prompt_tokens")
+        actual_completion_tokens = usage.get("completion_tokens")
+    
+    return req, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens
 
 def _config_trace_path(cfg: dict) -> str:
     """Trace path from ExpConfig-shaped config: job_trace_config.output_trace_path."""
@@ -121,6 +152,15 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
     trace_path = _config_trace_path(cfg)
     port = cfg.get('port', 8000)
     base_url = f"http://localhost:{port}"
+    
+    # Get generation mode from config
+    replay_cfg = cfg.get('job_replay_client_config', {})
+    generation_mode = replay_cfg.get('generation_mode', 'deterministic')
+    
+    # Validate generation mode
+    if generation_mode not in ['deterministic', 'natural']:
+        print(f"!!! WARNING: Invalid generation_mode '{generation_mode}', defaulting to 'deterministic'")
+        generation_mode = 'deterministic'
 
     # 2. Pre-Load Requests (Blocking Phase)
     print(f">>> [REPLAY] Loading trace from {trace_path}...")
@@ -161,6 +201,13 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
     print(f">>> [REPLAY] Target: {base_url}")
     print(f"    Requests: {len(requests)}")
     print(f"    Duration: {requests[-1].timestamp:.2f}s")
+    print(f">>> [REPLAY] Generation Mode: {generation_mode.upper()}")
+    if generation_mode == "deterministic":
+        print(f"    Using min_tokens=max_tokens={requests[0].output_len if requests else 'N/A'} with ignore_eos=True")
+        print(f"    This ensures deterministic compute load matching trace output_len.")
+    else:
+        print(f"    Using natural generation with EOS termination.")
+        print(f"    Output lengths may vary from trace-specified output_len.")
     print(">>> [REPLAY] Disabling Garbage Collection for precision...")
     
     # 5. Setup interrupt handler
@@ -243,7 +290,7 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                         tensor_parallel_size=base_req.tensor_parallel_size,
                         req_id=uuid.uuid4().hex
                     )
-                    task = asyncio.create_task(send_request(session, base_url, w_req, mode_map, include_tp))
+                    task = asyncio.create_task(send_request(session, base_url, w_req, mode_map, include_tp, generation_mode))
                     warmup_tasks.append(task)
                 
                 # Wait for all warmup requests to finish
@@ -293,7 +340,7 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                 # Fire
                 inflight_stats["count"] += 1
                 task = asyncio.create_task(
-                    send_request(session, base_url, req, mode_map, include_tp)
+                    send_request(session, base_url, req, mode_map, include_tp, generation_mode)
                 )
                 task.add_done_callback(task_done_callback)
                 tasks.append(task)
@@ -489,8 +536,8 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
     # Save all runs with run_index for later analysis
     for run_idx, run_results in enumerate(all_runs_results):
         for r in run_results:
-            # r = (TraceRequest, latency, success, error_msg, end_time)
-            req_obj, latency, success, error_msg, end_time = r
+            # r = (TraceRequest, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens)
+            req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens = r
             raw_results.append({
                 "run_index": run_idx,
                 "model": req_obj.model,
@@ -499,17 +546,19 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                 "error": error_msg,
                 "input_len": req_obj.input_len,
                 "output_len": req_obj.output_len,
+                "actual_prompt_tokens": actual_prompt_tokens,
+                "actual_completion_tokens": actual_completion_tokens,
                 "tensor_parallel_size": req_obj.tensor_parallel_size,
                 "req_id": req_obj.req_id
             })
 
     # Print summary stats for the last run only
     for r in results:
-        req_obj, latency, success, error_msg, end_time = r
+        req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens = r
         m_name = req_obj.model
         if m_name not in model_stats:
             model_stats[m_name] = []
-        model_stats[m_name].append((req_obj, latency, success, error_msg, end_time))
+        model_stats[m_name].append((req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens))
 
     for m_name, stats in model_stats.items():
         succ_lats = [x[1] for x in stats if x[2]]
@@ -528,9 +577,31 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
 
     duration_for_rate = max(total_duration, 1e-6)
     
-    # Calculate token statistics
-    total_input_tokens = sum(r[0].input_len for r in results if r[2])
-    total_output_tokens = sum(r[0].output_len for r in results if r[2])
+    # Calculate token statistics - prioritize actual usage data over trace specs
+    # Count successful requests that have actual token counts vs those using trace specs
+    actual_count = 0
+    trace_count = 0
+    
+    total_input_tokens = 0
+    total_output_tokens = 0
+    
+    for r in results:
+        if r[2]:  # if success
+            req_obj = r[0]
+            actual_prompt_tokens = r[5]
+            actual_completion_tokens = r[6]
+            
+            # Prioritize actual usage data from API response
+            if actual_prompt_tokens is not None and actual_completion_tokens is not None:
+                total_input_tokens += actual_prompt_tokens
+                total_output_tokens += actual_completion_tokens
+                actual_count += 1
+            else:
+                # Fallback to trace specifications
+                total_input_tokens += req_obj.input_len
+                total_output_tokens += req_obj.output_len
+                trace_count += 1
+    
     total_tokens = total_input_tokens + total_output_tokens
     
     completed_requests = len(results)
@@ -541,8 +612,12 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
     tps = total_tokens / duration_for_rate
     processed_tps = total_input_tokens / duration_for_rate
     generated_tps = total_output_tokens / duration_for_rate
+    
+    token_source = f"(Usage API: {actual_count}, Trace Spec: {trace_count})" if completed_requests > 0 else ""
 
     print(f"System duration: {total_duration:.2f}s | RPS: {rps:.2f} | TPS: {tps:.2f} (Processed: {processed_tps:.2f}, Generated: {generated_tps:.2f}) | Completed: {completed_requests}/{scheduled_requests}")
+    if token_source:
+        print(f"Token counts from {token_source}")
     
     # Save Results
     config_result_dir = _config_result_dir(cfg)
@@ -560,7 +635,10 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                     "meta": {
                         "num_runs": num_runs,
                         "completed_runs": len(all_runs_results),
-                        "warmup_duration_s": warmup_duration_s
+                        "warmup_duration_s": warmup_duration_s,
+                        "generation_mode": generation_mode,
+                        "token_counts_from_usage_api": actual_count,
+                        "token_counts_from_trace_spec": trace_count
                     },
                     "summary": {m: len(s) for m, s in model_stats.items()},
                     "overall": {

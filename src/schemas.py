@@ -58,6 +58,7 @@ class ReplayClientConfig:
     early_stop: float = 0.0
     no_warmup: bool = False
     num_runs: int = 1
+    generation_mode: str = "deterministic"  # "deterministic" or "natural"
 
 @dataclass
 class ExpConfig:

@@ -7,7 +7,7 @@
 #PBS -k doe
 #PBS -l select=16
 #PBS -l walltime=1:00:00
-#PBS -q debug-scaling
+#PBS -q prod
 #PBS -o /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/16_nodes/stdout/
 #PBS -e /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/16_nodes/stderr/
 

@@ -6,8 +6,8 @@
 #PBS -A AuroraGPT
 #PBS -k doe
 #PBS -l select=8
-#PBS -l walltime=01:00:00
-#PBS -q debug
+#PBS -l walltime=1:00:00
+#PBS -q prod
 #PBS -o /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/8_nodes/stdout/
 #PBS -e /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/8_nodes/stderr/
 

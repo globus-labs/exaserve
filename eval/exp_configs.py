@@ -263,7 +263,8 @@ def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int =
     # nodes_list = [1, 2, 4, 8, 16]
     # nodes_list = [32]
     num_nodes_list = [1,2,4,8,16,32,64]
-    rate_per_node = 60 # requests per node per second
+    num_nodes_list = [128, 256]
+    rate_per_node = 80 # requests per node per second
     duration = 5.0                 
     input_len = 2048
     output_len = 512
@@ -278,10 +279,11 @@ def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int =
         ),
     ]
     batch_name = f"weak_scaling_{backend}"
-    base_working_dir = os.path.join("experiments", batch_name)
+    EVAL_DIR = os.path.join(os.path.dirname(__file__))
+    base_working_dir = os.path.join(EVAL_DIR, "experiments", batch_name)
 
     for num_nodes in num_nodes_list:
-        if num_nodes > 8:
+        if num_nodes > 1:
             walltime = "1:00:00"
             queue_name = "debug-scaling"
         else:
