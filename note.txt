@@ -126,3 +126,28 @@ Fix (two layers)
 Staggered initialization (primary) -- Odd-numbered tiles (the second tile on each PVC card) now sleep for 20 seconds before starting engine init. This ensures the two tiles on each card don't run their memory profiling simultaneously. Configurable via INIT_STAGGER_SECONDS env var.
 Retry logic (safety net) -- If engine creation still fails (e.g., model-loading times vary enough to re-create overlap), the worker retries up to 3 times with increasing back-off delays. Configurable via ENGINE_INIT_RETRIES.
 The total startup overhead is ~20 seconds (one stagger wave), which is small relative to the ~2 minute model loading time.
+
+
+============================================================================================================
+Ray's Locality Aware approach
+On the 3rd approach: Locality-Aware Routing (reducing replicas visible to a single proxy)
+This is the most architecturally interesting mitigation, and potentially the most impactful for large-scale deployments.
+The fundamental problem
+Ray Serve uses a single ProxyActor per node that acts as both the HTTP ingress and the load balancer. By default, when a request arrives, the proxy queries all replicas cluster-wide to get queue lengths, then routes to the least-loaded one. At 64 nodes × 12 tiles = 768 replicas, the proxy is sending 768 concurrent RPCs every time it needs to make a routing decision. That's O(N) work per request.
+What locality-aware routing would do
+Instead of each proxy polling all 768 replicas, you'd partition replicas so each proxy only "sees" (and polls) the replicas on its own node or a small subset of nearby nodes. For example, with 12 replicas per node, a proxy only queries 12 replicas instead of 768 — a 64x reduction in polling overhead.
+Two ways to achieve this with your setup
+Option A: Ray Serve's built-in locality_enabled routing (simplest)
+Ray Serve has a locality_enabled setting in its routing config. When enabled, the proxy prefers replicas on the same node before going remote:
+serve.run(    deployment,    route_prefix="/",    _local_node_routing_enabled=True,   # or via serve config YAML)
+However, this is a soft preference, not strict locality — if the local node is saturated, it will still go remote. It also doesn't eliminate the global polling problem entirely.
+Option B: Explicit per-node deployment sharding (more robust)
+You could restructure your deployment so that instead of one large deployment with 768 replicas all talking through a single ingress, you run one deployment per node (or per rack) and use your own request routing at the client or load-balancer level:
+Client → node-local HTTP proxy → VLLMWorker replicas on that node only
+In your current architecture, this would mean something like:
+Each node runs its own aurora_serve.py with num_replicas=12 (local tiles only)
+The client driver (your replay_client.py) distributes requests across nodes itself (round-robin, random, or by tracking per-node load via a lightweight sidecar)
+This is essentially what your system already does per-node — the issue is that Ray Serve then federates all of them under one global proxy which reintroduces the O(N-replicas) polling.
+Why this is the long-term right answer
+The 0.1s polling deadline and the NoneType bug are both symptoms of Ray Serve not being designed for O(100s) of replicas behind a single proxy. Increasing the deadline to 2s (mitigation 1) trades latency headroom for correctness, but as you scale further, even 2s will eventually be insufficient. Sharding the routing keeps the per-proxy replica count constant regardless of total cluster size, giving you true O(1) routing overhead per request.
+For your null-compute experiment specifically at 64 nodes, the simpler fix (the 2.0s deadline just applied) should be sufficient. But if you plan to go to 128+ nodes, the sharding approach is worth pursuing.

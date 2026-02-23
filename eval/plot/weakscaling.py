@@ -37,7 +37,8 @@ except OSError:
             pass
 
 # Constant: folder path containing the experiment results
-RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_ray"
+# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_ray"
+RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/null_compute_ray"
 
 
 def extract_node_count(directory_name: str) -> int:

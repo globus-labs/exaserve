@@ -26,12 +26,13 @@ def get_default_config() -> DeploymentConfig:
                 max_model_len=4096,
                 size=8,
                 num_replicas=None,
-                num_routers_per_replica=0.5,
+                num_routers_per_replica=0.25,
+                num_cpus_per_replica=4,
             )
         ],
         model_storage_path="/lus/flare/projects/AuroraGPT/wenyiw/models",
-        worker_max_ongoing=32,
-        router_max_ongoing=200,
+        worker_max_ongoing=288,
+        # router_max_ongoing=2000,
         num_nodes=1,
     )
 

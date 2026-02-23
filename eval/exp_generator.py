@@ -10,11 +10,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from exp_configs import (
-    TraceGeneratorConfig,
-    WeakScalingConfig,
-    get_weak_scaling_configs_with_num_runs,
-)
+from exp_configs import *
 from trace_generator import TraceGenerator
 VALID_BACKENDS = ["ray", "mpi"]
 
@@ -141,5 +137,6 @@ if __name__ == "__main__":
     
     print(f">>> Generating experiments for backend: {args.backend}")
     # experiments = get_weak_scaling_configs(backend=args.backend)
-    experiments = get_weak_scaling_configs_with_num_runs(backend=args.backend, num_runs=5)
+    # experiments = get_weak_scaling_configs_with_num_runs(backend=args.backend, num_runs=5)
+    experiments = get_weak_scaling_null_compute_configs_with_num_runs(backend=args.backend, num_runs=3)
     setup_weak_scaling(args, experiments, backend=args.backend)
