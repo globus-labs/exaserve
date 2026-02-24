@@ -26,5 +26,6 @@ echo "Work Dir:   $(pwd)"
 echo "Config:     /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/32_nodes/config.yaml"
 echo "=================================================="
 
+
 # Invoke Experiment Driver (using absolute path) with backend specification
-bash "/home/wenyiw/aurora_rayserver/eval/templates/run_exp.sh" /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/32_nodes/config.yaml --backend ray  --num-runs 5
+bash "/home/wenyiw/aurora_rayserver/eval/templates/run_exp.sh" /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/32_nodes/config.yaml --backend ray  --num-runs 3

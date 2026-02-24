@@ -134,7 +134,7 @@ def sparse_trace_config() -> ExpConfig:
         pbs_queue_name="debug",
         pbs_job_name="sparse",
         pbs_working_dir=".",
-        job_replay_client_config=ReplayClientConfig(config_path="config.yaml"),
+        job_replay_client_config=ReplayClientConfig(config_path="config.yaml", dest="cluster"),
         job_trace_config=trace_cfg,
         job_seed=42,
         model_deployment_config=dep,
@@ -240,7 +240,7 @@ def get_weak_scaling_configs(backend: str = "ray") -> List[ExpConfig]:
             pbs_queue_name=queue_name,
             pbs_job_name=f"{batch_name}_{num_nodes}n",
             pbs_working_dir=exp_working_dir,
-            job_replay_client_config=ReplayClientConfig(config_path=config_file_path, no_warmup=False, num_runs=1),
+            job_replay_client_config=ReplayClientConfig(config_path=config_file_path, no_warmup=False, num_runs=1, dest="cluster" if num_nodes > 1 else "node", num_nodes=num_nodes),
             job_trace_config=trace_cfg,
             job_seed=42,
             model_deployment_config=dep,
@@ -248,7 +248,7 @@ def get_weak_scaling_configs(backend: str = "ray") -> List[ExpConfig]:
         configs.append(exp_cfg)
     return configs
 
-# Now generate weak scaling configs with warup and num_runs
+
 def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int = 1) -> List[ExpConfig]:
     """
     Returns a list of ExpConfig objects for weak scaling experiments
@@ -262,8 +262,8 @@ def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int =
     # Common parameters for weak scaling
     # nodes_list = [1, 2, 4, 8, 16]
     # nodes_list = [32]
-    num_nodes_list = [1,2,4,8,16,32,64]
-    num_nodes_list = [128, 256]
+    num_nodes_list = [1,2,4,8,16,32,64,128,256]
+    # num_nodes_list = [128, 256]
     rate_per_node = 80 # requests per node per second
     duration = 5.0                 
     input_len = 2048
@@ -314,7 +314,14 @@ def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int =
             pbs_queue_name=queue_name,
             pbs_job_name=f"{batch_name}_{num_nodes}n",
             pbs_working_dir=pbs_working_dir,
-            job_replay_client_config=ReplayClientConfig(config_path=config_file_path, no_warmup=False, num_runs=num_runs),
+            job_replay_client_config=ReplayClientConfig(
+                config_path=config_file_path,
+                no_warmup=False,
+                num_runs=num_runs,
+                dest="cluster" if num_nodes > 1 else "node",
+                num_nodes=num_nodes,
+                num_cli_per_node=0.125,
+            ),
             job_trace_config=trace_cfg,
             job_seed=42,
             model_deployment_config=dep,
@@ -336,7 +343,7 @@ def get_weak_scaling_null_compute_configs_with_num_runs(backend: str = "ray", nu
     # Common parameters for weak scaling
     # nodes_list = [1, 2, 4, 8, 16]
     # nodes_list = [32]
-    num_nodes_list = [1,2,4,8,16,32,64, 128, 256]
+    num_nodes_list = [1,2,4,8,16,32,64,128]
     # num_nodes_list = [128, 256]
     rate_per_node = 80 # requests per node per second
     duration = 5.0                 
@@ -388,7 +395,14 @@ def get_weak_scaling_null_compute_configs_with_num_runs(backend: str = "ray", nu
             pbs_queue_name=queue_name,
             pbs_job_name=f"{batch_name}_{num_nodes}n",
             pbs_working_dir=pbs_working_dir,
-            job_replay_client_config=ReplayClientConfig(config_path=config_file_path, no_warmup=False, num_runs=num_runs),
+            job_replay_client_config=ReplayClientConfig(
+                config_path=config_file_path,
+                no_warmup=False,
+                num_runs=num_runs,
+                dest="cluster" if num_nodes > 1 else "node",
+                num_nodes=num_nodes,
+                num_cli_per_node=0.125,
+            ),
             job_trace_config=trace_cfg,
             job_seed=42,
             model_deployment_config=dep,

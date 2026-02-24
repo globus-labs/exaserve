@@ -42,6 +42,12 @@ def parse_args():
         help="Optional subset of job directories to submit (e.g. 1_nodes 2_nodes).",
     )
     parser.add_argument(
+        "--node-nums",
+        default=None,
+        help="Comma-separated list of node counts to submit (e.g. 1,2,4). "
+             "Filters job dirs whose name starts with <n>_nodes.",
+    )
+    parser.add_argument(
         "--parent-dir",
         default=None,
         help="Parent directory containing job folders (default: script directory).",
@@ -159,6 +165,10 @@ def main():
         args.parent_dir if args.parent_dir is not None else get_script_dir()
     )
     job_dirs = args.job_dirs if args.job_dirs else discover_job_dirs(parent_dir)
+
+    if args.node_nums is not None:
+        node_set = {n.strip() for n in args.node_nums.split(",")}
+        job_dirs = [d for d in job_dirs if d.split("_")[0] in node_set]
 
     queue_limits = dict(DEFAULT_QUEUE_LIMITS)
     for item in args.queue_limit:

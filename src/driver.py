@@ -57,7 +57,7 @@ def get_ray_env():
     # every replica to time out simultaneously, triggering a NoneType crash
     # in _fulfill_pending_requests. 2.0s gives enough headroom for cross-node
     # round trips in a large cluster.
-    env["RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S"] = "8.0"
+    env["RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S"] = "300.0"
 
     # NOSET=1 prevents Ray from writing per-worker ONEAPI_DEVICE_SELECTOR
     # (avoids the "level_zero:" empty-string SYCL crash for non-GPU actors).

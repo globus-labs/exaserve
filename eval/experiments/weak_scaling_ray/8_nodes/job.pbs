@@ -7,7 +7,7 @@
 #PBS -k doe
 #PBS -l select=8
 #PBS -l walltime=1:00:00
-#PBS -q prod
+#PBS -q debug-scaling
 #PBS -o /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/8_nodes/stdout/
 #PBS -e /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_ray/8_nodes/stderr/
 
@@ -26,5 +26,6 @@ echo "Work Dir:   $(pwd)"
 echo "Config:     /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/8_nodes/config.yaml"
 echo "=================================================="
 
+
 # Invoke Experiment Driver (using absolute path) with backend specification
-bash "/home/wenyiw/aurora_rayserver/eval/templates/run_exp.sh" /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/8_nodes/config.yaml --backend ray  --num-runs 5
+bash "/home/wenyiw/aurora_rayserver/eval/templates/run_exp.sh" /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/8_nodes/config.yaml --backend ray  --num-runs 3

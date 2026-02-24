@@ -22,7 +22,7 @@ def save_yaml(data, path):
     with open(path, 'w') as f:
         yaml.dump(data, f, default_flow_style=False)
 
-def setup_weak_scaling(args, experiments, backend="ray"):
+def setup_weak_scaling(args, experiments, backend="ray", null_compute=False):
     """
     Setup weak scaling experiments for the specified backend.
     
@@ -30,6 +30,7 @@ def setup_weak_scaling(args, experiments, backend="ray"):
         args: Command line arguments
         experiments: List of ExpConfig objects
         backend: Either "ray" or "mpi"
+        null_compute: If True, export AURORA_NULL_COMPUTE=1 inside each job.pbs
     """
     # Prepare Submission List
     submit_cmds = []
@@ -72,6 +73,7 @@ def setup_weak_scaling(args, experiments, backend="ray"):
         exp_cfg.save_yaml(config_path)
         print(f"      -> Config: {config_path}")
         pbs_output_dir = os.path.dirname(exp_cfg.pbs_stdout_dir)
+        env_exports = "export AURORA_NULL_COMPUTE=1" if null_compute else ""
         pbs_content = pbs_template_content \
             .replace("{{JOB_NAME}}", exp_cfg.pbs_job_name) \
             .replace("{{NUM_NODES}}", str(exp_cfg.model_deployment_config.num_nodes)) \
@@ -83,7 +85,8 @@ def setup_weak_scaling(args, experiments, backend="ray"):
             .replace("{{RUN_EXP_SCRIPT}}", run_exp_script) \
             .replace("{{BACKEND}}", backend) \
             .replace("{{NO_WARMUP}}", "--no-warmup" if exp_cfg.job_replay_client_config.no_warmup else "") \
-            .replace("{{NUM_RUNS}}", str(exp_cfg.job_replay_client_config.num_runs))
+            .replace("{{NUM_RUNS}}", str(exp_cfg.job_replay_client_config.num_runs)) \
+            .replace("{{ENV_EXPORTS}}", env_exports)
         pbs_path = os.path.join(exp_cfg.pbs_working_dir, "job.pbs")
         with open(pbs_path, 'w') as f:
             f.write(pbs_content)
@@ -136,7 +139,6 @@ if __name__ == "__main__":
         exit(1)
     
     print(f">>> Generating experiments for backend: {args.backend}")
-    # experiments = get_weak_scaling_configs(backend=args.backend)
-    # experiments = get_weak_scaling_configs_with_num_runs(backend=args.backend, num_runs=5)
-    experiments = get_weak_scaling_null_compute_configs_with_num_runs(backend=args.backend, num_runs=3)
-    setup_weak_scaling(args, experiments, backend=args.backend)
+    experiments = get_weak_scaling_configs_with_num_runs(backend=args.backend, num_runs=3)
+    # experiments = get_weak_scaling_null_compute_configs_with_num_runs(backend=args.backend, num_runs=3)
+    setup_weak_scaling(args, experiments, backend=args.backend, null_compute=False)

@@ -25,6 +25,7 @@ echo "Backend:    ray"
 echo "Work Dir:   $(pwd)"
 echo "Config:     /home/wenyiw/aurora_rayserver/eval/experiments/null_compute_ray/16_nodes/config.yaml"
 echo "=================================================="
+
 export AURORA_NULL_COMPUTE=1
 # Invoke Experiment Driver (using absolute path) with backend specification
 bash "/home/wenyiw/aurora_rayserver/eval/templates/run_exp.sh" /home/wenyiw/aurora_rayserver/eval/experiments/null_compute_ray/16_nodes/config.yaml --backend ray  --num-runs 3

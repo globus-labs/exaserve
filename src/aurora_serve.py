@@ -22,6 +22,7 @@ import ray
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from ray import serve
+from ray.serve.config import HTTPOptions, ProxyLocation
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -95,7 +96,7 @@ class VLLMWorker:
         device_id = int(gpu_ids[0]) if gpu_ids else 0
 
         if null_compute:
-            self.latency = float(os.environ.get("AURORA_NULL_COMPUTE_LATENCY", "20.0"))
+            self.latency = float(os.environ.get("AURORA_NULL_COMPUTE_LATENCY", "2.0"))
             print(
                 f"[VLLMWorker pid={pid}] NullCompute mode on tile {device_id} "
                 f"(latency={self.latency:.2f}s, no vLLM engine)",
@@ -204,7 +205,7 @@ class VLLMWorker:
 
     async def _non_stream(self, request_id: str, prompt: str, sampling_kwargs: dict):
         result = (
-            await self._null_generate(sampling_kwargs)
+            await self._null_generate(prompt, sampling_kwargs)
             if self.null_compute
             else await self._generate(prompt, sampling_kwargs)
         )
@@ -236,7 +237,7 @@ class VLLMWorker:
     async def _stream(self, request_id: str, prompt: str, sampling_kwargs: dict):
         created = int(time.time())
         gen = (
-            self._null_generate_stream(sampling_kwargs)
+            self._null_generate_stream(prompt, sampling_kwargs)
             if self.null_compute
             else self._generate_stream(prompt, sampling_kwargs)
         )
@@ -316,23 +317,27 @@ class VLLMWorker:
             "completion_tokens": len(choice.token_ids),
         }
 
-    async def _null_generate(self, sampling_kwargs: dict) -> dict:
+    async def _null_generate(self, prompt: str, sampling_kwargs: dict) -> dict:
         await asyncio.sleep(self.latency)
         max_tokens = int(sampling_kwargs.get("max_tokens", 10))
+        # No tokenizer in null_compute mode; word count is the same approximation
+        # used by the chat handler when it flattens messages into a plain string.
+        prompt_tokens = len(prompt.split())
         return {
             "text": "null " * max_tokens,
             "finish_reason": "stop",
-            "prompt_tokens": 10,
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": max_tokens,
         }
 
-    async def _null_generate_stream(self, sampling_kwargs: dict):
+    async def _null_generate_stream(self, prompt: str, sampling_kwargs: dict):
         await asyncio.sleep(self.latency)
         max_tokens = int(sampling_kwargs.get("max_tokens", 10))
+        prompt_tokens = len(prompt.split())
         yield {
             "delta": "null " * max_tokens,
             "finish_reason": "stop",
-            "prompt_tokens": 10,
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": max_tokens,
         }
 
@@ -380,9 +385,15 @@ def deploy_model(
             flush=True,
         )
 
+    # Replicas per node = tiles per node / TP size. Ray's GPU resource scheduling
+    # already enforces this implicitly, but being explicit avoids stacking replicas
+    # onto a subset of nodes when cluster membership fluctuates.
+    replicas_per_node = max(1, config.num_gpus_per_node // model_config.tensor_parallel_size)
+
     deployment = VLLMWorker.options(
         name=f"VLLMWorker-{safe_name}",
         num_replicas=num_replicas,
+        # max_replicas_per_node=replicas_per_node,
         ray_actor_options={
             "num_gpus": model_config.tensor_parallel_size,
             "num_cpus": model_config.num_cpus_per_replica,
@@ -452,6 +463,14 @@ if __name__ == "__main__":
     stage_start = time.time()
     print("[AuroraServe] Stage 1: Initializing Ray cluster...", flush=True)
     ray.init(address="auto", namespace="serve", include_dashboard=False)
+    serve.start(
+        http_options=HTTPOptions(
+            host="0.0.0.0",  # Bind to all interfaces so HSN hostnames are reachable
+            location=ProxyLocation.EveryNode,
+            port=8000,
+        )
+    )
+    print("[AuroraServe] HTTP proxy location: EveryNode, host=0.0.0.0, port=8000", flush=True)
     print_red(f"[AuroraServe] ✓ Stage 1 ray.init() completed in {time.time() - stage_start:.2f}s")
 
     # ---- Detect cluster resources -------------------------------------------

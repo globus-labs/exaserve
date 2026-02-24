@@ -12,7 +12,7 @@ import time
 
 DEFAULT_QUEUE_LIMITS = {
     "debug": 1,
-    "debug-scaling": 1,
+    "debug-scaling": 4,
     "prod": 100,
 }
 DEFAULT_SLEEP_SEC = 60

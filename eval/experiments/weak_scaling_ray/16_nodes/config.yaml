@@ -1,10 +1,14 @@
 job_replay_client_config:
   config_path: /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_ray/16_nodes/config.yaml
+  dest: cluster
   early_stop: 0.0
   generation_mode: deterministic
   include_tp: false
   no_warmup: false
-  num_runs: 5
+  num_cli_per_node: 0.125
+  num_nodes: 16
+  num_runs: 3
+  num_workers: 4
 job_seed: 42
 job_trace_config:
   duration: 5.0

@@ -4,7 +4,7 @@ set -e  # Exit on error
 # ==============================================================================
 # UNIVERSAL EXPERIMENT DRIVER
 # ==============================================================================
-# USAGE: ./run_exp.sh <path_to_config.yaml> [--backend {ray|mpi}]
+# USAGE: ./run_exp.sh <path_to_config.yaml> [--backend {ray|mpi}] [--dest {node|cluster}]
 #
 # This script:
 # 1. Validates all required files and environment
@@ -19,6 +19,7 @@ CONFIG_PATH=""
 BACKEND="ray"  # Default to ray if not specified
 NO_WARMUP=""
 NUM_RUNS=1
+DEST=""  # Empty = defer to job_replay_client_config.dest in the YAML config
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -33,6 +34,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --num-runs)
             NUM_RUNS="$2"
+            shift 2
+            ;;
+        --dest|--destination)
+            DEST="$2"
             shift 2
             ;;
         *)
@@ -82,6 +87,21 @@ if [ ! -f "$CONFIG_PATH" ]; then
     exit 1
 fi
 echo "[✓] Config file:      $CONFIG_PATH"
+
+# If --dest was not given on the CLI, read it from the YAML config
+if [ -z "$DEST" ]; then
+    DEST=$(python3 -c "
+import yaml, sys
+c = yaml.safe_load(open('$CONFIG_PATH'))
+print(c.get('job_replay_client_config', {}).get('dest', 'node'))
+" 2>/dev/null || echo "node")
+fi
+# Validate dest value
+if [ "$DEST" != "node" ] && [ "$DEST" != "cluster" ]; then
+    echo "!!! ERROR: Invalid --dest '$DEST'. Must be 'node' or 'cluster'."
+    exit 1
+fi
+echo "[✓] Dest mode:        $DEST"
 
 # Check for trace file in config
 TRACE_PATH=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c['benchmark']['output_trace_path'])" 2>/dev/null || echo "")
@@ -281,12 +301,45 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
 
         # ==============================================================================
         # RUN REPLAY CLIENT
+        # CLIENT_NODES = max(1, min(num_nodes, int(num_nodes * num_cli_per_node)))
+        # num_nodes      = total PBS nodes (= pbs_num_nodes, always set)
+        # num_cli_per_node = fraction of those nodes that also run the replay client
+        # When CLIENT_NODES > 1, launches with mpiexec (one rank per node) using the
+        # first CLIENT_NODES unique hostnames from $PBS_NODEFILE so that client nodes
+        # overlap with Ray-worker nodes for scheduling simplicity.
         # ==============================================================================
 
+        CLIENT_NODES=$(python3 -c "
+import yaml
+c = yaml.safe_load(open('$CONFIG_PATH'))
+cfg = c.get('job_replay_client_config', {})
+num_nodes = cfg.get('num_nodes', 1)
+ratio     = cfg.get('num_cli_per_node', 1.0)
+print(max(1, min(num_nodes, round(num_nodes * ratio))))
+" 2>/dev/null || echo "1")
+
         echo ""
-        echo ">>> [DRIVER] Starting Replay Client..."
-            python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS
-        EXIT_CODE=$?
+        echo ">>> [DRIVER] Starting Replay Client (client nodes: $CLIENT_NODES)..."
+
+        if [ "$CLIENT_NODES" -gt 1 ]; then
+            # Build a deduplicated hostfile from the first CLIENT_NODES unique PBS nodes
+            CLIENT_HOSTFILE="/tmp/aurora_client_hosts_$$"
+            sort -u "$PBS_NODEFILE" | head -n "$CLIENT_NODES" > "$CLIENT_HOSTFILE"
+            ACTUAL_CLIENT_NODES=$(wc -l < "$CLIENT_HOSTFILE")
+            if [ "$ACTUAL_CLIENT_NODES" -lt "$CLIENT_NODES" ]; then
+                echo "!!! WARNING: Requested $CLIENT_NODES client nodes but $PBS_NODEFILE only has $ACTUAL_CLIENT_NODES unique hostnames. Proceeding with $ACTUAL_CLIENT_NODES."
+                CLIENT_NODES=$ACTUAL_CLIENT_NODES
+            fi
+            echo "    Client hostfile: $CLIENT_HOSTFILE"
+            cat "$CLIENT_HOSTFILE"
+            mpiexec -n "$CLIENT_NODES" --ppn 1 --hostfile "$CLIENT_HOSTFILE" \
+                python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
+            EXIT_CODE=$?
+            rm -f "$CLIENT_HOSTFILE"
+        else
+            python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
+            EXIT_CODE=$?
+        fi
     else
         EXIT_CODE=1
     fi

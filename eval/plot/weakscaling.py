@@ -335,6 +335,12 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     title_text = 'RayServe vLLM Weak Scaling Performance (ALCF Aurora)'
     subtitle_text = 'Meta-Llama-3-8B-Instruct, chat mode, 12 GPUs per node, 5 runs avg'
     subtitle_text += '\n Note: Preliminary results, we may not have implemented RayServe correctly.'
+    
+    title_text = 'RayServe Null Compute Weak Scaling Performance w/ Round-robin Clients (ALCF Aurora)'
+    subtitle_text = '1 client per 8 nodes, 4 workers per client, 3 runs avg.'
+    subtitle_text += '\n No model staging, no tokenizer.'
+    subtitle_text += '\n Single-node performance is NOT saturated.'
+    # subtitle_text += '\n Note: Preliminary results, we may not have implemented RayServe correctly.'
     fig.suptitle(title_text, fontsize=16, fontweight='bold', 
                 color='#1a1a1a', y=0.98)
     ax1.set_title(subtitle_text, fontsize=11, color='#666666', pad=10, style='italic')

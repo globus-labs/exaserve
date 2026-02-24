@@ -59,6 +59,11 @@ class ReplayClientConfig:
     no_warmup: bool = False
     num_runs: int = 1
     generation_mode: str = "deterministic"  # "deterministic" or "natural"
+    dest: str = "node"  # "node" (localhost) or "cluster" (round-robin over PBS nodes)
+    num_nodes: int = 1      # total PBS nodes (= pbs_num_nodes); used to compute actual client count
+    num_cli_per_node: float = 1.0  # fraction of total nodes used as MPI client ranks
+                                   # actual_client_nodes = max(1, min(num_nodes, round(num_nodes * num_cli_per_node)))
+    num_workers: int = 4    # multiprocessing workers per MPI rank
 
 @dataclass
 class ExpConfig:

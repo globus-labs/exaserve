@@ -1,7 +1,9 @@
 import argparse
 import asyncio
 import glob
+import itertools
 import json
+import multiprocessing
 import os
 import re
 import resource
@@ -14,6 +16,47 @@ from dataclasses import dataclass
 import aiohttp
 import numpy as np
 import yaml
+
+# ---------------------------------------------------------------------------
+# Optional MPI support via mpi4py.
+# When the script is launched with mpiexec/mpirun (num_nodes > 1) each OS
+# process is one MPI rank (one compute node). Multiprocessing workers are
+# spawned *within* each rank for intra-node parallelism.
+# Falls back transparently to single-node mode when mpi4py is absent or
+# MPI_SIZE == 1.
+# ---------------------------------------------------------------------------
+try:
+    from mpi4py import MPI as _MPI
+    _MPI_AVAILABLE = True
+except ImportError:
+    _MPI_AVAILABLE = False
+
+
+def _init_mpi():
+    """Return (comm, rank, size). Falls back to (None, 0, 1) without MPI."""
+    if _MPI_AVAILABLE:
+        comm = _MPI.COMM_WORLD
+        return comm, comm.Get_rank(), comm.Get_size()
+    return None, 0, 1
+
+
+def _mpi_barrier(comm):
+    if comm is not None and comm.Get_size() > 1:
+        comm.Barrier()
+
+
+def _mpi_bcast(comm, value, root=0):
+    if comm is not None and comm.Get_size() > 1:
+        return comm.bcast(value, root=root)
+    return value
+
+
+def _mpi_gather(comm, value, root=0):
+    """Gather values from all ranks to root. Returns list on root, None elsewhere."""
+    if comm is not None and comm.Get_size() > 1:
+        return comm.gather(value, root=root)
+    return [value]
+
 
 @dataclass
 class TraceRequest:
@@ -30,13 +73,44 @@ TIMEOUT_S = 3600 # 1 hour
 REQ_BATCH_SIZE = 5
 EXTRA_RATE = 0.2
 
+_MAX_ERROR_PRINTS = 5
+_error_print_count = 0
+
+
+def _print_request_error(url: str, error_msg: str):
+    """Print request error with rate limiting to avoid log flooding."""
+    global _error_print_count
+    _error_print_count += 1
+    if _error_print_count <= _MAX_ERROR_PRINTS:
+        print(f"\n!!! [REQ ERROR #{_error_print_count}] {url}\n    {error_msg}", flush=True)
+    elif _error_print_count % 100 == 0:
+        print(f"\n!!! [REQ ERROR] {_error_print_count} total failures so far...", flush=True)
+
 _RESULT_PATTERN = re.compile(r"result(\d+)\.json$")
 
 
+def _get_cluster_nodes() -> list:
+    """Return a sorted, deduplicated list of hostnames from $PBS_NODEFILE."""
+    nodefile = os.environ.get("PBS_NODEFILE")
+    if not nodefile:
+        raise RuntimeError(
+            "PBS_NODEFILE environment variable is not set. "
+            "--dest=cluster requires a PBS job environment."
+        )
+    try:
+        with open(nodefile) as f:
+            nodes = sorted(set(line.strip() for line in f if line.strip()))
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"PBS_NODEFILE points to '{nodefile}' which does not exist."
+        )
+    if not nodes:
+        raise RuntimeError(f"No nodes found in PBS_NODEFILE ('{nodefile}').")
+    return nodes
+
+
 def _next_result_path(result_dir: str) -> str:
-    """Return path for next result file: result0.json, result1.json, ...
-    Scans result_dir for existing resultN.json and uses next available index.
-    """
+    """Return path for next result file (result0.json, result1.json, ...)."""
     os.makedirs(result_dir, exist_ok=True)
     candidates = glob.glob(os.path.join(result_dir, "result*.json"))
     indices = []
@@ -49,13 +123,10 @@ def _next_result_path(result_dir: str) -> str:
 
 
 async def send_request(session, base_url, req, mode_map, include_tp: bool, generation_mode: str):
-    # Per-request mode from trace file
-    mode = getattr(req, 'mode', None) 
+    mode = getattr(req, 'mode', None)
     url = f"{base_url}/v1/chat/completions" if mode == "chat" else f"{base_url}/v1/completions"
-    
-    # Construct Payload based on generation_mode
+
     if generation_mode == "deterministic":
-        # Deterministic mode: force exact output length
         if mode == "chat":
             payload = {
                 "model": req.model,
@@ -75,7 +146,6 @@ async def send_request(session, base_url, req, mode_map, include_tp: bool, gener
                 "ignore_eos": True
             }
     else:
-        # Natural mode: allow natural generation with EOS
         if mode == "chat":
             payload = {
                 "model": req.model,
@@ -98,83 +168,241 @@ async def send_request(session, base_url, req, mode_map, include_tp: bool, gener
     success = False
     error_msg = ""
     response_data = None
-    
+
     try:
-        # High timeout because queued requests in Ray/MPI might take time
         async with session.post(url, json=payload, timeout=TIMEOUT_S) as resp:
             success = (resp.status == 200)
             if success:
-                # Parse response body to extract usage information
                 response_data = await resp.json()
             else:
-                error_msg = f"HTTP {resp.status}"
-                await resp.read()  # Consume body even on error
+                body = await resp.text()
+                error_msg = f"HTTP {resp.status}: {body[:300]}"
+                _print_request_error(url, error_msg)
     except Exception as e:
         error_msg = str(e)
-    
+        _print_request_error(url, error_msg)
+
     end_time = time.time()
     latency = end_time - start
-    
-    # Extract token counts from response usage field (if available)
+
     actual_prompt_tokens = None
     actual_completion_tokens = None
     if response_data and "usage" in response_data:
         usage = response_data["usage"]
         actual_prompt_tokens = usage.get("prompt_tokens")
         actual_completion_tokens = usage.get("completion_tokens")
-    
+
     return req, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens
 
+
 def _config_trace_path(cfg: dict) -> str:
-    """Trace path from ExpConfig-shaped config: job_trace_config.output_trace_path."""
     jtc = cfg.get('job_trace_config') or {}
     return jtc.get('output_trace_path', 'experiment_trace.jsonl')
 
 def _config_result_dir(cfg: dict):
-    """Result directory from ExpConfig-shaped config: pbs_result_dir."""
     return cfg.get('pbs_result_dir')
 
 def _config_mode_map(cfg: dict) -> dict:
-    """Build model_id -> mode from ExpConfig-shaped config (model_deployment_config.model_configs)."""
     dep = cfg.get('model_deployment_config') or {}
     model_configs = dep.get('model_configs') or []
     return {m.get('model_id', ''): m.get('mode', 'chat') for m in model_configs if m.get('model_id')}
 
 def _config_gpu_topology(cfg: dict) -> tuple:
-    """(num_nodes, num_gpus_per_node) from ExpConfig-shaped config."""
     dep = cfg.get('model_deployment_config') or {}
     return (dep.get('num_nodes', 1), dep.get('num_gpus_per_node', 4))
 
-async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bool, num_runs: int):
-    # 1. Load Config (ExpConfig-shaped YAML)
+
+# ==============================================================================
+# MULTIPROCESSING WORKER
+# Each worker process manages its own asyncio event loop and dispatches the
+# subset of requests assigned to it on their original schedule.
+# Workers are spawned by MPI ranks — MPI is NOT used inside workers.
+# ==============================================================================
+
+def _worker_entry(
+    worker_id: int,
+    worker_requests: list,
+    base_urls: list,
+    include_tp: bool,
+    generation_mode: str,
+    mode_map: dict,
+    start_event,        # multiprocessing.Event: fires when run_t0 is set
+    run_t0_val,         # multiprocessing.Value('d'): shared start timestamp
+    result_queue,       # multiprocessing.Queue: for sending results back
+    interrupt_event,    # multiprocessing.Event: set by main process on Ctrl-C
+    safe_conn_limit: int,
+    num_workers: int,
+    dispatch_done_val,  # multiprocessing.Value('d'): updated to last fire time
+):
+    """Entry point for a worker process; runs an independent asyncio event loop."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except Exception:
+        pass
+
+    gc.disable()
+    asyncio.run(_worker_async(
+        worker_id, worker_requests, base_urls, include_tp, generation_mode,
+        mode_map, start_event, run_t0_val, result_queue, interrupt_event,
+        safe_conn_limit, num_workers, dispatch_done_val,
+    ))
+
+
+async def _worker_async(
+    worker_id: int,
+    worker_requests: list,
+    base_urls: list,
+    include_tp: bool,
+    generation_mode: str,
+    mode_map: dict,
+    start_event,
+    run_t0_val,
+    result_queue,
+    interrupt_event,
+    safe_conn_limit: int,
+    num_workers: int,
+    dispatch_done_val,
+):
+    """Async body: waits for start signal, then dispatches requests on schedule."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, start_event.wait)
+    run_t0 = run_t0_val.value
+
+    per_worker_conn = max(10, safe_conn_limit // num_workers)
+    connector = aiohttp.TCPConnector(limit=per_worker_conn)
+    session = aiohttp.ClientSession(connector=connector)
+    url_cycle = itertools.cycle(base_urls)
+
+    tasks = []
+    try:
+        for i, req in enumerate(worker_requests):
+            if interrupt_event.is_set():
+                print(
+                    f"\n[Worker {worker_id}] Interrupt at request {i}/{len(worker_requests)}, "
+                    "stopping dispatch.",
+                    flush=True,
+                )
+                break
+
+            target_time = run_t0 + req.timestamp
+            now = time.time()
+            if target_time > now:
+                await asyncio.sleep(target_time - now)
+
+            tasks.append(asyncio.create_task(
+                send_request(session, next(url_cycle), req, mode_map, include_tp, generation_mode)
+            ))
+
+        # Record when this worker fired its last request.  Use a lock-free
+        # compare-and-set via the Value lock so we capture the true maximum
+        # across all workers on this rank.
+        last_fire = time.time()
+        with dispatch_done_val.get_lock():
+            if last_fire > dispatch_done_val.value:
+                dispatch_done_val.value = last_fire
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if not isinstance(r, BaseException):
+                result_queue.put(r)
+    finally:
+        await session.close()
+
+
+# ==============================================================================
+# MAIN REPLAY FUNCTION
+# ==============================================================================
+
+async def replay(
+    config_path,
+    include_tp: bool,
+    early_stop: float,
+    no_warmup: bool,
+    num_runs: int,
+    dest: str = "node",
+    num_workers: int = None,   # None = resolve from config; CLI overrides config
+):
+    # ------------------------------------------------------------------
+    # 1. MPI init (no-op when running without mpiexec)
+    # ------------------------------------------------------------------
+    comm, rank, mpi_size = _init_mpi()
+    is_root = (rank == 0)
+
+    # ------------------------------------------------------------------
+    # 2. Load Config
+    # ------------------------------------------------------------------
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f) or {}
     trace_path = _config_trace_path(cfg)
     port = cfg.get('port', 8000)
-    base_url = f"http://localhost:{port}"
-    
-    # Get generation mode from config
+
     replay_cfg = cfg.get('job_replay_client_config', {})
     generation_mode = replay_cfg.get('generation_mode', 'deterministic')
-    
-    # Validate generation mode
     if generation_mode not in ['deterministic', 'natural']:
-        print(f"!!! WARNING: Invalid generation_mode '{generation_mode}', defaulting to 'deterministic'")
+        if is_root:
+            print(f"!!! WARNING: Invalid generation_mode '{generation_mode}', defaulting to 'deterministic'")
         generation_mode = 'deterministic'
 
-    # 2. Pre-Load Requests (Blocking Phase)
-    print(f">>> [REPLAY] Loading trace from {trace_path}...")
+    # Resolve num_workers: None (CLI default) → config value → hardcoded 4
+    if num_workers is None:
+        num_workers = replay_cfg.get('num_workers', 4)
+
+    # Derive expected client-node count from total PBS nodes × per-node ratio.
+    # actual_client_nodes = max(1, min(num_nodes, int(num_nodes * num_cli_per_node)))
+    cfg_num_nodes = replay_cfg.get('num_nodes', mpi_size)   # total PBS nodes
+    num_cli_per_node_ratio = replay_cfg.get('num_cli_per_node', 1.0)
+    expected_client_nodes = max(1, min(cfg_num_nodes, round(cfg_num_nodes * num_cli_per_node_ratio)))
+    if is_root:
+        print(
+            f">>> [REPLAY] PBS nodes: {cfg_num_nodes} | "
+            f"num_cli_per_node: {num_cli_per_node_ratio:.4g} | "
+            f"Expected client nodes: {expected_client_nodes} | "
+            f"Actual MPI size: {mpi_size}"
+        )
+    if expected_client_nodes != mpi_size and is_root:
+        print(
+            f"!!! WARNING: Expected {expected_client_nodes} client nodes but MPI "
+            f"size is {mpi_size}. Check that mpiexec was launched with the right "
+            f"-n value. Proceeding with actual MPI size."
+        )
+
+    total_workers = mpi_size * num_workers
+
+    # ------------------------------------------------------------------
+    # 3. Build target URL list
+    # ------------------------------------------------------------------
+    if dest == "cluster":
+        cluster_nodes = _get_cluster_nodes()
+        base_urls = [f"http://{node}:{port}" for node in cluster_nodes]
+        if is_root:
+            print(f">>> [DEST] cluster mode — {len(base_urls)} node(s): {cluster_nodes}")
+    else:
+        cluster_nodes = []
+        base_urls = [f"http://localhost:{port}"]
+        if is_root:
+            print(f">>> [DEST] node mode — target: {base_urls[0]}")
+
+    url_cycle = itertools.cycle(base_urls)   # used only for warmup on this rank
+    base_url = base_urls[0]
+
+    # ------------------------------------------------------------------
+    # 4. Load Trace (all ranks load independently; avoids large MPI transfers)
+    # ------------------------------------------------------------------
+    if is_root:
+        print(f">>> [REPLAY] Loading trace from {trace_path}...")
     requests = []
     try:
         with open(trace_path, 'r', encoding='utf-8') as f:
             for line in f:
                 data = json.loads(line)
-                
-                # [NEW] Skip metadata header
                 if data.get("__type__") == "metadata":
-                    print(f">>> [REPLAY] Found trace metadata (generated {data.get('timestamp')})")
+                    if is_root:
+                        print(f">>> [REPLAY] Found trace metadata (generated {data.get('timestamp')})")
                     continue
-                    
                 requests.append(TraceRequest(
                     timestamp=data['timestamp'],
                     model=data['model'],
@@ -186,340 +414,349 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                     mode=data.get('mode', 'chat'),
                 ))
     except FileNotFoundError:
-        print(f"!!! ERROR: Trace file {trace_path} not found. Run trace_generator.py first.")
+        print(f"!!! ERROR [Rank {rank}]: Trace file {trace_path} not found.")
         return
 
-    # 3. Mode mapping (model_id -> mode; per-request mode from trace overrides when set)
     mode_map = _config_mode_map(cfg)
 
-    # 4. Early stop calculation
+    # ------------------------------------------------------------------
+    # 5. Request partitioning across MPI ranks × local workers
+    #
+    # Global worker index for (rank r, local worker w):
+    #   global_w = r * num_workers + w
+    # That worker handles:
+    #   requests[global_w :: total_workers]
+    # This interleaves workers across the full trace duration so every
+    # worker fires requests throughout the experiment window.
+    # ------------------------------------------------------------------
+    rank_worker_lists = []
+    for local_w in range(num_workers):
+        global_w = rank * num_workers + local_w
+        rank_worker_lists.append(requests[global_w::total_workers])
+
+    # ------------------------------------------------------------------
+    # 6. Early stop
+    # ------------------------------------------------------------------
     target_responses = None
     if early_stop > 0:
         target_responses = int(len(requests) * early_stop)
-        print(f">>> [EARLY STOP] Will stop after {target_responses}/{len(requests)} responses received ({early_stop*100:.1f}%)")
+        if is_root:
+            print(
+                f">>> [EARLY STOP] Will stop after {target_responses}/{len(requests)} "
+                f"total responses ({early_stop*100:.1f}%)"
+            )
 
-    print(f">>> [REPLAY] Target: {base_url}")
-    print(f"    Requests: {len(requests)}")
-    print(f"    Duration: {requests[-1].timestamp:.2f}s")
-    print(f">>> [REPLAY] Generation Mode: {generation_mode.upper()}")
-    if generation_mode == "deterministic":
-        print(f"    Using min_tokens=max_tokens={requests[0].output_len if requests else 'N/A'} with ignore_eos=True")
-        print(f"    This ensures deterministic compute load matching trace output_len.")
-    else:
-        print(f"    Using natural generation with EOS termination.")
-        print(f"    Output lengths may vary from trace-specified output_len.")
-    print(">>> [REPLAY] Disabling Garbage Collection for precision...")
-    
-    # 5. Setup interrupt handler
+    if is_root:
+        print(f">>> [REPLAY] Target: {base_url}")
+        print(f"    Requests: {len(requests)}")
+        print(f"    Duration: {requests[-1].timestamp:.2f}s")
+        print(f">>> [REPLAY] MPI ranks: {mpi_size} | Workers/rank: {num_workers} | "
+              f"Total workers: {total_workers}")
+        print(f"    This rank ({rank}) handles "
+              f"{sum(len(l) for l in rank_worker_lists)} / {len(requests)} requests")
+        print(f">>> [REPLAY] Generation Mode: {generation_mode.upper()}")
+        if generation_mode == "deterministic":
+            print(f"    Using min_tokens=max_tokens={requests[0].output_len if requests else 'N/A'} "
+                  "with ignore_eos=True")
+        else:
+            print("    Using natural generation with EOS termination.")
+        print(">>> [REPLAY] Disabling Garbage Collection for precision...")
+
+    # ------------------------------------------------------------------
+    # 7. Signal handler (each rank handles SIGINT independently)
+    # ------------------------------------------------------------------
     interrupted = False
+    interrupt_event = multiprocessing.Event()
+
     def signal_handler(sig, frame):
         nonlocal interrupted
         interrupted = True
-    
-    # Install signal handler for Ctrl-C
+        interrupt_event.set()
+
     old_handler = signal.signal(signal.SIGINT, signal_handler)
-    
-    # 6. The Loop
-    tasks = []
-    gc.disable() # Critical for reducing jitter
+
+    # ------------------------------------------------------------------
+    # 8. Resource management
+    # ------------------------------------------------------------------
+    gc.disable()
     t0 = time.time()
-    
+
     results = []
     all_runs_results = []
     run_durations = []
     warmup_duration_s = 0.0
     session = None
-    
+    safe_conn_limit = 100
+
     try:
-        # Dynamic Resource Management:
-        # 1. Get current limits
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        print(f">>> [SYSTEM] Current open file limit: soft={soft}, hard={hard}")
-        
-        # 2. Try to raise soft limit to hard limit
+        if is_root:
+            print(f">>> [SYSTEM] Current open file limit: soft={soft}, hard={hard}")
         if soft < hard:
             try:
                 resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
                 soft = hard
-                print(f">>> [SYSTEM] Increased soft limit to {soft}")
+                if is_root:
+                    print(f">>> [SYSTEM] Increased soft limit to {soft}")
             except Exception as e:
-                print(f">>> [SYSTEM] Failed to increase file limit: {e}")
+                if is_root:
+                    print(f">>> [SYSTEM] Failed to increase file limit: {e}")
 
-        # 3. Calculate safe max connections (reserve buffer for system/other files)
-        # Reserve ~512 FDs for overhead (libraries, stdout, etc.)
         safe_conn_limit = max(100, soft - 512)
-        print(f">>> [CONFIG] Setting dynamic max concurrent connections to {safe_conn_limit}")
-
-        # Use TCPConnector with the calculated safe limit.
-        # This saturates the OS resources without crashing (queues excess requests).
-        connector = aiohttp.TCPConnector(limit=safe_conn_limit)
-        session = aiohttp.ClientSession(connector=connector)
-        
-        # Track inflight requests to detect client-side queuing
-        inflight_stats = {'count': 0}
-        def task_done_callback(future):
-            inflight_stats['count'] -= 1
+        if is_root:
+            print(f">>> [CONFIG] Connection budget: {safe_conn_limit} total | "
+                  f"{safe_conn_limit // num_workers} per worker")
 
         # ==============================================================================
         # WARMUP PHASE
+        # All MPI ranks participate in parallel.  Total warmup load on the server =
+        # warmup_count (split evenly across ranks so aggregate load is unchanged).
         # ==============================================================================
         if not no_warmup:
-            num_nodes, num_gpus_per_node = _config_gpu_topology(cfg)
-            
-            warmup_count = int(num_nodes * num_gpus_per_node * REQ_BATCH_SIZE * (1 + EXTRA_RATE))
-            print(f"\n>>> [WARMUP] Starting warmup phase...")
-            print(f"    Nodes: {num_nodes}, GPUs/Node: {num_gpus_per_node}")
-            print(f"    Batch Size: {REQ_BATCH_SIZE}, Extra Rate: {EXTRA_RATE}")
-            print(f"    Total Warmup Requests: {warmup_count}")
-            
+            num_nodes_deploy, num_gpus_per_node = _config_gpu_topology(cfg)
+            total_warmup = int(num_nodes_deploy * num_gpus_per_node * REQ_BATCH_SIZE * (1 + EXTRA_RATE))
+            # Each rank fires an equal share so the server sees total_warmup requests total
+            per_rank_warmup = max(1, total_warmup // mpi_size)
+
+            if is_root:
+                print(f"\n>>> [WARMUP] Starting warmup phase (all {mpi_size} rank(s))...")
+                print(f"    Deploy nodes: {num_nodes_deploy}, GPUs/node: {num_gpus_per_node}")
+                print(f"    Total warmup: {total_warmup} | Per rank: {per_rank_warmup}")
+
             if requests:
-                # Reuse the first request template for warmup
+                connector = aiohttp.TCPConnector(limit=safe_conn_limit)
+                session = aiohttp.ClientSession(connector=connector)
                 base_req = requests[0]
                 warmup_tasks = []
                 warmup_start = time.time()
-                
-                print(f"    Firing {warmup_count} requests concurrently...")
-                for _ in range(warmup_count):
-                    # Create a copy with new ID
+
+                print(f"    [Rank {rank}] Firing {per_rank_warmup} warmup requests...", flush=True)
+                for _ in range(per_rank_warmup):
                     w_req = TraceRequest(
-                        timestamp=0, # Immediate
+                        timestamp=0,
                         model=base_req.model,
                         prompt=base_req.prompt,
                         input_len=base_req.input_len,
                         output_len=base_req.output_len,
                         tensor_parallel_size=base_req.tensor_parallel_size,
-                        req_id=uuid.uuid4().hex
+                        req_id=uuid.uuid4().hex,
                     )
-                    task = asyncio.create_task(send_request(session, base_url, w_req, mode_map, include_tp, generation_mode))
-                    warmup_tasks.append(task)
-                
-                # Wait for all warmup requests to finish
+                    warmup_tasks.append(asyncio.create_task(
+                        send_request(session, next(url_cycle), w_req, mode_map, include_tp, generation_mode)
+                    ))
+
                 done, _ = await asyncio.wait(warmup_tasks, return_when=asyncio.ALL_COMPLETED)
-                
-                # Check success rate
                 success_count = sum(1 for t in done if t.result()[2])
                 warmup_dur = time.time() - warmup_start
+                print(
+                    f"    [Rank {rank}] Warmup done in {warmup_dur:.2f}s. "
+                    f"Success: {success_count}/{per_rank_warmup}",
+                    flush=True,
+                )
+
+                await session.close()
+                session = None
+
+                # All ranks must finish warmup before proceeding
+                _mpi_barrier(comm)
                 warmup_duration_s = warmup_dur
-                print(f">>> [WARMUP] Completed in {warmup_dur:.2f}s. Success: {success_count}/{warmup_count}")
-                print(f">>> [WARMUP] Resting for 5s before main trace...")
+
+                if is_root:
+                    print(f">>> [WARMUP] All ranks finished. Resting 5s...")
                 await asyncio.sleep(5)
+                _mpi_barrier(comm)
             else:
-                print(">>> [WARMUP] No requests loaded to use for warmup. Skipping.")
+                if is_root:
+                    print(">>> [WARMUP] No requests loaded. Skipping.")
 
         # ==============================================================================
         # MAIN EXPERIMENT LOOP (Multiple Runs)
+        # run_t0 is set by rank 0 immediately after a barrier so all ranks share the
+        # same wall-clock origin.  Rank 0 broadcasts it to all others.
         # ==============================================================================
         all_runs_results = []
         run_durations = []
+        dispatch_timings = []   # per-run: {trace_span_s, actual_dispatch_s, overhead_s}
 
         for run_idx in range(num_runs):
+            # Check for interrupt before starting (and still hit the barrier)
+            _mpi_barrier(comm)
             if interrupted:
+                if is_root:
+                    print(f"\n>>> [INTERRUPTED] Skipping run {run_idx + 1}.")
                 break
 
-            print("\n" + "=" * 70)
-            print(f">>> [RUN {run_idx + 1}/{num_runs}] Starting main experiment replay...")
-            print("=" * 70)
+            if is_root:
+                print("\n" + "=" * 70)
+                print(f">>> [RUN {run_idx + 1}/{num_runs}] Starting main experiment replay...")
+                print("=" * 70)
 
-            run_t0 = time.time()
-            tasks = []
-            inflight_stats["count"] = 0
+            # ---- Synchronised start time ----
+            # rank 0 sets run_t0 right after the barrier so all ranks share the
+            # same origin.  The tiny broadcast latency (~1-5 ms) is absorbed as
+            # negative sleep for the first few requests, which is harmless.
+            if is_root:
+                run_t0 = time.time()
+            else:
+                run_t0 = None
+            run_t0 = _mpi_bcast(comm, run_t0, root=0)
 
-            # Fire all requests according to schedule
-            for i, req in enumerate(requests):
-                # Check for interrupt
-                if interrupted:
-                    print(f"\n>>> [INTERRUPTED] Stopping at request {i}/{len(requests)}")
-                    break
+            # ---- Per-run interrupt / early-stop event ----
+            run_interrupt_event = multiprocessing.Event()
 
-                # Precision Sleep
-                target_time = run_t0 + req.timestamp
-                now = time.time()
-                if target_time > now:
-                    await asyncio.sleep(target_time - now)
+            # ---- Shared dispatch-done timestamp (max across local workers) ----
+            dispatch_done_val = multiprocessing.Value('d', 0.0)
 
-                # Fire
-                inflight_stats["count"] += 1
-                task = asyncio.create_task(
-                    send_request(session, base_url, req, mode_map, include_tp, generation_mode)
+            # ---- Spawn local workers ----
+            run_start_event = multiprocessing.Value('d', run_t0)
+            worker_start_event = multiprocessing.Event()
+            result_queue = multiprocessing.Queue()
+
+            processes = []
+            for local_w in range(num_workers):
+                p = multiprocessing.Process(
+                    target=_worker_entry,
+                    args=(
+                        rank * num_workers + local_w,   # global worker id for logging
+                        rank_worker_lists[local_w],
+                        base_urls,
+                        include_tp,
+                        generation_mode,
+                        mode_map,
+                        worker_start_event,
+                        run_start_event,
+                        result_queue,
+                        run_interrupt_event,
+                        safe_conn_limit,
+                        num_workers,
+                        dispatch_done_val,
+                    ),
+                    daemon=True,
                 )
-                task.add_done_callback(task_done_callback)
-                tasks.append(task)
+                p.start()
+                processes.append(p)
 
-                if i % 50 == 0:
-                    print(f"\r[RUNNING] Fired {i+1}/{len(requests)}", end="", flush=True)
+            # Fire start signal now that all workers are spawned and run_t0 is set
+            worker_start_event.set()
 
-                    # Check for client-side bottleneck
-                    if inflight_stats["count"] >= safe_conn_limit:
-                        queued = inflight_stats["count"] - safe_conn_limit
-                        print(
-                            f"\n>>> [WARNING] Client connection limit hit! Active: "
-                            f"{safe_conn_limit}, Queued: {queued}"
-                        )
+            # ---- Collect results from local workers ----
+            local_expected = sum(len(l) for l in rank_worker_lists)
+            local_results = []
+            pending_processes = list(processes)
 
-            # Print final count if not already printed
-            if not interrupted:
-                print(f"\r[RUNNING] Fired {len(requests)}/{len(requests)}")
-            print(">>> [FINISH] All requests fired. Waiting for responses...")
-
-            # Wait for responses with early stop support
-            if target_responses is not None:
-                # Early stop mode: poll until we have enough responses
-                completed_results = []
-                pending = set(tasks)
-
-                while pending and not interrupted:
-                    done, pending = await asyncio.wait(
-                        pending,
-                        timeout=0.5,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-
-                    for task in done:
-                        try:
-                            res = task.result()
-                            completed_results.append(res)
-                        except Exception:
-                            pass
-
-                    # Check if we've reached the target
-                    if len(completed_results) >= target_responses:
-                        print(
-                            f"\n>>> [EARLY STOP] Target reached "
-                            f"({len(completed_results)}/{target_responses}). "
-                            "Cancelling remaining tasks..."
-                        )
-                        for task in pending:
-                            task.cancel()
+            while pending_processes or not result_queue.empty():
+                while True:
+                    try:
+                        local_results.append(result_queue.get_nowait())
+                        if len(local_results) % 50 == 0:
+                            print(
+                                f"\r[Rank {rank}] Received {len(local_results)}/"
+                                f"{local_expected} responses...",
+                                end="", flush=True,
+                            )
+                    except Exception:
                         break
 
-                    if len(completed_results) % 50 == 0 and len(completed_results) > 0:
-                        print(
-                            f"\r[WAITING] Received {len(completed_results)}/"
-                            f"{target_responses} responses...",
-                            end="",
-                            flush=True,
-                        )
-
-                # Handle interrupt
+                # Early stop is evaluated globally on rank 0 after gather; here we
+                # just propagate a rank-level interrupt if the global interrupt fires.
                 if interrupted:
-                    print(
-                        "\n>>> [INTERRUPTED] Received Ctrl-C. "
-                        "Cancelling remaining tasks..."
-                    )
-                    for task in pending:
-                        task.cancel()
+                    run_interrupt_event.set()
 
-                # Wait for any cancellations to complete
-                if pending:
-                    await asyncio.wait(
-                        pending, return_when=asyncio.ALL_COMPLETED
-                    )
+                pending_processes = [p for p in pending_processes if p.is_alive()]
+                await asyncio.sleep(0.1)
 
-                run_results = completed_results
+            # Drain remainder
+            while not result_queue.empty():
+                try:
+                    local_results.append(result_queue.get_nowait())
+                except Exception:
+                    break
+
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+                p.join(timeout=5)
+
+            print(
+                f"\r[Rank {rank}] Received {len(local_results)}/{local_expected} responses.",
+                flush=True,
+            )
+
+            # ---- Dispatch timing report (rank 0 only) ----
+            if is_root and dispatch_done_val.value > 0:
+                actual_dispatch_s = dispatch_done_val.value - run_t0
+                trace_span = requests[-1].timestamp if requests else 0.0
+                overhead = actual_dispatch_s - trace_span
+                print(
+                    f">>> [DISPATCH] Trace span: {trace_span:.3f}s | "
+                    f"Actual send window: {actual_dispatch_s:.3f}s | "
+                    f"Overhead: {overhead:+.3f}s"
+                )
+                dispatch_timings.append({
+                    "run_index": run_idx,
+                    "trace_span_s": trace_span,
+                    "actual_dispatch_s": actual_dispatch_s,
+                    "overhead_s": overhead,
+                })
+
+            # ---- Barrier: wait for all ranks to finish dispatching ----
+            _mpi_barrier(comm)
+
+            # ---- Gather all results to rank 0 ----
+            gathered = _mpi_gather(comm, local_results, root=0)
+
+            if is_root:
+                run_results = [r for rank_results in gathered for r in rank_results]
+                # Early stop: trim to target if we over-collected
+                if target_responses is not None and len(run_results) > target_responses:
+                    run_results = run_results[:target_responses]
+                    print(f"\n>>> [EARLY STOP] Trimmed to {target_responses} responses.")
             else:
-                # Normal mode: wait for all with progress updates
-                completed_results = []
-                pending = set(tasks)
-                total_tasks = len(tasks)
-
-                while pending and not interrupted:
-                    done, pending = await asyncio.wait(
-                        pending,
-                        timeout=0.5,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-
-                    for task in done:
-                        try:
-                            res = task.result()
-                            completed_results.append(res)
-                        except Exception:
-                            pass
-
-                    # Show progress
-                    if len(completed_results) % 50 == 0 and len(completed_results) > 0:
-                        print(
-                            f"\r[WAITING] Received {len(completed_results)}/"
-                            f"{total_tasks} responses...",
-                            end="",
-                            flush=True,
-                        )
-
-                # Handle interrupt
-                if interrupted:
-                    print(
-                        "\n>>> [INTERRUPTED] Received Ctrl-C. "
-                        "Cancelling remaining tasks..."
-                    )
-                    for task in pending:
-                        task.cancel()
-                    # Wait briefly for cancellations
-                    if pending:
-                        await asyncio.wait(
-                            pending,
-                            timeout=1.0,
-                            return_when=asyncio.ALL_COMPLETED,
-                        )
-                else:
-                    print(
-                        f"\r[WAITING] Received {len(completed_results)}/"
-                        f"{total_tasks} responses..."
-                    )
-
-                run_results = completed_results
+                run_results = []   # non-root ranks don't process results
 
             all_runs_results.append(run_results)
 
-            # Track run duration using response end timestamps when possible
-            if run_results:
+            # Track run duration from run_t0 to last response end timestamp
+            if is_root and run_results:
                 run_end_time = max((r[4] for r in run_results), default=None)
-                if run_end_time is not None:
-                    run_durations.append(run_end_time - run_t0)
-                else:
-                    run_durations.append(max(time.time() - run_t0, 0.0))
-            else:
+                run_durations.append(
+                    run_end_time - run_t0 if run_end_time is not None
+                    else max(time.time() - run_t0, 0.0)
+                )
+            elif is_root:
                 run_durations.append(max(time.time() - run_t0, 0.0))
 
             if interrupted:
                 break
 
             if run_idx < num_runs - 1:
-                print(
-                    f">>> [RUN {run_idx + 1}] Completed. "
-                    "Resting for 5s before next run..."
-                )
+                if is_root:
+                    print(f">>> [RUN {run_idx + 1}] Completed. Resting 5s before next run...")
                 await asyncio.sleep(5)
+                _mpi_barrier(comm)
 
         results = all_runs_results[-1] if all_runs_results else []
-    
+
     except Exception as e:
-        print(f"\n\n!!! [ERROR] Unexpected error: {e}")
+        print(f"\n\n!!! [ERROR] Rank {rank} unexpected error: {e}")
         import traceback
         traceback.print_exc()
-        
-        # Try to collect whatever results we have
-        results_store = []
-        for task in tasks:
-            if task.done() and not task.cancelled():
-                try:
-                    res = task.result()
-                    results_store.append(res)
-                except Exception:
-                    continue
-        results = results_store
-        if not all_runs_results and results_store:
-            all_runs_results = [results_store]
-    
+        results = []
+        if not all_runs_results:
+            all_runs_results = [results]
+
     finally:
-        # Restore signal handler
         signal.signal(signal.SIGINT, old_handler)
-        
-        # Cleanup
         gc.enable()
         if session and not session.closed:
             await session.close()
-    
-    # 6. Analysis & Save
+
+    # ------------------------------------------------------------------
+    # 9. Analysis & Save (rank 0 only)
+    # ------------------------------------------------------------------
+    if not is_root:
+        return
+
     if interrupted:
         print(
             f"\n>>> [INTERRUPTED] Collected {len(results)} completed responses "
@@ -533,10 +770,8 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
     model_stats = {}
     raw_results = []
 
-    # Save all runs with run_index for later analysis
     for run_idx, run_results in enumerate(all_runs_results):
         for r in run_results:
-            # r = (TraceRequest, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens)
             req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens = r
             raw_results.append({
                 "run_index": run_idx,
@@ -552,80 +787,80 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                 "req_id": req_obj.req_id
             })
 
-    # Print summary stats for the last run only
     for r in results:
         req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens = r
         m_name = req_obj.model
         if m_name not in model_stats:
             model_stats[m_name] = []
-        model_stats[m_name].append((req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens))
+        model_stats[m_name].append((req_obj, latency, success, error_msg, end_time,
+                                    actual_prompt_tokens, actual_completion_tokens))
 
+    per_model = {}
     for m_name, stats in model_stats.items():
         succ_lats = [x[1] for x in stats if x[2]]
         fails = len(stats) - len(succ_lats)
-
         if succ_lats:
-            p50 = np.percentile(succ_lats, 50)
-            p99 = np.percentile(succ_lats, 99)
+            p50 = float(np.percentile(succ_lats, 50))
+            p99 = float(np.percentile(succ_lats, 99))
             print(f"{m_name:<45} | {len(stats):<5} | {p50:.4f}   | {p99:.4f}   | {fails}")
         else:
+            p50 = p99 = None
             print(f"{m_name:<45} | {len(stats):<5} | N/A        | N/A        | {fails}")
+        per_model[m_name] = {
+            "count": len(stats),
+            "errors": fails,
+            "p50_s": p50,
+            "p99_s": p99,
+        }
 
     print("=" * 70)
 
     total_duration = run_durations[-1] if run_durations else max(time.time() - t0, 0.0)
-
     duration_for_rate = max(total_duration, 1e-6)
-    
-    # Calculate token statistics - prioritize actual usage data over trace specs
-    # Count successful requests that have actual token counts vs those using trace specs
+
     actual_count = 0
     trace_count = 0
-    
     total_input_tokens = 0
     total_output_tokens = 0
-    
+
     for r in results:
-        if r[2]:  # if success
+        if r[2]:
             req_obj = r[0]
-            actual_prompt_tokens = r[5]
-            actual_completion_tokens = r[6]
-            
-            # Prioritize actual usage data from API response
-            if actual_prompt_tokens is not None and actual_completion_tokens is not None:
-                total_input_tokens += actual_prompt_tokens
-                total_output_tokens += actual_completion_tokens
+            apt = r[5]
+            act = r[6]
+            if apt is not None and act is not None:
+                total_input_tokens += apt
+                total_output_tokens += act
                 actual_count += 1
             else:
-                # Fallback to trace specifications
                 total_input_tokens += req_obj.input_len
                 total_output_tokens += req_obj.output_len
                 trace_count += 1
-    
+
     total_tokens = total_input_tokens + total_output_tokens
-    
     completed_requests = len(results)
     scheduled_requests = len(requests)
-    
-    # Calculate rates
+
     rps = completed_requests / duration_for_rate
     tps = total_tokens / duration_for_rate
     processed_tps = total_input_tokens / duration_for_rate
     generated_tps = total_output_tokens / duration_for_rate
-    
+
     token_source = f"(Usage API: {actual_count}, Trace Spec: {trace_count})" if completed_requests > 0 else ""
 
-    print(f"System duration: {total_duration:.2f}s | RPS: {rps:.2f} | TPS: {tps:.2f} (Processed: {processed_tps:.2f}, Generated: {generated_tps:.2f}) | Completed: {completed_requests}/{scheduled_requests}")
+    print(
+        f"System duration: {total_duration:.2f}s | RPS: {rps:.2f} | TPS: {tps:.2f} "
+        f"(Processed: {processed_tps:.2f}, Generated: {generated_tps:.2f}) | "
+        f"Completed: {completed_requests}/{scheduled_requests}"
+    )
     if token_source:
         print(f"Token counts from {token_source}")
-    
-    # Save Results
+
     config_result_dir = _config_result_dir(cfg)
-    
     final_save_path = None
     if config_result_dir:
         final_save_path = _next_result_path(config_result_dir)
-        
+
     if final_save_path:
         print(f">>> [REPLAY] Saving detailed results to {final_save_path}")
         try:
@@ -637,10 +872,17 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                         "completed_runs": len(all_runs_results),
                         "warmup_duration_s": warmup_duration_s,
                         "generation_mode": generation_mode,
+                        "dest": dest,
+                        "cluster_nodes": cluster_nodes,
+                        "mpi_size": mpi_size,
+                        "num_workers_per_rank": num_workers,
+                        "total_workers": total_workers,
                         "token_counts_from_usage_api": actual_count,
-                        "token_counts_from_trace_spec": trace_count
+                        "token_counts_from_trace_spec": trace_count,
+                        "dispatch_timings": dispatch_timings,
                     },
                     "summary": {m: len(s) for m, s in model_stats.items()},
+                    "per_model": per_model,
                     "overall": {
                         "duration_s": total_duration,
                         "rps": rps,
@@ -651,12 +893,23 @@ async def replay(config_path, include_tp: bool, early_stop: float, no_warmup: bo
                         "total_input_tokens": total_input_tokens,
                         "total_output_tokens": total_output_tokens,
                         "requests_completed": completed_requests,
-                        "requests_scheduled": scheduled_requests
+                        "requests_scheduled": scheduled_requests,
+                        "errors": sum(v["errors"] for v in per_model.values()),
+                        "p50_s": float(np.percentile(
+                            [x[1] for x in results if x[2]], 50
+                        )) if any(x[2] for x in results) else None,
+                        "p99_s": float(np.percentile(
+                            [x[1] for x in results if x[2]], 99
+                        )) if any(x[2] for x in results) else None,
+                        "trace_span_s": dispatch_timings[-1]["trace_span_s"] if dispatch_timings else None,
+                        "actual_dispatch_s": dispatch_timings[-1]["actual_dispatch_s"] if dispatch_timings else None,
+                        "dispatch_overhead_s": dispatch_timings[-1]["overhead_s"] if dispatch_timings else None,
                     },
                     "requests": raw_results
                 }, f, indent=2)
         except Exception as e:
             print(f"!!! ERROR Saving results: {e}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -664,29 +917,51 @@ if __name__ == "__main__":
     parser.add_argument(
         "--include-tp",
         action="store_true",
-        help="Include the tensor_parallel_size metadata in every request payload."
+        help="Include tensor_parallel_size in every request payload.",
     )
     parser.add_argument(
         "--early-stop",
         type=float,
         default=0.0,
-        help="Fraction (0-1) of responses to wait for before stopping. 0 = wait for all (default), 0.5 = stop after 50%% of responses."
+        help="Fraction (0-1) of responses to wait for before stopping early (0 = all).",
     )
     parser.add_argument(
         "--no-warmup",
         action="store_true",
-        help="Disable the warmup phase."
+        help="Disable the warmup phase.",
     )
     parser.add_argument(
         "--num-runs",
         type=int,
         default=1,
-        help="Number of times to run the main experiment replay (after warmup)."
+        help="Number of times to replay the main trace (after warmup).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help=(
+            "Multiprocessing workers per MPI rank. "
+            "Defaults to job_replay_client_config.num_workers in the YAML config (or 4). "
+            "CLI value overrides the config."
+        ),
+    )
+    parser.add_argument(
+        "--dest", "--destination",
+        dest="dest",
+        choices=["node", "cluster"],
+        default="node",
+        help=(
+            "'node': send to localhost:<port>. "
+            "'cluster': round-robin over all nodes in $PBS_NODEFILE."
+        ),
     )
     args = parser.parse_args()
-    
-    # Validate early_stop range
+
     if not (0.0 <= args.early_stop <= 1.0):
         parser.error("--early-stop must be between 0.0 and 1.0")
-    
-    asyncio.run(replay(args.config, args.include_tp, args.early_stop, args.no_warmup, args.num_runs))
+
+    asyncio.run(replay(
+        args.config, args.include_tp, args.early_stop, args.no_warmup,
+        args.num_runs, args.dest, args.num_workers,
+    ))
