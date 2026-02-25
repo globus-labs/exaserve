@@ -38,7 +38,11 @@ except OSError:
 
 # Constant: folder path containing the experiment results
 # RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_ray"
+# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_ray"
 RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/null_compute_ray"
+RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_4_workers_ray"
+RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_8_workers_ray"
+
 
 
 def extract_node_count(directory_name: str) -> int:
@@ -71,7 +75,45 @@ def parse_indices(indices_str: str) -> Optional[List[int]]:
     return sorted(list(indices))
 
 
-def load_results(results_folder: str, target_indices: List[int] = None, excluded_nodes: List[int] = None) -> Tuple[List[Tuple], List[str]]:
+def parse_node_select_mapping(node_list_str: str, select_str: str) -> Dict[int, int]:
+    """
+    Parse --node-list and --select into a per-node result index mapping.
+
+    Args:
+        node_list_str: Comma-separated node counts, e.g. '1,2,4,8,16,32'
+        select_str:    Comma-separated result indices (one per node), e.g. '0,1,0,0,0,0'
+
+    Returns:
+        Dict mapping node_count -> result_index
+    """
+    nodes = [int(x.strip()) for x in node_list_str.split(',')]
+    indices = [int(x.strip()) for x in select_str.split(',')]
+    if len(nodes) != len(indices):
+        raise ValueError(
+            f"--node-list has {len(nodes)} entries but --select has {len(indices)} entries; "
+            "they must be the same length."
+        )
+    return dict(zip(nodes, indices))
+
+
+def _latency_stats_from_data(data: dict) -> Tuple[float, float, float, float, float]:
+    """Extract p50, p99 and min, max, mean latency (seconds) from loaded result data."""
+    overall = data.get("overall", {})
+    p50 = overall.get("p50_s", 0.0)
+    p99 = overall.get("p99_s", 0.0)
+    requests = data.get("requests", [])
+    latencies = [r["latency"] for r in requests if isinstance(r.get("latency"), (int, float))]
+    if not latencies:
+        return p50, p99, 0.0, 0.0, 0.0
+    return p50, p99, float(min(latencies)), float(max(latencies)), float(np.mean(latencies))
+
+
+def load_results(
+    results_folder: str,
+    target_indices: List[int] = None,
+    excluded_nodes: List[int] = None,
+    node_select_map: Dict[int, int] = None,
+) -> Tuple[List[Tuple], List[str]]:
     """
     Load results from all node configurations.
     
@@ -80,10 +122,15 @@ def load_results(results_folder: str, target_indices: List[int] = None, excluded
         target_indices: Optional list of indices to aggregate (e.g. [0, 1, 2]).
                         If None, uses the latest result file in each dir.
         excluded_nodes: Optional list of node counts to exclude from the plot.
+        node_select_map: Optional dict mapping node_count -> result_index.
+                         When provided, picks the exact result{index}.json for each
+                         listed node and falls back to the latest file for unlisted nodes.
+                         Takes precedence over target_indices.
                         
     Returns:
-        results: List of tuples (num_nodes, tps_mean, tps_std, rps_mean, rps_std)
-        missing_files: List of missing file paths (only if target_indices provided)
+        results: List of tuples (num_nodes, tps_mean, tps_std, rps_mean, rps_std,
+                 p50, p99, lat_min, lat_max, lat_mean)
+        missing_files: List of missing file paths
     """
     results = []
     missing_files = []
@@ -104,26 +151,76 @@ def load_results(results_folder: str, target_indices: List[int] = None, excluded
         if excluded_nodes and node_count in excluded_nodes:
             print(f"Skipping {node_count} nodes (excluded via argument)")
             continue
-            
-        tps_list = []
-        rps_list = []
-        
+
+        # ── Mode 1: per-node explicit selection (--select + --node-list) ──────
+        if node_select_map is not None:
+            if node_count in node_select_map:
+                idx = node_select_map[node_count]
+                fpath = subdir / f"result{idx}.json"
+                if not fpath.exists():
+                    missing_files.append(str(fpath))
+                    print(f"Warning: {fpath} not found, skipping {subdir.name}")
+                    continue
+                try:
+                    with open(fpath, 'r') as f:
+                        data = json.load(f)
+                    overall = data.get("overall", {})
+                    tps = overall.get("tps", 0.0)
+                    rps = overall.get("rps", 0.0)
+                    p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
+                    results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean))
+                    print(f"Loaded {subdir.name}: result{idx}.json  TPS={tps:.2f}, RPS={rps:.2f}")
+                except Exception as e:
+                    print(f"Error reading {fpath}: {e}")
+            else:
+                # Node not listed in --node-list: fall back to latest
+                candidates = list(subdir.glob("result*.json"))
+                if not candidates:
+                    print(f"Warning: No result files found in {subdir.name}, skipping")
+                    continue
+                latest_file, max_idx = None, -2
+                for p in candidates:
+                    m = re.match(r"result(\d+)\.json", p.name)
+                    file_idx = int(m.group(1)) if m else (-1 if p.name == "result.json" else None)
+                    if file_idx is not None and file_idx > max_idx:
+                        max_idx, latest_file = file_idx, p
+                if not latest_file:
+                    continue
+                print(f"  -> Using {latest_file.name} (latest) for {subdir.name}")
+                try:
+                    with open(latest_file, 'r') as f:
+                        data = json.load(f)
+                    overall = data.get("overall", {})
+                    tps = overall.get("tps", 0.0)
+                    rps = overall.get("rps", 0.0)
+                    p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
+                    results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean))
+                    print(f"Loaded {subdir.name}: {node_count} nodes, TPS={tps:.2f}, RPS={rps:.2f}")
+                except Exception as e:
+                    print(f"Error reading {latest_file}: {e}")
+            continue
+
+        # ── Mode 2: aggregate specific indices (--indices) ────────────────────
         if target_indices is not None:
-            # Mode: Aggregate specific indices
+            tps_list, rps_list = [], []
+            p50_list, p99_list, lat_min_list, lat_max_list, lat_mean_list = [], [], [], [], []
             for idx in target_indices:
-                fname = f"result{idx}.json"
-                fpath = subdir / fname
-                
+                fpath = subdir / f"result{idx}.json"
                 if not fpath.exists():
                     missing_files.append(str(fpath))
                     continue
-                    
                 try:
                     with open(fpath, 'r') as f:
                         data = json.load(f)
                     overall = data.get("overall", {})
                     tps_list.append(overall.get("tps", 0.0))
                     rps_list.append(overall.get("rps", 0.0))
+                    p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
+                    p50_list.append(p50)
+                    p99_list.append(p99)
+                    lat_min_list.append(lat_min)
+                    lat_max_list.append(lat_max)
+                    lat_mean_list.append(lat_mean)
                 except Exception as e:
                     print(f"Error reading {fpath}: {e}")
             
@@ -135,51 +232,50 @@ def load_results(results_folder: str, target_indices: List[int] = None, excluded
             tps_std = np.std(tps_list) if len(tps_list) > 1 else 0.0
             rps_mean = np.mean(rps_list)
             rps_std = np.std(rps_list) if len(rps_list) > 1 else 0.0
+            p50_mean = np.mean(p50_list) if p50_list else 0.0
+            p99_mean = np.mean(p99_list) if p99_list else 0.0
+            lat_min_mean = np.mean(lat_min_list) if lat_min_list else 0.0
+            lat_max_mean = np.mean(lat_max_list) if lat_max_list else 0.0
+            lat_mean_mean = np.mean(lat_mean_list) if lat_mean_list else 0.0
             
             print(f"Loaded {subdir.name}: {len(tps_list)} runs. TPS={tps_mean:.2f}±{tps_std:.2f}, RPS={rps_mean:.2f}±{rps_std:.2f}")
-            results.append((node_count, tps_mean, tps_std, rps_mean, rps_std))
+            results.append((node_count, tps_mean, tps_std, rps_mean, rps_std, p50_mean, p99_mean, lat_min_mean, lat_max_mean, lat_mean_mean))
+            continue
+
+        # ── Mode 3: latest result only (default) ──────────────────────────────
+        candidates = list(subdir.glob("result*.json"))
+        if not candidates:
+            print(f"Warning: No result files found in {subdir.name}, skipping")
+            continue
             
-        else:
-            # Mode: Latest result only
-            candidates = list(subdir.glob("result*.json"))
-            if not candidates:
-                print(f"Warning: No result files found in {subdir.name}, skipping")
+        latest_file, max_idx = None, -2
+        for p in candidates:
+            m = re.match(r"result(\d+)\.json", p.name)
+            if m:
+                file_idx = int(m.group(1))
+            elif p.name == "result.json":
+                file_idx = -1
+            else:
                 continue
-                
-            latest_file = None
-            max_idx = -2
-            
-            for p in candidates:
-                m = re.match(r"result(\d+)\.json", p.name)
-                if m:
-                    idx = int(m.group(1))
-                elif p.name == "result.json":
-                    idx = -1
-                else:
-                    continue
-                    
-                if idx > max_idx:
-                    max_idx = idx
-                    latest_file = p
-            
-            if not latest_file:
-                 continue
-                 
-            print(f"  -> Using {latest_file.name} for {subdir.name}")
-            
-            try:
-                with open(latest_file, 'r') as f:
-                    data = json.load(f)
-                overall = data.get("overall", {})
-                tps = overall.get("tps", 0.0)
-                rps = overall.get("rps", 0.0)
-                
-                # std is 0 for single run
-                results.append((node_count, tps, 0.0, rps, 0.0))
-                print(f"Loaded {subdir.name}: {node_count} nodes, TPS={tps:.2f}, RPS={rps:.2f}")
-            except Exception as e:
-                print(f"Error reading {latest_file}: {e}")
-                continue
+            if file_idx > max_idx:
+                max_idx, latest_file = file_idx, p
+        
+        if not latest_file:
+            continue
+             
+        print(f"  -> Using {latest_file.name} for {subdir.name}")
+        
+        try:
+            with open(latest_file, 'r') as f:
+                data = json.load(f)
+            overall = data.get("overall", {})
+            tps = overall.get("tps", 0.0)
+            rps = overall.get("rps", 0.0)
+            p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
+            results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean))
+            print(f"Loaded {subdir.name}: {node_count} nodes, TPS={tps:.2f}, RPS={rps:.2f}")
+        except Exception as e:
+            print(f"Error reading {latest_file}: {e}")
     
     # Sort by number of nodes
     results.sort(key=lambda x: x[0])
@@ -188,10 +284,11 @@ def load_results(results_folder: str, target_indices: List[int] = None, excluded
 
 def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: bool = False):
     """
-    Plot weak scaling chart with dual y-axes.
+    Plot weak scaling chart with TPS (left), RPS (right), and latency (right offset).
+    Includes p99/p50 latency lines and scatter points for min, max, mean latency.
     
     Args:
-        results: List of (num_nodes, tps_mean, tps_std, rps_mean, rps_std) tuples
+        results: List of (num_nodes, tps_mean, tps_std, rps_mean, rps_std, p50, p99, lat_min, lat_max, lat_mean) tuples
         output_path: Optional path to save the plot. If None, displays interactively.
         log_scale: Whether to use log scale for x and y axes.
     """
@@ -204,15 +301,22 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     tps_stds = [r[2] for r in results]
     rps_means = [r[3] for r in results]
     rps_stds = [r[4] for r in results]
+    p50_vals = [r[5] for r in results]
+    p99_vals = [r[6] for r in results]
+    lat_mins = [r[7] for r in results]
+    lat_maxs = [r[8] for r in results]
+    lat_means = [r[9] for r in results]
     
     # Set up the figure with a modern style
-    fig, ax1 = plt.subplots(figsize=(12, 7))
+    fig, ax1 = plt.subplots(figsize=(16, 7))
     fig.patch.set_facecolor('white')
     ax1.set_facecolor('#FAFAFA')
     
     # Modern color palette
     color1 = '#2E86AB'  # Professional blue
     color2 = '#A23B72'  # Professional purple/magenta
+    color_p99 = '#E94F37'  # Red for p99
+    color_p50 = '#44AF69'  # Green for p50
     
     # Plot TPS on left y-axis with enhanced styling (using errorbar)
     # capsize=5 adds caps to error bars
@@ -232,7 +336,7 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
                     color=color1, bbox=dict(boxstyle='round,pad=0.3', 
                     facecolor='white', edgecolor=color1, linewidth=1.5, alpha=0.8))
     
-    ax1.set_xlabel('Number of Nodes', fontsize=13, fontweight='bold', color='#333333')
+    ax1.set_xlabel('Number of Nodes (RayWorkers)', fontsize=13, fontweight='bold', color='#333333')
     ax1.set_ylabel('Total Throughput (Tokens per Second, TPS)', 
                    color=color1, fontsize=12, fontweight='bold')
     ax1.tick_params(axis='y', labelcolor=color1, labelsize=11)
@@ -261,14 +365,57 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
                    fontsize=12, fontweight='bold')
     ax2.tick_params(axis='y', labelcolor=color2, labelsize=11)
     
+    # Create third axis for latency (right, offset from RPS)
+    ax3 = ax1.twinx()
+    ax3.spines['right'].set_position(('outward', 60))
+    ax3.plot(num_nodes, p99_vals, '^-', color=color_p99, linewidth=2.5, markersize=10,
+             label='p99 latency', zorder=3, alpha=0.9)
+    ax3.plot(num_nodes, p50_vals, 'v-', color=color_p50, linewidth=2.5, markersize=10,
+             label='p50 latency', zorder=3, alpha=0.9)
+    # Scatter: min, max, mean latency
+    ax3.scatter(num_nodes, lat_mins, marker='o', s=80, color='#3A7CA5', edgecolors='white',
+                linewidths=2, label='min latency', zorder=4)
+    ax3.scatter(num_nodes, lat_maxs, marker='s', s=80, color='#F18F01', edgecolors='white',
+                linewidths=2, label='max latency', zorder=4)
+    ax3.scatter(num_nodes, lat_means, marker='D', s=80, color='#5C4D7D', edgecolors='white',
+                linewidths=2, label='mean latency', zorder=4)
+    # Add value annotations for latency (stagger vertical offsets to reduce overlap)
+    for i, (x, y) in enumerate(zip(num_nodes, p99_vals)):
+        ax3.annotate(f'{y:.1f}', (x, y), textcoords="offset points", xytext=(0, 18), ha='center',
+                     fontsize=9, fontweight='bold', color=color_p99,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=color_p99, linewidth=1.5, alpha=0.8))
+    for i, (x, y) in enumerate(zip(num_nodes, p50_vals)):
+        ax3.annotate(f'{y:.1f}', (x, y), textcoords="offset points", xytext=(0, -22), ha='center',
+                     fontsize=9, fontweight='bold', color=color_p50,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=color_p50, linewidth=1.5, alpha=0.8))
+    for i, (x, y) in enumerate(zip(num_nodes, lat_mins)):
+        ax3.annotate(f'{y:.1f}', (x, y), textcoords="offset points", xytext=(8, 0), ha='left',
+                     fontsize=8, fontweight='bold', color='#3A7CA5',
+                     bbox=dict(boxstyle='round,pad=0.25', facecolor='white', edgecolor='#3A7CA5', linewidth=1.2, alpha=0.8))
+    for i, (x, y) in enumerate(zip(num_nodes, lat_maxs)):
+        ax3.annotate(f'{y:.1f}', (x, y), textcoords="offset points", xytext=(-8, 0), ha='right',
+                     fontsize=8, fontweight='bold', color='#F18F01',
+                     bbox=dict(boxstyle='round,pad=0.25', facecolor='white', edgecolor='#F18F01', linewidth=1.2, alpha=0.8))
+    for i, (x, y) in enumerate(zip(num_nodes, lat_means)):
+        ax3.annotate(f'{y:.1f}', (x, y), textcoords="offset points", xytext=(0, -8), ha='center',
+                     fontsize=8, fontweight='bold', color='#5C4D7D',
+                     bbox=dict(boxstyle='round,pad=0.25', facecolor='white', edgecolor='#5C4D7D', linewidth=1.2, alpha=0.8))
+    ax3.set_ylabel('Latency (s)', color='#333333', fontsize=12, fontweight='bold')
+    ax3.tick_params(axis='y', labelcolor='#333333', labelsize=11)
+    ax3.spines['top'].set_visible(False)
+    for spine in ax3.spines.values():
+        spine.set_edgecolor('#DDDDDD')
+        spine.set_linewidth(1.2)
+    
     # Set axis scales
     if log_scale:
         ax1.set_xscale('log')
         ax1.set_yscale('log')
         ax2.set_yscale('log')
+        ax3.set_yscale('log')
         
         # Use scalar formatter to show plain numbers (e.g., 100 instead of 10^2)
-        for ax in [ax1, ax2]:
+        for ax in [ax1, ax2, ax3]:
             formatter = ScalarFormatter()
             formatter.set_scientific(False)
             ax.yaxis.set_major_formatter(formatter)
@@ -277,9 +424,10 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
         ax1.set_xscale('linear')
         ax1.set_yscale('linear')
         ax2.set_yscale('linear')
+        ax3.set_yscale('linear')
 
     ax1.set_xticks(num_nodes)
-    ax1.set_xticklabels([str(n) for n in num_nodes])
+    ax1.set_xticklabels([f"{n}\n({n * 12} workers)" for n in num_nodes])
     
     if log_scale:
         ax1.set_xlim(min(num_nodes) * 0.8, max(num_nodes) * 1.2)
@@ -312,7 +460,14 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     if len(results) > 0:
         legend_handles.extend([ideal_tps_line, ideal_rps_line])
         legend_labels.extend(['Ideal TPS Scaling', 'Ideal RPS Scaling'])
-    legend = ax1.legend(legend_handles, legend_labels, loc='upper left', fontsize=11,
+    # Add latency series (p99, p50 lines and min/max/mean scatter) from ax3
+    for line in ax3.get_lines():
+        legend_handles.append(line)
+        legend_labels.append(line.get_label())
+    for scatter in ax3.collections:
+        legend_handles.append(scatter)
+        legend_labels.append(scatter.get_label())
+    legend = ax1.legend(legend_handles, legend_labels, loc='upper left', fontsize=10,
                         frameon=True, fancybox=True, shadow=True,
                         framealpha=0.95, edgecolor='#CCCCCC', facecolor='white')
     legend.get_frame().set_linewidth(1.5)
@@ -333,14 +488,14 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     
     # Enhanced title with better formatting
     title_text = 'RayServe vLLM Weak Scaling Performance (ALCF Aurora)'
-    subtitle_text = 'Meta-Llama-3-8B-Instruct, chat mode, 12 GPUs per node, 5 runs avg'
-    subtitle_text += '\n Note: Preliminary results, we may not have implemented RayServe correctly.'
+    subtitle_text = 'Meta-Llama-3-8B-Instruct, chat mode, 12 GPUs per node, 3 runs avg'
+    subtitle_text += '\n Note: Preliminary results, configuration may not be optimal.'
     
     title_text = 'RayServe Null Compute Weak Scaling Performance w/ Round-robin Clients (ALCF Aurora)'
-    subtitle_text = '1 client per 8 nodes, 4 workers per client, 3 runs avg.'
+    # subtitle_text = '1 client per 8 nodes, 4 workers per client, 3 runs avg.'
     subtitle_text += '\n No model staging, no tokenizer.'
     subtitle_text += '\n Single-node performance is NOT saturated.'
-    # subtitle_text += '\n Note: Preliminary results, we may not have implemented RayServe correctly.'
+    subtitle_text += '\n Note: Preliminary results, we may not have implemented RayServe correctly.'
     fig.suptitle(title_text, fontsize=16, fontweight='bold', 
                 color='#1a1a1a', y=0.98)
     ax1.set_title(subtitle_text, fontsize=11, color='#666666', pad=10, style='italic')
@@ -369,23 +524,40 @@ def main():
                             "Calculates mean and error bars. Default: latest result only.")
     parser.add_argument("--exclude-nodes", type=str, default=None,
                        help="Comma-separated list of node counts to exclude (e.g., '64,128').")
+    parser.add_argument("--node-list", type=str, default=None,
+                       help="Comma-separated node counts paired with --select "
+                            "(e.g., '1,2,4,8,16,32').")
+    parser.add_argument("--select", type=str, default=None,
+                       help="Comma-separated result indices, one per entry in --node-list "
+                            "(e.g., '0,1,0,0,0,0'). Picks result{i}.json for each node. "
+                            "Nodes not listed fall back to the latest result file.")
     args = parser.parse_args()
+
+    if bool(args.node_list) != bool(args.select):
+        parser.error("--node-list and --select must be used together.")
     
     # Determine default output filename
     if not args.output_path:
         suffix = "linear" if args.linear else "log"
         args.output_path = f"weak_scaling_{suffix}.png"
-    
-    target_indices = parse_indices(args.indices)
-    if target_indices:
-        print(f"Aggregating results for indices: {target_indices}")
+
+    node_select_map = None
+    if args.node_list and args.select:
+        node_select_map = parse_node_select_mapping(args.node_list, args.select)
+        print(f"Per-node result selection: { {k: f'result{v}.json' for k, v in node_select_map.items()} }")
+
+    target_indices = None
+    if node_select_map is None:
+        target_indices = parse_indices(args.indices)
+        if target_indices:
+            print(f"Aggregating results for indices: {target_indices}")
         
     excluded_nodes = parse_indices(args.exclude_nodes)
     if excluded_nodes:
         print(f"Excluding nodes: {excluded_nodes}")
     
     print(f"Loading results from: {RESULTS_FOLDER}")
-    results, missing_files = load_results(RESULTS_FOLDER, target_indices, excluded_nodes)
+    results, missing_files = load_results(RESULTS_FOLDER, target_indices, excluded_nodes, node_select_map)
     
     if missing_files:
         print("\n" + "!"*50)

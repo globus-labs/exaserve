@@ -1,0 +1,31 @@
+#!/bin/bash -l
+#PBS -N weak_scaling_tests_ray_1n
+#PBS -m bae
+#PBS -M wenyiw@uchicago.edu
+#PBS -l filesystems=home:flare
+#PBS -A AuroraGPT
+#PBS -k doe
+#PBS -l select=1
+#PBS -l walltime=01:00:00
+#PBS -q debug
+#PBS -o /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_tests_ray/1_nodes/stdout/
+#PBS -e /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/weak_scaling_tests_ray/1_nodes/stderr/
+
+# Navigate to Experiment Directory
+cd /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_tests_ray/1_nodes
+
+echo "=================================================="
+echo "PBS Job Information"
+echo "=================================================="
+echo "Job ID:     $PBS_JOBID"
+echo "Job Name:   weak_scaling_tests_ray_1n"
+echo "Hostname:   $(hostname)"
+echo "Nodes:      1"
+echo "Backend:    ray"
+echo "Work Dir:   $(pwd)"
+echo "Config:     /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_tests_ray/1_nodes/config.yaml"
+echo "=================================================="
+
+
+# Invoke Experiment Driver (using absolute path) with backend specification
+bash "/home/wenyiw/aurora_rayserver/eval/templates/run_exp.sh" /home/wenyiw/aurora_rayserver/eval/experiments/weak_scaling_tests_ray/1_nodes/config.yaml --backend ray  --num-runs 3

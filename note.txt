@@ -151,3 +151,32 @@ This is essentially what your system already does per-node — the issue is that
 Why this is the long-term right answer
 The 0.1s polling deadline and the NoneType bug are both symptoms of Ray Serve not being designed for O(100s) of replicas behind a single proxy. Increasing the deadline to 2s (mitigation 1) trades latency headroom for correctness, but as you scale further, even 2s will eventually be insufficient. Sharding the routing keeps the per-proxy replica count constant regardless of total cluster size, giving you true O(1) routing overhead per request.
 For your null-compute experiment specifically at 64 nodes, the simpler fix (the 2.0s deadline just applied) should be sufficient. But if you plan to go to 128+ nodes, the sharding approach is worth pursuing.
+
+
+================================================================================================================
+Why ray is not scaling? Why ray errors out at 2048 nodes?
+The Real Problem: serve.run() Deployment Time Exceeds the 20-Minute Timeout
+The actual failure is that serve.run() (line 509 of aurora_serve.py) blocks until all replicas report as RUNNING. With 24,576 replicas (2048 nodes × 12 tiles), this deployment takes far longer than the driver's 20-minute timeout (240 retries × 5s = 1200s). The deployment time scales roughly linearly (possibly super-linearly) with replica count:
+Nodes	Replicas	serve.run() Time	Status
+256	3,072	99.58s (~1.7 min)	Success
+512	6,144	198.99s (~3.3 min)	Success
+1024	12,288	1240.64s (~20.7 min)	Barely succeeded
+2048	24,576	>1200s (killed at timeout)	Failed all 3 attempts
+Notice the scaling is super-linear: 256→512 doubles replicas and doubles time (linear), but 512→1024 doubles replicas and the time jumps 6.2x (from 199s to 1241s). This strongly suggests the Ray GCS/ServeController becomes a bottleneck at this scale. All 3 attempts for 2048 nodes failed identically:
+Attempt 1 (23:21:45): Detected 24,552 GPUs → timeout at 20 min
+Attempt 2 (23:41:45): Detected 24,576 GPUs → timeout at 20 min
+Attempt 3 (00:02:01): Detected 24,576 GPUs → timeout at 20 min
+In each attempt, only about ~12,900 of the 24,576 replicas managed to initialize before the driver killed the process.
+Why serve.run() Blows Up at Scale
+The Ray Serve ServeController is a single actor on the head node that must:
+Request 24,576 actor placements from GCS (one round-trip per actor)
+Track health status of all 24,576 actors
+Update the routing table for 2,048 proxy actors (ProxyLocation.EveryNode)
+Process health check responses from all replicas
+At 24K replicas, the controller becomes CPU-bound managing the actor lifecycle state machine. The GCS (also a single process on the head node) is also overloaded processing placement requests. This is a known Ray Serve scaling limitation — the controller is not designed for O(10K) replicas.
+Potential Fixes
+There are a few approaches you could consider (switch to Agent mode if you want me to implement any):
+Increase the driver timeout: Set MAX_RETRIES higher. 1024 nodes barely fit in 20 minutes. 2048 nodes would likely need ~40-60 minutes. But this is a band-aid — the super-linear scaling suggests 4096 nodes would be impractical.
+Batch the deployment: Instead of deploying all 24,576 replicas in a single serve.run() call, deploy in waves (e.g., scale up num_replicas incrementally). Ray Serve supports updating num_replicas on a running deployment.
+Reduce replicas per node: If you don't need all 12 tiles active, using fewer replicas reduces the controller's burden.
+Use multiple independent Ray Serve applications: Instead of one deployment with 24,576 replicas, deploy node-local services where each node runs its own independent serve instance. This eliminates the centralized controller bottleneck entirely.

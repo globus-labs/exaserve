@@ -96,7 +96,7 @@ class VLLMWorker:
         device_id = int(gpu_ids[0]) if gpu_ids else 0
 
         if null_compute:
-            self.latency = float(os.environ.get("AURORA_NULL_COMPUTE_LATENCY", "2.0"))
+            self.latency = float(os.environ.get("AURORA_NULL_COMPUTE_LATENCY", "20.0"))
             print(
                 f"[VLLMWorker pid={pid}] NullCompute mode on tile {device_id} "
                 f"(latency={self.latency:.2f}s, no vLLM engine)",

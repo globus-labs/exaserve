@@ -64,6 +64,11 @@ def parse_args():
         default=[],
         help="Override queue limit, e.g. --queue-limit debug=2",
     )
+    parser.add_argument(
+        "--wait-between-queues",
+        action="store_true",
+        help="Wait for all jobs in the current queue to finish before submitting the next queue.",
+    )
     return parser.parse_args()
 
 
@@ -159,6 +164,19 @@ def submit_with_queue_limit(job_dir, pbs_path, queue, sleep_sec, queue_limits):
         time.sleep(sleep_sec)
 
 
+def wait_for_queue_drain(queue, sleep_sec):
+    """Block until the given queue has no jobs for the current user."""
+    if not queue:
+        return
+    while True:
+        counts = get_user_queue_counts()
+        n = counts.get(queue, 0)
+        if n == 0:
+            return
+        print(f"[WAIT] Queue {queue}: {n} job(s) still running. Sleeping {sleep_sec}s...")
+        time.sleep(sleep_sec)
+
+
 def main():
     args = parse_args()
     parent_dir = os.path.abspath(
@@ -198,7 +216,12 @@ def main():
 
         jobs_by_queue.setdefault(queue, []).append((job_dir, pbs_path))
 
-    for queue, jobs in jobs_by_queue.items():
+    # Process each queue independently (deterministic order by queue name)
+    for queue in sorted(jobs_by_queue.keys(), key=lambda q: (q or "")):
+        jobs = jobs_by_queue[queue]
+        queue_label = queue or "(default)"
+        print(f"\n--- Queue: {queue_label} ({len(jobs)} job(s)) ---")
+
         limit = queue_limits.get(queue)
         requires_serial = limit is not None and limit <= 1
 
@@ -211,27 +234,29 @@ def main():
                     args.sleep_sec,
                     queue_limits,
                 )
-            continue
+        else:
+            failed = []
+            for job_dir, pbs_path in jobs:
+                ok, msg = submit_job(pbs_path)
+                if ok:
+                    print(f"[OK] Submitted {job_dir}: {msg}")
+                else:
+                    print(f"[WARN] Immediate submit failed {job_dir}: {msg}")
+                    failed.append((job_dir, pbs_path))
 
-        failed = []
-        for job_dir, pbs_path in jobs:
-            ok, msg = submit_job(pbs_path)
-            if ok:
-                print(f"[OK] Submitted {job_dir}: {msg}")
-            else:
-                print(f"[WARN] Immediate submit failed {job_dir}: {msg}")
-                failed.append((job_dir, pbs_path))
+            for job_dir, pbs_path in failed:
+                submit_with_queue_limit(
+                    job_dir,
+                    pbs_path,
+                    queue,
+                    args.sleep_sec,
+                    queue_limits,
+                )
 
-        for job_dir, pbs_path in failed:
-            submit_with_queue_limit(
-                job_dir,
-                pbs_path,
-                queue,
-                args.sleep_sec,
-                queue_limits,
-            )
+        if args.wait_between_queues and queue:
+            wait_for_queue_drain(queue, args.sleep_sec)
 
-    print("All submissions attempted.")
+    print("\nAll submissions attempted.")
     return 0
 
 

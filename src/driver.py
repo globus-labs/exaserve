@@ -50,7 +50,7 @@ def get_ray_env():
     # Aurora Specifics for PVC (Ponte Vecchio)
     env["ZE_FLAT_DEVICE_HIERARCHY"] = "FLAT"  # Exposes all 12 tiles
     env["ZE_AFFINITY_MASK"] = ""              # All tiles visible (baseline)
-    env["VLLM_TARGET_DEVICE"] = "xpu"         # Tell vLLM we are on Intel
+    env["VLLM_TARGET_DEVICE"] = "xpu"         # Tell vLLM we are on Intel 
     env["RAY_ENABLE_METRICS_COLLECTION"] = "0"
 
     # At large replica counts (64+ nodes) the default 0.1s deadline causes

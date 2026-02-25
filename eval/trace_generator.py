@@ -6,6 +6,7 @@ import numpy as np
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union
 from dataclasses import asdict
 
@@ -342,7 +343,37 @@ class TraceGenerator:
         config_path = exp_config.job_replay_client_config.config_path
         exp_config.save_yaml(config_path)
         print(f">>> [GEN] Saved config to {config_path}")
-  
+
+    def _generate_weak_scaling_chunk(
+        self,
+        chunk_start: int,
+        chunk_end: int,
+        inter_arrival_time: float,
+        model_names: list,
+        target_in: int,
+        target_out: int,
+    ) -> list:
+        """Generate a contiguous chunk of weak-scaling rows (used for parallelization)."""
+        rows = []
+        for i in range(chunk_start, chunk_end):
+            current_time = (i + 1) * inter_arrival_time
+            model = model_names[i % len(model_names)]
+            random.seed(self.seed + i)
+            prompt_text, input_len = self._get_exact_content(
+                target_len=target_in,
+                hard_limit=target_in,
+                model_id=model,
+            )
+            rows.append({
+                "timestamp": float(f"{current_time:.6f}"),
+                "model": model,
+                "prompt": prompt_text,
+                "input_len": input_len,
+                "tensor_parallel_size": self._tensor_parallel_size(model),
+                "output_len": target_out,
+            })
+        return rows
+
     def generate_weak_scaling(self, exp_config: ExpConfig):
         """
         Generates a synthetic, deterministic weak-scaling workload.
@@ -378,47 +409,25 @@ class TraceGenerator:
             print("!!! ERROR: No models defined in config.")
             sys.exit(1)
 
-        # 3. Generate Trace
-        output_rows = []
-        current_time = 0.0
-        
-        # Tokenizer for precision
-        # We use the first model's tokenizer as the standard ruler
-        first_model = model_names[0]
-        
-        print(">>> [GEN] Generating payload...")
-        for i in range(total_requests):
-            # A. Deterministic Timing (Perfect spacing)
-            current_time += inter_arrival_time
-            
-            # B. Deterministic Routing (Round Robin)
-            model = model_names[i % len(model_names)]
-            
-            # C. Deterministic Content (Unique but Fixed Length)
-            # We generate unique text to bypass cache, but force exact length
-            # Seed the random generator with the index to ensure reproducibility
-            # but uniqueness per request.
-            random.seed(self.seed + i) 
-            
-            # We use the generic 'get_exact_content' we wrote before, 
-            # but we force it to generate fresh text every time.
-            prompt_text, input_len = self._get_exact_content(
-                target_len=target_in, 
-                hard_limit=target_in, 
-                model_id=model
-            )
-            
-            output_rows.append({
-                "timestamp": float(f"{current_time:.6f}"),
-                "model": model,
-                "prompt": prompt_text,
-                "input_len": input_len,
-                "tensor_parallel_size": self._tensor_parallel_size(model),
-                "output_len": target_out
-            })
+        # 3. Generate Trace (parallelized over chunks)
+        max_workers = min(os.cpu_count() or 4, 32)
+        chunk_size = max(1, total_requests // (max_workers * 4))
+        chunk_ranges = [
+            (start, min(start + chunk_size, total_requests))
+            for start in range(0, total_requests, chunk_size)
+        ]
+        print(f">>> [GEN] Generating payload ({total_requests} requests, {len(chunk_ranges)} chunks, {max_workers} workers)...")
 
-            if i % 1000 == 0:
-                print(f"\r    Generated {i}/{total_requests}", end="")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            chunk_results = list(executor.map(
+                lambda r: self._generate_weak_scaling_chunk(
+                    r[0], r[1], inter_arrival_time, model_names, target_in, target_out
+                ),
+                chunk_ranges,
+            ))
+        output_rows = []
+        for chunk_rows in chunk_results:
+            output_rows.extend(chunk_rows)
 
         # 4. Save
         out_path = ws_cfg.output_trace_path

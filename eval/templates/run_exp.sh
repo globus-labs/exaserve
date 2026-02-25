@@ -262,7 +262,7 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
 
     echo ""
     echo ">>> [DRIVER] Waiting for AuroraServe to be ready..."
-    MAX_RETRIES=240 # 20 minutes
+    MAX_RETRIES=360 # 60 minutes
     COUNT=0
     SERVICE_STARTED=true
 
@@ -273,7 +273,7 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
             break
         fi
         
-        sleep 5
+        sleep 10
         COUNT=$((COUNT+1))
         
         # Check if service died early
@@ -332,7 +332,7 @@ print(max(1, min(num_nodes, round(num_nodes * ratio))))
             fi
             echo "    Client hostfile: $CLIENT_HOSTFILE"
             cat "$CLIENT_HOSTFILE"
-            mpiexec -n "$CLIENT_NODES" --ppn 1 --hostfile "$CLIENT_HOSTFILE" \
+            mpiexec -n "$CLIENT_NODES" --ppn 1 --cpu-bind none --hostfile "$CLIENT_HOSTFILE" \
                 python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
             EXIT_CODE=$?
             rm -f "$CLIENT_HOSTFILE"
