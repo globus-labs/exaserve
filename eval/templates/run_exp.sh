@@ -242,7 +242,7 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
     
     if [ "$BACKEND" == "ray" ]; then
         echo ">>> [DRIVER] Launching Ray Cluster..."
-        bash "$LAUNCH_CLUSTER_SCRIPT" > "$SERVICE_PIPE" 2>&1 &
+        bash "$LAUNCH_CLUSTER_SCRIPT" "$CONFIG_PATH" > "$SERVICE_PIPE" 2>&1 &
         SERVICE_PID=$!
         echo "    Ray Cluster PID: $SERVICE_PID"
         echo "    Output Reader PID: $READER_PID"
@@ -262,7 +262,7 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
 
     echo ""
     echo ">>> [DRIVER] Waiting for AuroraServe to be ready..."
-    MAX_RETRIES=360 # 60 minutes
+    MAX_RETRIES=720 # 120 minutes
     COUNT=0
     SERVICE_STARTED=true
 

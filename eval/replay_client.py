@@ -347,9 +347,9 @@ async def replay(
             print(f"!!! WARNING: Invalid generation_mode '{generation_mode}', defaulting to 'deterministic'")
         generation_mode = 'deterministic'
 
-    # Resolve num_workers: None (CLI default) → config value → hardcoded 4
+    # Resolve num_workers: None (CLI default) → config value (num_workers_per_node) → hardcoded 4
     if num_workers is None:
-        num_workers = replay_cfg.get('num_workers', 4)
+        num_workers = replay_cfg.get('num_workers_per_node', 4)
 
     # Derive expected client-node count from total PBS nodes × per-node ratio.
     # actual_client_nodes = max(1, min(num_nodes, int(num_nodes * num_cli_per_node)))
@@ -937,12 +937,13 @@ if __name__ == "__main__":
         help="Number of times to replay the main trace (after warmup).",
     )
     parser.add_argument(
-        "--num-workers",
+        "--num-workers-per-node",
         type=int,
         default=None,
+        dest="num_workers",
         help=(
-            "Multiprocessing workers per MPI rank. "
-            "Defaults to job_replay_client_config.num_workers in the YAML config (or 4). "
+            "Multiprocessing workers per MPI rank (per node). "
+            "Defaults to job_replay_client_config.num_workers_per_node in the YAML config (or 4). "
             "CLI value overrides the config."
         ),
     )

@@ -39,9 +39,11 @@ except OSError:
 # Constant: folder path containing the experiment results
 # RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_ray"
 # RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_ray"
-RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/null_compute_ray"
-RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_4_workers_ray"
-RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_8_workers_ray"
+# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/null_compute_ray"
+# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_4_workers_ray"
+# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_8_workers_ray"
+# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_1_workers_ray"
+RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_ray_2"
 
 
 
@@ -489,13 +491,13 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     # Enhanced title with better formatting
     title_text = 'RayServe vLLM Weak Scaling Performance (ALCF Aurora)'
     subtitle_text = 'Meta-Llama-3-8B-Instruct, chat mode, 12 GPUs per node, 3 runs avg'
-    subtitle_text += '\n Note: Preliminary results, configuration may not be optimal.'
+    subtitle_text += '\n Note: Configuration may not be optimal. Single-node performance could be higher.'
     
-    title_text = 'RayServe Null Compute Weak Scaling Performance w/ Round-robin Clients (ALCF Aurora)'
-    # subtitle_text = '1 client per 8 nodes, 4 workers per client, 3 runs avg.'
-    subtitle_text += '\n No model staging, no tokenizer.'
-    subtitle_text += '\n Single-node performance is NOT saturated.'
-    subtitle_text += '\n Note: Preliminary results, we may not have implemented RayServe correctly.'
+    # title_text = 'RayServe Null Compute Weak Scaling Performance w/ Round-robin Clients (ALCF Aurora)'
+    # # subtitle_text = '1 client per 8 nodes, 4 workers per client, 3 runs avg.'
+    # subtitle_text += '\n No model staging, no tokenizer.'
+    # subtitle_text += '\n Single-node performance is NOT saturated.'
+    # subtitle_text += '\n Note: Preliminary results, we may not have implemented RayServe correctly.'
     fig.suptitle(title_text, fontsize=16, fontweight='bold', 
                 color='#1a1a1a', y=0.98)
     ax1.set_title(subtitle_text, fontsize=11, color='#666666', pad=10, style='italic')

@@ -164,10 +164,10 @@ if __name__ == "__main__":
         exit(1)
     
     print(f">>> Generating experiments for backend: {args.backend}")
-    # experiments = get_weak_scaling_configs_with_num_runs(backend=args.backend, num_runs=3)
+    experiments = get_weak_scaling_configs_with_num_runs(backend=args.backend, num_runs=3)
     # experiments = get_weak_scaling_null_compute_configs_with_num_runs(backend=args.backend, num_runs=3)
     # experiments = get_weak_scaling_null_compute_tests_configs_with_num_runs(backend=args.backend, num_runs=3)
-    experiments = get_weak_scaling_tests_configs_with_num_runs(backend=args.backend, num_runs=3)
+    # experiments = get_weak_scaling_tests_configs_with_num_runs(backend=args.backend, num_runs=3)
     
     # setup_weak_scaling(args, experiments, backend=args.backend, null_compute=True)
     setup_weak_scaling(args, experiments, backend=args.backend, null_compute=False)

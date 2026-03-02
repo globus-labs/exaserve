@@ -180,3 +180,43 @@ Increase the driver timeout: Set MAX_RETRIES higher. 1024 nodes barely fit in 20
 Batch the deployment: Instead of deploying all 24,576 replicas in a single serve.run() call, deploy in waves (e.g., scale up num_replicas incrementally). Ray Serve supports updating num_replicas on a running deployment.
 Reduce replicas per node: If you don't need all 12 tiles active, using fewer replicas reduces the controller's burden.
 Use multiple independent Ray Serve applications: Instead of one deployment with 24,576 replicas, deploy node-local services where each node runs its own independent serve instance. This eliminates the centralized controller bottleneck entirely.
+
+==================================================================================================================
+Root Cause of AttributeError: 'NoneType' object has no attribute 'routing_context' <- "if not pending_request.routing_context.should_backoff"
+This is a bug in Ray Serve's _choose_replicas_with_backoff generator — specifically a missing null check at line 943 of request_router.py.
+The crash path
+Step 1: _fulfill_pending_requests (line 980) calls _get_next_pending_request_to_route(), which can return None when _pending_requests_to_route is empty — either because the queue is exhausted or all queued futures are already done:
+request_router.py
+Lines 884-892
+```
+def _get_next_pending_request_to_route(    self,) -> Optional[PendingRequest]:    
+    while len(self._pending_requests_to_route) > 0:        
+        pr = self._pending_requests_to_route.popleft()        
+            if not pr.future.done():            
+                return pr    
+    return None
+```
+Step 2: That None is passed directly into _choose_replicas_with_backoff(None) (line 982–984).
+Step 3: Inside the generator, choose_replicas(pending_request=None) is called. It properly handles None — in pow_2_router.py it guards with if pending_request is not None, falling through to apply_locality_routing(None). And apply_locality_routing explicitly handles None by returning all replicas:
+request_router.py
+Lines 136-137
+        if not pending_request:            
+            return self._replica_id_set
+Step 4: Since there ARE replicas (they're just full/busy, not absent), choose_replicas returns a non-empty candidate list. The generator yields those candidates back.
+Step 5: Then the generator reaches line 943 with pending_request still None:
+request_router.py
+Lines 943-944
+```
+                if not pending_request.routing_context.should_backoff:                    
+                    continue
+```
+Crash. pending_request is None, so pending_request.routing_context raises AttributeError: 'NoneType' object has no attribute 'routing_context'.
+Why small max_ongoing_requests triggers this
+With a small max_ongoing_requests, all replicas are saturated rapidly. The routing system is constantly looping in backoff, cycling through _choose_replicas_with_backoff at high frequency. 
+There are also potentially multiple routing tasks running concurrently (controlled by target_num_routing_tasks). Each task calls _get_next_pending_request_to_route() which pops from the shared _pending_requests_to_route deque. 
+When there are more active routing tasks than queued requests, some tasks get None back. Those tasks then crash at line 943.
+It repeats 140 times because the finally block in _fulfill_pending_requests (line 1026) removes the crashed task from _routing_tasks, which triggers _maybe_start_routing_tasks to spawn a replacement, which immediately gets None again and crashes again, in a tight loop.
+The fix (conceptually)
+The missing guard should be at the start of the backoff check in the generator — something like:
+if pending_request is None or not pending_request.routing_context.should_backoff:    continue
+Or alternatively, the outer loop in _fulfill_pending_requests should not enter _choose_replicas_with_backoff when pending_request is None.

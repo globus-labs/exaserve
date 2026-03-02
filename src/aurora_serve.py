@@ -16,6 +16,7 @@ import os
 import time
 import uuid
 import socket
+import argparse
 from typing import Optional, List, Dict
 
 import ray
@@ -27,9 +28,8 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-from schemas import ModelConfig, DeploymentConfig
+from schemas import ModelConfig, DeploymentConfig, load_deployment_config
 from model_staging import stage_models, print_red
-import aurora
 
 
 def get_hsn_ip():
@@ -393,7 +393,7 @@ def deploy_model(
     deployment = VLLMWorker.options(
         name=f"VLLMWorker-{safe_name}",
         num_replicas=num_replicas,
-        # max_replicas_per_node=replicas_per_node,
+        max_replicas_per_node=replicas_per_node,
         ray_actor_options={
             "num_gpus": model_config.tensor_parallel_size,
             "num_cpus": model_config.num_cpus_per_replica,
@@ -452,9 +452,22 @@ def deploy_multi_model(
 if __name__ == "__main__":
     overall_start = time.time()
 
+    parser = argparse.ArgumentParser(description="Ray Serve LLM inference on Aurora")
+    parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help="Path to deployment config YAML (default: config.yaml). "
+             "Can be full experiment config (model_deployment_config key) or deployment-only.",
+    )
+    args = parser.parse_args()
+
+    config_path = os.path.abspath(args.config)
+    if not os.path.isfile(config_path):
+        raise SystemExit(f"[AuroraServe] Config file not found: {config_path}")
+
     # ---- Load configuration -------------------------------------------------
-    config = aurora.get_deployment_config("default")
-    print(f"[AuroraServe] Loaded config: {config.deployment_name}", flush=True)
+    config = load_deployment_config(config_path)
+    print(f"[AuroraServe] Loaded config from {config_path}: {config.deployment_name}", flush=True)
     print(f"[AuroraServe] Models: {len(config.model_configs)}", flush=True)
     for cfg in config.model_configs:
         print(f"  - {cfg.model_id} (size={cfg.size}B, TP={cfg.tensor_parallel_size})", flush=True)

@@ -229,17 +229,17 @@ def get_weak_scaling_configs(backend: str = "ray") -> List[ExpConfig]:
             output_len=output_len,
             output_trace_path=trace_output_path,
         )
-        config_file_path = os.path.join(exp_working_dir, "config.yaml")
+        config_file_path = os.path.join(pbs_working_dir, "config.yaml")
         dep = DeploymentConfig(model_configs=model_cfgs, num_gpus_per_node=4, num_nodes=num_nodes)
         exp_cfg = ExpConfig(
-            pbs_result_dir=exp_result_dir,
-            pbs_stdout_dir=os.path.join(exp_pbs_out_dir, "stdout"),
-            pbs_stderr_dir=os.path.join(exp_pbs_out_dir, "stderr"),
+            pbs_result_dir=pbs_result_dir,
+            pbs_stdout_dir=pbs_stdout_dir,
+            pbs_stderr_dir=pbs_stderr_dir,
             pbs_num_nodes=num_nodes,
             pbs_walltime=walltime,
             pbs_queue_name=queue_name,
             pbs_job_name=f"{batch_name}_{num_nodes}n",
-            pbs_working_dir=exp_working_dir,
+            pbs_working_dir=pbs_working_dir,
             job_replay_client_config=ReplayClientConfig(config_path=config_file_path, no_warmup=False, num_runs=1, dest="cluster" if num_nodes > 1 else "node", num_nodes=num_nodes),
             job_trace_config=trace_cfg,
             job_seed=42,
@@ -252,7 +252,6 @@ def get_weak_scaling_configs(backend: str = "ray") -> List[ExpConfig]:
 def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int = 1) -> List[ExpConfig]:
     """
     Returns a list of ExpConfig objects for weak scaling experiments
-    ranging from 1 to 16 nodes.
     
     Args:
         backend: Either "ray" or "mpi" to determine which backend to use
@@ -260,11 +259,8 @@ def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int =
     configs = []
     
     # Common parameters for weak scaling
-    # nodes_list = [1, 2, 4, 8, 16]
-    # nodes_list = [32]
-    num_nodes_list = [1,2,4,8,16,32,64,128,256]
-    # num_nodes_list = [128, 256]
-    num_nodes_list = [512, 1024, 2048]
+
+    num_nodes_list = [1,2,4,8,16,32,64,128,256,512,1024]
     rate_per_node = 80 # requests per node per second
     duration = 5.0                 
     input_len = 2048
@@ -279,7 +275,7 @@ def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int =
             size=8,
         ),
     ]
-    batch_name = f"weak_scaling_{backend}"
+    batch_name = f"weak_scaling_{backend}_2"
     EVAL_DIR = os.path.join(os.path.dirname(__file__))
     base_working_dir = os.path.join(EVAL_DIR, "experiments", batch_name)
 
@@ -310,7 +306,13 @@ def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int =
             output_trace_path=trace_output_path,
         )
         config_file_path = os.path.join(pbs_working_dir, "config.yaml")
-        dep = DeploymentConfig(model_configs=model_cfgs, num_nodes=num_nodes)
+        dep = DeploymentConfig(
+            deployment_name=f"weak_scaling_{backend}",
+            model_configs=model_cfgs, 
+            num_nodes=num_nodes,
+            model_storage_path="/lus/flare/projects/AuroraGPT/wenyiw/models",
+            worker_max_ongoing=32
+            )
         exp_cfg = ExpConfig(
             pbs_result_dir=pbs_result_dir,
             pbs_stdout_dir=pbs_stdout_dir,
@@ -362,7 +364,7 @@ def get_weak_scaling_tests_configs_with_num_runs(backend: str = "ray", num_runs:
             size=8,
         ),
     ]
-    batch_name = f"weak_scaling_tests_0125_cli_8_workers_{backend}"
+    batch_name = f"weak_scaling_tests_0125_cli_1_workers_{backend}"
     EVAL_DIR = os.path.join(os.path.dirname(__file__))
     base_working_dir = os.path.join(EVAL_DIR, "experiments", batch_name)
 
@@ -393,7 +395,10 @@ def get_weak_scaling_tests_configs_with_num_runs(backend: str = "ray", num_runs:
             output_trace_path=trace_output_path,
         )
         config_file_path = os.path.join(pbs_working_dir, "config.yaml")
-        dep = DeploymentConfig(model_configs=model_cfgs, num_nodes=num_nodes)
+        dep = DeploymentConfig(
+            deployment_name=f"weak_scaling_tests_{backend}",
+            model_configs=model_cfgs, 
+            num_nodes=num_nodes)
         exp_cfg = ExpConfig(
             pbs_result_dir=pbs_result_dir,
             pbs_stdout_dir=pbs_stdout_dir,
@@ -410,7 +415,7 @@ def get_weak_scaling_tests_configs_with_num_runs(backend: str = "ray", num_runs:
                 dest="cluster" if num_nodes > 1 else "node",
                 num_nodes=num_nodes,
                 num_cli_per_node=0.125,
-                num_workers=8,
+                num_workers_per_node=1,
             ),
             job_trace_config=trace_cfg,
             job_seed=42,

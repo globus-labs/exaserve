@@ -17,8 +17,6 @@ class ModelConfig: # model configs for the engine
     enable_log_requests: bool = True # EngineArgs
     num_replicas: Optional[int] = None # Deployment - number of replicas total, auto-scale based on tensor parallel size
     num_cpus_per_replica: int = 4 # Deployment - number of CPUs per replica
-    num_routers_per_replica: Optional[float] = 0.5 # Deployment - number of routers per replica, default 0.5x replicas
-    num_router_cpus: int = 1 # Deployment - number of CPUs per router
 
 @dataclass
 class DeploymentConfig:
@@ -27,7 +25,6 @@ class DeploymentConfig:
     model_storage_path: str = "/lus/flare/projects/AuroraGPT/wenyiw/models"
     deployment_name: str = "aurora_serve"
     worker_max_ongoing: int = 32
-    router_max_ongoing: int = 200
     num_gpus_per_node: int = 12 # machine spec
   
 @dataclass
@@ -63,7 +60,62 @@ class ReplayClientConfig:
     num_nodes: int = 1      # total PBS nodes (= pbs_num_nodes); used to compute actual client count
     num_cli_per_node: float = 1.0  # fraction of total nodes used as MPI client ranks
                                    # actual_client_nodes = max(1, min(num_nodes, round(num_nodes * num_cli_per_node)))
-    num_workers: int = 4    # multiprocessing workers per MPI rank
+    num_workers_per_node: int = 4    # multiprocessing workers per MPI rank (typically one rank per node)
+
+
+def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
+    """Build ModelConfig from a dict (e.g. YAML-loaded)."""
+    raw_replicas = d.get("num_replicas")
+    if raw_replicas is None:
+        num_replicas = None
+    elif isinstance(raw_replicas, dict):
+        num_replicas = None  # YAML sometimes nests unexpectedly
+    else:
+        try:
+            num_replicas = int(raw_replicas)
+        except (TypeError, ValueError):
+            num_replicas = None
+    return ModelConfig(
+        model_id=d["model_id"],
+        tensor_parallel_size=int(d.get("tensor_parallel_size", 1)),
+        max_model_len=int(d.get("max_model_len", 4096)),
+        size=int(d.get("size", 8)),
+        gpu_memory_utilization=float(d.get("gpu_memory_utilization", 0.90)),
+        enforce_eager=bool(d.get("enforce_eager", True)),
+        enable_log_requests=bool(d.get("enable_log_requests", True)),
+        num_replicas=num_replicas,
+        num_cpus_per_replica=int(d.get("num_cpus_per_replica", 4)),
+    )
+
+
+def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
+    """Build DeploymentConfig from a dict (e.g. YAML-loaded)."""
+    model_configs = [
+        _model_config_from_dict(m) if isinstance(m, dict) else m
+        for m in d.get("model_configs", [])
+    ]
+    return DeploymentConfig(
+        num_nodes=int(d.get("num_nodes", 1)),
+        model_configs=model_configs,
+        model_storage_path=str(d.get("model_storage_path", "/lus/flare/projects/AuroraGPT/wenyiw/models")),
+        deployment_name=str(d.get("deployment_name", "aurora_serve")),
+        worker_max_ongoing=int(d.get("worker_max_ongoing", 32)),
+        num_gpus_per_node=int(d.get("num_gpus_per_node", 12)),
+    )
+
+
+def load_deployment_config(path: str) -> DeploymentConfig:
+    """
+    Load DeploymentConfig from a YAML file.
+    If the file has top-level key 'model_deployment_config', that subtree is used
+    (experiment config format). Otherwise the root dict is treated as deployment config.
+    """
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    if "model_deployment_config" in data:
+        data = data["model_deployment_config"]
+    return _deployment_config_from_dict(data)
+
 
 @dataclass
 class ExpConfig:

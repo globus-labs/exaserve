@@ -12,7 +12,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["TMPDIR"] = "/tmp"
 # Disable Ray log deduplication to see all replica logs
-os.environ["RAY_DEDUP_LOGS"] = "0"
+# os.environ["RAY_DEDUP_LOGS"] = "0"
 
 # --- GPU device isolation ---
 # NOSET=1 keeps all tiles visible to every Ray worker process (avoiding
@@ -108,6 +108,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--head-ip", required=True, help="IP Address of the Head Node")
     parser.add_argument("--port", default="6379", help="Ray GCS Port")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to deployment config YAML for Aurora Serve (optional). "
+             "If not set, aurora_serve will use its default (config.yaml in cwd).",
+    )
     args = parser.parse_args()
 
     rank = get_rank()
@@ -128,8 +134,11 @@ def main():
             time.sleep(10)
 
             # 3. Launch Aurora Serve
-            print(f"[Driver] Launching Aurora Serve: {sys.executable} src/aurora_serve.py", flush=True)
-            subprocess.run([sys.executable, "src/aurora_serve.py"], check=True, env=get_ray_env())
+            serve_cmd = [sys.executable, "src/aurora_serve.py"]
+            if args.config:
+                serve_cmd.extend(["--config", args.config])
+            print(f"[Driver] Launching Aurora Serve: {' '.join(serve_cmd)}", flush=True)
+            subprocess.run(serve_cmd, check=True, env=get_ray_env())
             print("[Driver] Aurora Serve finished. Shutting down cluster.", flush=True)
 
         else:

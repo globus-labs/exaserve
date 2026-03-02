@@ -39,6 +39,9 @@ echo "[System] Total Nodes: $NODE_COUNT"
 # --- 4. Atomic Launch ---
 echo "[System] Launching Cluster..."
 
+# Optional: path to deployment/experiment config passed from run_exp.sh (for PBS jobs)
+DEPLOYMENT_CONFIG_PATH="${1:-}"
+
 export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
 export ZE_AFFINITY_MASK=""
 export CCL_PROCESS_LAUNCHER="hydra"
@@ -52,5 +55,11 @@ export ONEAPI_DEVICE_SELECTOR="level_zero:0,1,2,3,4,5,6,7,8,9,10,11"
 
 PYTHON_EXEC=$(which python3)
 
-mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
-    $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379
+if [ -n "$DEPLOYMENT_CONFIG_PATH" ]; then
+    echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
+    mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
+        $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379 --config "$DEPLOYMENT_CONFIG_PATH"
+else
+    mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
+        $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379
+fi

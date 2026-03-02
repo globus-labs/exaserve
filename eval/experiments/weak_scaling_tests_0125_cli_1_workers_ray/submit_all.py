@@ -8,16 +8,7 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-_print_lock = threading.Lock()
-
-
-def _safe_print(*args, **kwargs):
-    with _print_lock:
-        print(*args, **kwargs)
 
 DEFAULT_QUEUE_LIMITS = {
     "debug": 1,
@@ -155,7 +146,7 @@ def submit_job(pbs_path):
 def submit_with_queue_limit(job_dir, pbs_path, queue, sleep_sec, queue_limits):
     while True:
         if not can_submit(queue, queue_limits):
-            _safe_print(
+            print(
                 f"[WAIT] Queue {queue} at limit. "
                 f"Sleeping {sleep_sec}s before retry..."
             )
@@ -164,9 +155,9 @@ def submit_with_queue_limit(job_dir, pbs_path, queue, sleep_sec, queue_limits):
 
         ok, msg = submit_job(pbs_path)
         if ok:
-            _safe_print(f"[OK] Submitted {job_dir}: {msg}")
+            print(f"[OK] Submitted {job_dir}: {msg}")
             return True
-        _safe_print(
+        print(
             f"[RETRY] Failed to submit {job_dir}: {msg} "
             f"(sleep {sleep_sec}s)"
         )
@@ -182,7 +173,7 @@ def wait_for_queue_drain(queue, sleep_sec):
         n = counts.get(queue, 0)
         if n == 0:
             return
-        _safe_print(f"[WAIT] Queue {queue}: {n} job(s) still running. Sleeping {sleep_sec}s...")
+        print(f"[WAIT] Queue {queue}: {n} job(s) still running. Sleeping {sleep_sec}s...")
         time.sleep(sleep_sec)
 
 
@@ -225,9 +216,11 @@ def main():
 
         jobs_by_queue.setdefault(queue, []).append((job_dir, pbs_path))
 
-    def process_queue(queue, jobs):
+    # Process each queue independently (deterministic order by queue name)
+    for queue in sorted(jobs_by_queue.keys(), key=lambda q: (q or "")):
+        jobs = jobs_by_queue[queue]
         queue_label = queue or "(default)"
-        _safe_print(f"\n--- Queue: {queue_label} ({len(jobs)} job(s)) ---")
+        print(f"\n--- Queue: {queue_label} ({len(jobs)} job(s)) ---")
 
         limit = queue_limits.get(queue)
         requires_serial = limit is not None and limit <= 1
@@ -246,9 +239,9 @@ def main():
             for job_dir, pbs_path in jobs:
                 ok, msg = submit_job(pbs_path)
                 if ok:
-                    _safe_print(f"[OK] Submitted {job_dir}: {msg}")
+                    print(f"[OK] Submitted {job_dir}: {msg}")
                 else:
-                    _safe_print(f"[WARN] Immediate submit failed {job_dir}: {msg}")
+                    print(f"[WARN] Immediate submit failed {job_dir}: {msg}")
                     failed.append((job_dir, pbs_path))
 
             for job_dir, pbs_path in failed:
@@ -262,20 +255,6 @@ def main():
 
         if args.wait_between_queues and queue:
             wait_for_queue_drain(queue, args.sleep_sec)
-
-    # Submit all queues in parallel; each queue's internal ordering is preserved.
-    queues = sorted(jobs_by_queue.keys(), key=lambda q: (q or ""))
-    with ThreadPoolExecutor(max_workers=len(queues) or 1) as executor:
-        futures = {
-            executor.submit(process_queue, queue, jobs_by_queue[queue]): queue
-            for queue in queues
-        }
-        for future in as_completed(futures):
-            queue = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                _safe_print(f"[ERROR] Queue {queue or '(default)'} raised: {exc}")
 
     print("\nAll submissions attempted.")
     return 0
