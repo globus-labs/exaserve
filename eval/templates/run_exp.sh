@@ -65,6 +65,7 @@ LAUNCH_CLUSTER_SCRIPT="/home/wenyiw/aurora_rayserver/scripts/launch_cluster.sh"
 # MPI_API_SERVER_SCRIPT="$SCRIPT_DIR/../mpi_customized/api_server/run_api_server.py"
 REPLAY_CLIENT_SCRIPT="/home/wenyiw/aurora_rayserver/eval/replay_client.py"
 ENV_SETUP_SCRIPT="/home/wenyiw/script/env_aurora"
+# ENV_SETUP_SCRIPT="/home/wenyiw/script/env_local"
 
 # ==============================================================================
 # VALIDATION
@@ -231,10 +232,12 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
     SERVICE_READY_FLAG="/tmp/aurora_ready_$$_${RETRY_COUNT}"
     rm -f "$SERVICE_READY_FLAG"
     
-    # Start a background process to read from pipe and detect ready message
+    # Start a background process to read from pipe and detect ready message.
+    # driver.py prints "[Driver] ALL SERVICES READY" after both Ray Serve
+    # and the optional proxy (LiteLLM/HAProxy) are fully up.
     while IFS= read -r line; do
         echo "$line"  # Echo to stdout for visibility
-        if [[ "$line" == *"[AuroraServe] Service available at http://localhost:8000/v1"* ]]; then
+        if [[ "$line" == *"[Driver] ALL SERVICES READY"* ]]; then
             touch "$SERVICE_READY_FLAG"
         fi
     done < "$SERVICE_PIPE" &

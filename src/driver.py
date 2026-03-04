@@ -4,6 +4,8 @@ import subprocess
 import sys
 import time
 import socket
+import urllib.error
+import urllib.request
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -28,6 +30,12 @@ os.environ["TMPDIR"] = "/tmp"
 # Architecture: Router (CPU, HTTP ingress) → ModelWorker (1 GPU, vLLM engine).
 # Replica counts auto-scale to cluster size in aurora_serve.py.
 NUM_GPU_TILES_PER_NODE = 12  # 6 PVC cards × 2 tiles (ZE_FLAT_DEVICE_HIERARCHY=FLAT)
+
+# Ray Serve HTTP proxy port -- must match aurora_serve.py serve.start() config
+RAY_SERVE_PORT = 8000
+
+# How long to wait for Ray Serve to become healthy before starting the proxy
+RAY_SERVE_HEALTH_TIMEOUT_S = 1800  # 30 min covers large-scale deployments
 
 
 def get_rank():
@@ -104,6 +112,110 @@ def start_ray_worker(head_ip, head_port):
     return subprocess.Popen(cmd, env=get_ray_env())
 
 
+def wait_for_ray_serve(
+    port: int = RAY_SERVE_PORT,
+    timeout: float = RAY_SERVE_HEALTH_TIMEOUT_S,
+) -> bool:
+    """
+    Poll http://localhost:{port}/health until 200 OK or timeout.
+
+    Returns True when Ray Serve is healthy, False on timeout.
+    """
+    url = f"http://127.0.0.1:{port}/health"
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    print(f"[Driver] Waiting for Ray Serve to become healthy on port {port}...", flush=True)
+    while time.monotonic() < deadline:
+        attempt += 1
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                if resp.status == 200:
+                    print(
+                        f"[Driver] Ray Serve healthy after {attempt} poll(s).",
+                        flush=True,
+                    )
+                    return True
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(5)
+    print(
+        f"[Driver] WARNING: Ray Serve did not become healthy within {timeout}s.",
+        flush=True,
+    )
+    return False
+
+
+def start_proxy(proxy_config, deploy_config, config_path: str):
+    """
+    Start the configured proxy backend (if type != 'none').
+
+    Returns (proxy_backend_instance, proxy_process) or (None, None).
+    """
+    if proxy_config.type == "none":
+        return None, None
+
+    # proxy/ lives alongside driver.py in src/; Python adds src/ to sys.path
+    # automatically when running src/driver.py, so no path manipulation needed.
+    from proxy import get_proxy
+    from proxy.backends import discover_backends
+
+    proxy = get_proxy(proxy_config.type)
+
+    # Use the config file's parent directory as output dir for generated configs
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(config_path)), "proxy_out")
+
+    backends = discover_backends(
+        deploy_config=deploy_config,
+        backend_port=proxy_config.backend_port,
+    )
+
+    # Merge python_path into options so proxy backends can use it.
+    proxy_options = dict(proxy_config.options)
+    if proxy_config.python_path:
+        proxy_options["python_path"] = proxy_config.python_path
+
+    cfg_file = proxy.generate_config(
+        backends,
+        output_dir=output_dir,
+        **proxy_options,
+    )
+
+    proc = proxy.start(cfg_file, host="0.0.0.0", port=proxy_config.port)
+
+    healthy = proxy.health_check(
+        "127.0.0.1", proxy_config.port, timeout=3600.0, process=proc,
+    )
+    if not healthy:
+        # Collect exit code for the error message
+        rc = proc.poll()
+        if rc is not None:
+            msg = (
+                f"Proxy ({proxy_config.type}) process died immediately "
+                f"(exit code {rc}). Check logs above for errors."
+            )
+        else:
+            proc.kill()
+            proc.wait()
+            msg = (
+                f"Proxy ({proxy_config.type}) health check timed out after 60s "
+                f"on port {proxy_config.port}."
+            )
+        raise RuntimeError(f"[Driver] FATAL: {msg}")
+
+    print(
+        f"[Driver] Proxy ({proxy_config.type}) ready on "
+        f"http://0.0.0.0:{proxy_config.port}",
+        flush=True,
+    )
+    return proxy, proc
+
+
+def stop_proxy(proxy, proc):
+    """Stop the proxy process if one was started."""
+    if proxy is not None and proc is not None:
+        proxy.stop(proc)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--head-ip", required=True, help="IP Address of the Head Node")
@@ -121,6 +233,9 @@ def main():
     print(f"[Driver] Node: {hostname} | Rank: {rank} | Role: {'HEAD' if rank == 0 else 'WORKER'}", flush=True)
 
     ray_process = None
+    serve_process = None
+    proxy_backend = None
+    proxy_process = None
 
     try:
         if rank == 0:
@@ -133,12 +248,40 @@ def main():
             print("[Driver] Waiting 10s for Ray GCS to stabilize...", flush=True)
             time.sleep(10)
 
-            # 3. Launch Aurora Serve
+            # 3. Launch Aurora Serve as a non-blocking subprocess so that the
+            #    proxy can be started after Ray Serve is ready, and both run
+            #    concurrently for the lifetime of the cluster.
             serve_cmd = [sys.executable, "src/aurora_serve.py"]
             if args.config:
                 serve_cmd.extend(["--config", args.config])
             print(f"[Driver] Launching Aurora Serve: {' '.join(serve_cmd)}", flush=True)
-            subprocess.run(serve_cmd, check=True, env=get_ray_env())
+            serve_process = subprocess.Popen(serve_cmd, env=get_ray_env())
+
+            # 4. Load proxy config (if a config file was provided)
+            if args.config:
+                from schemas import load_deployment_config, load_proxy_config
+                proxy_config = load_proxy_config(args.config)
+                deploy_config = load_deployment_config(args.config)
+
+                if proxy_config.type != "none":
+                    # Wait for Ray Serve to be healthy before starting the proxy
+                    wait_for_ray_serve(port=RAY_SERVE_PORT)
+                    proxy_backend, proxy_process = start_proxy(
+                        proxy_config, deploy_config, args.config
+                    )
+
+            # 5. Signal that ALL services (Ray Serve + proxy) are ready.
+            #    run_exp.sh watches for this exact line to start the client.
+            print("[Driver] ALL SERVICES READY", flush=True)
+
+            # 6. Wait for Aurora Serve to exit (it blocks until the cluster shuts down)
+            serve_process.wait()
+            if serve_process.returncode != 0:
+                print(
+                    f"[Driver] Aurora Serve exited with code {serve_process.returncode}.",
+                    flush=True,
+                )
+
             print("[Driver] Aurora Serve finished. Shutting down cluster.", flush=True)
 
         else:
@@ -154,6 +297,20 @@ def main():
     except Exception as e:
         print(f"[Driver] Critical Error: {e}", flush=True)
     finally:
+        # Stop the proxy before shutting down Ray
+        if rank == 0:
+            stop_proxy(proxy_backend, proxy_process)
+
+        # Ensure aurora_serve doesn't outlive driver.py on unexpected exit
+        if serve_process and serve_process.poll() is None:
+            print("[Driver] Terminating Aurora Serve process...", flush=True)
+            serve_process.terminate()
+            try:
+                serve_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                serve_process.kill()
+                serve_process.wait()
+
         # Cleanup ensures we don't leave zombie processes
         if ray_process and ray_process.poll() is None:
             print("[Driver] Terminating Ray process...", flush=True)

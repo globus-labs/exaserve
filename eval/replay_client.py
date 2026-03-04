@@ -338,7 +338,12 @@ async def replay(
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f) or {}
     trace_path = _config_trace_path(cfg)
-    port = cfg.get('port', 8000)
+    proxy_cfg = cfg.get('proxy_config', {})
+    proxy_type = proxy_cfg.get('type', 'none')
+    if proxy_type != 'none':
+        port = proxy_cfg.get('port', 4000)
+    else:
+        port = cfg.get('port', 8000)
 
     replay_cfg = cfg.get('job_replay_client_config', {})
     generation_mode = replay_cfg.get('generation_mode', 'deterministic')
@@ -382,7 +387,7 @@ async def replay(
             print(f">>> [DEST] cluster mode — {len(base_urls)} node(s): {cluster_nodes}")
     else:
         cluster_nodes = []
-        base_urls = [f"http://localhost:{port}"]
+        base_urls = [f"http://0.0.0.0:{port}"]
         if is_root:
             print(f">>> [DEST] node mode — target: {base_urls[0]}")
 

@@ -39,7 +39,19 @@ echo "[System] Total Nodes: $NODE_COUNT"
 # --- 4. Atomic Launch ---
 echo "[System] Launching Cluster..."
 
-# Optional: path to deployment/experiment config passed from run_exp.sh (for PBS jobs)
+# Optional: path to deployment/experiment config passed from run_exp.sh (for PBS jobs).
+# The proxy layer is configured via the optional 'proxy_config' section in this YAML
+# (type, port, backend_port, options). Set type: "none" or omit the section entirely
+# to disable the proxy (backward-compatible default).
+#
+# Example proxy_config section to add to the experiment config YAML:
+#   proxy_config:
+#     type: litellm          # or "haproxy"
+#     port: 4000             # port users will hit
+#     backend_port: 8000     # port Ray Serve listens on (default)
+#     options:
+#       master_key: "sk-aurora-master-key"
+#       routing_strategy: "least-busy"
 DEPLOYMENT_CONFIG_PATH="${1:-}"
 
 export ZE_FLAT_DEVICE_HIERARCHY="FLAT"

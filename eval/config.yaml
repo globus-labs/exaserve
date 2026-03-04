@@ -1,19 +1,24 @@
 job_replay_client_config:
   config_path: config.yaml
+  dest: cluster
   early_stop: 0.0
+  generation_mode: deterministic
   include_tp: false
   no_warmup: false
+  num_cli_per_node: 1.0
+  num_nodes: 1
   num_runs: 1
+  num_workers_per_node: 4
 job_seed: 42
 job_trace_config:
   duration: 300.0
-  input_prompt_path: /home/wenyiw/aurora_rayserver/data_local/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json
-  input_trace_path: /home/wenyiw/aurora_rayserver/data_local/input_traces/AzureLLMInferenceTrace_code_1week.csv
+  input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json
+  input_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/AzureLLMInferenceTrace_code_1week.csv
   modes:
     chat: 1
     completion: 0
   output_len: 128
-  output_trace_path: /home/wenyiw/aurora_rayserver/data_local/output_traces/sparse_300s_300x.jsonl
+  output_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/output_traces/sparse_300s_300x.jsonl
   sampling_strategy: sparse
   speedup: 300.0
 model_deployment_config:
@@ -25,21 +30,24 @@ model_deployment_config:
     max_model_len: 4096
     model_id: meta-llama/Meta-Llama-3-8B-Instruct
     num_cpus_per_replica: 4
-    num_replicas: 4
-    num_router_cpus: 1
-    num_routers_per_replica: 0.5
+    num_replicas: null
     size: 8
     tensor_parallel_size: 1
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
-  num_gpus_per_node: 4
-  num_nodes: 1
-  router_max_ongoing: 200
+  num_gpus_per_node: 12
+  num_nodes: 2
   worker_max_ongoing: 32
 pbs_job_name: sparse
-pbs_num_nodes: 1
+pbs_num_nodes: 2
 pbs_queue_name: debug
-pbs_result_dir: /home/wenyiw/aurora_rayserver/data_local/results/sparse
-pbs_stderr_dir: /home/wenyiw/aurora_rayserver/data_local/pbs_output/sparse/stderr
-pbs_stdout_dir: /home/wenyiw/aurora_rayserver/data_local/pbs_output/sparse/stdout
+pbs_result_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/results/sparse
+pbs_stderr_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/sparse/stderr
+pbs_stdout_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/sparse/stdout
 pbs_walltime: 00:30:00
 pbs_working_dir: .
+proxy_config:
+  backend_port: 8000
+  python_path: "/home/wenyiw/agpt/venv/litellm/bin/python3"
+  options: {}
+  port: 4001
+  type: litellm

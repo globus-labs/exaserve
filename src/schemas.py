@@ -49,6 +49,33 @@ class WeakScalingConfig:
     output_trace_path: str
 
 @dataclass
+class ProxyConfig:
+    """
+    Configuration for the optional proxy layer launched on the head node.
+
+    type: str
+        "litellm" -- LiteLLM proxy (API keys, rate limiting, model routing, usage tracking)
+        "none"    -- no proxy (default; backward-compatible with all existing experiments)
+        "haproxy" -- HAProxy (pure L7 load balancing; good performance baseline)
+
+    port: int
+        The port the proxy listens on. Users hit http://<head>:<port>.
+
+    backend_port: int
+        The port where Ray Serve HTTP proxies listen on each node (default 8000).
+
+    options: dict
+        Passed verbatim to the proxy backend's generate_config() as **kwargs.
+        See litellm_proxy.py / haproxy_proxy.py for supported keys.
+    """
+    type: str = "none"
+    port: int = 4001
+    backend_port: int = 8000
+    python_path: str = ""   # Python interpreter for the proxy process (empty = sys.executable)
+    options: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ReplayClientConfig:
     config_path: str = "config.yaml"
     include_tp: bool = False
@@ -104,6 +131,29 @@ def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
     )
 
 
+def _proxy_config_from_dict(d: Dict[str, Any]) -> ProxyConfig:
+    """Build ProxyConfig from a dict (e.g. YAML-loaded)."""
+    return ProxyConfig(
+        type=str(d.get("type", "none")),
+        port=int(d.get("port", 4001)),
+        backend_port=int(d.get("backend_port", 8000)),
+        python_path=str(d.get("python_path", "")),
+        options=d.get("options", {}),
+    )
+
+
+def load_proxy_config(path: str) -> ProxyConfig:
+    """
+    Load ProxyConfig from a YAML file.
+    Reads the optional top-level 'proxy_config' key.
+    Returns a default (type="none") ProxyConfig if the key is absent.
+    """
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    proxy_data = data.get("proxy_config", {})
+    return _proxy_config_from_dict(proxy_data)
+
+
 def load_deployment_config(path: str) -> DeploymentConfig:
     """
     Load DeploymentConfig from a YAML file.
@@ -134,6 +184,8 @@ class ExpConfig:
     job_seed: int
     # Model Serving
     model_deployment_config: DeploymentConfig
+    # Optional proxy layer (defaults to disabled for backward compat)
+    proxy_config: ProxyConfig = field(default_factory=ProxyConfig)
     
     
     def to_yaml_dict(self) -> Dict[str, Any]:
