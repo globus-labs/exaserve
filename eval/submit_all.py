@@ -32,11 +32,11 @@ def get_script_dir():
 
 
 def discover_job_dirs(parent_dir):
-    """Find subdirs of parent_dir that contain job.pbs."""
+    """Find subdirs of parent_dir that contain config/job.pbs."""
     job_dirs = []
     for name in sorted(os.listdir(parent_dir)):
         path = os.path.join(parent_dir, name)
-        if os.path.isdir(path) and os.path.exists(os.path.join(path, "job.pbs")):
+        if os.path.isdir(path) and os.path.exists(os.path.join(path, "config", "job.pbs")):
             job_dirs.append(name)
     return job_dirs
 
@@ -217,7 +217,7 @@ def main():
 
     jobs_by_queue = {}
     for job_dir in job_dirs:
-        pbs_path = os.path.join(parent_dir, job_dir, "job.pbs")
+        pbs_path = os.path.join(parent_dir, job_dir, "config", "job.pbs")
         queue = read_queue_from_pbs(pbs_path)
         if not os.path.exists(pbs_path):
             print(f"[SKIP] Missing job.pbs: {pbs_path}")

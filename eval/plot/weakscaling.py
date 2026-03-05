@@ -11,11 +11,15 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import json
-import os
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 import argparse
+
+# Allow importing from the parent eval/ directory
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from exp_configs import EXPERIMENT_REGISTRY, DEFAULT_EXPERIMENTS_ROOT
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -35,16 +39,6 @@ except OSError:
         except OSError:
             # Fall back to default with custom styling
             pass
-
-# Constant: folder path containing the experiment results
-# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_ray"
-# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_ray"
-# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/null_compute_ray"
-# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_4_workers_ray"
-# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_8_workers_ray"
-# RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_tests_0125_cli_1_workers_ray"
-RESULTS_FOLDER = "/home/wenyiw/agpt/data/results/weak_scaling_ray_2"
-
 
 
 def extract_node_count(directory_name: str) -> int:
@@ -120,7 +114,8 @@ def load_results(
     Load results from all node configurations.
     
     Args:
-        results_folder: Path to results
+        results_folder: Path to the experiment directory (e.g. data/experiments/<exp>).
+                        Results are expected at <N_nodes>/results/result*.json.
         target_indices: Optional list of indices to aggregate (e.g. [0, 1, 2]).
                         If None, uses the latest result file in each dir.
         excluded_nodes: Optional list of node counts to exclude from the plot.
@@ -158,7 +153,7 @@ def load_results(
         if node_select_map is not None:
             if node_count in node_select_map:
                 idx = node_select_map[node_count]
-                fpath = subdir / f"result{idx}.json"
+                fpath = subdir / "results" / f"result{idx}.json"
                 if not fpath.exists():
                     missing_files.append(str(fpath))
                     print(f"Warning: {fpath} not found, skipping {subdir.name}")
@@ -176,7 +171,7 @@ def load_results(
                     print(f"Error reading {fpath}: {e}")
             else:
                 # Node not listed in --node-list: fall back to latest
-                candidates = list(subdir.glob("result*.json"))
+                candidates = list((subdir / "results").glob("result*.json"))
                 if not candidates:
                     print(f"Warning: No result files found in {subdir.name}, skipping")
                     continue
@@ -207,7 +202,7 @@ def load_results(
             tps_list, rps_list = [], []
             p50_list, p99_list, lat_min_list, lat_max_list, lat_mean_list = [], [], [], [], []
             for idx in target_indices:
-                fpath = subdir / f"result{idx}.json"
+                fpath = subdir / "results" / f"result{idx}.json"
                 if not fpath.exists():
                     missing_files.append(str(fpath))
                     continue
@@ -245,7 +240,7 @@ def load_results(
             continue
 
         # ── Mode 3: latest result only (default) ──────────────────────────────
-        candidates = list(subdir.glob("result*.json"))
+        candidates = list((subdir / "results").glob("result*.json"))
         if not candidates:
             print(f"Warning: No result files found in {subdir.name}, skipping")
             continue
@@ -517,7 +512,13 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
 def main():
     """Main function to load results and generate plot."""
     parser = argparse.ArgumentParser(description='Plot weak scaling results')
-    parser.add_argument("--output_path", type=str, default=None,
+    parser.add_argument("-e", "--experiment", type=str, required=True,
+                       help=f"Experiment name from EXPERIMENT_REGISTRY. "
+                            f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}.")
+    parser.add_argument("-b", "--backend", type=str, default="ray",
+                       help="Backend name used to resolve the experiment's batch_name "
+                            "(e.g. 'ray', 'mpi'). Default: ray.")
+    parser.add_argument("-o", "--output_path", type=str, default=None,
                        help="Path to save the output plot (default: weak_scaling_log.png or weak_scaling_linear.png)")
     parser.add_argument("--linear", action="store_true", 
                        help="Use linear scale for X and Y axes (default: log scale)")
@@ -537,7 +538,19 @@ def main():
 
     if bool(args.node_list) != bool(args.select):
         parser.error("--node-list and --select must be used together.")
-    
+
+    # Resolve results folder from the experiment registry
+    if args.experiment not in EXPERIMENT_REGISTRY:
+        parser.error(
+            f"Unknown experiment '{args.experiment}'. "
+            f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}"
+        )
+    params = EXPERIMENT_REGISTRY[args.experiment]
+    batch_name = params.batch_name.format(backend=args.backend)
+    results_folder = os.path.join(DEFAULT_EXPERIMENTS_ROOT, batch_name)
+    print(f"Experiment : {args.experiment}  (backend={args.backend})")
+    print(f"Batch name : {batch_name}")
+
     # Determine default output filename
     if not args.output_path:
         suffix = "linear" if args.linear else "log"
@@ -558,8 +571,8 @@ def main():
     if excluded_nodes:
         print(f"Excluding nodes: {excluded_nodes}")
     
-    print(f"Loading results from: {RESULTS_FOLDER}")
-    results, missing_files = load_results(RESULTS_FOLDER, target_indices, excluded_nodes, node_select_map)
+    print(f"Loading results from: {results_folder}")
+    results, missing_files = load_results(results_folder, target_indices, excluded_nodes, node_select_map)
     
     if missing_files:
         print("\n" + "!"*50)

@@ -1,6 +1,7 @@
 import os
 import sys
-from typing import List
+from dataclasses import dataclass
+from typing import List, Dict, Optional
 
 # Add src directory to path for schemas
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
@@ -10,6 +11,7 @@ from schemas import (
     ReplayClientConfig,
     TraceGeneratorConfig,
     WeakScalingConfig,
+    ProxyConfig,
     ExpConfig,
 )
 
@@ -23,9 +25,206 @@ DEFAULT_MODEL_PATH = "/lus/flare/projects/AuroraGPT/wenyiw/models"
 DEFAULT_INPUT_TRACE_PATH = os.path.join(DEFAULT_DATA_ROOT, "input_traces/AzureLLMInferenceTrace_code_1week.csv") 
 DEFAULT_INPUT_PROMPT_PATH = os.path.join(DEFAULT_DATA_ROOT, "input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json")
 DEFAULT_OUTPUT_TRACE_DIR = os.path.join(DEFAULT_DATA_ROOT, "output_traces")
-DEFAULT_RESULTS_ROOT = os.path.join(DEFAULT_DATA_ROOT, "results")
-DEFAULT_PBS_OUTPUT_ROOT = os.path.join(DEFAULT_DATA_ROOT, "pbs_output")
+DEFAULT_EXPERIMENTS_ROOT = os.path.join(DEFAULT_DATA_ROOT, "experiments")
 
+
+# ---------------------------------------------------------------------------
+# WeakScalingExpParams — all per-experiment-type knobs in one place
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WeakScalingExpParams:
+    """
+    Describes one weak-scaling experiment variant.
+    Pass an instance to build_weak_scaling_configs() to get the full ExpConfig list.
+    """
+    # Experiment identity
+    batch_name: str                       # supports {backend} placeholder, e.g. "weak_scaling_{backend}"
+    num_nodes_list: List[int]
+    null_compute: bool = False            # injects AURORA_NULL_COMPUTE=1 into the PBS job
+
+    # Trace / workload
+    rate_per_node: float = 80.0           # requests per node per second
+    duration: float = 5.0
+    input_len: int = 2048
+    output_len: int = 512
+
+    # Model (→ ModelConfig)
+    model_id: str = "meta-llama/Meta-Llama-3-8B-Instruct"
+    model_tensor_parallel_size: int = 1
+    model_max_model_len: int = 4096
+    model_size: int = 8                   # used by trace generator
+    model_storage_path: str = DEFAULT_MODEL_PATH
+
+    # Deployment (→ DeploymentConfig)
+    deployment_worker_max_ongoing: int = 64
+
+    # Client (→ ReplayClientConfig)
+    client_num_runs: int = 1
+    client_num_cli_per_node: float = 1
+    client_num_workers_per_node: int = 4  # micro-benchmark default; increase for throughput runs
+    client_dest: str = "proxy"            # "proxy": local workers → proxy (ignores MPI args)
+                                          # "direct": MPI round-robin to servers (no proxy)
+
+    # Proxy (→ ProxyConfig)
+    proxy_type: str = "litellm"
+    proxy_python_path: str = "/home/wenyiw/agpt/venv/litellm/bin/python3"
+
+
+def _walltime_and_queue(num_nodes: int):
+    """Return (walltime, queue_name) based on node count."""
+    if num_nodes <= 2:
+        return "01:00:00", "debug"
+    elif num_nodes <= 256:
+        return "01:00:00", "debug-scaling"
+    else:
+        return "02:00:00", "prod"
+
+
+def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> List[ExpConfig]:
+    """
+    Build a list of ExpConfig objects from a WeakScalingExpParams descriptor.
+
+    Args:
+        backend: "ray" or "mpi"
+        params:  A WeakScalingExpParams instance from EXPERIMENT_REGISTRY
+    """
+    batch_name = params.batch_name.format(backend=backend)
+    base_exp_dir = os.path.join(DEFAULT_EXPERIMENTS_ROOT, batch_name)
+
+    model_cfgs = [
+        ModelConfig(
+            model_id=params.model_id,
+            tensor_parallel_size=params.model_tensor_parallel_size,
+            max_model_len=params.model_max_model_len,
+            size=params.model_size,
+        ),
+    ]
+
+    configs = []
+    for num_nodes in params.num_nodes_list:
+        if num_nodes < 1:
+            raise ValueError(f"num_nodes must be >= 1, got {num_nodes}")
+
+        walltime, queue_name = _walltime_and_queue(num_nodes)
+
+        node_dir_name = f"{num_nodes}_nodes"
+        node_base       = os.path.join(base_exp_dir, node_dir_name)
+        pbs_working_dir = os.path.join(node_base, "config")
+        pbs_result_dir  = os.path.join(node_base, "results")
+        pbs_stdout_dir  = os.path.join(node_base, "pbs_output", "stdout")
+        pbs_stderr_dir  = os.path.join(node_base, "pbs_output", "stderr")
+        trace_output_path = os.path.join(DEFAULT_OUTPUT_TRACE_DIR, f"{batch_name}_{num_nodes}n.jsonl")
+        config_file_path  = os.path.join(pbs_working_dir, "config.yaml")
+
+        trace_cfg = WeakScalingConfig(
+            input_prompt_path=DEFAULT_INPUT_PROMPT_PATH,
+            duration=params.duration,
+            rpn=params.rate_per_node,
+            input_len=params.input_len,
+            output_len=params.output_len,
+            output_trace_path=trace_output_path,
+        )
+        dep = DeploymentConfig(
+            deployment_name=batch_name,
+            model_configs=model_cfgs,
+            num_nodes=num_nodes,
+            model_storage_path=params.model_storage_path,
+            worker_max_ongoing=params.deployment_worker_max_ongoing,
+        )
+        replay_cfg = ReplayClientConfig(
+            config_path=config_file_path,
+            no_warmup=False,
+            num_runs=params.client_num_runs,
+            dest=params.client_dest,
+            num_nodes=num_nodes,
+            num_cli_per_node=params.client_num_cli_per_node,
+            num_workers_per_node=params.client_num_workers_per_node,
+        )
+        proxy_cfg = ProxyConfig(type=params.proxy_type, python_path=params.proxy_python_path)
+
+        exp_cfg = ExpConfig(
+            pbs_result_dir=pbs_result_dir,
+            pbs_stdout_dir=pbs_stdout_dir,
+            pbs_stderr_dir=pbs_stderr_dir,
+            pbs_num_nodes=num_nodes,
+            pbs_walltime=walltime,
+            pbs_queue_name=queue_name,
+            pbs_job_name=f"{batch_name}_{num_nodes}n",
+            pbs_working_dir=pbs_working_dir,
+            job_replay_client_config=replay_cfg,
+            job_trace_config=trace_cfg,
+            job_seed=42,
+            model_deployment_config=dep,
+            proxy_config=proxy_cfg,
+        )
+        configs.append(exp_cfg)
+    return configs
+
+
+# ---------------------------------------------------------------------------
+# Experiment registry — add new variants here, one dict entry each
+# ---------------------------------------------------------------------------
+
+EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
+    # --- proxy-mode experiments (litellm in front, local client workers) ---
+    "null_compute_litellm": WeakScalingExpParams(
+        batch_name="null_compute_litellm_{backend}",
+        num_nodes_list=[1, 2, 4, 8, 16, 32, 64],
+        null_compute=True,
+        rate_per_node=80,
+        client_num_runs=3,
+        client_dest="proxy",
+    ),
+    "weak_scaling_litellm": WeakScalingExpParams(
+        batch_name="weak_scaling_litellm_{backend}",
+        num_nodes_list=[1, 2, 4, 8, 16, 32, 64],
+        rate_per_node=80,
+        client_num_runs=3,
+        client_dest="proxy",
+    ),
+    # --- direct-mode experiments (MPI round-robin, no proxy, lower-bound baseline) ---
+    "weak_scaling": WeakScalingExpParams(
+        batch_name="weak_scaling_{backend}_2",
+        num_nodes_list=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+        rate_per_node=80,
+        client_num_runs=3,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+    "null_compute": WeakScalingExpParams(
+        batch_name="null_compute_{backend}",
+        num_nodes_list=[256, 512, 1024, 2048],
+        null_compute=True,
+        rate_per_node=80,
+        client_num_runs=3,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+    "weak_scaling_tests": WeakScalingExpParams(
+        batch_name="weak_scaling_tests_0125_cli_1_workers_{backend}",
+        num_nodes_list=[1, 2, 4, 8],
+        rate_per_node=80,
+        client_num_runs=1,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+    "null_compute_tests": WeakScalingExpParams(
+        batch_name="null_compute_tests_{backend}",
+        num_nodes_list=[1, 2, 4, 8, 16],
+        null_compute=True,
+        rate_per_node=80,
+        client_num_runs=1,
+        client_num_cli_per_node=0.5,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# One-off / legacy single-config functions (kept for manual / ad-hoc use)
+# ---------------------------------------------------------------------------
 
 def peak_trace_config() -> ExpConfig:
     model_cfgs = [
@@ -46,22 +245,22 @@ def peak_trace_config() -> ExpConfig:
         output_len=128,
         output_trace_path=os.path.join(DEFAULT_OUTPUT_TRACE_DIR, 'peak_30s_10x.jsonl'),
     )
-    pbs_out = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, "peak")
+    node_base = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "peak", "1_nodes")
     dep = DeploymentConfig(
         model_configs=model_cfgs,
         num_gpus_per_node=4,
         num_nodes=1,
     )
     return ExpConfig(
-        pbs_result_dir=os.path.join(DEFAULT_RESULTS_ROOT, "peak"),
-        pbs_stdout_dir=os.path.join(pbs_out, "stdout"),
-        pbs_stderr_dir=os.path.join(pbs_out, "stderr"),
+        pbs_result_dir=os.path.join(node_base, "results"),
+        pbs_stdout_dir=os.path.join(node_base, "pbs_output", "stdout"),
+        pbs_stderr_dir=os.path.join(node_base, "pbs_output", "stderr"),
         pbs_num_nodes=1,
         pbs_walltime="00:30:00",
         pbs_queue_name="debug",
         pbs_job_name="peak",
-        pbs_working_dir=".",
-        job_replay_client_config=ReplayClientConfig(config_path="config.yaml"),
+        pbs_working_dir=os.path.join(node_base, "config"),
+        job_replay_client_config=ReplayClientConfig(config_path=os.path.join(node_base, "config", "config.yaml")),
         job_trace_config=trace_cfg,
         job_seed=42,
         model_deployment_config=dep,
@@ -86,18 +285,18 @@ def burst_trace_config() -> ExpConfig:
         output_len=128,
         output_trace_path=os.path.join(DEFAULT_OUTPUT_TRACE_DIR, 'peak_30s_10x.jsonl'),
     )
-    pbs_out = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, "burst")
+    node_base = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "burst", "1_nodes")
     dep = DeploymentConfig(model_configs=model_cfgs, num_gpus_per_node=4, num_nodes=1)
     return ExpConfig(
-        pbs_result_dir=os.path.join(DEFAULT_RESULTS_ROOT, "burst"),
-        pbs_stdout_dir=os.path.join(pbs_out, "stdout"),
-        pbs_stderr_dir=os.path.join(pbs_out, "stderr"),
+        pbs_result_dir=os.path.join(node_base, "results"),
+        pbs_stdout_dir=os.path.join(node_base, "pbs_output", "stdout"),
+        pbs_stderr_dir=os.path.join(node_base, "pbs_output", "stderr"),
         pbs_num_nodes=1,
         pbs_walltime="00:30:00",
         pbs_queue_name="debug",
         pbs_job_name="burst",
-        pbs_working_dir=".",
-        job_replay_client_config=ReplayClientConfig(config_path="config.yaml"),
+        pbs_working_dir=os.path.join(node_base, "config"),
+        job_replay_client_config=ReplayClientConfig(config_path=os.path.join(node_base, "config", "config.yaml")),
         job_trace_config=trace_cfg,
         job_seed=42,
         model_deployment_config=dep,
@@ -123,27 +322,25 @@ def sparse_trace_config() -> ExpConfig:
         output_len=128,
         output_trace_path=os.path.join(DEFAULT_OUTPUT_TRACE_DIR, 'sparse_300s_300x.jsonl'),
     )
-    pbs_out = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, "sparse")
+    node_base = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "sparse", "2_nodes")
     dep = DeploymentConfig(model_configs=model_cfgs, num_nodes=num_nodes)
     return ExpConfig(
-        pbs_result_dir=os.path.join(DEFAULT_RESULTS_ROOT, "sparse"),
-        pbs_stdout_dir=os.path.join(pbs_out, "stdout"),
-        pbs_stderr_dir=os.path.join(pbs_out, "stderr"),
+        pbs_result_dir=os.path.join(node_base, "results"),
+        pbs_stdout_dir=os.path.join(node_base, "pbs_output", "stdout"),
+        pbs_stderr_dir=os.path.join(node_base, "pbs_output", "stderr"),
         pbs_num_nodes=2,
         pbs_walltime="00:30:00",
         pbs_queue_name="debug",
         pbs_job_name="sparse",
-        pbs_working_dir=".",
-        job_replay_client_config=ReplayClientConfig(config_path="config.yaml", dest="cluster"),
+        pbs_working_dir=os.path.join(node_base, "config"),
+        job_replay_client_config=ReplayClientConfig(config_path=os.path.join(node_base, "config", "config.yaml"), dest="direct"),
         job_trace_config=trace_cfg,
         job_seed=42,
         model_deployment_config=dep,
     )
 
 def get_example_trace_config() -> ExpConfig:
-    """
-    Returns an example ExpConfig for testing trace_generator.py
-    """
+    """Returns an example ExpConfig for testing trace_generator.py"""
     model_cfgs = [
         ModelConfig(
             model_id="meta-llama/Meta-Llama-3-8B",
@@ -162,436 +359,19 @@ def get_example_trace_config() -> ExpConfig:
         output_len=128,
         output_trace_path=os.path.join(DEFAULT_OUTPUT_TRACE_DIR, 'peak_300s_10x_0.jsonl'),
     )
+    node_base = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "manual", "1_nodes")
     dep = DeploymentConfig(model_configs=model_cfgs, num_gpus_per_node=4, num_nodes=1)
     return ExpConfig(
-        pbs_result_dir=os.path.join(DEFAULT_RESULTS_ROOT, "manual_results"),
-        pbs_stdout_dir=os.path.join("manual_pbs", "stdout"),
-        pbs_stderr_dir=os.path.join("manual_pbs", "stderr"),
+        pbs_result_dir=os.path.join(node_base, "results"),
+        pbs_stdout_dir=os.path.join(node_base, "pbs_output", "stdout"),
+        pbs_stderr_dir=os.path.join(node_base, "pbs_output", "stderr"),
         pbs_num_nodes=1,
         pbs_walltime="00:30:00",
         pbs_queue_name="debug",
         pbs_job_name="manual_run",
-        pbs_working_dir=".",
-        job_replay_client_config=ReplayClientConfig(config_path="config.yaml", no_warmup=False, num_runs=1),
+        pbs_working_dir=os.path.join(node_base, "config"),
+        job_replay_client_config=ReplayClientConfig(config_path=os.path.join(node_base, "config", "config.yaml"), no_warmup=False, num_runs=1),
         job_trace_config=trace_cfg,
         job_seed=42,
         model_deployment_config=dep,
     )
-
-# Weak scaling experiments, appear in pairs (MPI or Ray).
-def get_weak_scaling_configs(backend: str = "ray") -> List[ExpConfig]:
-    """
-    Returns a list of ExpConfig objects for weak scaling experiments
-    ranging from 1 to 16 nodes.
-    
-    Args:
-        backend: Either "ray" or "mpi" to determine which backend to use
-    """
-    configs = []
-    
-    # Common parameters for weak scaling
-    num_nodes_list = [1, 2, 4, 8, 16, 32, 64]
-    rate_per_node = 32.0  # requests per node per second
-    duration = 5.0                 
-    input_len = 2048
-    output_len = 512
-    
-    # Model configs
-    model_cfgs = [
-        ModelConfig(
-            model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-            tensor_parallel_size=1,
-            max_model_len=4096,
-            size=8,
-        ),
-    ]
-    batch_name = f"weak_scaling_{backend}"
-    base_working_dir = os.path.join("experiments", batch_name)
-
-    for num_nodes in num_nodes_list:
-        if num_nodes > 1:
-            walltime = "1:00:00"
-            queue_name = "debug-scaling"
-        else:
-            walltime = "01:00:00"
-            queue_name = "debug"
-        node_dir_name = f"{num_nodes}_nodes"
-        pbs_working_dir = os.path.join(base_working_dir, node_dir_name)
-        pbs_result_dir = os.path.join(DEFAULT_RESULTS_ROOT, batch_name, node_dir_name)
-        pbs_stdout_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stdout")
-        pbs_stderr_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stderr")
-        trace_output_path = os.path.join(DEFAULT_OUTPUT_TRACE_DIR, f"{batch_name}_{backend}_{num_nodes}n.jsonl")
-        trace_cfg = WeakScalingConfig(
-            input_prompt_path=DEFAULT_INPUT_PROMPT_PATH,
-            duration=duration,
-            rpn=rate_per_node,
-            input_len=input_len,
-            output_len=output_len,
-            output_trace_path=trace_output_path,
-        )
-        config_file_path = os.path.join(pbs_working_dir, "config.yaml")
-        dep = DeploymentConfig(model_configs=model_cfgs, num_gpus_per_node=4, num_nodes=num_nodes)
-        exp_cfg = ExpConfig(
-            pbs_result_dir=pbs_result_dir,
-            pbs_stdout_dir=pbs_stdout_dir,
-            pbs_stderr_dir=pbs_stderr_dir,
-            pbs_num_nodes=num_nodes,
-            pbs_walltime=walltime,
-            pbs_queue_name=queue_name,
-            pbs_job_name=f"{batch_name}_{num_nodes}n",
-            pbs_working_dir=pbs_working_dir,
-            job_replay_client_config=ReplayClientConfig(config_path=config_file_path, no_warmup=False, num_runs=1, dest="cluster" if num_nodes > 1 else "node", num_nodes=num_nodes),
-            job_trace_config=trace_cfg,
-            job_seed=42,
-            model_deployment_config=dep,
-        )
-        configs.append(exp_cfg)
-    return configs
-
-
-def get_weak_scaling_configs_with_num_runs(backend: str = "ray", num_runs: int = 1) -> List[ExpConfig]:
-    """
-    Returns a list of ExpConfig objects for weak scaling experiments
-    
-    Args:
-        backend: Either "ray" or "mpi" to determine which backend to use
-    """
-    configs = []
-    
-    # Common parameters for weak scaling
-
-    num_nodes_list = [1,2,4,8,16,32,64,128,256,512,1024]
-    rate_per_node = 80 # requests per node per second
-    duration = 5.0                 
-    input_len = 2048
-    output_len = 512
-    
-    # Model configs
-    model_cfgs = [
-        ModelConfig(
-            model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-            tensor_parallel_size=1,
-            max_model_len=4096,
-            size=8,
-        ),
-    ]
-    batch_name = f"weak_scaling_{backend}_2"
-    EVAL_DIR = os.path.join(os.path.dirname(__file__))
-    base_working_dir = os.path.join(EVAL_DIR, "experiments", batch_name)
-
-    for num_nodes in num_nodes_list:
-        if num_nodes < 1:
-            raise ValueError(f"Number of nodes must be greater than 0, got {num_nodes}")
-        elif num_nodes <= 2:
-            walltime = "01:00:00"
-            queue_name = "debug"
-        elif num_nodes <= 256:
-            walltime = "01:00:00"
-            queue_name = "debug-scaling"
-        else:
-            walltime = "02:00:00"
-            queue_name = "prod"
-        node_dir_name = f"{num_nodes}_nodes"
-        pbs_working_dir = os.path.join(base_working_dir, node_dir_name)
-        pbs_result_dir = os.path.join(DEFAULT_RESULTS_ROOT, batch_name, node_dir_name)
-        pbs_stdout_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stdout")
-        pbs_stderr_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stderr")
-        trace_output_path = os.path.join(DEFAULT_OUTPUT_TRACE_DIR, f"{batch_name}_{num_nodes}n.jsonl")
-        trace_cfg = WeakScalingConfig(
-            input_prompt_path=DEFAULT_INPUT_PROMPT_PATH,
-            duration=duration,
-            rpn=rate_per_node,
-            input_len=input_len,
-            output_len=output_len,
-            output_trace_path=trace_output_path,
-        )
-        config_file_path = os.path.join(pbs_working_dir, "config.yaml")
-        dep = DeploymentConfig(
-            deployment_name=f"weak_scaling_{backend}",
-            model_configs=model_cfgs, 
-            num_nodes=num_nodes,
-            model_storage_path="/lus/flare/projects/AuroraGPT/wenyiw/models",
-            worker_max_ongoing=32
-            )
-        exp_cfg = ExpConfig(
-            pbs_result_dir=pbs_result_dir,
-            pbs_stdout_dir=pbs_stdout_dir,
-            pbs_stderr_dir=pbs_stderr_dir,
-            pbs_num_nodes=num_nodes,
-            pbs_walltime=walltime,
-            pbs_queue_name=queue_name,
-            pbs_job_name=f"{batch_name}_{num_nodes}n",
-            pbs_working_dir=pbs_working_dir,
-            job_replay_client_config=ReplayClientConfig(
-                config_path=config_file_path,
-                no_warmup=False,
-                num_runs=num_runs,
-                dest="cluster" if num_nodes > 1 else "node",
-                num_nodes=num_nodes,
-                num_cli_per_node=0.125,
-            ),
-            job_trace_config=trace_cfg,
-            job_seed=42,
-            model_deployment_config=dep,
-        )
-        configs.append(exp_cfg)
-    return configs
-
-
-def get_weak_scaling_tests_configs_with_num_runs(backend: str = "ray", num_runs: int = 1) -> List[ExpConfig]:
-    """
-    Returns a list of ExpConfig objects for weak scaling experiments
-    ranging from 1 to 16 nodes.
-    
-    Args:
-        backend: Either "ray" or "mpi" to determine which backend to use
-    """
-    configs = []
-    
-    # Common parameters for weak scaling
-    num_nodes_list = [1,2,4,8]
-    rate_per_node = 80 # requests per node per second
-    duration = 5.0                 
-    input_len = 2048
-    output_len = 512
-    
-    # Model configs
-    model_cfgs = [
-        ModelConfig(
-            model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-            tensor_parallel_size=1,
-            max_model_len=4096,
-            size=8,
-        ),
-    ]
-    batch_name = f"weak_scaling_tests_0125_cli_1_workers_{backend}"
-    EVAL_DIR = os.path.join(os.path.dirname(__file__))
-    base_working_dir = os.path.join(EVAL_DIR, "experiments", batch_name)
-
-    for num_nodes in num_nodes_list:
-        if num_nodes < 1:
-            raise ValueError(f"Number of nodes must be greater than 0, got {num_nodes}")
-        elif num_nodes <= 2:
-            walltime = "01:00:00"
-            queue_name = "debug"
-        elif num_nodes <= 256:
-            walltime = "01:00:00"
-            queue_name = "debug-scaling"
-        else:
-            walltime = "02:00:00"
-            queue_name = "prod"
-        node_dir_name = f"{num_nodes}_nodes"
-        pbs_working_dir = os.path.join(base_working_dir, node_dir_name)
-        pbs_result_dir = os.path.join(DEFAULT_RESULTS_ROOT, batch_name, node_dir_name)
-        pbs_stdout_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stdout")
-        pbs_stderr_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stderr")
-        trace_output_path = os.path.join(DEFAULT_OUTPUT_TRACE_DIR, f"{batch_name}_{num_nodes}n.jsonl")
-        trace_cfg = WeakScalingConfig(
-            input_prompt_path=DEFAULT_INPUT_PROMPT_PATH,
-            duration=duration,
-            rpn=rate_per_node,
-            input_len=input_len,
-            output_len=output_len,
-            output_trace_path=trace_output_path,
-        )
-        config_file_path = os.path.join(pbs_working_dir, "config.yaml")
-        dep = DeploymentConfig(
-            deployment_name=f"weak_scaling_tests_{backend}",
-            model_configs=model_cfgs, 
-            num_nodes=num_nodes)
-        exp_cfg = ExpConfig(
-            pbs_result_dir=pbs_result_dir,
-            pbs_stdout_dir=pbs_stdout_dir,
-            pbs_stderr_dir=pbs_stderr_dir,
-            pbs_num_nodes=num_nodes,
-            pbs_walltime=walltime,
-            pbs_queue_name=queue_name,
-            pbs_job_name=f"{batch_name}_{num_nodes}n",
-            pbs_working_dir=pbs_working_dir,
-            job_replay_client_config=ReplayClientConfig(
-                config_path=config_file_path,
-                no_warmup=False,
-                num_runs=num_runs,
-                dest="cluster" if num_nodes > 1 else "node",
-                num_nodes=num_nodes,
-                num_cli_per_node=0.125,
-                num_workers_per_node=1,
-            ),
-            job_trace_config=trace_cfg,
-            job_seed=42,
-            model_deployment_config=dep,
-        )
-        configs.append(exp_cfg)
-    return configs
-
-
-def get_weak_scaling_null_compute_configs_with_num_runs(backend: str = "ray", num_runs: int = 1) -> List[ExpConfig]:
-    """
-    Returns a list of ExpConfig objects for weak scaling experiments
-    ranging from 1 to 16 nodes.
-    
-    Args:
-        backend: Either "ray" or "mpi" to determine which backend to use
-    """
-    configs = []
-    
-    # Common parameters for weak scaling
-    # nodes_list = [1, 2, 4, 8, 16]
-    # nodes_list = [32]
-    num_nodes_list = [1,2,4,8,16,32,64,128]
-    num_nodes_list = [256, 512, 1024, 2048]
-    # num_nodes_list = [128, 256]
-    rate_per_node = 80 # requests per node per second
-    duration = 5.0                 
-    input_len = 2048
-    output_len = 512
-    
-    # Model configs
-    model_cfgs = [
-        ModelConfig(
-            model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-            tensor_parallel_size=1,
-            max_model_len=4096,
-            size=8,
-        ),
-    ]
-    batch_name = f"null_compute_{backend}"
-    EVAL_DIR = os.path.join(os.path.dirname(__file__))
-    base_working_dir = os.path.join(EVAL_DIR, "experiments", batch_name)
-
-    for num_nodes in num_nodes_list:
-        if num_nodes < 1:
-            raise ValueError(f"Number of nodes must be greater than 0, got {num_nodes}")
-        elif num_nodes <= 2:
-            walltime = "01:00:00"
-            queue_name = "debug"
-        elif num_nodes <= 256:
-            walltime = "01:00:00"
-            queue_name = "debug-scaling"
-        else:
-            walltime = "02:00:00"
-            queue_name = "prod"
-
-        node_dir_name = f"{num_nodes}_nodes"
-        pbs_working_dir = os.path.join(base_working_dir, node_dir_name)
-        pbs_result_dir = os.path.join(DEFAULT_RESULTS_ROOT, batch_name, node_dir_name)
-        pbs_stdout_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stdout")
-        pbs_stderr_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stderr")
-        trace_output_path = os.path.join(DEFAULT_OUTPUT_TRACE_DIR, f"{batch_name}_{num_nodes}n.jsonl")
-        trace_cfg = WeakScalingConfig(
-            input_prompt_path=DEFAULT_INPUT_PROMPT_PATH,
-            duration=duration,
-            rpn=rate_per_node,
-            input_len=input_len,
-            output_len=output_len,
-            output_trace_path=trace_output_path,
-        )
-        config_file_path = os.path.join(pbs_working_dir, "config.yaml")
-        dep = DeploymentConfig(model_configs=model_cfgs, num_nodes=num_nodes)
-        exp_cfg = ExpConfig(
-            pbs_result_dir=pbs_result_dir,
-            pbs_stdout_dir=pbs_stdout_dir,
-            pbs_stderr_dir=pbs_stderr_dir,
-            pbs_num_nodes=num_nodes,
-            pbs_walltime=walltime,
-            pbs_queue_name=queue_name,
-            pbs_job_name=f"{batch_name}_{num_nodes}n",
-            pbs_working_dir=pbs_working_dir,
-            job_replay_client_config=ReplayClientConfig(
-                config_path=config_file_path,
-                no_warmup=False,
-                num_runs=num_runs,
-                dest="cluster" if num_nodes > 1 else "node",
-                num_nodes=num_nodes,
-                num_cli_per_node=0.125,
-            ),
-            job_trace_config=trace_cfg,
-            job_seed=42,
-            model_deployment_config=dep,
-        )
-        configs.append(exp_cfg)
-    return configs
-
-
-def get_weak_scaling_null_compute_tests_configs_with_num_runs(backend: str = "ray", num_runs: int = 1) -> List[ExpConfig]:
-    """
-    Returns a list of ExpConfig objects for weak scaling experiments
-    ranging from 1 to 16 nodes.
-    
-    Args:
-        backend: Either "ray" or "mpi" to determine which backend to use
-    """
-    configs = []
-    
-    # Common parameters for weak scaling
-    num_nodes_list = [1, 2, 4, 8, 16]
-    rate_per_node = 80 # requests per node per second
-    duration = 5.0                 
-    input_len = 2048
-    output_len = 512
-    
-    # Model configs
-    model_cfgs = [
-        ModelConfig(
-            model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-            tensor_parallel_size=1,
-            max_model_len=4096,
-            size=8,
-        ),
-    ]
-    batch_name = f"null_compute_tests_{backend}"
-    EVAL_DIR = os.path.join(os.path.dirname(__file__))
-    base_working_dir = os.path.join(EVAL_DIR, "experiments", batch_name)
-
-    for num_nodes in num_nodes_list:
-        if num_nodes < 1:
-            raise ValueError(f"Number of nodes must be greater than 0, got {num_nodes}")
-        elif num_nodes <= 2:
-            walltime = "01:00:00"
-            queue_name = "debug"
-        elif num_nodes <= 256:
-            walltime = "01:00:00"
-            queue_name = "debug-scaling"
-        else:
-            walltime = "02:00:00"
-            queue_name = "prod"
-
-        node_dir_name = f"{num_nodes}_nodes"
-        pbs_working_dir = os.path.join(base_working_dir, node_dir_name)
-        pbs_result_dir = os.path.join(DEFAULT_RESULTS_ROOT, batch_name, node_dir_name)
-        pbs_stdout_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stdout")
-        pbs_stderr_dir = os.path.join(DEFAULT_PBS_OUTPUT_ROOT, batch_name, node_dir_name, "stderr")
-        trace_output_path = os.path.join(DEFAULT_OUTPUT_TRACE_DIR, f"{batch_name}_{num_nodes}n.jsonl")
-        trace_cfg = WeakScalingConfig(
-            input_prompt_path=DEFAULT_INPUT_PROMPT_PATH,
-            duration=duration,
-            rpn=rate_per_node,
-            input_len=input_len,
-            output_len=output_len,
-            output_trace_path=trace_output_path,
-        )
-        config_file_path = os.path.join(pbs_working_dir, "config.yaml")
-        dep = DeploymentConfig(model_configs=model_cfgs, num_nodes=num_nodes)
-        exp_cfg = ExpConfig(
-            pbs_result_dir=pbs_result_dir,
-            pbs_stdout_dir=pbs_stdout_dir,
-            pbs_stderr_dir=pbs_stderr_dir,
-            pbs_num_nodes=num_nodes,
-            pbs_walltime=walltime,
-            pbs_queue_name=queue_name,
-            pbs_job_name=f"{batch_name}_{num_nodes}n",
-            pbs_working_dir=pbs_working_dir,
-            job_replay_client_config=ReplayClientConfig(
-                config_path=config_file_path,
-                no_warmup=False,
-                num_runs=num_runs,
-                dest="cluster" if num_nodes > 1 else "node",
-                num_nodes=num_nodes,
-                num_cli_per_node=0.5,
-            ),
-            job_trace_config=trace_cfg,
-            job_seed=42,
-            model_deployment_config=dep,
-        )
-        configs.append(exp_cfg)
-    return configs

@@ -1,0 +1,16 @@
+model_list:
+- model_name: meta-llama/Meta-Llama-3-8B-Instruct
+  litellm_params:
+    model: openai/meta-llama/Meta-Llama-3-8B-Instruct
+    api_base: http://x4516c6s0b0n0.hsn.cm.aurora.alcf.anl.gov:8000/v1
+    api_key: dummy
+- model_name: meta-llama/Meta-Llama-3-8B-Instruct
+  litellm_params:
+    model: openai/meta-llama/Meta-Llama-3-8B-Instruct
+    api_base: http://x4516c6s2b0n0.hsn.cm.aurora.alcf.anl.gov:8000/v1
+    api_key: dummy
+router_settings:
+  routing_strategy: least-busy
+  num_retries: 2
+  timeout: 300
+general_settings: {}

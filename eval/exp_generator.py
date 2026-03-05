@@ -11,7 +11,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from exp_configs import *
+from exp_configs import (
+    EXPERIMENT_REGISTRY,
+    WeakScalingConfig,
+    TraceGeneratorConfig,
+    build_weak_scaling_configs,
+)
 from trace_generator import TraceGenerator
 VALID_BACKENDS = ["ray", "mpi"]
 
@@ -115,8 +120,8 @@ def setup_weak_scaling(args, experiments, backend="ray", null_compute=False):
 
     if submit_cmds:
         first_dir = experiments[0].pbs_working_dir
-        # Parent of "1_nodes" etc.
-        parent_dir = os.path.abspath(os.path.dirname(first_dir))
+        # Parent of "<N_nodes>/config" — go up two levels to reach the experiment dir
+        parent_dir = os.path.abspath(os.path.dirname(os.path.dirname(first_dir)))
         submit_src = args.submit_script
         submit_script_path = os.path.join(parent_dir, "submit_all.py")
 
@@ -144,10 +149,19 @@ if __name__ == "__main__":
         help="Submit script to copy (default: templates/submit_all.py)",
     )
     parser.add_argument(
-        "--backend", 
+        "--backend",
         choices=VALID_BACKENDS,
         default="ray",
-        help="Backend to use: 'ray' for orchestrator.py or 'mpi' for MPI API server (default: ray)"
+        help="Backend to use: 'ray' for Ray orchestrator or 'mpi' for MPI API server (default: ray)",
+    )
+    parser.add_argument(
+        "-e", "--experiment",
+        default=None,
+        help=(
+            "Experiment name from the registry to generate. "
+            f"Known names: {', '.join(EXPERIMENT_REGISTRY)}. "
+            "Pass 'list' to print all available names and exit."
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -157,17 +171,22 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    
-    # Validate backend
+
+    if args.experiment == "list" or args.experiment is None:
+        print("Available experiments:")
+        for name, params in EXPERIMENT_REGISTRY.items():
+            print(f"  {name:40s}  nodes={params.num_nodes_list}")
+        exit(0 if args.experiment == "list" else 1)
+
+    if args.experiment not in EXPERIMENT_REGISTRY:
+        print(f"!!! ERROR: Unknown experiment '{args.experiment}'. Known: {list(EXPERIMENT_REGISTRY)}")
+        exit(1)
+
     if args.backend not in VALID_BACKENDS:
         print(f"!!! ERROR: Invalid backend '{args.backend}'. Must be one of: {VALID_BACKENDS}")
         exit(1)
-    
-    print(f">>> Generating experiments for backend: {args.backend}")
-    experiments = get_weak_scaling_configs_with_num_runs(backend=args.backend, num_runs=3)
-    # experiments = get_weak_scaling_null_compute_configs_with_num_runs(backend=args.backend, num_runs=3)
-    # experiments = get_weak_scaling_null_compute_tests_configs_with_num_runs(backend=args.backend, num_runs=3)
-    # experiments = get_weak_scaling_tests_configs_with_num_runs(backend=args.backend, num_runs=3)
-    
-    # setup_weak_scaling(args, experiments, backend=args.backend, null_compute=True)
-    setup_weak_scaling(args, experiments, backend=args.backend, null_compute=False)
+
+    params = EXPERIMENT_REGISTRY[args.experiment]
+    print(f">>> Generating experiment '{args.experiment}' for backend: {args.backend}")
+    experiments = build_weak_scaling_configs(backend=args.backend, params=params)
+    setup_weak_scaling(args, experiments, backend=args.backend, null_compute=params.null_compute)

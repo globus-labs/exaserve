@@ -129,7 +129,7 @@ def _get_cluster_nodes() -> list:
     if not nodefile:
         raise RuntimeError(
             "PBS_NODEFILE environment variable is not set. "
-            "--dest=cluster requires a PBS job environment."
+            "--dest=direct requires a PBS job environment."
         )
     try:
         with open(nodefile) as f:
@@ -363,7 +363,7 @@ async def replay(
     early_stop: float,
     no_warmup: bool,
     num_runs: int,
-    dest: str = "node",
+    dest: str = "proxy",
     num_workers: int = None,   # None = resolve from config; CLI overrides config
 ):
     # ------------------------------------------------------------------
@@ -420,16 +420,16 @@ async def replay(
     # ------------------------------------------------------------------
     # 3. Build target URL list
     # ------------------------------------------------------------------
-    if dest == "cluster":
+    if dest == "direct":
         cluster_nodes = _get_cluster_nodes()
         base_urls = [f"http://{node}:{port}" for node in cluster_nodes]
         if is_root:
-            print(f">>> [DEST] cluster mode — {len(base_urls)} node(s): {cluster_nodes}")
+            print(f">>> [DEST] direct mode — {len(base_urls)} node(s): {cluster_nodes}")
     else:
         cluster_nodes = []
         base_urls = [f"http://0.0.0.0:{port}"]
         if is_root:
-            print(f">>> [DEST] node mode — target: {base_urls[0]}")
+            print(f">>> [DEST] proxy mode — target: {base_urls[0]}")
 
     url_cycle = itertools.cycle(base_urls)   # used only for warmup on this rank
     base_url = base_urls[0]
@@ -1002,11 +1002,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dest", "--destination",
         dest="dest",
-        choices=["node", "cluster"],
-        default="node",
+        choices=["proxy", "direct"],
+        default="proxy",
         help=(
-            "'node': send to localhost:<port>. "
-            "'cluster': round-robin over all nodes in $PBS_NODEFILE."
+            "'proxy': send to localhost:<port>. "
+            "'direct': round-robin over all nodes in $PBS_NODEFILE."
         ),
     )
     args = parser.parse_args()

@@ -4,7 +4,7 @@ set -e  # Exit on error
 # ==============================================================================
 # UNIVERSAL EXPERIMENT DRIVER
 # ==============================================================================
-# USAGE: ./run_exp.sh <path_to_config.yaml> [--backend {ray|mpi}] [--dest {node|cluster}]
+# USAGE: ./run_exp.sh <path_to_config.yaml> [--backend {ray|mpi}] [--dest {proxy|direct}]
 #
 # This script:
 # 1. Validates all required files and environment
@@ -94,12 +94,12 @@ if [ -z "$DEST" ]; then
     DEST=$(python3 -c "
 import yaml, sys
 c = yaml.safe_load(open('$CONFIG_PATH'))
-print(c.get('job_replay_client_config', {}).get('dest', 'node'))
-" 2>/dev/null || echo "node")
+print(c.get('job_replay_client_config', {}).get('dest', 'proxy'))
+" 2>/dev/null || echo "proxy")
 fi
 # Validate dest value
-if [ "$DEST" != "node" ] && [ "$DEST" != "cluster" ]; then
-    echo "!!! ERROR: Invalid --dest '$DEST'. Must be 'node' or 'cluster'."
+if [ "$DEST" != "proxy" ] && [ "$DEST" != "direct" ]; then
+    echo "!!! ERROR: Invalid --dest '$DEST'. Must be 'proxy' or 'direct'."
     exit 1
 fi
 echo "[✓] Dest mode:        $DEST"
@@ -304,15 +304,17 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
 
         # ==============================================================================
         # RUN REPLAY CLIENT
-        # CLIENT_NODES = max(1, min(num_nodes, int(num_nodes * num_cli_per_node)))
-        # num_nodes      = total PBS nodes (= pbs_num_nodes, always set)
-        # num_cli_per_node = fraction of those nodes that also run the replay client
-        # When CLIENT_NODES > 1, launches with mpiexec (one rank per node) using the
-        # first CLIENT_NODES unique hostnames from $PBS_NODEFILE so that client nodes
-        # overlap with Ray-worker nodes for scheduling simplicity.
+        # proxy mode: always run locally on the head node — no MPI needed since all
+        #             traffic goes to the local proxy regardless of cluster size.
+        # direct mode: CLIENT_NODES = max(1, min(num_nodes, round(num_nodes * num_cli_per_node)))
+        #              When CLIENT_NODES > 1, launches with mpiexec (one rank per node)
+        #              using the first CLIENT_NODES unique hostnames from $PBS_NODEFILE.
         # ==============================================================================
 
-        CLIENT_NODES=$(python3 -c "
+        echo ""
+
+        if [ "$DEST" == "direct" ]; then
+            CLIENT_NODES=$(python3 -c "
 import yaml
 c = yaml.safe_load(open('$CONFIG_PATH'))
 cfg = c.get('job_replay_client_config', {})
@@ -320,26 +322,30 @@ num_nodes = cfg.get('num_nodes', 1)
 ratio     = cfg.get('num_cli_per_node', 1.0)
 print(max(1, min(num_nodes, round(num_nodes * ratio))))
 " 2>/dev/null || echo "1")
+            echo ">>> [DRIVER] Starting Replay Client in direct mode (client nodes: $CLIENT_NODES)..."
 
-        echo ""
-        echo ">>> [DRIVER] Starting Replay Client (client nodes: $CLIENT_NODES)..."
-
-        if [ "$CLIENT_NODES" -gt 1 ]; then
-            # Build a deduplicated hostfile from the first CLIENT_NODES unique PBS nodes
-            CLIENT_HOSTFILE="/tmp/aurora_client_hosts_$$"
-            sort -u "$PBS_NODEFILE" | head -n "$CLIENT_NODES" > "$CLIENT_HOSTFILE"
-            ACTUAL_CLIENT_NODES=$(wc -l < "$CLIENT_HOSTFILE")
-            if [ "$ACTUAL_CLIENT_NODES" -lt "$CLIENT_NODES" ]; then
-                echo "!!! WARNING: Requested $CLIENT_NODES client nodes but $PBS_NODEFILE only has $ACTUAL_CLIENT_NODES unique hostnames. Proceeding with $ACTUAL_CLIENT_NODES."
-                CLIENT_NODES=$ACTUAL_CLIENT_NODES
-            fi
-            echo "    Client hostfile: $CLIENT_HOSTFILE"
-            cat "$CLIENT_HOSTFILE"
-            mpiexec -n "$CLIENT_NODES" --ppn 1 --cpu-bind none --hostfile "$CLIENT_HOSTFILE" \
+            if [ "$CLIENT_NODES" -gt 1 ]; then
+                # Build a deduplicated hostfile from the first CLIENT_NODES unique PBS nodes
+                CLIENT_HOSTFILE="/tmp/aurora_client_hosts_$$"
+                sort -u "$PBS_NODEFILE" | head -n "$CLIENT_NODES" > "$CLIENT_HOSTFILE"
+                ACTUAL_CLIENT_NODES=$(wc -l < "$CLIENT_HOSTFILE")
+                if [ "$ACTUAL_CLIENT_NODES" -lt "$CLIENT_NODES" ]; then
+                    echo "!!! WARNING: Requested $CLIENT_NODES client nodes but $PBS_NODEFILE only has $ACTUAL_CLIENT_NODES unique hostnames. Proceeding with $ACTUAL_CLIENT_NODES."
+                    CLIENT_NODES=$ACTUAL_CLIENT_NODES
+                fi
+                echo "    Client hostfile: $CLIENT_HOSTFILE"
+                cat "$CLIENT_HOSTFILE"
+                mpiexec -n "$CLIENT_NODES" --ppn 1 --cpu-bind none --hostfile "$CLIENT_HOSTFILE" \
+                    python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
+                EXIT_CODE=$?
+                rm -f "$CLIENT_HOSTFILE"
+            else
                 python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
-            EXIT_CODE=$?
-            rm -f "$CLIENT_HOSTFILE"
+                EXIT_CODE=$?
+            fi
         else
+            # proxy mode: single local process, no MPI
+            echo ">>> [DRIVER] Starting Replay Client in proxy mode (local, no MPI)..."
             python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
             EXIT_CODE=$?
         fi
