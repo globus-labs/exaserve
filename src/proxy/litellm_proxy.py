@@ -158,6 +158,14 @@ class LiteLLMProxy(ProxyBackend):
         env.pop("http_proxy", None)
         env.pop("https_proxy", None)
 
+        # Aurora HPC nodes have no external internet access.  Without this,
+        # every litellm worker startup attempts a network fetch of the model
+        # cost map from GitHub (raw.githubusercontent.com), fails with
+        # ERRNO 101 (Network unreachable), and logs a spurious warning before
+        # falling back to the bundled local copy.  Setting this env var skips
+        # the remote fetch entirely.
+        env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+
         print(f"[LiteLLMProxy] Starting: {' '.join(cmd)}", flush=True)
         print(f"[LiteLLMProxy] Port forced via env: LITELLM_PORT={port}, UVICORN_PORT={port}", flush=True)
         proc = subprocess.Popen(cmd, env=env)

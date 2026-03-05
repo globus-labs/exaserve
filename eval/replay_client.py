@@ -7,13 +7,47 @@ import multiprocessing
 import os
 import re
 import resource
+import sys
 import time
 import uuid
 import gc
 import signal
 from dataclasses import dataclass
 
-import aiohttp
+
+def _inject_litellm_site_packages() -> None:
+    """
+    Peek at --config <path> in sys.argv, extract proxy_config.python_path
+    from the YAML (via regex, no yaml import yet), and prepend the litellm
+    venv's site-packages to sys.path so that httpx[http2] and its h2
+    dependency are importable.
+    """
+    config_path = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            config_path = sys.argv[i + 1]
+            break
+    if not config_path:
+        return
+    try:
+        with open(config_path) as f:
+            content = f.read()
+        m = re.search(r"python_path\s*:\s*['\"]?([^'\"\n]+)['\"]?", content)
+        if not m:
+            return
+        python_bin = m.group(1).strip()
+        venv_root = os.path.dirname(os.path.dirname(python_bin))
+        for sp in glob.glob(os.path.join(venv_root, "lib", "python3.*", "site-packages")):
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+                print(f"[bootstrap] Injected litellm site-packages: {sp}", flush=True)
+    except Exception as exc:
+        print(f"[bootstrap] Could not inject litellm site-packages: {exc}", flush=True)
+
+
+_inject_litellm_site_packages()
+
+import httpx
 import numpy as np
 import yaml
 
@@ -170,14 +204,13 @@ async def send_request(session, base_url, req, mode_map, include_tp: bool, gener
     response_data = None
 
     try:
-        async with session.post(url, json=payload, timeout=TIMEOUT_S) as resp:
-            success = (resp.status == 200)
-            if success:
-                response_data = await resp.json()
-            else:
-                body = await resp.text()
-                error_msg = f"HTTP {resp.status}: {body[:300]}"
-                _print_request_error(url, error_msg)
+        resp = await session.post(url, json=payload)
+        success = (resp.status_code == 200)
+        if success:
+            response_data = resp.json()
+        else:
+            error_msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            _print_request_error(url, error_msg)
     except Exception as e:
         error_msg = str(e)
         _print_request_error(url, error_msg)
@@ -273,8 +306,15 @@ async def _worker_async(
     run_t0 = run_t0_val.value
 
     per_worker_conn = max(10, safe_conn_limit // num_workers)
-    connector = aiohttp.TCPConnector(limit=per_worker_conn)
-    session = aiohttp.ClientSession(connector=connector)
+    session = httpx.AsyncClient(
+        http2=True,
+        limits=httpx.Limits(
+            max_connections=per_worker_conn,
+            max_keepalive_connections=per_worker_conn,
+            keepalive_expiry=60,
+        ),
+        timeout=httpx.Timeout(TIMEOUT_S),
+    )
     url_cycle = itertools.cycle(base_urls)
 
     tasks = []
@@ -310,7 +350,7 @@ async def _worker_async(
             if not isinstance(r, BaseException):
                 result_queue.put(r)
     finally:
-        await session.close()
+        await session.aclose()
 
 
 # ==============================================================================
@@ -529,8 +569,15 @@ async def replay(
                 print(f"    Total warmup: {total_warmup} | Per rank: {per_rank_warmup}")
 
             if requests:
-                connector = aiohttp.TCPConnector(limit=safe_conn_limit)
-                session = aiohttp.ClientSession(connector=connector)
+                session = httpx.AsyncClient(
+                    http2=True,
+                    limits=httpx.Limits(
+                        max_connections=safe_conn_limit,
+                        max_keepalive_connections=safe_conn_limit,
+                        keepalive_expiry=60,
+                    ),
+                    timeout=httpx.Timeout(TIMEOUT_S),
+                )
                 base_req = requests[0]
                 warmup_tasks = []
                 warmup_start = time.time()
@@ -559,7 +606,7 @@ async def replay(
                     flush=True,
                 )
 
-                await session.close()
+                await session.aclose()
                 session = None
 
                 # All ranks must finish warmup before proceeding
