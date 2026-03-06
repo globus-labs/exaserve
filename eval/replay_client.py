@@ -51,6 +51,12 @@ import httpx
 import numpy as np
 import yaml
 
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # Optional MPI support via mpi4py.
 # When the script is launched with mpiexec/mpirun (num_nodes > 1) each OS
