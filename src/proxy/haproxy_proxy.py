@@ -172,12 +172,14 @@ class HAProxyProxy(ProxyBackend):
         )
         return config_path
 
-    def start(self, config_path: Path, host: str, port: int, **kwargs) -> subprocess.Popen:
+    def start(self, config_path: Path, host: str, port: int, **kwargs) -> tuple[subprocess.Popen, int]:
         """
         Launch haproxy with the generated config.
 
         The {PORT} placeholder in the config is resolved here by re-writing
         the config with the actual port before launching.
+
+        Returns (proc, port) to satisfy the ProxyBackend interface.
         """
         # Patch the port placeholder in the config file
         text = config_path.read_text()
@@ -187,8 +189,8 @@ class HAProxyProxy(ProxyBackend):
         cmd = ["haproxy", "-f", str(config_path)]
         print(f"[HAProxyProxy] Starting: {' '.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd)
-        print(f"[HAProxyProxy] Process started (pid={proc.pid})", flush=True)
-        return proc
+        print(f"[HAProxyProxy] Process started (pid={proc.pid}, port={port})", flush=True)
+        return proc, port
 
     def health_check(
         self,

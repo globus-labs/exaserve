@@ -149,10 +149,10 @@ def start_proxy(proxy_config, deploy_config, config_path: str):
     """
     Start the configured proxy backend (if type != 'none').
 
-    Returns (proxy_backend_instance, proxy_process) or (None, None).
+    Returns (proxy_backend_instance, proxy_process, actual_port) or (None, None, None).
     """
     if proxy_config.type == "none":
-        return None, None
+        return None, None, None
 
     # proxy/ lives alongside driver.py in src/; Python adds src/ to sys.path
     # automatically when running src/driver.py, so no path manipulation needed.
@@ -180,14 +180,13 @@ def start_proxy(proxy_config, deploy_config, config_path: str):
         **proxy_options,
     )
 
-    proc = proxy.start(cfg_file, host="0.0.0.0", port=proxy_config.port,
-                        num_workers=proxy_config.num_workers)
+    proc, actual_port = proxy.start(cfg_file, host="0.0.0.0", port=proxy_config.port,
+                                     num_workers=proxy_config.num_workers)
 
     healthy = proxy.health_check(
-        "127.0.0.1", proxy_config.port, timeout=3600.0, process=proc,
+        "127.0.0.1", actual_port, timeout=3600.0, process=proc,
     )
     if not healthy:
-        # Collect exit code for the error message
         rc = proc.poll()
         if rc is not None:
             msg = (
@@ -198,17 +197,23 @@ def start_proxy(proxy_config, deploy_config, config_path: str):
             proc.kill()
             proc.wait()
             msg = (
-                f"Proxy ({proxy_config.type}) health check timed out after 60s "
-                f"on port {proxy_config.port}."
+                f"Proxy ({proxy_config.type}) health check timed out "
+                f"on port {actual_port}."
             )
         raise RuntimeError(f"[Driver] FATAL: {msg}")
 
+    # Write the actual port to a file so replay_client.py can read it
+    # even when the port differed from the configured preference.
+    port_file = os.path.join(output_dir, "proxy_port")
+    os.makedirs(output_dir, exist_ok=True)
+    with open(port_file, "w") as f:
+        f.write(str(actual_port))
     print(
         f"[Driver] Proxy ({proxy_config.type}) ready on "
-        f"http://0.0.0.0:{proxy_config.port}",
+        f"http://0.0.0.0:{actual_port} (port file: {port_file})",
         flush=True,
     )
-    return proxy, proc
+    return proxy, proc, actual_port
 
 
 def stop_proxy(proxy, proc):
@@ -267,7 +272,7 @@ def main():
                 if proxy_config.type != "none":
                     # Wait for Ray Serve to be healthy before starting the proxy
                     wait_for_ray_serve(port=RAY_SERVE_PORT)
-                    proxy_backend, proxy_process = start_proxy(
+                    proxy_backend, proxy_process, _actual_port = start_proxy(
                         proxy_config, deploy_config, args.config
                     )
 

@@ -17,6 +17,7 @@ to Ray serving code):
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -122,37 +123,49 @@ class LiteLLMProxy(ProxyBackend):
         )
         return config_path
 
-    def start(self, config_path: Path, host: str, port: int, num_workers: int = 8) -> subprocess.Popen:
+    @staticmethod
+    def _find_available_port(preferred: int) -> int:
+        """
+        Return preferred if it is free, otherwise return an OS-assigned free port.
+        """
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("", preferred))
+                return preferred
+        except OSError:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                return s.getsockname()[1]
+
+    def start(self, config_path: Path, host: str, port: int, num_workers: int = 8) -> tuple[subprocess.Popen, int]:
         """
         Launch the LiteLLM proxy via its ``litellm`` console script.
 
         Derives the script path from self._python_path so it uses the
         correct venv (e.g. /path/to/venv/bin/python3 → /path/to/venv/bin/litellm).
 
-        Port and host are set via environment variables because some litellm
-        versions ignore the CLI --port/--host flags.
+        Returns (proc, actual_port). actual_port may differ from port if
+        the preferred port was already in use.
         """
+        actual_port = self._find_available_port(port)
+        if actual_port != port:
+            print(f"[LiteLLMProxy] Port {port} unavailable, using {actual_port}", flush=True)
+
         python = getattr(self, "_python_path", sys.executable)
         litellm_bin = str(Path(python).parent / "litellm")
         cmd = [
             litellm_bin,
             "--config", str(config_path),
-            "--port", str(port),
+            "--port", str(actual_port),
             "--host", host,
             "--num_workers", str(num_workers),
         ]
 
         env = os.environ.copy()
-        env["LITELLM_PORT"] = str(port)
-        env["LITELLM_HOST"] = host
-        env["UVICORN_PORT"] = str(port)
-        env["UVICORN_HOST"] = host
-        env["PORT"] = str(port)
-        env["HOST"] = host
 
-        # Disable HTTP proxy for backend requests.  The litellm process
-        # talks to Ray Serve nodes on the HSN which must not go through
-        # ALCF's Squid proxy.
+        # Disable HTTP proxy — litellm talks to Ray Serve on HSN, must not
+        # go through ALCF's Squid proxy.
         env.pop("HTTP_PROXY", None)
         env.pop("HTTPS_PROXY", None)
         env.pop("http_proxy", None)
@@ -176,7 +189,7 @@ class LiteLLMProxy(ProxyBackend):
             if key in _GPU_ENV_EXACT or key.startswith(_GPU_ENV_PREFIXES):
                 del env[key]
 
-        # Also scrub LD_LIBRARY_PATH of Intel/oneAPI shared-lib dirs so the
+        # Scrub LD_LIBRARY_PATH of Intel/oneAPI shared-lib dirs so the
         # forked workers don't load Level Zero or SYCL runtimes at all.
         ld_path = env.get("LD_LIBRARY_PATH", "")
         if ld_path:
@@ -184,10 +197,9 @@ class LiteLLMProxy(ProxyBackend):
             env["LD_LIBRARY_PATH"] = ":".join(clean)
 
         print(f"[LiteLLMProxy] Starting: {' '.join(cmd)}", flush=True)
-        print(f"[LiteLLMProxy] Port forced via env: LITELLM_PORT={port}, UVICORN_PORT={port}", flush=True)
         proc = subprocess.Popen(cmd, env=env)
-        print(f"[LiteLLMProxy] Process started (pid={proc.pid})", flush=True)
-        return proc
+        print(f"[LiteLLMProxy] Process started (pid={proc.pid}, port={actual_port})", flush=True)
+        return proc, actual_port
 
     def health_check(
         self,

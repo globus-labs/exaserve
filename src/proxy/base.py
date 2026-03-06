@@ -53,18 +53,21 @@ class ProxyBackend(ABC):
         """
 
     @abstractmethod
-    def start(self, config_path: Path, host: str, port: int, **kwargs) -> subprocess.Popen:
+    def start(self, config_path: Path, host: str, port: int, **kwargs) -> tuple[subprocess.Popen, int]:
         """
         Launch the proxy process.
 
         Args:
             config_path: Path returned by generate_config().
             host:        Interface to bind (e.g. "0.0.0.0").
-            port:        Port to listen on (e.g. 4000).
+            port:        Preferred port to listen on (e.g. 4001). The
+                         implementation may fall back to a different port if
+                         the preferred one is unavailable.
             **kwargs:    Backend-specific options (e.g. num_workers).
 
         Returns:
-            Popen handle for the running proxy process.
+            (proc, actual_port) — Popen handle and the port the proxy
+            actually bound to (may differ from the requested port).
         """
 
     @abstractmethod
