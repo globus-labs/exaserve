@@ -122,7 +122,7 @@ class LiteLLMProxy(ProxyBackend):
         )
         return config_path
 
-    def start(self, config_path: Path, host: str, port: int) -> subprocess.Popen:
+    def start(self, config_path: Path, host: str, port: int, num_workers: int = 8) -> subprocess.Popen:
         """
         Launch the LiteLLM proxy via its ``litellm`` console script.
 
@@ -139,7 +139,7 @@ class LiteLLMProxy(ProxyBackend):
             "--config", str(config_path),
             "--port", str(port),
             "--host", host,
-            "--num_workers", "2",
+            "--num_workers", str(num_workers),
         ]
 
         env = os.environ.copy()

@@ -53,7 +53,7 @@ class ProxyBackend(ABC):
         """
 
     @abstractmethod
-    def start(self, config_path: Path, host: str, port: int) -> subprocess.Popen:
+    def start(self, config_path: Path, host: str, port: int, **kwargs) -> subprocess.Popen:
         """
         Launch the proxy process.
 
@@ -61,6 +61,7 @@ class ProxyBackend(ABC):
             config_path: Path returned by generate_config().
             host:        Interface to bind (e.g. "0.0.0.0").
             port:        Port to listen on (e.g. 4000).
+            **kwargs:    Backend-specific options (e.g. num_workers).
 
         Returns:
             Popen handle for the running proxy process.

@@ -180,7 +180,8 @@ def start_proxy(proxy_config, deploy_config, config_path: str):
         **proxy_options,
     )
 
-    proc = proxy.start(cfg_file, host="0.0.0.0", port=proxy_config.port)
+    proc = proxy.start(cfg_file, host="0.0.0.0", port=proxy_config.port,
+                        num_workers=proxy_config.num_workers)
 
     healthy = proxy.health_check(
         "127.0.0.1", proxy_config.port, timeout=3600.0, process=proc,

@@ -72,6 +72,7 @@ class ProxyConfig:
     port: int = 4001
     backend_port: int = 8000
     python_path: str = ""   # Python interpreter for the proxy process (empty = sys.executable)
+    num_workers: int = 8    # uvicorn worker count for the proxy (LiteLLM --num_workers)
     options: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -138,6 +139,7 @@ def _proxy_config_from_dict(d: Dict[str, Any]) -> ProxyConfig:
         port=int(d.get("port", 4001)),
         backend_port=int(d.get("backend_port", 8000)),
         python_path=str(d.get("python_path", "")),
+        num_workers=int(d.get("num_workers", 8)),
         options=d.get("options", {}),
     )
 

@@ -126,7 +126,7 @@ def load_results(
                         
     Returns:
         results: List of tuples (num_nodes, tps_mean, tps_std, rps_mean, rps_std,
-                 p50, p99, lat_min, lat_max, lat_mean)
+                 p50, p99, lat_min, lat_max, lat_mean, errors_mean)
         missing_files: List of missing file paths
     """
     results = []
@@ -164,9 +164,10 @@ def load_results(
                     overall = data.get("overall", {})
                     tps = overall.get("tps", 0.0)
                     rps = overall.get("rps", 0.0)
+                    errors = overall.get("errors", 0)
                     p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
-                    results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean))
-                    print(f"Loaded {subdir.name}: result{idx}.json  TPS={tps:.2f}, RPS={rps:.2f}")
+                    results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean, errors))
+                    print(f"Loaded {subdir.name}: result{idx}.json  TPS={tps:.2f}, RPS={rps:.2f}, Errors={errors}")
                 except Exception as e:
                     print(f"Error reading {fpath}: {e}")
             else:
@@ -190,9 +191,10 @@ def load_results(
                     overall = data.get("overall", {})
                     tps = overall.get("tps", 0.0)
                     rps = overall.get("rps", 0.0)
+                    errors = overall.get("errors", 0)
                     p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
-                    results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean))
-                    print(f"Loaded {subdir.name}: {node_count} nodes, TPS={tps:.2f}, RPS={rps:.2f}")
+                    results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean, errors))
+                    print(f"Loaded {subdir.name}: {node_count} nodes, TPS={tps:.2f}, RPS={rps:.2f}, Errors={errors}")
                 except Exception as e:
                     print(f"Error reading {latest_file}: {e}")
             continue
@@ -201,6 +203,7 @@ def load_results(
         if target_indices is not None:
             tps_list, rps_list = [], []
             p50_list, p99_list, lat_min_list, lat_max_list, lat_mean_list = [], [], [], [], []
+            errors_list = []
             for idx in target_indices:
                 fpath = subdir / "results" / f"result{idx}.json"
                 if not fpath.exists():
@@ -212,6 +215,7 @@ def load_results(
                     overall = data.get("overall", {})
                     tps_list.append(overall.get("tps", 0.0))
                     rps_list.append(overall.get("rps", 0.0))
+                    errors_list.append(overall.get("errors", 0))
                     p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
                     p50_list.append(p50)
                     p99_list.append(p99)
@@ -229,14 +233,15 @@ def load_results(
             tps_std = np.std(tps_list) if len(tps_list) > 1 else 0.0
             rps_mean = np.mean(rps_list)
             rps_std = np.std(rps_list) if len(rps_list) > 1 else 0.0
+            errors_mean = np.mean(errors_list) if errors_list else 0.0
             p50_mean = np.mean(p50_list) if p50_list else 0.0
             p99_mean = np.mean(p99_list) if p99_list else 0.0
             lat_min_mean = np.mean(lat_min_list) if lat_min_list else 0.0
             lat_max_mean = np.mean(lat_max_list) if lat_max_list else 0.0
             lat_mean_mean = np.mean(lat_mean_list) if lat_mean_list else 0.0
             
-            print(f"Loaded {subdir.name}: {len(tps_list)} runs. TPS={tps_mean:.2f}±{tps_std:.2f}, RPS={rps_mean:.2f}±{rps_std:.2f}")
-            results.append((node_count, tps_mean, tps_std, rps_mean, rps_std, p50_mean, p99_mean, lat_min_mean, lat_max_mean, lat_mean_mean))
+            print(f"Loaded {subdir.name}: {len(tps_list)} runs. TPS={tps_mean:.2f}±{tps_std:.2f}, RPS={rps_mean:.2f}±{rps_std:.2f}, Errors={errors_mean:.1f}")
+            results.append((node_count, tps_mean, tps_std, rps_mean, rps_std, p50_mean, p99_mean, lat_min_mean, lat_max_mean, lat_mean_mean, errors_mean))
             continue
 
         # ── Mode 3: latest result only (default) ──────────────────────────────
@@ -268,9 +273,10 @@ def load_results(
             overall = data.get("overall", {})
             tps = overall.get("tps", 0.0)
             rps = overall.get("rps", 0.0)
+            errors = overall.get("errors", 0)
             p50, p99, lat_min, lat_max, lat_mean = _latency_stats_from_data(data)
-            results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean))
-            print(f"Loaded {subdir.name}: {node_count} nodes, TPS={tps:.2f}, RPS={rps:.2f}")
+            results.append((node_count, tps, 0.0, rps, 0.0, p50, p99, lat_min, lat_max, lat_mean, errors))
+            print(f"Loaded {subdir.name}: {node_count} nodes, TPS={tps:.2f}, RPS={rps:.2f}, Errors={errors}")
         except Exception as e:
             print(f"Error reading {latest_file}: {e}")
     
@@ -281,11 +287,11 @@ def load_results(
 
 def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: bool = False):
     """
-    Plot weak scaling chart with TPS (left), RPS (right), and latency (right offset).
+    Plot weak scaling chart with TPS (left), RPS (right), latency (right offset), and errors.
     Includes p99/p50 latency lines and scatter points for min, max, mean latency.
     
     Args:
-        results: List of (num_nodes, tps_mean, tps_std, rps_mean, rps_std, p50, p99, lat_min, lat_max, lat_mean) tuples
+        results: List of (num_nodes, tps_mean, tps_std, rps_mean, rps_std, p50, p99, lat_min, lat_max, lat_mean, errors_mean) tuples
         output_path: Optional path to save the plot. If None, displays interactively.
         log_scale: Whether to use log scale for x and y axes.
     """
@@ -303,9 +309,10 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     lat_mins = [r[7] for r in results]
     lat_maxs = [r[8] for r in results]
     lat_means = [r[9] for r in results]
+    errors_vals = [r[10] for r in results]
     
     # Set up the figure with a modern style
-    fig, ax1 = plt.subplots(figsize=(16, 7))
+    fig, ax1 = plt.subplots(figsize=(18, 7))
     fig.patch.set_facecolor('white')
     ax1.set_facecolor('#FAFAFA')
     
@@ -314,6 +321,7 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     color2 = '#A23B72'  # Professional purple/magenta
     color_p99 = '#E94F37'  # Red for p99
     color_p50 = '#44AF69'  # Green for p50
+    color_errors = '#FF6B35'  # Orange for errors
     
     # Plot TPS on left y-axis with enhanced styling (using errorbar)
     # capsize=5 adds caps to error bars
@@ -403,16 +411,34 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     for spine in ax3.spines.values():
         spine.set_edgecolor('#DDDDDD')
         spine.set_linewidth(1.2)
-    
+
+    # Create fourth axis for error count (right, offset further from latency axis)
+    ax4 = ax1.twinx()
+    ax4.spines['right'].set_position(('outward', 120))
+    errors_line, = ax4.plot(num_nodes, errors_vals, 'X-', color=color_errors, linewidth=2.5,
+                            markersize=10, label='Errors', zorder=3, alpha=0.9)
+    for x, y in zip(num_nodes, errors_vals):
+        ax4.annotate(f'{int(y)}', (x, y), textcoords="offset points", xytext=(0, 12),
+                     ha='center', fontsize=9, fontweight='bold', color=color_errors,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor=color_errors, linewidth=1.5, alpha=0.8))
+    ax4.set_ylabel('Errored Responses', color=color_errors, fontsize=12, fontweight='bold')
+    ax4.tick_params(axis='y', labelcolor=color_errors, labelsize=11)
+    ax4.spines['top'].set_visible(False)
+    for spine in ax4.spines.values():
+        spine.set_edgecolor('#DDDDDD')
+        spine.set_linewidth(1.2)
+
     # Set axis scales
     if log_scale:
         ax1.set_xscale('log')
         ax1.set_yscale('log')
         ax2.set_yscale('log')
         ax3.set_yscale('log')
-        
+        ax4.set_yscale('log')
+
         # Use scalar formatter to show plain numbers (e.g., 100 instead of 10^2)
-        for ax in [ax1, ax2, ax3]:
+        for ax in [ax1, ax2, ax3, ax4]:
             formatter = ScalarFormatter()
             formatter.set_scientific(False)
             ax.yaxis.set_major_formatter(formatter)
@@ -422,6 +448,7 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
         ax1.set_yscale('linear')
         ax2.set_yscale('linear')
         ax3.set_yscale('linear')
+        ax4.set_yscale('linear')
 
     ax1.set_xticks(num_nodes)
     ax1.set_xticklabels([f"{n}\n({n * 12} workers)" for n in num_nodes])
@@ -464,6 +491,9 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
     for scatter in ax3.collections:
         legend_handles.append(scatter)
         legend_labels.append(scatter.get_label())
+    # Add errors line
+    legend_handles.append(errors_line)
+    legend_labels.append('Errors')
     legend = ax1.legend(legend_handles, legend_labels, loc='upper left', fontsize=10,
                         frameon=True, fancybox=True, shadow=True,
                         framealpha=0.95, edgecolor='#CCCCCC', facecolor='white')

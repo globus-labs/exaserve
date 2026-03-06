@@ -172,7 +172,7 @@ class HAProxyProxy(ProxyBackend):
         )
         return config_path
 
-    def start(self, config_path: Path, host: str, port: int) -> subprocess.Popen:
+    def start(self, config_path: Path, host: str, port: int, **kwargs) -> subprocess.Popen:
         """
         Launch haproxy with the generated config.
 

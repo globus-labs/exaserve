@@ -58,12 +58,12 @@ if [ "$BACKEND" != "ray" ]; then
     # fi
 fi
 
-# Locate script directory
+# Locate script directory and derive project root (works in both dev repo and snapshots)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RAY_ORCHESTRATOR_SCRIPT="/home/wenyiw/aurora_rayserver/src/orchestrator.py"
-LAUNCH_CLUSTER_SCRIPT="/home/wenyiw/aurora_rayserver/scripts/launch_cluster.sh"
-# MPI_API_SERVER_SCRIPT="$SCRIPT_DIR/../mpi_customized/api_server/run_api_server.py"
-REPLAY_CLIENT_SCRIPT="/home/wenyiw/aurora_rayserver/eval/replay_client.py"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RAY_ORCHESTRATOR_SCRIPT="$PROJECT_ROOT/src/orchestrator.py"
+LAUNCH_CLUSTER_SCRIPT="$PROJECT_ROOT/scripts/launch_cluster.sh"
+REPLAY_CLIENT_SCRIPT="$PROJECT_ROOT/eval/replay_client.py"
 ENV_SETUP_SCRIPT="/home/wenyiw/script/env_aurora"
 # ENV_SETUP_SCRIPT="/home/wenyiw/script/env_local"
 
@@ -203,7 +203,7 @@ echo "=================================================="
 echo "Date:    $(date)"
 echo "Host:    $(hostname)"
 echo "Backend: $BACKEND"
-echo "Script:  $SCRIPT_DIR"
+echo "Code:    $PROJECT_ROOT"
 echo "=================================================="
 
 echo ">>> [DRIVER] Setting up environment..."

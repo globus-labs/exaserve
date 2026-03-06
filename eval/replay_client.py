@@ -212,7 +212,7 @@ async def send_request(session, base_url, req, mode_map, include_tp: bool, gener
             error_msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
             _print_request_error(url, error_msg)
     except Exception as e:
-        error_msg = str(e)
+        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         _print_request_error(url, error_msg)
 
     end_time = time.time()
@@ -311,7 +311,7 @@ async def _worker_async(
         limits=httpx.Limits(
             max_connections=per_worker_conn,
             max_keepalive_connections=per_worker_conn,
-            keepalive_expiry=60,
+            keepalive_expiry=4,
         ),
         timeout=httpx.Timeout(TIMEOUT_S),
     )
@@ -574,7 +574,7 @@ async def replay(
                     limits=httpx.Limits(
                         max_connections=safe_conn_limit,
                         max_keepalive_connections=safe_conn_limit,
-                        keepalive_expiry=60,
+                        keepalive_expiry=4,
                     ),
                     timeout=httpx.Timeout(TIMEOUT_S),
                 )
@@ -615,7 +615,7 @@ async def replay(
 
                 if is_root:
                     print(f">>> [WARMUP] All ranks finished. Resting 5s...")
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
                 _mpi_barrier(comm)
             else:
                 if is_root:
@@ -783,8 +783,8 @@ async def replay(
 
             if run_idx < num_runs - 1:
                 if is_root:
-                    print(f">>> [RUN {run_idx + 1}] Completed. Resting 5s before next run...")
-                await asyncio.sleep(5)
+                    print(f">>> [RUN {run_idx + 1}] Completed. Resting 10s before next run...")
+                await asyncio.sleep(10)
                 _mpi_barrier(comm)
 
         results = all_runs_results[-1] if all_runs_results else []

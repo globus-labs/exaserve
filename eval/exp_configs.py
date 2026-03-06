@@ -62,13 +62,14 @@ class WeakScalingExpParams:
     # Client (→ ReplayClientConfig)
     client_num_runs: int = 1
     client_num_cli_per_node: float = 1
-    client_num_workers_per_node: int = 4  # micro-benchmark default; increase for throughput runs
+    client_num_workers_per_node: int = 1  # micro-benchmark default; increase for throughput runs
     client_dest: str = "proxy"            # "proxy": local workers → proxy (ignores MPI args)
                                           # "direct": MPI round-robin to servers (no proxy)
 
     # Proxy (→ ProxyConfig)
     proxy_type: str = "litellm"
     proxy_python_path: str = "/home/wenyiw/agpt/venv/litellm/bin/python3"
+    proxy_num_workers_per_node: int = 1   # litellm uvicorn workers; total = num_nodes * this
 
 
 def _walltime_and_queue(num_nodes: int):
@@ -139,9 +140,13 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
             dest=params.client_dest,
             num_nodes=num_nodes,
             num_cli_per_node=params.client_num_cli_per_node,
-            num_workers_per_node=params.client_num_workers_per_node,
+            num_workers_per_node=params.client_num_workers_per_node * num_nodes,
         )
-        proxy_cfg = ProxyConfig(type=params.proxy_type, python_path=params.proxy_python_path)
+        proxy_cfg = ProxyConfig(
+            type=params.proxy_type,
+            python_path=params.proxy_python_path,
+            num_workers=num_nodes * params.proxy_num_workers_per_node,
+        )
 
         exp_cfg = ExpConfig(
             pbs_result_dir=pbs_result_dir,
