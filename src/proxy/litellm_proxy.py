@@ -145,7 +145,6 @@ class LiteLLMProxy(ProxyBackend):
         env = os.environ.copy()
         env["LITELLM_PORT"] = str(port)
         env["LITELLM_HOST"] = host
-        # Also set uvicorn's env vars as a fallback
         env["UVICORN_PORT"] = str(port)
         env["UVICORN_HOST"] = host
         env["PORT"] = str(port)
@@ -158,7 +157,31 @@ class LiteLLMProxy(ProxyBackend):
         env.pop("HTTPS_PROXY", None)
         env.pop("http_proxy", None)
         env.pop("https_proxy", None)
-        env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True" # skip fetching model cost map from the internet
+        env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+
+        # Strip Intel oneAPI / Level Zero / SYCL env vars.  These cause
+        # uvicorn worker children to segfault after fork because Level Zero
+        # runtime state is not fork-safe.  LiteLLM is a pure-Python HTTP
+        # proxy and never needs GPU access.
+        _GPU_ENV_PREFIXES = (
+            "ZE_", "ONEAPI_", "SYCL_", "CCL_", "I_MPI_", "FI_",
+            "INTEL_", "LIBOMPTARGET_", "NEOReadDebugKeys",
+        )
+        _GPU_ENV_EXACT = {
+            "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
+            "ZE_FLAT_DEVICE_HIERARCHY",
+            "ZE_AFFINITY_MASK",
+        }
+        for key in list(env):
+            if key in _GPU_ENV_EXACT or key.startswith(_GPU_ENV_PREFIXES):
+                del env[key]
+
+        # Also scrub LD_LIBRARY_PATH of Intel/oneAPI shared-lib dirs so the
+        # forked workers don't load Level Zero or SYCL runtimes at all.
+        ld_path = env.get("LD_LIBRARY_PATH", "")
+        if ld_path:
+            clean = [p for p in ld_path.split(":") if "/oneapi/" not in p and "/intel/" not in p.lower()]
+            env["LD_LIBRARY_PATH"] = ":".join(clean)
 
         print(f"[LiteLLMProxy] Starting: {' '.join(cmd)}", flush=True)
         print(f"[LiteLLMProxy] Port forced via env: LITELLM_PORT={port}, UVICORN_PORT={port}", flush=True)
