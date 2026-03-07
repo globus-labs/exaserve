@@ -83,3 +83,18 @@ bash benchmarks/run_bench.sh \
   --dispatch-workers 2 \
   --point-timeout 60 \
   --sum-only
+
+
+bash benchmarks/run_bench.sh \
+  --rps-start 128000 \
+  --find-max-rps \
+  --probe-duration 3 \
+  --mode client \
+  --payload medium \
+  --stub-workers 16 \
+  --workers 4 \
+  --go-concurrency 4000 \
+  --dispatch-workers 2 \
+  --point-timeout 60 \
+  --sum-only \
+  --go-num-processes 2

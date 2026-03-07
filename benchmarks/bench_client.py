@@ -168,6 +168,7 @@ def generate_config(
     go_concurrency: int = 2000,
     dispatch_workers: int = 4,
     sum_only: bool = False,
+    go_num_processes: int = 1,
 ) -> str:
     """Write a minimal YAML config for replay_client.py and return its path."""
     cfg = {
@@ -183,12 +184,9 @@ def generate_config(
             "num_runs": 1,
             "dest": "proxy",
             "go_concurrency": go_concurrency,
-            # Number of parallel dispatch goroutines in go_dispatch.
-            # Splits the trace into N interleaved partitions so each goroutine
-            # only fires every Nth request — N× longer intervals break the
-            # single-loop serial bottleneck (~30K req/s ceiling).
             "dispatch_workers": dispatch_workers,
             "sum_only": sum_only,
+            "go_num_processes": go_num_processes,
         },
         "model_deployment_config": {
             "num_nodes": 1,
@@ -270,6 +268,7 @@ def run_sweep_point(
     go_concurrency: int = 2000,
     dispatch_workers: int = 4,
     sum_only: bool = False,
+    go_num_processes: int = 1,
 ) -> dict:
     """
     Run one (rps, workers, payload) combination using the real replay_client.py.
@@ -284,7 +283,8 @@ def run_sweep_point(
     config_path = generate_config(stub_port, trace_path, result_dir, num_workers, model,
                                   go_concurrency=go_concurrency,
                                   dispatch_workers=dispatch_workers,
-                                  sum_only=sum_only)
+                                  sum_only=sum_only,
+                                  go_num_processes=go_num_processes)
     generate_trace(target_rps, duration_s, payload_size, trace_path, model)
 
     cmd = [
@@ -463,6 +463,7 @@ def find_max_rps(
     go_concurrency: int = 2000,
     dispatch_workers: int = 4,
     sum_only: bool = False,
+    go_num_processes: int = 1,
 ) -> dict:
     """
     Find the maximum sustainable RPS for a given (workers, payload) config.
@@ -495,6 +496,7 @@ def find_max_rps(
             go_concurrency=go_concurrency,
             dispatch_workers=dispatch_workers,
             sum_only=sum_only,
+            go_num_processes=go_num_processes,
         )
         entry = {
             "phase":        phase,
@@ -790,6 +792,12 @@ def main():
                         ))
     parser.add_argument("--sum-only", action="store_true",
                         help="Go client writes only a summary line instead of per-request results.")
+    parser.add_argument("--go-num-processes", type=int, default=1,
+                        help=(
+                            "Number of independent Go processes per rank (default 1). "
+                            "Each gets 1/N of the requests (interleaved). "
+                            "Use >1 to test single-process Go scheduler bottleneck."
+                        ))
     # Legacy sweep args kept for run_bench.sh compatibility
     parser.add_argument("--sweep-pools", type=str, default=None, help="(No-op for real replay_client.)")
     parser.add_argument("--target",      type=str, default="stub_server", help="(No-op, kept for compat.)")
@@ -869,6 +877,7 @@ def main():
                 go_concurrency=args.go_concurrency,
                 dispatch_workers=args.dispatch_workers,
                 sum_only=args.sum_only,
+                go_num_processes=args.go_num_processes,
             )
 
         print_max_rps_summary_table(all_results)
@@ -947,6 +956,7 @@ def main():
                 go_concurrency=args.go_concurrency,
                 dispatch_workers=args.dispatch_workers,
                 sum_only=args.sum_only,
+                go_num_processes=args.go_num_processes,
             )
         all_results.append(result)
 

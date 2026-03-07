@@ -305,6 +305,7 @@ def _run_go_dispatch(
     tmp_dir: str,
     dispatch_workers: int = 4,
     sum_only: bool = False,
+    num_go_processes: int = 1,
 ) -> tuple[list, float]:
     """
     Write the rank's trace partition, invoke go_dispatch, and return
@@ -315,62 +316,125 @@ def _run_go_dispatch(
          actual_prompt_tokens, actual_completion_tokens)
 
     When sum_only=True, returns a summary dict instead of per-request tuples.
-    """
-    trace_path = os.path.join(tmp_dir, f"rank{rank}_trace.jsonl")
-    result_path = os.path.join(tmp_dir, f"rank{rank}_results.jsonl")
 
-    _write_trace_partition(rank_requests, trace_path)
+    num_go_processes: spawn N independent Go processes, each handling 1/N of
+    the requests (interleaved). This tests whether the bottleneck is inside
+    a single Go process's scheduler.
+    """
+    N = max(1, num_go_processes)
 
     # Build request lookup by req_id so we can reconstruct the TraceRequest
     req_map = {req.req_id: req for req in rank_requests}
 
-    cmd = [
-        go_bin,
-        "--base-urls", ",".join(base_urls),
-        "--run-t0", repr(run_t0),
-        "--generation-mode", generation_mode,
-        "--timeout", str(TIMEOUT_S),
-        "--concurrency", str(concurrency),
-        "--dispatch-workers", str(dispatch_workers),
-        "--trace-file", trace_path,
-        "--result-file", result_path,
-    ]
-    if sum_only:
-        cmd.append("--sum-only")
-    if include_tp:
-        cmd.append("--include-tp")
+    # Interleave requests across N Go processes
+    partitions = [rank_requests[i::N] for i in range(N)]
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    # Per-process concurrency
+    per_proc_concurrency = max(100, concurrency // N)
+    per_proc_dispatch_workers = max(1, dispatch_workers // N) if N > 1 else dispatch_workers
 
-    # Poll until the subprocess finishes, forwarding interrupts
-    while True:
-        try:
-            proc.wait(timeout=1.0)
-            break
-        except subprocess.TimeoutExpired:
-            if interrupt_event is not None and interrupt_event.is_set():
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                break
+    procs = []
+    result_paths = []
+    for p_idx in range(N):
+        trace_path = os.path.join(tmp_dir, f"rank{rank}_p{p_idx}_trace.jsonl")
+        result_path = os.path.join(tmp_dir, f"rank{rank}_p{p_idx}_results.jsonl")
+        result_paths.append(result_path)
 
-    stderr_out = proc.stderr.read().decode(errors="replace")
-    for line in stderr_out.splitlines():
-        print(f"[go_dispatch rank {rank}] {line}", flush=True)
+        _write_trace_partition(partitions[p_idx], trace_path)
 
-    if proc.returncode not in (0, -signal.SIGTERM):
-        print(
-            f"!!! [go_dispatch rank {rank}] exited with code {proc.returncode}",
-            flush=True,
+        cmd = [
+            go_bin,
+            "--base-urls", ",".join(base_urls),
+            "--run-t0", repr(run_t0),
+            "--generation-mode", generation_mode,
+            "--timeout", str(TIMEOUT_S),
+            "--concurrency", str(per_proc_concurrency),
+            "--dispatch-workers", str(per_proc_dispatch_workers),
+            "--trace-file", trace_path,
+            "--result-file", result_path,
+        ]
+        if sum_only:
+            cmd.append("--sum-only")
+        if include_tp:
+            cmd.append("--include-tp")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        procs.append((p_idx, proc))
 
-    return _read_go_results(result_path, req_map)
+    if N > 1:
+        print(f"[go_dispatch rank {rank}] Spawned {N} Go processes "
+              f"(concurrency={per_proc_concurrency} each, "
+              f"dispatch_workers={per_proc_dispatch_workers} each)", flush=True)
+
+    # Poll until all subprocesses finish, forwarding interrupts
+    alive = set(range(N))
+    while alive:
+        for p_idx, proc in procs:
+            if p_idx not in alive:
+                continue
+            try:
+                proc.wait(timeout=0.5)
+                alive.discard(p_idx)
+            except subprocess.TimeoutExpired:
+                pass
+        if interrupt_event is not None and interrupt_event.is_set():
+            for p_idx, proc in procs:
+                if p_idx in alive:
+                    proc.send_signal(signal.SIGTERM)
+            for p_idx, proc in procs:
+                if p_idx in alive:
+                    try:
+                        proc.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+            break
+
+    for p_idx, proc in procs:
+        stderr_out = proc.stderr.read().decode(errors="replace")
+        for line in stderr_out.splitlines():
+            print(f"[go_dispatch rank {rank} p{p_idx}] {line}", flush=True)
+        if proc.returncode not in (0, None, -signal.SIGTERM):
+            print(
+                f"!!! [go_dispatch rank {rank} p{p_idx}] exited with code {proc.returncode}",
+                flush=True,
+            )
+
+    # Merge results from all Go processes
+    all_results = []
+    max_last_fire_time = 0.0
+    final_adjusted_run_t0 = None
+
+    for result_path in result_paths:
+        results, lft, adj_t0 = _read_go_results(result_path, req_map)
+        if lft > max_last_fire_time:
+            max_last_fire_time = lft
+        if adj_t0 is not None:
+            final_adjusted_run_t0 = adj_t0
+
+        if sum_only and isinstance(results, dict):
+            # For sum_only with multiple processes, accumulate into first summary
+            if not all_results:
+                all_results = results
+            else:
+                all_results["requests_completed"] = all_results.get("requests_completed", 0) + results.get("requests_completed", 0)
+                all_results["requests_scheduled"] = all_results.get("requests_scheduled", 0) + results.get("requests_scheduled", 0)
+                all_results["errors"] = all_results.get("errors", 0) + results.get("errors", 0)
+                all_results["total_input_tokens"] = all_results.get("total_input_tokens", 0) + results.get("total_input_tokens", 0)
+                all_results["total_output_tokens"] = all_results.get("total_output_tokens", 0) + results.get("total_output_tokens", 0)
+                # p50/p99 from merged processes are approximate — take the max
+                all_results["p50_s"] = max(all_results.get("p50_s", 0), results.get("p50_s", 0))
+                all_results["p99_s"] = max(all_results.get("p99_s", 0), results.get("p99_s", 0))
+        else:
+            all_results.extend(results)
+
+    if sum_only and isinstance(all_results, dict):
+        all_results["last_fire_time"] = max_last_fire_time
+
+    return all_results, max_last_fire_time, final_adjusted_run_t0
 
 
 def _read_go_results(result_path: str, req_map: dict) -> tuple:
@@ -915,6 +979,9 @@ async def replay(
                 # and breaking the single-loop throughput ceiling (~30K req/s).
                 dispatch_workers = replay_cfg.get("dispatch_workers", 4)
                 go_sum_only = replay_cfg.get("sum_only", False)
+                # num_go_processes: spawn N independent Go processes per rank.
+                # Use to test whether single-process Go scheduler is the bottleneck.
+                go_num_processes = replay_cfg.get("go_num_processes", 1)
 
                 loop = asyncio.get_running_loop()
                 local_results, last_fire_time, go_adjusted_run_t0 = await loop.run_in_executor(
@@ -932,6 +999,7 @@ async def replay(
                     tmp_dir,
                     dispatch_workers,
                     go_sum_only,
+                    go_num_processes,
                 )
                 # Use go_dispatch's adjusted run_t0 (post-startup-compensation) for
                 # overhead calculation, so startup latency is not counted as dispatch

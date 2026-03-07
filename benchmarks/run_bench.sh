@@ -80,6 +80,7 @@ STUB_WORKERS=1
 NUM_STUBS=1
 GO_CONCURRENCY=2000
 DISPATCH_WORKERS=4
+GO_NUM_PROCESSES=1
 LITELLM_PYTHON=""
 LITELLM_WORKERS=4
 ROUTING="least-busy"
@@ -104,7 +105,7 @@ SUM_ONLY=true
 FIND_MAX_RPS=false
 PROBE_DURATION=8
 RPS_START=50
-MAX_RPS_CEILING=320000
+MAX_RPS_CEILING=3200000
 PRECISION=0.1
 
 # ---------------------------------------------------------------------------
@@ -133,6 +134,7 @@ while [[ $# -gt 0 ]]; do
         --num-stubs)       NUM_STUBS="$2";        shift 2 ;;
         --go-concurrency)    GO_CONCURRENCY="$2";    shift 2 ;;
         --dispatch-workers)  DISPATCH_WORKERS="$2";  shift 2 ;;
+        --go-num-processes)  GO_NUM_PROCESSES="$2";  shift 2 ;;
         --litellm-python)  LITELLM_PYTHON="$2";  shift 2 ;;
         --litellm-workers) LITELLM_WORKERS="$2"; shift 2 ;;
         --routing)         ROUTING="$2";          shift 2 ;;
@@ -368,6 +370,7 @@ run_client_bench() {
     fi
     CLIENT_ARGS+=("--go-concurrency"   "$GO_CONCURRENCY")
     CLIENT_ARGS+=("--dispatch-workers" "$DISPATCH_WORKERS")
+    CLIENT_ARGS+=("--go-num-processes" "$GO_NUM_PROCESSES")
     if [ "$SUM_ONLY" = true ]; then
         CLIENT_ARGS+=("--sum-only")
     fi

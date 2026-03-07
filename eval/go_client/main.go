@@ -390,9 +390,6 @@ func run() int {
 		workerResults[i] = make([]resultRecord, len(partitions[i]))
 	}
 
-	// Per-worker WaitGroups to track in-flight requests per worker
-	workerWgs := make([]sync.WaitGroup, N)
-
 	// Per-worker last fire times — merged after dispatch
 	workerLastFireTimes := make([]float64, N)
 
@@ -406,7 +403,37 @@ func run() int {
 		clients[i] = newHTTPClient(connsPerWorker, *timeoutSec)
 	}
 
-	fmt.Fprintf(os.Stderr, "[go_dispatch] Launching dispatch group at T0+%.3fs\n", time.Since(runT0Adjusted).Seconds())
+	// ------------------------------------------------------------------
+	// Pre-spawned worker pool — eliminates per-request goroutine creation
+	// overhead from the dispatch hot path.
+	// ------------------------------------------------------------------
+	type workItem struct {
+		req      preparedRequest
+		baseURL  string
+		fireTime float64
+		wID      int // dispatch worker that owns this request
+		rIdx     int // index into workerResults[wID]
+	}
+
+	// Buffered channel so dispatch loop rarely blocks on send
+	poolSize := *concurrency
+	workCh := make(chan workItem, poolSize)
+	var poolWg sync.WaitGroup
+
+	// Distribute pool goroutines evenly across dispatch workers' HTTP clients
+	for i := 0; i < poolSize; i++ {
+		poolWg.Add(1)
+		clientIdx := i % N
+		go func(client *http.Client) {
+			defer poolWg.Done()
+			for item := range workCh {
+				workerResults[item.wID][item.rIdx] = doRequest(ctx, client, item.baseURL, item.req, item.fireTime)
+			}
+		}(clients[clientIdx])
+	}
+
+	fmt.Fprintf(os.Stderr, "[go_dispatch] Launching dispatch group at T0+%.3fs (pool_size=%d)\n",
+		time.Since(runT0Adjusted).Seconds(), poolSize)
 
 	var dispatchWg sync.WaitGroup
 	for w := 0; w < N; w++ {
@@ -423,17 +450,6 @@ func run() int {
 			// the hot-spin loop, which would cause multi-µs jitter.
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
-
-			workerClient := clients[workerID]
-
-			// Per-worker semaphore — limits in-flight requests to prevent
-			// port exhaustion.  Acquired INSIDE the goroutine so the
-			// dispatch loop is never blocked.
-			workerSemSize := *concurrency / N
-			if workerSemSize < 1 {
-				workerSemSize = 1
-			}
-			workerSem := make(chan struct{}, workerSemSize)
 
 			// Per-worker URL round-robin counter
 			var localURLIdx uint64
@@ -486,21 +502,18 @@ func run() int {
 					localLastFireTime = fireTimeF
 				}
 
-					// Choose URL (per-worker round-robin)
+				// Choose URL (per-worker round-robin)
 				baseURL := baseURLs[localURLIdx%uint64(len(baseURLs))]
 				localURLIdx++
 
-				workerWgs[workerID].Add(1)
-				reqCopy := req
-				wID := workerID
-				rIdx := reqIdx
-				go func(r preparedRequest, base string, ft float64) {
-					defer workerWgs[wID].Done()
-					// Acquire semaphore inside goroutine — dispatch loop never blocks
-					workerSem <- struct{}{}
-					defer func() { <-workerSem }()
-					workerResults[wID][rIdx] = doRequest(ctx, workerClient, base, r, ft)
-				}(reqCopy, baseURL, fireTimeF)
+				// Send to worker pool — channel send, no goroutine creation
+				workCh <- workItem{
+					req:      req,
+					baseURL:  baseURL,
+					fireTime: fireTimeF,
+					wID:      workerID,
+					rIdx:     reqIdx,
+				}
 			}
 
 			// Store per-worker last fire time for post-dispatch merge
@@ -515,10 +528,9 @@ func run() int {
 	dispatchElapsed := time.Since(runT0Adjusted)
 	fmt.Fprintf(os.Stderr, "[go_dispatch] All requests dispatched in %.3fs\n", dispatchElapsed.Seconds())
 
-	// Wait for all in-flight requests to complete
-	for i := 0; i < N; i++ {
-		workerWgs[i].Wait()
-	}
+	// Close work channel and wait for all pool goroutines to drain
+	close(workCh)
+	poolWg.Wait()
 	totalElapsed := time.Since(runT0Adjusted)
 	fmt.Fprintf(os.Stderr, "[go_dispatch] All requests completed in %.3fs (in-flight drain: %.3fs)\n",
 		totalElapsed.Seconds(), totalElapsed.Seconds()-dispatchElapsed.Seconds())
