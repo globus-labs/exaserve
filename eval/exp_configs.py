@@ -61,8 +61,11 @@ class WeakScalingExpParams:
 
     # Client (→ ReplayClientConfig)
     client_num_runs: int = 1
-    client_num_cli_per_node: float = 1
-    client_num_workers_per_node: int = 1  # micro-benchmark default; increase for throughput runs
+    client_num_go_procs: int = 1          # number of Go processes per replay_client node
+    client_num_go_workers: int = 4        # dispatch goroutines (N) inside each Go process
+    client_go_concurrency: int = 2000     # max in-flight requests per Go process
+    client_warmup_rps: int = 0            # warm-up requests per second (0 = no warmup)
+    client_warmup_duration_s: float = 0.0 # warm-up duration in seconds
     client_dest: str = "proxy"            # "proxy": local workers → proxy (ignores MPI args)
                                           # "direct": MPI round-robin to servers (no proxy)
 
@@ -135,12 +138,14 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
         )
         replay_cfg = ReplayClientConfig(
             config_path=config_file_path,
-            no_warmup=False,
             num_runs=params.client_num_runs,
             dest=params.client_dest,
             num_nodes=num_nodes,
-            num_cli_per_node=params.client_num_cli_per_node,
-            num_workers_per_node=params.client_num_workers_per_node * num_nodes,
+            num_go_procs=params.client_num_go_procs,
+            num_go_workers=params.client_num_go_workers,
+            go_concurrency=params.client_go_concurrency,
+            warmup_rps=params.client_warmup_rps,
+            warmup_duration_s=params.client_warmup_duration_s,
         )
         proxy_cfg = ProxyConfig(
             type=params.proxy_type,
@@ -220,7 +225,6 @@ EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
         null_compute=True,
         rate_per_node=80,
         client_num_runs=1,
-        client_num_cli_per_node=0.5,
         client_dest="direct",
         proxy_type="none",
     ),
@@ -375,7 +379,7 @@ def get_example_trace_config() -> ExpConfig:
         pbs_queue_name="debug",
         pbs_job_name="manual_run",
         pbs_working_dir=os.path.join(node_base, "config"),
-        job_replay_client_config=ReplayClientConfig(config_path=os.path.join(node_base, "config", "config.yaml"), no_warmup=False, num_runs=1),
+        job_replay_client_config=ReplayClientConfig(config_path=os.path.join(node_base, "config", "config.yaml"), num_runs=1),
         job_trace_config=trace_cfg,
         job_seed=42,
         model_deployment_config=dep,

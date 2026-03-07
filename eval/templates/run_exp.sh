@@ -17,7 +17,6 @@ set -e  # Exit on error
 
 CONFIG_PATH=""
 BACKEND="ray"  # Default to ray if not specified
-NO_WARMUP=""
 NUM_RUNS=1
 DEST=""  # Empty = defer to job_replay_client_config.dest in the YAML config
 
@@ -29,7 +28,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --no-warmup)
-            NO_WARMUP="--no-warmup"
+            # Legacy flag, ignored — warmup is now controlled by Go client config
             shift
             ;;
         --num-runs)
@@ -136,7 +135,8 @@ if [ -f "$GO_CLIENT_DIR/build.sh" ]; then
     if [ -f "$GO_DISPATCH_BIN" ]; then
         echo "[✓] Go dispatch:      $GO_DISPATCH_BIN"
     else
-        echo "[!] Go dispatch binary not built — will fall back to Python workers"
+        echo "!!! ERROR: Go dispatch binary not built — Go binary is required"
+        exit 1
     fi
 fi
 
@@ -318,7 +318,7 @@ while [ $RETRY_COUNT -lt $MAX_EXP_RETRIES ]; do
         # RUN REPLAY CLIENT
         # proxy mode: always run locally on the head node — no MPI needed since all
         #             traffic goes to the local proxy regardless of cluster size.
-        # direct mode: CLIENT_NODES = max(1, min(num_nodes, round(num_nodes * num_cli_per_node)))
+        # direct mode: CLIENT_NODES = num_nodes from config
         #              When CLIENT_NODES > 1, launches with mpiexec (one rank per node)
         #              using the first CLIENT_NODES unique hostnames from $PBS_NODEFILE.
         # ==============================================================================
@@ -331,8 +331,7 @@ import yaml
 c = yaml.safe_load(open('$CONFIG_PATH'))
 cfg = c.get('job_replay_client_config', {})
 num_nodes = cfg.get('num_nodes', 1)
-ratio     = cfg.get('num_cli_per_node', 1.0)
-print(max(1, min(num_nodes, round(num_nodes * ratio))))
+print(num_nodes)
 " 2>/dev/null || echo "1")
             echo ">>> [DRIVER] Starting Replay Client in direct mode (client nodes: $CLIENT_NODES)..."
 
@@ -348,17 +347,17 @@ print(max(1, min(num_nodes, round(num_nodes * ratio))))
                 echo "    Client hostfile: $CLIENT_HOSTFILE"
                 cat "$CLIENT_HOSTFILE"
                 mpiexec -n "$CLIENT_NODES" --ppn 1 --cpu-bind none --hostfile "$CLIENT_HOSTFILE" \
-                    python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
+                    python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" --num-runs $NUM_RUNS --dest $DEST
                 EXIT_CODE=$?
                 rm -f "$CLIENT_HOSTFILE"
             else
-                python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
+                python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" --num-runs $NUM_RUNS --dest $DEST
                 EXIT_CODE=$?
             fi
         else
             # proxy mode: single local process, no MPI
             echo ">>> [DRIVER] Starting Replay Client in proxy mode (local, no MPI)..."
-            python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" $NO_WARMUP --num-runs $NUM_RUNS --dest $DEST
+            python "$REPLAY_CLIENT_SCRIPT" --config "$CONFIG_PATH" --num-runs $NUM_RUNS --dest $DEST
             EXIT_CODE=$?
         fi
     else

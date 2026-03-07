@@ -86,15 +86,42 @@ bash benchmarks/run_bench.sh \
 
 
 bash benchmarks/run_bench.sh \
-  --rps-start 128000 \
+  --rps-start 64000 \
   --find-max-rps \
   --probe-duration 3 \
   --mode client \
   --payload medium \
   --stub-workers 16 \
-  --workers 4 \
+  --num-go-workers 2 \
+  --num-go-procs 2 \
   --go-concurrency 4000 \
-  --dispatch-workers 2 \
   --point-timeout 60 \
-  --sum-only \
-  --go-num-processes 2
+  --sum-only
+
+# settings achieved 512 K RPS
+bash benchmarks/run_bench.sh \
+  --rps-start 512000 \
+  --find-max-rps \
+  --probe-duration 3 \
+  --mode client \
+  --payload medium \
+  --stub-workers 64 \
+  --num-go-workers 2 \
+  --num-go-procs 8 \
+  --go-concurrency 40 \
+  --point-timeout 120 \
+  --sum-only
+
+
+bash benchmarks/run_bench.sh \
+  --rps-start 512000 \
+  --find-max-rps \
+  --probe-duration 3 \
+  --mode client \
+  --payload small \
+  --stub-workers 64 \
+  --num-go-workers 2 \
+  --num-go-procs 8 \
+  --go-concurrency 40 \
+  --point-timeout 120 \
+  --sum-only

@@ -115,7 +115,7 @@ def _setup_one_weak_scaling_experiment(item):
         .replace("{{CONFIG_FILE}}", os.path.abspath(config_path)) \
         .replace("{{RUN_EXP_SCRIPT}}", run_exp_script) \
         .replace("{{BACKEND}}", backend) \
-        .replace("{{NO_WARMUP}}", "--no-warmup" if exp_cfg.job_replay_client_config.no_warmup else "") \
+        .replace("{{NO_WARMUP}}", "") \
         .replace("{{NUM_RUNS}}", str(exp_cfg.job_replay_client_config.num_runs)) \
         .replace("{{ENV_EXPORTS}}", env_exports)
     pbs_path = os.path.join(exp_cfg.pbs_working_dir, "job.pbs")

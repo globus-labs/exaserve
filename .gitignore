@@ -8,3 +8,4 @@ data_local/
 CLAUDE.md
 *.png
 eval/go_client/bin/
+.claude/

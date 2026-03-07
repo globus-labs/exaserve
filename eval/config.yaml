@@ -4,11 +4,14 @@ job_replay_client_config:
   early_stop: 0.0
   generation_mode: deterministic
   include_tp: false
-  no_warmup: false
-  num_cli_per_node: 1.0
   num_nodes: 1
   num_runs: 1
-  num_workers_per_node: 4
+  num_go_procs: 1
+  num_go_workers: 4
+  go_concurrency: 2000
+  warmup_rps: 0
+  warmup_duration_s: 0.0
+  sum_only: false
 job_seed: 42
 job_trace_config:
   duration: 300.0

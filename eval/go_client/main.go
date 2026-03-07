@@ -14,13 +14,19 @@
 //
 //	./go_dispatch \
 //	  --base-urls "http://0.0.0.0:8000" \
-//	  --run-t0 1709744400.123456 \
 //	  --trace-file /tmp/rank0_trace.jsonl \
 //	  --result-file /tmp/rank0_results.jsonl \
 //	  [--generation-mode deterministic] \
 //	  [--include-tp] \
 //	  [--timeout 3600] \
-//	  [--concurrency 2000]
+//	  [--concurrency 2000] \
+//	  [--num-go-workers 4] \
+//	  [--worker-id rank0_p0] \
+//	  [--warmup-rps 10] \
+//	  [--warmup-duration 5.0]
+//
+// run_t0 is read from stdin (as a float64 string) after warm-up completes.
+// The process prints "GO_CLI_READY\n" to stdout when ready to receive run_t0.
 package main
 
 import (
@@ -256,23 +262,31 @@ func run() int {
 	startupTime := time.Now()
 
 	baseURLsFlag := flag.String("base-urls", "", "Comma-separated target base URLs (required)")
-	runT0Flag := flag.Float64("run-t0", 0, "Run start time as Unix epoch float (required)")
 	generationMode := flag.String("generation-mode", "deterministic", "deterministic or natural")
 	includeTP := flag.Bool("include-tp", false, "Include tensor_parallel_size in payloads")
 	timeoutSec := flag.Float64("timeout", 3600.0, "Per-request timeout in seconds")
 	concurrency := flag.Int("concurrency", 2000, "Max in-flight requests")
-	dispatchWorkers := flag.Int("dispatch-workers", 4, "Number of parallel dispatch goroutines. "+
+	numGoWorkers := flag.Int("num-go-workers", 4, "Number of parallel dispatch goroutines. "+
 		"Each goroutine handles every Nth request so its per-request interval is N× longer, "+
 		"eliminating the serial dispatch bottleneck at high RPS.")
 	traceFile := flag.String("trace-file", "", "Input trace partition JSONL (required)")
 	resultFile := flag.String("result-file", "", "Output results JSONL (required)")
 	sumOnly := flag.Bool("sum-only", false, "Write only a summary line instead of per-request results")
+	workerID := flag.String("worker-id", "", "Worker identifier for log prefixes (e.g. rank0_p0)")
+	warmupRPS := flag.Int("warmup-rps", 0, "Warm-up requests per second (0 = no warmup)")
+	warmupDuration := flag.Float64("warmup-duration", 0, "Warm-up duration in seconds")
 	flag.Parse()
 
-	if *baseURLsFlag == "" || *traceFile == "" || *resultFile == "" || *runT0Flag == 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: --base-urls, --run-t0, --trace-file, --result-file are required")
+	if *baseURLsFlag == "" || *traceFile == "" || *resultFile == "" {
+		fmt.Fprintln(os.Stderr, "ERROR: --base-urls, --trace-file, --result-file are required")
 		flag.Usage()
 		return 1
+	}
+
+	// Build log prefix from worker-id
+	logPrefix := "[go_dispatch]"
+	if *workerID != "" {
+		logPrefix = fmt.Sprintf("[go_dispatch %s]", *workerID)
 	}
 
 	// Ensure Go uses all available cores and reduce GC frequency.
@@ -285,7 +299,7 @@ func run() int {
 		// before any allocation pressure.  Use a simple approach:
 		os.Setenv("GOGC", "200")
 	}
-	fmt.Fprintf(os.Stderr, "[go_dispatch] GOMAXPROCS=%d\n", runtime.GOMAXPROCS(0))
+	fmt.Fprintf(os.Stderr, "%s GOMAXPROCS=%d\n", logPrefix, runtime.GOMAXPROCS(0))
 
 	baseURLs := strings.Split(*baseURLsFlag, ",")
 	for i := range baseURLs {
@@ -329,14 +343,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "ERROR: reading trace file: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "[go_dispatch] Loaded %d requests from %s\n", len(requests), *traceFile)
+	fmt.Fprintf(os.Stderr, "%s Loaded %d requests from %s\n", logPrefix, len(requests), *traceFile)
 
-	// Compensate for startup latency (flag parsing + trace loading).
 	startupElapsed := time.Since(startupTime)
-	runT0Adjusted := startupTime.Add(startupElapsed).Add(50 * time.Millisecond)
-	runT0 := runT0Adjusted.UnixNano()
-	fmt.Fprintf(os.Stderr, "[go_dispatch] Startup took %.3fs; run_t0 shifted forward by %.3fs\n",
-		startupElapsed.Seconds(), startupElapsed.Seconds()+0.05)
+	fmt.Fprintf(os.Stderr, "%s Startup took %.3fs\n", logPrefix, startupElapsed.Seconds())
 
 	// ------------------------------------------------------------------
 	// Signal handling
@@ -347,9 +357,87 @@ func run() int {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fmt.Fprintln(os.Stderr, "[go_dispatch] Interrupt received, draining in-flight requests...")
+		fmt.Fprintf(os.Stderr, "%s Interrupt received, draining in-flight requests...\n", logPrefix)
 		cancel()
 	}()
+
+	// ------------------------------------------------------------------
+	// Warm-up phase (optional)
+	// ------------------------------------------------------------------
+	if *warmupRPS > 0 && *warmupDuration > 0 && len(requests) > 0 {
+		warmupCount := int(float64(*warmupRPS) * *warmupDuration)
+		fmt.Fprintf(os.Stderr, "%s Starting warm-up: %d RPS × %.1fs = %d requests\n",
+			logPrefix, *warmupRPS, *warmupDuration, warmupCount)
+
+		// Use first trace request as template for warm-up
+		templateReq := requests[0]
+
+		// Create a single HTTP client for warm-up
+		warmupClient := newHTTPClient(*warmupRPS, *timeoutSec)
+
+		interval := time.Second / time.Duration(*warmupRPS)
+		var warmupWg sync.WaitGroup
+		warmupSuccess := 0
+		warmupErrors := 0
+		var warmupMu sync.Mutex
+		warmupStart := time.Now()
+		warmupDeadline := warmupStart.Add(time.Duration(*warmupDuration * float64(time.Second)))
+
+		for i := 0; i < warmupCount; i++ {
+			if ctx.Err() != nil {
+				break
+			}
+			if time.Now().After(warmupDeadline) {
+				break
+			}
+
+			warmupWg.Add(1)
+			baseURL := baseURLs[i%len(baseURLs)]
+			go func(url string) {
+				defer warmupWg.Done()
+				rec := doRequest(ctx, warmupClient, url, templateReq, float64(time.Now().UnixNano())/1e9)
+				warmupMu.Lock()
+				if rec.Success {
+					warmupSuccess++
+				} else {
+					warmupErrors++
+				}
+				warmupMu.Unlock()
+			}(baseURL)
+
+			// Sleep for the interval between requests
+			if i < warmupCount-1 {
+				time.Sleep(interval)
+			}
+		}
+
+		warmupWg.Wait()
+		warmupElapsed := time.Since(warmupStart)
+		fmt.Fprintf(os.Stderr, "%s Warm-up done in %.2fs: success=%d errors=%d\n",
+			logPrefix, warmupElapsed.Seconds(), warmupSuccess, warmupErrors)
+	}
+
+	// ------------------------------------------------------------------
+	// Signal readiness and wait for run_t0 from stdin
+	// ------------------------------------------------------------------
+	fmt.Println("GO_CLI_READY")
+
+	var runT0 int64
+	stdinScanner := bufio.NewScanner(os.Stdin)
+	if stdinScanner.Scan() {
+		line := strings.TrimSpace(stdinScanner.Text())
+		var runT0F float64
+		if _, err := fmt.Sscanf(line, "%f", &runT0F); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: failed to parse run_t0 from stdin: %q: %v\n", line, err)
+			return 1
+		}
+		runT0 = int64(runT0F * 1e9)
+		fmt.Fprintf(os.Stderr, "%s Received run_t0=%.6f from stdin\n", logPrefix, runT0F)
+	} else {
+		fmt.Fprintln(os.Stderr, "ERROR: stdin closed before receiving run_t0")
+		return 1
+	}
+	runT0Time := time.Unix(0, runT0)
 
 	// ------------------------------------------------------------------
 	// Parallel dispatch goroutines
@@ -369,12 +457,12 @@ func run() int {
 	// 4. Reusable timers — time.NewTimer+Reset instead of time.After
 	//    (which allocates a new timer per call → GC pressure).
 	// ------------------------------------------------------------------
-	N := *dispatchWorkers
+	N := *numGoWorkers
 	if N < 1 {
 		N = 1
 	}
-	fmt.Fprintf(os.Stderr, "[go_dispatch] dispatch_workers=%d  concurrency=%d  requests=%d\n",
-		N, *concurrency, len(requests))
+	fmt.Fprintf(os.Stderr, "%s num_go_workers=%d  concurrency=%d  requests=%d\n",
+		logPrefix, N, *concurrency, len(requests))
 
 	// Build N interleaved partitions
 	partitions := make([][]preparedRequest, N)
@@ -395,9 +483,9 @@ func run() int {
 
 	// Per-worker HTTP clients with independent connection pools
 	connsPerWorker := *concurrency / N
-	if connsPerWorker < 100 {
-		connsPerWorker = 100
-	}
+	// if connsPerWorker < 100 {
+	// 	connsPerWorker = 100
+	// }
 	clients := make([]*http.Client, N)
 	for i := 0; i < N; i++ {
 		clients[i] = newHTTPClient(connsPerWorker, *timeoutSec)
@@ -432,8 +520,8 @@ func run() int {
 		}(clients[clientIdx])
 	}
 
-	fmt.Fprintf(os.Stderr, "[go_dispatch] Launching dispatch group at T0+%.3fs (pool_size=%d)\n",
-		time.Since(runT0Adjusted).Seconds(), poolSize)
+	fmt.Fprintf(os.Stderr, "%s Launching dispatch group at T0+%.3fs (pool_size=%d)\n",
+		logPrefix, time.Since(runT0Time).Seconds(), poolSize)
 
 	var dispatchWg sync.WaitGroup
 	for w := 0; w < N; w++ {
@@ -442,8 +530,8 @@ func run() int {
 			defer dispatchWg.Done()
 
 			workerStart := time.Now()
-			fmt.Fprintf(os.Stderr, "[go_dispatch] Worker %d started at T0+%.3fs (%d requests)\n",
-				workerID, time.Since(runT0Adjusted).Seconds(), len(partition))
+			fmt.Fprintf(os.Stderr, "%s Worker %d started at T0+%.3fs (%d requests)\n",
+				logPrefix, workerID, time.Since(runT0Time).Seconds(), len(partition))
 
 			// Pin this dispatch goroutine to a dedicated OS thread.
 			// This prevents the Go scheduler from preempting us during
@@ -518,22 +606,22 @@ func run() int {
 
 			// Store per-worker last fire time for post-dispatch merge
 			workerLastFireTimes[workerID] = localLastFireTime
-			fmt.Fprintf(os.Stderr, "[go_dispatch] Worker %d finished at T0+%.3fs (took %.3fs)\n",
-				workerID, time.Since(runT0Adjusted).Seconds(), time.Since(workerStart).Seconds())
+			fmt.Fprintf(os.Stderr, "%s Worker %d finished at T0+%.3fs (took %.3fs)\n",
+				logPrefix, workerID, time.Since(runT0Time).Seconds(), time.Since(workerStart).Seconds())
 		}(w, partitions[w])
 	}
 
 	// Wait for all dispatch goroutines to finish scheduling
 	dispatchWg.Wait()
-	dispatchElapsed := time.Since(runT0Adjusted)
-	fmt.Fprintf(os.Stderr, "[go_dispatch] All requests dispatched in %.3fs\n", dispatchElapsed.Seconds())
+	dispatchElapsed := time.Since(runT0Time)
+	fmt.Fprintf(os.Stderr, "%s All requests dispatched in %.3fs\n", logPrefix, dispatchElapsed.Seconds())
 
 	// Close work channel and wait for all pool goroutines to drain
 	close(workCh)
 	poolWg.Wait()
-	totalElapsed := time.Since(runT0Adjusted)
-	fmt.Fprintf(os.Stderr, "[go_dispatch] All requests completed in %.3fs (in-flight drain: %.3fs)\n",
-		totalElapsed.Seconds(), totalElapsed.Seconds()-dispatchElapsed.Seconds())
+	totalElapsed := time.Since(runT0Time)
+	fmt.Fprintf(os.Stderr, "%s All requests completed in %.3fs (in-flight drain: %.3fs)\n",
+		logPrefix, totalElapsed.Seconds(), totalElapsed.Seconds()-dispatchElapsed.Seconds())
 
 	// ------------------------------------------------------------------
 	// Compute max last fire time across workers
@@ -616,12 +704,12 @@ func run() int {
 		out.Close()
 
 		saveElapsed := time.Since(saveStart)
-		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results summarized (compute %.3fs, total %.3fs)\n",
-			totalResults, sumElapsed.Seconds(), saveElapsed.Seconds())
-		fmt.Fprintf(os.Stderr, "[go_dispatch] Summary: completed=%d errors=%d p50=%.3fs p99=%.3fs\n",
-			completed, errors, p50, p99)
+		fmt.Fprintf(os.Stderr, "%s Done. %d results summarized (compute %.3fs, total %.3fs)\n",
+			logPrefix, totalResults, sumElapsed.Seconds(), saveElapsed.Seconds())
+		fmt.Fprintf(os.Stderr, "%s Summary: completed=%d errors=%d p50=%.3fs p99=%.3fs\n",
+			logPrefix, completed, errors, p50, p99)
 	} else {
-		fmt.Fprintf(os.Stderr, "[go_dispatch] Saving %d results to %s ...\n", totalResults, *resultFile)
+		fmt.Fprintf(os.Stderr, "%s Saving %d results to %s ...\n", logPrefix, totalResults, *resultFile)
 
 		for _, wr := range workerResults {
 			for _, rec := range wr {
@@ -642,7 +730,7 @@ func run() int {
 		out.Close()
 
 		saveElapsed := time.Since(saveStart)
-		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results written to %s (save took %.2fs)\n",
+		fmt.Fprintf(os.Stderr, "%s Done. %d results written to %s (save took %.2fs)\n", logPrefix,
 			totalResults, *resultFile, saveElapsed.Seconds())
 	}
 	return 0

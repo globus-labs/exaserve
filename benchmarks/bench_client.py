@@ -12,9 +12,9 @@ This ensures the benchmark measures the actual replay_client, not a
 re-implementation that only "follows the same pattern".
 
 Sweep dimensions supported:
-  workers   -- num_workers_per_node  [1, 2, 4, 8, 16, 32]
-  rps       -- target RPS            [10, 50, 100, 200, 500, 1000, 2000]
-  payload   -- prompt/output size    [small, medium, large, xl]
+  workers   -- num_go_workers  [1, 2, 4, 8, 16, 32]
+  rps       -- target RPS     [10, 50, 100, 200, 500, 1000, 2000]
+  payload   -- prompt/output size  [small, medium, large, xl]
 
 Note: HTTP version and connection pool size are not sweep dimensions here
 because replay_client always uses HTTP/2 and auto-sizes the pool from the
@@ -163,12 +163,11 @@ def generate_config(
     stub_port: int,
     trace_path: str,
     result_dir: str,
-    num_workers: int,
     model: str = MODEL_ID,
     go_concurrency: int = 2000,
-    dispatch_workers: int = 4,
+    num_go_workers: int = 4,
     sum_only: bool = False,
-    go_num_processes: int = 1,
+    num_go_procs: int = 1,
 ) -> str:
     """Write a minimal YAML config for replay_client.py and return its path."""
     cfg = {
@@ -177,16 +176,14 @@ def generate_config(
             "output_trace_path": trace_path,
         },
         "job_replay_client_config": {
-            "num_workers_per_node": num_workers,
             "generation_mode": "deterministic",
             "num_nodes": 1,
-            "num_cli_per_node": 1.0,
             "num_runs": 1,
             "dest": "proxy",
             "go_concurrency": go_concurrency,
-            "dispatch_workers": dispatch_workers,
+            "num_go_workers": num_go_workers,
             "sum_only": sum_only,
-            "go_num_processes": go_num_processes,
+            "num_go_procs": num_go_procs,
         },
         "model_deployment_config": {
             "num_nodes": 1,
@@ -255,10 +252,9 @@ def parse_result(result_dir: str) -> Optional[dict]:
 def run_sweep_point(
     stub_port: int,
     target_rps: float,
-    num_workers: int,
+    num_go_workers: int,
     payload_size: str,
     duration_s: float,
-    warmup: bool,
     max_wall_s: float,
     python: str,
     work_dir: str,
@@ -266,25 +262,24 @@ def run_sweep_point(
     stub_workers: int = 1,
     model: str = MODEL_ID,
     go_concurrency: int = 2000,
-    dispatch_workers: int = 4,
     sum_only: bool = False,
-    go_num_processes: int = 1,
+    num_go_procs: int = 1,
 ) -> dict:
     """
     Run one (rps, workers, payload) combination using the real replay_client.py.
     Returns a flat metrics dict; 'timed_out' is set if the process was killed.
     """
-    point_id = f"w{num_workers}_r{int(target_rps)}_{payload_size}"
+    point_id = f"w{num_go_workers}_r{int(target_rps)}_{payload_size}"
     point_dir = os.path.join(work_dir, point_id)
     result_dir = os.path.join(point_dir, "results")
     os.makedirs(result_dir, exist_ok=True)
 
     trace_path  = os.path.join(point_dir, "trace.jsonl")
-    config_path = generate_config(stub_port, trace_path, result_dir, num_workers, model,
+    config_path = generate_config(stub_port, trace_path, result_dir, model,
                                   go_concurrency=go_concurrency,
-                                  dispatch_workers=dispatch_workers,
+                                  num_go_workers=num_go_workers,
                                   sum_only=sum_only,
-                                  go_num_processes=go_num_processes)
+                                  num_go_procs=num_go_procs)
     generate_trace(target_rps, duration_s, payload_size, trace_path, model)
 
     cmd = [
@@ -292,15 +287,12 @@ def run_sweep_point(
         "--config",              config_path,
         "--dest",                "proxy",
         "--proxy-port",          str(stub_port),
-        "--num-workers-per-node", str(num_workers),
     ]
-    if not warmup:
-        cmd.append("--no-warmup")
 
     # Port prediction
     pred = port_predict(
         rps=target_rps,
-        num_workers=num_workers,
+        num_workers=num_go_workers,
         http_version="2",   # replay_client always uses HTTP/2
         num_client_nodes=1,
     )
@@ -406,7 +398,7 @@ def run_sweep_point(
     return {
         # Identity
         "target_rps":           target_rps,
-        "num_workers":          num_workers,
+        "num_workers":          num_go_workers,
         "payload_size":         payload_size,
         "duration_s":           duration_s,
         "max_wall_s":           max_wall_s,
@@ -445,14 +437,13 @@ def run_sweep_point(
 
 def find_max_rps(
     stub_port: int,
-    num_workers: int,
+    num_go_workers: int,
     payload_size: str,
     probe_duration_s: float,
     full_duration_s: float,
     rps_start: float,
     max_ceiling: float,
     precision: float,
-    warmup: bool,
     probe_wall_s: float,
     full_wall_s: float,
     python: str,
@@ -461,9 +452,8 @@ def find_max_rps(
     stub_workers: int = 1,
     model: str = MODEL_ID,
     go_concurrency: int = 2000,
-    dispatch_workers: int = 4,
     sum_only: bool = False,
-    go_num_processes: int = 1,
+    num_go_procs: int = 1,
 ) -> dict:
     """
     Find the maximum sustainable RPS for a given (workers, payload) config.
@@ -476,17 +466,16 @@ def find_max_rps(
     Returns a dict with keys:
       max_rps, at_ceiling, below_floor, validated, search_history, validation_result
     """
-    cfg_label = f"w{num_workers}_{payload_size}"
+    cfg_label = f"w{num_go_workers}_{payload_size}"
     history: list[dict] = []
 
     def _probe(rps: float, duration_s: float, wall_s: float, phase: str) -> dict:
         result = run_sweep_point(
             stub_port=stub_port,
             target_rps=rps,
-            num_workers=num_workers,
+            num_go_workers=num_go_workers,
             payload_size=payload_size,
             duration_s=duration_s,
-            warmup=warmup,
             max_wall_s=wall_s,
             python=python,
             work_dir=work_dir,
@@ -494,9 +483,8 @@ def find_max_rps(
             stub_workers=stub_workers,
             model=model,
             go_concurrency=go_concurrency,
-            dispatch_workers=dispatch_workers,
             sum_only=sum_only,
-            go_num_processes=go_num_processes,
+            num_go_procs=num_go_procs,
         )
         entry = {
             "phase":        phase,
@@ -556,7 +544,7 @@ def find_max_rps(
               f"reporting max_rps >= {last_good_rps}", flush=True)
         vr = _probe(last_good_rps, full_duration_s, full_wall_s, "validation")
         return {
-            "num_workers":      num_workers,
+            "num_workers":      num_go_workers,
             "payload_size":     payload_size,
             "max_rps":          last_good_rps,
             "at_ceiling":       True,
@@ -571,7 +559,7 @@ def find_max_rps(
         below_floor = True
         print(f"  [FindMaxRPS] {cfg_label}: cannot keep up at floor rps={rps_start}", flush=True)
         return {
-            "num_workers":      num_workers,
+            "num_workers":      num_go_workers,
             "payload_size":     payload_size,
             "max_rps":          0.0,
             "at_ceiling":       False,
@@ -736,7 +724,8 @@ def main():
                         help="Payload sizes to sweep, comma-sep (e.g. small,medium,large,xl).")
 
     # Fixed parameter values
-    parser.add_argument("--workers",  type=int,   default=4,        help="Workers (fixed point).")
+    # Legacy alias — use --num-go-workers instead
+    parser.add_argument("--workers",  type=int,   default=None,     help="(Legacy alias for --num-go-workers.)")
     parser.add_argument("--rps",      type=float, default=100.0,    help="Target RPS (fixed point).")
     parser.add_argument("--payload",  type=str,   default="medium",
                         choices=list(PAYLOAD_SIZES.keys()),          help="Payload size (fixed point).")
@@ -750,8 +739,9 @@ def main():
                             "If replay_client takes longer, it is killed and the point is marked SKIP. "
                             "Default 0 = auto: duration + 30s."
                         ))
+    # Legacy flag (accepted but ignored — warmup is now controlled by Go client config)
     parser.add_argument("--warmup", action="store_true",
-                        help="Enable replay_client warmup phase (disabled by default).")
+                        help="(No-op: warmup is now controlled by warmup_rps/warmup_duration_s in config.)")
 
     # Python interpreter
     parser.add_argument("--python", type=str, default=sys.executable,
@@ -784,7 +774,7 @@ def main():
                             "Raise this to push past the default ~32K req/s ceiling "
                             "against a fast stub server."
                         ))
-    parser.add_argument("--dispatch-workers", type=int, default=4,
+    parser.add_argument("--num-go-workers", type=int, default=4,
                         help=(
                             "Parallel dispatch goroutines inside go_dispatch (default 4). "
                             "Each goroutine handles every Nth request, giving it N× longer "
@@ -792,7 +782,7 @@ def main():
                         ))
     parser.add_argument("--sum-only", action="store_true",
                         help="Go client writes only a summary line instead of per-request results.")
-    parser.add_argument("--go-num-processes", type=int, default=1,
+    parser.add_argument("--num-go-procs", type=int, default=1,
                         help=(
                             "Number of independent Go processes per rank (default 1). "
                             "Each gets 1/N of the requests (interleaved). "
@@ -829,7 +819,7 @@ def main():
         # Resolve workers and payload sweeps; RPS is what we're searching for.
         sweep_dims = set(d.strip() for d in args.sweep.split(",") if d.strip())
         workers_list = ([int(x) for x in args.sweep_workers.split(",")]  if args.sweep_workers
-                        else (SWEEP_WORKERS if "workers" in sweep_dims else [args.workers]))
+                        else (SWEEP_WORKERS if "workers" in sweep_dims else [args.num_go_workers]))
         payload_list = ([x.strip() for x in args.sweep_payloads.split(",")]  if args.sweep_payloads
                         else (list(PAYLOAD_SIZES.keys()) if "payload" in sweep_dims else [args.payload]))
 
@@ -841,7 +831,8 @@ def main():
         print(f"[FindMaxRPS] replay_client: {_REPLAY_CLIENT}")
         print(f"[FindMaxRPS] python:        {args.python}")
         print(f"[FindMaxRPS] Configs:       {total_configs}")
-        print(f"  workers:         {workers_list}")
+        print(f"  num_go_workers:  {workers_list}")
+        print(f"  num_go_procs:    {args.num_go_procs}")
         print(f"  payload:         {payload_list}")
         print(f"  rps_start:       {args.rps_start}")
         print(f"  ceiling:         {args.max_rps_ceiling}")
@@ -855,18 +846,17 @@ def main():
             itertools.product(workers_list, payload_list), start=1
         ):
             print(f"\n[FindMaxRPS] Config {cfg_idx}/{total_configs}: "
-                  f"workers={w} payload={payload}", flush=True)
+                  f"num_go_workers={w} payload={payload}", flush=True)
 
             result = find_max_rps(
                 stub_port=args.stub_port,
-                num_workers=w,
+                num_go_workers=w,
                 payload_size=payload,
                 probe_duration_s=args.probe_duration,
                 full_duration_s=args.duration,
                 rps_start=args.rps_start,
                 max_ceiling=args.max_rps_ceiling,
                 precision=args.precision,
-                warmup=args.warmup,
                 probe_wall_s=probe_wall_s,
                 full_wall_s=full_wall_s,
                 python=args.python,
@@ -875,9 +865,8 @@ def main():
                 stub_workers=args.stub_workers,
                 model=args.model,
                 go_concurrency=args.go_concurrency,
-                dispatch_workers=args.dispatch_workers,
                 sum_only=args.sum_only,
-                go_num_processes=args.go_num_processes,
+                num_go_procs=args.num_go_procs,
             )
 
         print_max_rps_summary_table(all_results)
@@ -914,7 +903,7 @@ def main():
     sweep_dims = set(d.strip() for d in args.sweep.split(",") if d.strip())
 
     workers_list = ([int(x) for x in args.sweep_workers.split(",")]  if args.sweep_workers
-                    else (SWEEP_WORKERS if "workers" in sweep_dims else [args.workers]))
+                    else (SWEEP_WORKERS if "workers" in sweep_dims else [args.num_go_workers]))
     rps_list     = ([float(x) for x in args.sweep_rps.split(",")]    if args.sweep_rps
                     else (SWEEP_RPS if "rps" in sweep_dims else [args.rps]))
     payload_list = ([x.strip() for x in args.sweep_payloads.split(",")]  if args.sweep_payloads
@@ -927,11 +916,13 @@ def main():
     print(f"[BenchClient] replay_client: {_REPLAY_CLIENT}")
     print(f"[BenchClient] python:        {args.python}")
     print(f"[BenchClient] Sweep plan:    {total_points} point(s)")
-    print(f"  workers:  {workers_list}")
-    print(f"  rps:      {rps_list}")
-    print(f"  payload:  {payload_list}")
-    print(f"  duration: {args.duration}s  timeout: {max_wall_s}s  warmup: {args.warmup}")
-    print(f"  stub:     http://0.0.0.0:{args.stub_port}\n")
+    print(f"  num_go_workers:  {workers_list}")
+    print(f"  num_go_procs:    {args.num_go_procs}")
+    print(f"  rps:             {rps_list}")
+    print(f"  payload:         {payload_list}")
+    print(f"  duration:        {args.duration}s  timeout: {max_wall_s}s")
+    print(f"  go_concurrency:  {args.go_concurrency}")
+    print(f"  stub:            http://0.0.0.0:{args.stub_port}\n")
 
     all_results = []
     for point_idx, (w, rps, payload) in enumerate(
@@ -943,21 +934,19 @@ def main():
         result = run_sweep_point(
             stub_port=args.stub_port,
             target_rps=rps,
-            num_workers=w,
+            num_go_workers=w,
             payload_size=payload,
             duration_s=args.duration,
-            warmup=args.warmup,
             max_wall_s=max_wall_s,
             python=args.python,
             work_dir=work_dir,
             monitor_ports=not args.no_port_monitor,
-                stub_workers=args.stub_workers,
-                model=args.model,
-                go_concurrency=args.go_concurrency,
-                dispatch_workers=args.dispatch_workers,
-                sum_only=args.sum_only,
-                go_num_processes=args.go_num_processes,
-            )
+            stub_workers=args.stub_workers,
+            model=args.model,
+            go_concurrency=args.go_concurrency,
+            sum_only=args.sum_only,
+            num_go_procs=args.num_go_procs,
+        )
         all_results.append(result)
 
         if result["timed_out"]:

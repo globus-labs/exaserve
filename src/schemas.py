@@ -81,14 +81,16 @@ class ReplayClientConfig:
     config_path: str = "config.yaml"
     include_tp: bool = False
     early_stop: float = 0.0
-    no_warmup: bool = False
     num_runs: int = 1
     generation_mode: str = "deterministic"  # "deterministic" or "natural"
     dest: str = "proxy"  # "proxy": local workers → proxy; "direct": MPI round-robin to servers
     num_nodes: int = 1      # total PBS nodes (= pbs_num_nodes); used to compute actual client count
-    num_cli_per_node: float = 1.0  # fraction of total nodes used as MPI client ranks
-                                   # actual_client_nodes = max(1, min(num_nodes, round(num_nodes * num_cli_per_node)))
-    num_workers_per_node: int = 4    # multiprocessing workers per MPI rank (typically one rank per node)
+    num_go_procs: int = 1   # number of Go processes per replay_client node
+    num_go_workers: int = 4 # dispatch goroutines (N) inside each Go process
+    go_concurrency: int = 2000  # max in-flight requests per Go process
+    warmup_rps: int = 0     # warm-up requests per second (0 = no warmup)
+    warmup_duration_s: float = 0.0  # warm-up duration in seconds
+    sum_only: bool = False  # Go client writes only summary instead of per-request results
 
 
 def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
