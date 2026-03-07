@@ -128,6 +128,18 @@ if [ ! -f "$REPLAY_CLIENT_SCRIPT" ]; then
 fi
 echo "[✓] Replay client:    $REPLAY_CLIENT_SCRIPT"
 
+# Build Go dispatch binary if not already built
+GO_CLIENT_DIR="$PROJECT_ROOT/eval/go_client"
+GO_DISPATCH_BIN="$GO_CLIENT_DIR/bin/go_dispatch"
+if [ -f "$GO_CLIENT_DIR/build.sh" ]; then
+    bash "$GO_CLIENT_DIR/build.sh"
+    if [ -f "$GO_DISPATCH_BIN" ]; then
+        echo "[✓] Go dispatch:      $GO_DISPATCH_BIN"
+    else
+        echo "[!] Go dispatch binary not built — will fall back to Python workers"
+    fi
+fi
+
 # Check environment setup
 if [ ! -f "$ENV_SETUP_SCRIPT" ]; then
     echo "!!! ERROR: Environment setup script not found: $ENV_SETUP_SCRIPT"

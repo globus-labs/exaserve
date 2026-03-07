@@ -1,0 +1,57 @@
+bash benchmarks/run_bench.sh --mode client --find-max-rps \
+  --rps-start 1000 \
+  --probe-duration 3 \
+  --go-concurrency 4000 \
+  --sweep-payloads medium \
+  --stub-workers 16 \
+  --python /home/wenyiw/agpt/venv/litellm/bin/python3
+
+
+  --sweep-workers 4000,8000 \
+
+bash benchmarks/run_bench.sh \
+  --rps-start 4000 \
+  --find-max-rps \
+  --probe-duration 4 \
+  --mode client \
+  --payload medium \
+  --stub-workers 16 \
+  --workers 4 \
+  --go-concurrency 4000 \
+  --dispatch-workers 8
+
+
+bash benchmarks/run_bench.sh \
+  --rps-start 8000 \
+  --find-max-rps \
+  --probe-duration 4 \
+  --mode client \
+  --payload medium \
+  --stub-workers 16 \
+  --workers 4 \
+  --go-concurrency 4000 \
+  --dispatch-workers 8
+
+bash benchmarks/run_bench.sh \
+  --rps-start 16000 \
+  --find-max-rps \
+  --probe-duration 4 \
+  --mode client \
+  --payload medium \
+  --stub-workers 32 \
+  --workers 4 \
+  --go-concurrency 500 \
+  --dispatch-workers 1 \
+  --point-timeout 60
+
+bash benchmarks/run_bench.sh \
+  --rps-start 128000 \
+  --find-max-rps \
+  --probe-duration 4 \
+  --mode client \
+  --payload medium \
+  --stub-workers 32 \
+  --workers 4 \
+  --go-concurrency 8000 \
+  --dispatch-workers 2 \
+  --point-timeout 60

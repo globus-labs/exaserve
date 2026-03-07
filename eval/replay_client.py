@@ -1,17 +1,21 @@
 import argparse
 import asyncio
+import gc
 import glob
 import itertools
 import json
 import multiprocessing
 import os
+import pathlib
 import re
 import resource
+import shutil
+import signal
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
-import gc
-import signal
 from dataclasses import dataclass
 
 
@@ -252,7 +256,169 @@ def _config_gpu_topology(cfg: dict) -> tuple:
 
 
 # ==============================================================================
-# MULTIPROCESSING WORKER
+# GO DISPATCH HELPERS
+# These functions drive the Go HTTP/2 dispatch binary (eval/go_client/go_dispatch).
+# If the binary is not found, replay falls back to the Python multiprocessing
+# workers below for compatibility.
+# ==============================================================================
+
+def _find_go_binary() -> str | None:
+    """Return path to go_dispatch binary, or None if not found."""
+    script_dir = pathlib.Path(__file__).parent
+    candidates = [
+        script_dir / "go_client" / "bin" / "go_dispatch",
+        script_dir.parent / "eval" / "go_client" / "bin" / "go_dispatch",
+    ]
+    for p in candidates:
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def _write_trace_partition(requests: list, path: str) -> None:
+    """Serialise a list of TraceRequest objects to a JSONL file for go_dispatch."""
+    with open(path, "w", encoding="utf-8") as f:
+        for req in requests:
+            record = {
+                "timestamp": req.timestamp,
+                "model": req.model,
+                "mode": getattr(req, "mode", "chat"),
+                "prompt": req.prompt,
+                "input_len": req.input_len,
+                "output_len": req.output_len,
+                "tensor_parallel_size": req.tensor_parallel_size,
+                "req_id": req.req_id,
+            }
+            f.write(json.dumps(record) + "\n")
+
+
+def _run_go_dispatch(
+    go_bin: str,
+    base_urls: list,
+    run_t0: float,
+    rank_requests: list,
+    generation_mode: str,
+    include_tp: bool,
+    concurrency: int,
+    interrupt_event,
+    rank: int,
+    tmp_dir: str,
+    dispatch_workers: int = 4,
+) -> tuple[list, float]:
+    """
+    Write the rank's trace partition, invoke go_dispatch, and return
+    (local_results_as_tuples, last_fire_time).
+
+    local_results_as_tuples: list of 7-tuples matching the Python worker format:
+        (TraceRequest, latency, success, error_msg, end_time,
+         actual_prompt_tokens, actual_completion_tokens)
+    """
+    trace_path = os.path.join(tmp_dir, f"rank{rank}_trace.jsonl")
+    result_path = os.path.join(tmp_dir, f"rank{rank}_results.jsonl")
+
+    _write_trace_partition(rank_requests, trace_path)
+
+    # Build request lookup by req_id so we can reconstruct the TraceRequest
+    req_map = {req.req_id: req for req in rank_requests}
+
+    cmd = [
+        go_bin,
+        "--base-urls", ",".join(base_urls),
+        "--run-t0", repr(run_t0),
+        "--generation-mode", generation_mode,
+        "--timeout", str(TIMEOUT_S),
+        "--concurrency", str(concurrency),
+        "--dispatch-workers", str(dispatch_workers),
+        "--trace-file", trace_path,
+        "--result-file", result_path,
+    ]
+    if include_tp:
+        cmd.append("--include-tp")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+    # Poll until the subprocess finishes, forwarding interrupts
+    while True:
+        try:
+            proc.wait(timeout=1.0)
+            break
+        except subprocess.TimeoutExpired:
+            if interrupt_event is not None and interrupt_event.is_set():
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                break
+
+    stderr_out = proc.stderr.read().decode(errors="replace")
+    for line in stderr_out.splitlines():
+        print(f"[go_dispatch rank {rank}] {line}", flush=True)
+
+    if proc.returncode not in (0, -signal.SIGTERM):
+        print(
+            f"!!! [go_dispatch rank {rank}] exited with code {proc.returncode}",
+            flush=True,
+        )
+
+    return _read_go_results(result_path, req_map)
+
+
+def _read_go_results(result_path: str, req_map: dict) -> tuple[list, float]:
+    """
+    Parse go_dispatch JSONL results back into the 7-tuple format used by the
+    Python orchestrator, plus the last_fire_time from the dispatch_done line.
+
+    Returns: (list_of_tuples, last_fire_time, adjusted_run_t0_or_None)
+    """
+    results = []
+    last_fire_time = 0.0
+    adjusted_run_t0 = None
+
+    if not os.path.isfile(result_path):
+        print(f"!!! [go_dispatch] result file not found: {result_path}", flush=True)
+        return results, last_fire_time, adjusted_run_t0
+
+    with open(result_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"!!! [go_dispatch] malformed result line: {e}", flush=True)
+                continue
+
+            if rec.get("__type__") == "dispatch_done":
+                last_fire_time = rec.get("last_fire_time", last_fire_time)
+                if "adjusted_run_t0" in rec:
+                    adjusted_run_t0 = rec["adjusted_run_t0"]
+                continue
+
+            req_id = rec.get("req_id", "")
+            req_obj = req_map.get(req_id)
+            if req_obj is None:
+                continue
+
+            latency = rec.get("latency", 0.0)
+            success = rec.get("success", False)
+            error_msg = rec.get("error", "")
+            end_time = rec.get("end_time", 0.0)
+            apt = rec.get("actual_prompt_tokens")
+            act = rec.get("actual_completion_tokens")
+
+            results.append((req_obj, latency, success, error_msg, end_time, apt, act))
+
+    return results, last_fire_time, adjusted_run_t0
+
+
+# ==============================================================================
+# MULTIPROCESSING WORKER (Python fallback when Go binary is not available)
 # Each worker process manages its own asyncio event loop and dispatches the
 # subset of requests assigned to it on their original schedule.
 # Workers are spawned by MPI ranks — MPI is NOT used inside workers.
@@ -371,6 +537,7 @@ async def replay(
     num_runs: int,
     dest: str = "proxy",
     num_workers: int = None,   # None = resolve from config; CLI overrides config
+    proxy_port: int = None,    # None = auto-detect from port file or config
 ):
     # ------------------------------------------------------------------
     # 1. MPI init (no-op when running without mpiexec)
@@ -386,8 +553,30 @@ async def replay(
     trace_path = _config_trace_path(cfg)
     proxy_cfg = cfg.get('proxy_config', {})
     proxy_type = proxy_cfg.get('type', 'none')
-    if proxy_type != 'none':
-        port = proxy_cfg.get('port', 4000)
+
+    # Port resolution priority:
+    #   1. proxy_port argument (--proxy-port CLI flag)
+    #   2. proxy_out/proxy_port file written by driver.py at runtime
+    #      (captures the actual bound port, which may differ from config)
+    #   3. proxy_config.port from the YAML config (static fallback)
+    #   4. Default 8000 (no proxy)
+    if proxy_port is not None:
+        port = proxy_port
+        if is_root:
+            print(f">>> [REPLAY] Port from --proxy-port override: {port}")
+    elif proxy_type != 'none':
+        proxy_port_file = os.path.join(
+            os.path.dirname(os.path.abspath(config_path)), "proxy_out", "proxy_port"
+        )
+        if os.path.isfile(proxy_port_file):
+            try:
+                port = int(open(proxy_port_file).read().strip())
+                if is_root:
+                    print(f">>> [REPLAY] Port from proxy_port file: {port}")
+            except (ValueError, OSError):
+                port = proxy_cfg.get('port', 4001)
+        else:
+            port = proxy_cfg.get('port', 4001)
     else:
         port = cfg.get('port', 8000)
 
@@ -445,6 +634,7 @@ async def replay(
     # ------------------------------------------------------------------
     if is_root:
         print(f">>> [REPLAY] Loading trace from {trace_path}...")
+    _trace_load_t0 = time.time()
     requests = []
     try:
         with open(trace_path, 'r', encoding='utf-8') as f:
@@ -467,23 +657,44 @@ async def replay(
     except FileNotFoundError:
         print(f"!!! ERROR [Rank {rank}]: Trace file {trace_path} not found.")
         return
+    if is_root:
+        _trace_load_elapsed = time.time() - _trace_load_t0
+        print(f">>> [REPLAY] Loaded {len(requests)} requests in {_trace_load_elapsed:.2f}s")
 
     mode_map = _config_mode_map(cfg)
 
     # ------------------------------------------------------------------
-    # 5. Request partitioning across MPI ranks × local workers
+    # 5. Go binary detection and request partitioning
     #
-    # Global worker index for (rank r, local worker w):
-    #   global_w = r * num_workers + w
-    # That worker handles:
-    #   requests[global_w :: total_workers]
-    # This interleaves workers across the full trace duration so every
-    # worker fires requests throughout the experiment window.
+    # When the Go binary is available, a single go_dispatch subprocess per
+    # MPI rank handles all of that rank's requests via goroutines.
+    # Partition: requests[rank :: mpi_size]  (interleaved across ranks)
+    #
+    # Fallback (Go binary not found): original Python multiprocessing workers.
+    # Partition: requests[global_w :: total_workers] across num_workers workers.
     # ------------------------------------------------------------------
-    rank_worker_lists = []
-    for local_w in range(num_workers):
-        global_w = rank * num_workers + local_w
-        rank_worker_lists.append(requests[global_w::total_workers])
+    go_bin = _find_go_binary()
+    use_go = (go_bin is not None)
+
+    if use_go:
+        rank_requests = requests[rank::mpi_size]
+        if is_root:
+            print(f">>> [DISPATCH] Go binary: {go_bin}")
+            print(f">>> [DISPATCH] Mode: Go subprocess per MPI rank "
+                  f"(concurrency=--concurrency, {num_workers} Python workers ignored)")
+    else:
+        rank_requests = []  # unused in Python-worker path
+        if is_root:
+            print(">>> [DISPATCH] Go binary not found — using Python multiprocessing workers (fallback)")
+
+    # Python-worker path still needs the per-worker sub-partition
+    if not use_go:
+        rank_worker_lists = []
+        for local_w in range(num_workers):
+            global_w = rank * num_workers + local_w
+            rank_worker_lists.append(requests[global_w::total_workers])
+    else:
+        rank_worker_lists = []  # unused in Go path
 
     # ------------------------------------------------------------------
     # 6. Early stop
@@ -497,14 +708,14 @@ async def replay(
                 f"total responses ({early_stop*100:.1f}%)"
             )
 
+    rank_req_count = len(rank_requests) if use_go else sum(len(l) for l in rank_worker_lists)
     if is_root:
         print(f">>> [REPLAY] Target: {base_url}")
         print(f"    Requests: {len(requests)}")
         print(f"    Duration: {requests[-1].timestamp:.2f}s")
         print(f">>> [REPLAY] MPI ranks: {mpi_size} | Workers/rank: {num_workers} | "
               f"Total workers: {total_workers}")
-        print(f"    This rank ({rank}) handles "
-              f"{sum(len(l) for l in rank_worker_lists)} / {len(requests)} requests")
+        print(f"    This rank ({rank}) handles {rank_req_count} / {len(requests)} requests")
         print(f">>> [REPLAY] Generation Mode: {generation_mode.upper()}")
         if generation_mode == "deterministic":
             print(f"    Using min_tokens=max_tokens={requests[0].output_len if requests else 'N/A'} "
@@ -538,6 +749,7 @@ async def replay(
     warmup_duration_s = 0.0
     session = None
     safe_conn_limit = 100
+    tmp_dir = tempfile.mkdtemp(prefix=f"replay_rank{rank}_")
 
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -620,7 +832,7 @@ async def replay(
                 warmup_duration_s = warmup_dur
 
                 if is_root:
-                    print(f">>> [WARMUP] All ranks finished. Resting 5s...")
+                    print(f">>> [WARMUP] All ranks finished. Resting 10s...")
                 await asyncio.sleep(10)
                 _mpi_barrier(comm)
             else:
@@ -659,90 +871,139 @@ async def replay(
                 run_t0 = None
             run_t0 = _mpi_bcast(comm, run_t0, root=0)
 
-            # ---- Per-run interrupt / early-stop event ----
+            # ---- Per-run interrupt event ----
             run_interrupt_event = multiprocessing.Event()
 
-            # ---- Shared dispatch-done timestamp (max across local workers) ----
-            dispatch_done_val = multiprocessing.Value('d', 0.0)
+            # ---- Dispatch: Go subprocess or Python multiprocessing workers ----
+            effective_run_t0 = run_t0
+            last_fire_time = 0.0
 
-            # ---- Spawn local workers ----
-            run_start_event = multiprocessing.Value('d', run_t0)
-            worker_start_event = multiprocessing.Event()
-            result_queue = multiprocessing.Queue()
-
-            processes = []
-            for local_w in range(num_workers):
-                p = multiprocessing.Process(
-                    target=_worker_entry,
-                    args=(
-                        rank * num_workers + local_w,   # global worker id for logging
-                        rank_worker_lists[local_w],
-                        base_urls,
-                        include_tp,
-                        generation_mode,
-                        mode_map,
-                        worker_start_event,
-                        run_start_event,
-                        result_queue,
-                        run_interrupt_event,
-                        safe_conn_limit,
-                        num_workers,
-                        dispatch_done_val,
-                    ),
-                    daemon=True,
+            if use_go:
+                # ------------------------------------------------------------------
+                # Go path: single subprocess per rank handles all rank_requests.
+                # run_t0 is broadcast above so all ranks share the same origin.
+                # We run the subprocess in a thread executor so the asyncio loop
+                # stays live (needed for MPI barrier and progress prints below).
+                # ------------------------------------------------------------------
+                local_expected = len(rank_requests)
+                print(
+                    f"[Rank {rank}] Launching go_dispatch for {local_expected} requests...",
+                    flush=True,
                 )
-                p.start()
-                processes.append(p)
 
-            # Fire start signal now that all workers are spawned and run_t0 is set
-            worker_start_event.set()
+                # go_concurrency defaults to 2000; callers can override via config
+                # (job_replay_client_config.go_concurrency) if needed.
+                go_concurrency = replay_cfg.get("go_concurrency", 2000)
+                # dispatch_workers: number of parallel dispatch goroutines in go_dispatch.
+                # Each goroutine handles every Nth request, giving it N× longer intervals
+                # and breaking the single-loop throughput ceiling (~30K req/s).
+                dispatch_workers = replay_cfg.get("dispatch_workers", 4)
 
-            # ---- Collect results from local workers ----
-            local_expected = sum(len(l) for l in rank_worker_lists)
-            local_results = []
-            pending_processes = list(processes)
+                loop = asyncio.get_running_loop()
+                local_results, last_fire_time, go_adjusted_run_t0 = await loop.run_in_executor(
+                    None,
+                    _run_go_dispatch,
+                    go_bin,
+                    base_urls,
+                    run_t0,
+                    rank_requests,
+                    generation_mode,
+                    include_tp,
+                    go_concurrency,
+                    run_interrupt_event,
+                    rank,
+                    tmp_dir,
+                    dispatch_workers,
+                )
+                # Use go_dispatch's adjusted run_t0 (post-startup-compensation) for
+                # overhead calculation, so startup latency is not counted as dispatch
+                # overhead. Fall back to the Python run_t0 for old binaries.
+                effective_run_t0 = go_adjusted_run_t0 if go_adjusted_run_t0 is not None else run_t0
+                print(
+                    f"\r[Rank {rank}] go_dispatch finished: "
+                    f"{len(local_results)}/{local_expected} responses.",
+                    flush=True,
+                )
 
-            while pending_processes or not result_queue.empty():
-                while True:
+            else:
+                # ------------------------------------------------------------------
+                # Python fallback: original multiprocessing workers.
+                # ------------------------------------------------------------------
+                dispatch_done_val = multiprocessing.Value('d', 0.0)
+                run_start_event = multiprocessing.Value('d', run_t0)
+                worker_start_event = multiprocessing.Event()
+                result_queue = multiprocessing.Queue()
+
+                processes = []
+                for local_w in range(num_workers):
+                    p = multiprocessing.Process(
+                        target=_worker_entry,
+                        args=(
+                            rank * num_workers + local_w,
+                            rank_worker_lists[local_w],
+                            base_urls,
+                            include_tp,
+                            generation_mode,
+                            mode_map,
+                            worker_start_event,
+                            run_start_event,
+                            result_queue,
+                            run_interrupt_event,
+                            safe_conn_limit,
+                            num_workers,
+                            dispatch_done_val,
+                        ),
+                        daemon=True,
+                    )
+                    p.start()
+                    processes.append(p)
+
+                worker_start_event.set()
+
+                local_expected = sum(len(l) for l in rank_worker_lists)
+                local_results = []
+                pending_processes = list(processes)
+
+                while pending_processes or not result_queue.empty():
+                    while True:
+                        try:
+                            local_results.append(result_queue.get_nowait())
+                            if len(local_results) % 50 == 0:
+                                print(
+                                    f"\r[Rank {rank}] Received {len(local_results)}/"
+                                    f"{local_expected} responses...",
+                                    end="", flush=True,
+                                )
+                        except Exception:
+                            break
+
+                    if interrupted:
+                        run_interrupt_event.set()
+
+                    pending_processes = [p for p in pending_processes if p.is_alive()]
+                    await asyncio.sleep(0.1)
+
+                while not result_queue.empty():
                     try:
                         local_results.append(result_queue.get_nowait())
-                        if len(local_results) % 50 == 0:
-                            print(
-                                f"\r[Rank {rank}] Received {len(local_results)}/"
-                                f"{local_expected} responses...",
-                                end="", flush=True,
-                            )
                     except Exception:
                         break
 
-                # Early stop is evaluated globally on rank 0 after gather; here we
-                # just propagate a rank-level interrupt if the global interrupt fires.
-                if interrupted:
-                    run_interrupt_event.set()
+                for p in processes:
+                    if p.is_alive():
+                        p.terminate()
+                    p.join(timeout=5)
 
-                pending_processes = [p for p in pending_processes if p.is_alive()]
-                await asyncio.sleep(0.1)
-
-            # Drain remainder
-            while not result_queue.empty():
-                try:
-                    local_results.append(result_queue.get_nowait())
-                except Exception:
-                    break
-
-            for p in processes:
-                if p.is_alive():
-                    p.terminate()
-                p.join(timeout=5)
-
-            print(
-                f"\r[Rank {rank}] Received {len(local_results)}/{local_expected} responses.",
-                flush=True,
-            )
+                print(
+                    f"\r[Rank {rank}] Received {len(local_results)}/{local_expected} responses.",
+                    flush=True,
+                )
+                last_fire_time = dispatch_done_val.value
+                effective_run_t0 = run_t0  # Python workers use the original run_t0
 
             # ---- Dispatch timing report (rank 0 only) ----
-            if is_root and dispatch_done_val.value > 0:
-                actual_dispatch_s = dispatch_done_val.value - run_t0
+            if is_root and last_fire_time > 0:
+                actual_dispatch_s = last_fire_time - effective_run_t0
                 trace_span = requests[-1].timestamp if requests else 0.0
                 overhead = actual_dispatch_s - trace_span
                 print(
@@ -774,15 +1035,18 @@ async def replay(
 
             all_runs_results.append(run_results)
 
-            # Track run duration from run_t0 to last response end timestamp
+            # Track run duration using effective_run_t0 (which accounts for
+            # Go startup compensation) so that RPS = completed / duration
+            # isn't diluted by go_dispatch's startup time.
+            duration_t0 = effective_run_t0 if effective_run_t0 is not None else run_t0
             if is_root and run_results:
                 run_end_time = max((r[4] for r in run_results), default=None)
                 run_durations.append(
-                    run_end_time - run_t0 if run_end_time is not None
-                    else max(time.time() - run_t0, 0.0)
+                    run_end_time - duration_t0 if run_end_time is not None
+                    else max(time.time() - duration_t0, 0.0)
                 )
             elif is_root:
-                run_durations.append(max(time.time() - run_t0, 0.0))
+                run_durations.append(max(time.time() - duration_t0, 0.0))
 
             if interrupted:
                 break
@@ -808,6 +1072,11 @@ async def replay(
         gc.enable()
         if session and not session.closed:
             await session.close()
+        # Clean up temporary JSONL files written for Go subprocess
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 9. Analysis & Save (rank 0 only)
@@ -920,7 +1189,8 @@ async def replay(
         final_save_path = _next_result_path(config_result_dir)
 
     if final_save_path:
-        print(f">>> [REPLAY] Saving detailed results to {final_save_path}")
+        print(f">>> [REPLAY] Saving detailed results to {final_save_path} ({len(raw_results)} records)")
+        _save_t0 = time.time()
         try:
             with open(final_save_path, 'w') as f:
                 json.dump({
@@ -965,6 +1235,9 @@ async def replay(
                     },
                     "requests": raw_results
                 }, f, indent=2)
+            _save_elapsed = time.time() - _save_t0
+            _save_mb = os.path.getsize(final_save_path) / (1024 * 1024)
+            print(f">>> [REPLAY] Save complete: {_save_mb:.1f} MB in {_save_elapsed:.2f}s")
         except Exception as e:
             print(f"!!! ERROR Saving results: {e}")
 
@@ -1015,6 +1288,16 @@ if __name__ == "__main__":
             "'direct': round-robin over all nodes in $PBS_NODEFILE."
         ),
     )
+    parser.add_argument(
+        "--proxy-port",
+        type=int,
+        default=None,
+        dest="proxy_port",
+        help=(
+            "Override the proxy port. By default the port is read from "
+            "proxy_out/proxy_port (written by driver.py) or from the config YAML."
+        ),
+    )
     args = parser.parse_args()
 
     if not (0.0 <= args.early_stop <= 1.0):
@@ -1022,5 +1305,5 @@ if __name__ == "__main__":
 
     asyncio.run(replay(
         args.config, args.include_tp, args.early_stop, args.no_warmup,
-        args.num_runs, args.dest, args.num_workers,
+        args.num_runs, args.dest, args.num_workers, args.proxy_port,
     ))
