@@ -304,6 +304,7 @@ def _run_go_dispatch(
     rank: int,
     tmp_dir: str,
     dispatch_workers: int = 4,
+    no_save: bool = False,
 ) -> tuple[list, float]:
     """
     Write the rank's trace partition, invoke go_dispatch, and return
@@ -330,8 +331,11 @@ def _run_go_dispatch(
         "--concurrency", str(concurrency),
         "--dispatch-workers", str(dispatch_workers),
         "--trace-file", trace_path,
-        "--result-file", result_path,
     ]
+    if no_save:
+        cmd.append("--no-save")
+    else:
+        cmd.extend(["--result-file", result_path])
     if include_tp:
         cmd.append("--include-tp")
 
@@ -365,6 +369,8 @@ def _run_go_dispatch(
             flush=True,
         )
 
+    if no_save:
+        return [], 0.0, None
     return _read_go_results(result_path, req_map)
 
 
@@ -898,6 +904,7 @@ async def replay(
                 # Each goroutine handles every Nth request, giving it N× longer intervals
                 # and breaking the single-loop throughput ceiling (~30K req/s).
                 dispatch_workers = replay_cfg.get("dispatch_workers", 4)
+                go_no_save = replay_cfg.get("no_save", False)
 
                 loop = asyncio.get_running_loop()
                 local_results, last_fire_time, go_adjusted_run_t0 = await loop.run_in_executor(
@@ -914,6 +921,7 @@ async def replay(
                     rank,
                     tmp_dir,
                     dispatch_workers,
+                    go_no_save,
                 )
                 # Use go_dispatch's adjusted run_t0 (post-startup-compensation) for
                 # overhead calculation, so startup latency is not counted as dispatch

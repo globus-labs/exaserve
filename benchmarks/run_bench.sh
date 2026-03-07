@@ -100,6 +100,7 @@ SWEEP_RPS_VAL=""
 SWEEP_PAYLOADS_VAL=""
 SWEEP_POOLS_VAL=""
 # Auto max-RPS search
+NO_SAVE=true
 FIND_MAX_RPS=false
 PROBE_DURATION=8
 RPS_START=50
@@ -146,6 +147,7 @@ while [[ $# -gt 0 ]]; do
         --no-port-monitor) NO_PORT_MONITOR=true;   shift   ;;
         --output-dir)      OUTPUT_DIR="$2";        shift 2 ;;
         --python)          PYTHON="$2";            shift 2 ;;
+        --no-save)         NO_SAVE=true;           shift   ;;
         --find-max-rps)    FIND_MAX_RPS=true;      shift   ;;
         --probe-duration)  PROBE_DURATION="$2";    shift 2 ;;
         --rps-start)       RPS_START="$2";         shift 2 ;;
@@ -366,6 +368,9 @@ run_client_bench() {
     fi
     CLIENT_ARGS+=("--go-concurrency"   "$GO_CONCURRENCY")
     CLIENT_ARGS+=("--dispatch-workers" "$DISPATCH_WORKERS")
+    if [ "$NO_SAVE" = true ]; then
+        CLIENT_ARGS+=("--no-save")
+    fi
 
     echo ">>> [BENCH] Starting stub server..."
     start_stub "$STUB_PORT"

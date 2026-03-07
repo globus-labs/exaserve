@@ -38,7 +38,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -253,10 +252,11 @@ func run() int {
 		"eliminating the serial dispatch bottleneck at high RPS.")
 	traceFile := flag.String("trace-file", "", "Input trace partition JSONL (required)")
 	resultFile := flag.String("result-file", "", "Output results JSONL (required)")
+	noSave := flag.Bool("no-save", false, "Skip saving result files (for debugging)")
 	flag.Parse()
 
-	if *baseURLsFlag == "" || *traceFile == "" || *resultFile == "" || *runT0Flag == 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: --base-urls, --run-t0, --trace-file, --result-file are required")
+	if *baseURLsFlag == "" || *traceFile == "" || (*resultFile == "" && !*noSave) || *runT0Flag == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: --base-urls, --run-t0, --trace-file, --result-file are required (unless --no-save)")
 		flag.Usage()
 		return 1
 	}
@@ -325,11 +325,6 @@ func run() int {
 		startupElapsed.Seconds(), startupElapsed.Seconds()+0.05)
 
 	// ------------------------------------------------------------------
-	// Concurrency semaphore
-	// ------------------------------------------------------------------
-	sem := make(chan struct{}, *concurrency)
-
-	// ------------------------------------------------------------------
 	// Signal handling
 	// ------------------------------------------------------------------
 	ctx, cancel := context.WithCancel(context.Background())
@@ -341,17 +336,6 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "[go_dispatch] Interrupt received, draining in-flight requests...")
 		cancel()
 	}()
-
-	// ------------------------------------------------------------------
-	// URL round-robin via atomic counter
-	// ------------------------------------------------------------------
-	var urlIdx atomic.Uint64
-
-	// ------------------------------------------------------------------
-	// Track last dispatch time for metadata line
-	// ------------------------------------------------------------------
-	var lastFireTime atomic.Value
-	lastFireTime.Store(float64(0))
 
 	// ------------------------------------------------------------------
 	// Parallel dispatch goroutines
@@ -385,17 +369,18 @@ func run() int {
 		partitions[w] = append(partitions[w], req)
 	}
 
-	// Per-worker result slices with per-worker mutexes.
-	// This replaces the single shared resultsMu — contention is reduced
-	// by N× since each worker's goroutines only compete with siblings.
+	// Pre-allocated per-worker result slices — each goroutine writes to
+	// its own index, so no mutex is needed.
 	workerResults := make([][]resultRecord, N)
-	workerMus := make([]sync.Mutex, N)
 	for i := range workerResults {
-		workerResults[i] = make([]resultRecord, 0, len(partitions[i]))
+		workerResults[i] = make([]resultRecord, len(partitions[i]))
 	}
 
 	// Per-worker WaitGroups to track in-flight requests per worker
 	workerWgs := make([]sync.WaitGroup, N)
+
+	// Per-worker last fire times — merged after dispatch
+	workerLastFireTimes := make([]float64, N)
 
 	// Per-worker HTTP clients with independent connection pools
 	connsPerWorker := *concurrency / N
@@ -407,11 +392,17 @@ func run() int {
 		clients[i] = newHTTPClient(connsPerWorker, *timeoutSec)
 	}
 
+	fmt.Fprintf(os.Stderr, "[go_dispatch] Launching dispatch group at T0+%.3fs\n", time.Since(runT0Adjusted).Seconds())
+
 	var dispatchWg sync.WaitGroup
 	for w := 0; w < N; w++ {
 		dispatchWg.Add(1)
 		go func(workerID int, partition []preparedRequest) {
 			defer dispatchWg.Done()
+
+			workerStart := time.Now()
+			fmt.Fprintf(os.Stderr, "[go_dispatch] Worker %d started at T0+%.3fs (%d requests)\n",
+				workerID, time.Since(runT0Adjusted).Seconds(), len(partition))
 
 			// Pin this dispatch goroutine to a dedicated OS thread.
 			// This prevents the Go scheduler from preempting us during
@@ -421,13 +412,26 @@ func run() int {
 
 			workerClient := clients[workerID]
 
+			// Per-worker semaphore — no cross-worker contention
+			workerSemSize := *concurrency / N
+			if workerSemSize < 1 {
+				workerSemSize = 1
+			}
+			workerSem := make(chan struct{}, workerSemSize)
+
+			// Per-worker URL round-robin counter
+			var localURLIdx uint64
+
+			// Per-worker last fire time tracking
+			var localLastFireTime float64
+
 			// Reusable timer to avoid per-request allocation from time.After
 			sleepTimer := time.NewTimer(0)
 			if !sleepTimer.Stop() {
 				<-sleepTimer.C
 			}
 
-			for _, req := range partition {
+			for reqIdx, req := range partition {
 				if ctx.Err() != nil {
 					break
 				}
@@ -462,16 +466,13 @@ func run() int {
 				// Record fire time
 				fireTime := time.Now().UnixNano()
 				fireTimeF := float64(fireTime) / 1e9
-				for {
-					prev := lastFireTime.Load().(float64)
-					if fireTimeF <= prev || lastFireTime.CompareAndSwap(prev, fireTimeF) {
-						break
-					}
+				if fireTimeF > localLastFireTime {
+					localLastFireTime = fireTimeF
 				}
 
-				// Acquire semaphore slot
+				// Acquire per-worker semaphore slot
 				select {
-				case sem <- struct{}{}:
+				case workerSem <- struct{}{}:
 				case <-ctx.Done():
 					break
 				}
@@ -479,70 +480,91 @@ func run() int {
 					break
 				}
 
-				// Choose URL
-				idx := urlIdx.Add(1) - 1
-				baseURL := baseURLs[idx%uint64(len(baseURLs))]
+				// Choose URL (per-worker round-robin)
+				baseURL := baseURLs[localURLIdx%uint64(len(baseURLs))]
+				localURLIdx++
 
 				workerWgs[workerID].Add(1)
 				reqCopy := req
 				wID := workerID
+				rIdx := reqIdx
 				go func(r preparedRequest, base string, ft float64) {
 					defer workerWgs[wID].Done()
-					defer func() { <-sem }()
-					rec := doRequest(ctx, workerClient, base, r, ft)
-					workerMus[wID].Lock()
-					workerResults[wID] = append(workerResults[wID], rec)
-					workerMus[wID].Unlock()
+					defer func() { <-workerSem }()
+					workerResults[wID][rIdx] = doRequest(ctx, workerClient, base, r, ft)
 				}(reqCopy, baseURL, fireTimeF)
 			}
+
+			// Store per-worker last fire time for post-dispatch merge
+			workerLastFireTimes[workerID] = localLastFireTime
+			fmt.Fprintf(os.Stderr, "[go_dispatch] Worker %d finished at T0+%.3fs (took %.3fs)\n",
+				workerID, time.Since(runT0Adjusted).Seconds(), time.Since(workerStart).Seconds())
 		}(w, partitions[w])
 	}
 
 	// Wait for all dispatch goroutines to finish scheduling
 	dispatchWg.Wait()
+	dispatchElapsed := time.Since(runT0Adjusted)
+	fmt.Fprintf(os.Stderr, "[go_dispatch] All requests dispatched in %.3fs\n", dispatchElapsed.Seconds())
 
 	// Wait for all in-flight requests to complete
 	for i := 0; i < N; i++ {
 		workerWgs[i].Wait()
 	}
+	totalElapsed := time.Since(runT0Adjusted)
+	fmt.Fprintf(os.Stderr, "[go_dispatch] All requests completed in %.3fs (in-flight drain: %.3fs)\n",
+		totalElapsed.Seconds(), totalElapsed.Seconds()-dispatchElapsed.Seconds())
 
 	// ------------------------------------------------------------------
 	// Merge per-worker results and write JSONL
 	// ------------------------------------------------------------------
-	saveStart := time.Now()
 	totalResults := 0
 	for _, wr := range workerResults {
 		totalResults += len(wr)
 	}
-	fmt.Fprintf(os.Stderr, "[go_dispatch] Saving %d results to %s ...\n", totalResults, *resultFile)
 
-	out, err := os.Create(*resultFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: cannot create result file %s: %v\n", *resultFile, err)
-		return 1
-	}
-	enc := json.NewEncoder(out)
-	for _, wr := range workerResults {
-		for _, rec := range wr {
-			if encErr := enc.Encode(rec); encErr != nil {
-				fmt.Fprintf(os.Stderr, "WARN: failed to encode result record: %v\n", encErr)
+	if *noSave {
+		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results (--no-save, skipping write)\n", totalResults)
+	} else {
+		saveStart := time.Now()
+		fmt.Fprintf(os.Stderr, "[go_dispatch] Saving %d results to %s ...\n", totalResults, *resultFile)
+
+		out, err := os.Create(*resultFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: cannot create result file %s: %v\n", *resultFile, err)
+			return 1
+		}
+		enc := json.NewEncoder(out)
+		for _, wr := range workerResults {
+			for _, rec := range wr {
+				if encErr := enc.Encode(rec); encErr != nil {
+					fmt.Fprintf(os.Stderr, "WARN: failed to encode result record: %v\n", encErr)
+				}
 			}
 		}
-	}
 
-	// Write dispatch_done metadata line
-	meta := dispatchDoneMeta{
-		Type:          "dispatch_done",
-		LastFireTime:  lastFireTime.Load().(float64),
-		AdjustedRunT0: float64(runT0) / 1e9,
-	}
-	if encErr := enc.Encode(meta); encErr != nil {
-		fmt.Fprintf(os.Stderr, "WARN: failed to encode dispatch_done metadata: %v\n", encErr)
-	}
-	out.Close()
+		// Compute max last fire time across workers
+		var maxLastFireTime float64
+		for _, ft := range workerLastFireTimes {
+			if ft > maxLastFireTime {
+				maxLastFireTime = ft
+			}
+		}
 
-	saveElapsed := time.Since(saveStart)
-	fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results written to %s (save took %.2fs)\n", totalResults, *resultFile, saveElapsed.Seconds())
+		// Write dispatch_done metadata line
+		meta := dispatchDoneMeta{
+			Type:          "dispatch_done",
+			LastFireTime:  maxLastFireTime,
+			AdjustedRunT0: float64(runT0) / 1e9,
+		}
+		if encErr := enc.Encode(meta); encErr != nil {
+			fmt.Fprintf(os.Stderr, "WARN: failed to encode dispatch_done metadata: %v\n", encErr)
+		}
+		out.Close()
+
+		saveElapsed := time.Since(saveStart)
+		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results written to %s (save took %.2fs)\n", totalResults, *resultFile, saveElapsed.Seconds())
+	}
 	return 0
 }
 

@@ -167,6 +167,7 @@ def generate_config(
     model: str = MODEL_ID,
     go_concurrency: int = 2000,
     dispatch_workers: int = 4,
+    no_save: bool = False,
 ) -> str:
     """Write a minimal YAML config for replay_client.py and return its path."""
     cfg = {
@@ -187,6 +188,7 @@ def generate_config(
             # only fires every Nth request — N× longer intervals break the
             # single-loop serial bottleneck (~30K req/s ceiling).
             "dispatch_workers": dispatch_workers,
+            "no_save": no_save,
         },
         "model_deployment_config": {
             "num_nodes": 1,
@@ -267,6 +269,7 @@ def run_sweep_point(
     model: str = MODEL_ID,
     go_concurrency: int = 2000,
     dispatch_workers: int = 4,
+    no_save: bool = False,
 ) -> dict:
     """
     Run one (rps, workers, payload) combination using the real replay_client.py.
@@ -280,7 +283,8 @@ def run_sweep_point(
     trace_path  = os.path.join(point_dir, "trace.jsonl")
     config_path = generate_config(stub_port, trace_path, result_dir, num_workers, model,
                                   go_concurrency=go_concurrency,
-                                  dispatch_workers=dispatch_workers)
+                                  dispatch_workers=dispatch_workers,
+                                  no_save=no_save)
     generate_trace(target_rps, duration_s, payload_size, trace_path, model)
 
     cmd = [
@@ -458,6 +462,7 @@ def find_max_rps(
     model: str = MODEL_ID,
     go_concurrency: int = 2000,
     dispatch_workers: int = 4,
+    no_save: bool = False,
 ) -> dict:
     """
     Find the maximum sustainable RPS for a given (workers, payload) config.
@@ -489,6 +494,7 @@ def find_max_rps(
             model=model,
             go_concurrency=go_concurrency,
             dispatch_workers=dispatch_workers,
+            no_save=no_save,
         )
         entry = {
             "phase":        phase,
@@ -782,6 +788,8 @@ def main():
                             "Each goroutine handles every Nth request, giving it N× longer "
                             "inter-request intervals and breaking the serial dispatch ceiling."
                         ))
+    parser.add_argument("--no-save", action="store_true",
+                        help="Skip saving go_dispatch result files (for debugging).")
     # Legacy sweep args kept for run_bench.sh compatibility
     parser.add_argument("--sweep-pools", type=str, default=None, help="(No-op for real replay_client.)")
     parser.add_argument("--target",      type=str, default="stub_server", help="(No-op, kept for compat.)")
@@ -860,6 +868,7 @@ def main():
                 model=args.model,
                 go_concurrency=args.go_concurrency,
                 dispatch_workers=args.dispatch_workers,
+                no_save=args.no_save,
             )
 
         print_max_rps_summary_table(all_results)
@@ -937,6 +946,7 @@ def main():
                 model=args.model,
                 go_concurrency=args.go_concurrency,
                 dispatch_workers=args.dispatch_workers,
+                no_save=args.no_save,
             )
         all_results.append(result)
 

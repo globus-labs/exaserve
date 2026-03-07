@@ -47,11 +47,39 @@ bash benchmarks/run_bench.sh \
 bash benchmarks/run_bench.sh \
   --rps-start 128000 \
   --find-max-rps \
-  --probe-duration 4 \
+  --probe-duration 3 \
   --mode client \
   --payload medium \
-  --stub-workers 32 \
+  --stub-workers 16 \
   --workers 4 \
   --go-concurrency 8000 \
   --dispatch-workers 2 \
   --point-timeout 60
+
+# Testing with time prints - 2 workers, still overdue
+bash benchmarks/run_bench.sh \
+  --rps-start 256000 \
+  --find-max-rps \
+  --probe-duration 3 \
+  --mode client \
+  --payload medium \
+  --stub-workers 16 \
+  --workers 4 \
+  --go-concurrency 8000 \
+  --dispatch-workers 2 \
+  --point-timeout 60
+
+
+# Testing with time prints - 1 worker, try to get the max throughput of one worker
+bash benchmarks/run_bench.sh \
+  --rps-start 64000 \
+  --find-max-rps \
+  --probe-duration 3 \
+  --mode client \
+  --payload medium \
+  --stub-workers 16 \
+  --workers 4 \
+  --go-concurrency 4000 \
+  --dispatch-workers 1 \
+  --point-timeout 60 \
+  --no-save
