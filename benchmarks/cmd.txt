@@ -72,7 +72,7 @@ bash benchmarks/run_bench.sh \
 
 # Testing with time prints - 1 worker, try to get the max throughput of one worker
 bash benchmarks/run_bench.sh \
-  --rps-start 64000 \
+  --rps-start 128000 \
   --find-max-rps \
   --probe-duration 3 \
   --mode client \
@@ -80,6 +80,6 @@ bash benchmarks/run_bench.sh \
   --stub-workers 16 \
   --workers 4 \
   --go-concurrency 4000 \
-  --dispatch-workers 1 \
+  --dispatch-workers 2 \
   --point-timeout 60 \
-  --no-save
+  --sum-only

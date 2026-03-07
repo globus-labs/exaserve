@@ -304,7 +304,7 @@ def _run_go_dispatch(
     rank: int,
     tmp_dir: str,
     dispatch_workers: int = 4,
-    no_save: bool = False,
+    sum_only: bool = False,
 ) -> tuple[list, float]:
     """
     Write the rank's trace partition, invoke go_dispatch, and return
@@ -313,6 +313,8 @@ def _run_go_dispatch(
     local_results_as_tuples: list of 7-tuples matching the Python worker format:
         (TraceRequest, latency, success, error_msg, end_time,
          actual_prompt_tokens, actual_completion_tokens)
+
+    When sum_only=True, returns a summary dict instead of per-request tuples.
     """
     trace_path = os.path.join(tmp_dir, f"rank{rank}_trace.jsonl")
     result_path = os.path.join(tmp_dir, f"rank{rank}_results.jsonl")
@@ -331,11 +333,10 @@ def _run_go_dispatch(
         "--concurrency", str(concurrency),
         "--dispatch-workers", str(dispatch_workers),
         "--trace-file", trace_path,
+        "--result-file", result_path,
     ]
-    if no_save:
-        cmd.append("--no-save")
-    else:
-        cmd.extend(["--result-file", result_path])
+    if sum_only:
+        cmd.append("--sum-only")
     if include_tp:
         cmd.append("--include-tp")
 
@@ -369,17 +370,19 @@ def _run_go_dispatch(
             flush=True,
         )
 
-    if no_save:
-        return [], 0.0, None
     return _read_go_results(result_path, req_map)
 
 
-def _read_go_results(result_path: str, req_map: dict) -> tuple[list, float]:
+def _read_go_results(result_path: str, req_map: dict) -> tuple:
     """
-    Parse go_dispatch JSONL results back into the 7-tuple format used by the
-    Python orchestrator, plus the last_fire_time from the dispatch_done line.
+    Parse go_dispatch JSONL results.
 
-    Returns: (list_of_tuples, last_fire_time, adjusted_run_t0_or_None)
+    When go_dispatch was run with --sum-only, the file contains a single
+    summary JSON line with __type__: "summary".  Returns:
+        (summary_dict, last_fire_time, adjusted_run_t0_or_None)
+
+    Otherwise returns the per-request 7-tuples:
+        (list_of_tuples, last_fire_time, adjusted_run_t0_or_None)
     """
     results = []
     last_fire_time = 0.0
@@ -399,6 +402,13 @@ def _read_go_results(result_path: str, req_map: dict) -> tuple[list, float]:
             except json.JSONDecodeError as e:
                 print(f"!!! [go_dispatch] malformed result line: {e}", flush=True)
                 continue
+
+            if rec.get("__type__") == "summary":
+                return (
+                    rec,
+                    rec.get("last_fire_time", 0.0),
+                    rec.get("adjusted_run_t0"),
+                )
 
             if rec.get("__type__") == "dispatch_done":
                 last_fire_time = rec.get("last_fire_time", last_fire_time)
@@ -904,7 +914,7 @@ async def replay(
                 # Each goroutine handles every Nth request, giving it N× longer intervals
                 # and breaking the single-loop throughput ceiling (~30K req/s).
                 dispatch_workers = replay_cfg.get("dispatch_workers", 4)
-                go_no_save = replay_cfg.get("no_save", False)
+                go_sum_only = replay_cfg.get("sum_only", False)
 
                 loop = asyncio.get_running_loop()
                 local_results, last_fire_time, go_adjusted_run_t0 = await loop.run_in_executor(
@@ -921,17 +931,27 @@ async def replay(
                     rank,
                     tmp_dir,
                     dispatch_workers,
-                    go_no_save,
+                    go_sum_only,
                 )
                 # Use go_dispatch's adjusted run_t0 (post-startup-compensation) for
                 # overhead calculation, so startup latency is not counted as dispatch
                 # overhead. Fall back to the Python run_t0 for old binaries.
                 effective_run_t0 = go_adjusted_run_t0 if go_adjusted_run_t0 is not None else run_t0
-                print(
-                    f"\r[Rank {rank}] go_dispatch finished: "
-                    f"{len(local_results)}/{local_expected} responses.",
-                    flush=True,
-                )
+
+                # When sum_only, local_results is a summary dict from Go
+                if isinstance(local_results, dict):
+                    print(
+                        f"\r[Rank {rank}] go_dispatch finished (summary): "
+                        f"completed={local_results.get('requests_completed')}/{local_expected} "
+                        f"errors={local_results.get('errors')}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"\r[Rank {rank}] go_dispatch finished: "
+                        f"{len(local_results)}/{local_expected} responses.",
+                        flush=True,
+                    )
 
             else:
                 # ------------------------------------------------------------------
@@ -1030,9 +1050,32 @@ async def replay(
             _mpi_barrier(comm)
 
             # ---- Gather all results to rank 0 ----
+            is_summary = isinstance(local_results, dict)
             gathered = _mpi_gather(comm, local_results, root=0)
 
-            if is_root:
+            if is_root and is_summary:
+                # Merge summary dicts from all ranks
+                merged_summary = {
+                    "requests_completed": 0, "requests_scheduled": 0,
+                    "errors": 0, "total_input_tokens": 0, "total_output_tokens": 0,
+                }
+                all_latency_p50s = []
+                all_latency_p99s = []
+                for s in gathered:
+                    merged_summary["requests_completed"] += s.get("requests_completed", 0)
+                    merged_summary["requests_scheduled"] += s.get("requests_scheduled", 0)
+                    merged_summary["errors"] += s.get("errors", 0)
+                    merged_summary["total_input_tokens"] += s.get("total_input_tokens", 0)
+                    merged_summary["total_output_tokens"] += s.get("total_output_tokens", 0)
+                    if s.get("p50_s"):
+                        all_latency_p50s.append(s["p50_s"])
+                    if s.get("p99_s"):
+                        all_latency_p99s.append(s["p99_s"])
+                # For multi-rank, percentiles are approximate (max of per-rank values)
+                merged_summary["p50_s"] = max(all_latency_p50s) if all_latency_p50s else 0.0
+                merged_summary["p99_s"] = max(all_latency_p99s) if all_latency_p99s else 0.0
+                run_results = merged_summary
+            elif is_root:
                 run_results = [r for rank_results in gathered for r in rank_results]
                 # Early stop: trim to target if we over-collected
                 if target_responses is not None and len(run_results) > target_responses:
@@ -1048,11 +1091,15 @@ async def replay(
             # isn't diluted by go_dispatch's startup time.
             duration_t0 = effective_run_t0 if effective_run_t0 is not None else run_t0
             if is_root and run_results:
-                run_end_time = max((r[4] for r in run_results), default=None)
-                run_durations.append(
-                    run_end_time - duration_t0 if run_end_time is not None
-                    else max(time.time() - duration_t0, 0.0)
-                )
+                if isinstance(run_results, dict):
+                    # Summary mode: no per-request end_time, use wall clock
+                    run_durations.append(max(time.time() - duration_t0, 0.0))
+                else:
+                    run_end_time = max((r[4] for r in run_results), default=None)
+                    run_durations.append(
+                        run_end_time - duration_t0 if run_end_time is not None
+                        else max(time.time() - duration_t0, 0.0)
+                    )
             elif is_root:
                 run_durations.append(max(time.time() - duration_t0, 0.0))
 
@@ -1092,162 +1139,249 @@ async def replay(
     if not is_root:
         return
 
-    if interrupted:
+    # Detect summary mode (Go --sum-only): results is a dict instead of list
+    is_summary_mode = isinstance(results, dict)
+
+    if is_summary_mode:
+        # ------------------------------------------------------------------
+        # Summary-only path: stats already computed by Go client
+        # ------------------------------------------------------------------
+        total_duration = run_durations[-1] if run_durations else max(time.time() - t0, 0.0)
+        duration_for_rate = max(total_duration, 1e-6)
+
+        completed_requests = results.get("requests_completed", 0)
+        scheduled_requests = results.get("requests_scheduled", len(requests))
+        errors = results.get("errors", 0)
+        p50 = results.get("p50_s", 0.0)
+        p99 = results.get("p99_s", 0.0)
+        total_input_tokens = results.get("total_input_tokens", 0)
+        total_output_tokens = results.get("total_output_tokens", 0)
+        total_tokens = total_input_tokens + total_output_tokens
+
+        rps = completed_requests / duration_for_rate
+        tps = total_tokens / duration_for_rate
+        processed_tps = total_input_tokens / duration_for_rate
+        generated_tps = total_output_tokens / duration_for_rate
+
+        print("\n" + "=" * 70)
+        print(f"{'(summary)':<45} | {completed_requests:<5} | {p50:.4f}   | {p99:.4f}   | {errors}")
+        print("=" * 70)
         print(
-            f"\n>>> [INTERRUPTED] Collected {len(results)} completed responses "
-            f"out of {len(requests)} scheduled requests in last run."
+            f"System duration: {total_duration:.2f}s | RPS: {rps:.2f} | TPS: {tps:.2f} "
+            f"(Processed: {processed_tps:.2f}, Generated: {generated_tps:.2f}) | "
+            f"Completed: {completed_requests}/{scheduled_requests}"
         )
 
-    print("\n" + "=" * 70)
-    print(f"{'MODEL':<45} | {'CNT':<5} | {'P50 (s)':<8} | {'P99 (s)':<8} | {'ERR'}")
-    print("-" * 70)
+        config_result_dir = _config_result_dir(cfg)
+        final_save_path = None
+        if config_result_dir:
+            final_save_path = _next_result_path(config_result_dir)
 
-    model_stats = {}
-    raw_results = []
+        if final_save_path:
+            print(f">>> [REPLAY] Saving summary results to {final_save_path}")
+            _save_t0 = time.time()
+            try:
+                with open(final_save_path, 'w') as f:
+                    json.dump({
+                        "config": cfg,
+                        "meta": {
+                            "num_runs": num_runs,
+                            "completed_runs": len(all_runs_results),
+                            "warmup_duration_s": warmup_duration_s,
+                            "generation_mode": generation_mode,
+                            "dest": dest,
+                            "cluster_nodes": cluster_nodes,
+                            "mpi_size": mpi_size,
+                            "num_workers_per_rank": num_workers,
+                            "total_workers": total_workers,
+                            "dispatch_timings": dispatch_timings,
+                            "sum_only": True,
+                        },
+                        "overall": {
+                            "duration_s": total_duration,
+                            "rps": rps,
+                            "tps": tps,
+                            "processed_tps": processed_tps,
+                            "generated_tps": generated_tps,
+                            "total_tokens": total_tokens,
+                            "total_input_tokens": total_input_tokens,
+                            "total_output_tokens": total_output_tokens,
+                            "requests_completed": completed_requests,
+                            "requests_scheduled": scheduled_requests,
+                            "errors": errors,
+                            "p50_s": p50,
+                            "p99_s": p99,
+                            "trace_span_s": dispatch_timings[-1]["trace_span_s"] if dispatch_timings else None,
+                            "actual_dispatch_s": dispatch_timings[-1]["actual_dispatch_s"] if dispatch_timings else None,
+                            "dispatch_overhead_s": dispatch_timings[-1]["overhead_s"] if dispatch_timings else None,
+                        },
+                    }, f, indent=2)
+                _save_elapsed = time.time() - _save_t0
+                _save_mb = os.path.getsize(final_save_path) / (1024 * 1024)
+                print(f">>> [REPLAY] Save complete: {_save_mb:.1f} MB in {_save_elapsed:.2f}s")
+            except Exception as e:
+                print(f"!!! ERROR Saving results: {e}")
 
-    for run_idx, run_results in enumerate(all_runs_results):
-        for r in run_results:
+    else:
+        # ------------------------------------------------------------------
+        # Full per-request path (original behavior)
+        # ------------------------------------------------------------------
+        if interrupted:
+            print(
+                f"\n>>> [INTERRUPTED] Collected {len(results)} completed responses "
+                f"out of {len(requests)} scheduled requests in last run."
+            )
+
+        print("\n" + "=" * 70)
+        print(f"{'MODEL':<45} | {'CNT':<5} | {'P50 (s)':<8} | {'P99 (s)':<8} | {'ERR'}")
+        print("-" * 70)
+
+        model_stats = {}
+        raw_results = []
+
+        for run_idx, run_results_item in enumerate(all_runs_results):
+            for r in run_results_item:
+                req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens = r
+                raw_results.append({
+                    "run_index": run_idx,
+                    "model": req_obj.model,
+                    "latency": latency,
+                    "success": success,
+                    "error": error_msg,
+                    "input_len": req_obj.input_len,
+                    "output_len": req_obj.output_len,
+                    "actual_prompt_tokens": actual_prompt_tokens,
+                    "actual_completion_tokens": actual_completion_tokens,
+                    "tensor_parallel_size": req_obj.tensor_parallel_size,
+                    "req_id": req_obj.req_id
+                })
+
+        for r in results:
             req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens = r
-            raw_results.append({
-                "run_index": run_idx,
-                "model": req_obj.model,
-                "latency": latency,
-                "success": success,
-                "error": error_msg,
-                "input_len": req_obj.input_len,
-                "output_len": req_obj.output_len,
-                "actual_prompt_tokens": actual_prompt_tokens,
-                "actual_completion_tokens": actual_completion_tokens,
-                "tensor_parallel_size": req_obj.tensor_parallel_size,
-                "req_id": req_obj.req_id
-            })
+            m_name = req_obj.model
+            if m_name not in model_stats:
+                model_stats[m_name] = []
+            model_stats[m_name].append((req_obj, latency, success, error_msg, end_time,
+                                        actual_prompt_tokens, actual_completion_tokens))
 
-    for r in results:
-        req_obj, latency, success, error_msg, end_time, actual_prompt_tokens, actual_completion_tokens = r
-        m_name = req_obj.model
-        if m_name not in model_stats:
-            model_stats[m_name] = []
-        model_stats[m_name].append((req_obj, latency, success, error_msg, end_time,
-                                    actual_prompt_tokens, actual_completion_tokens))
-
-    per_model = {}
-    for m_name, stats in model_stats.items():
-        succ_lats = [x[1] for x in stats if x[2]]
-        fails = len(stats) - len(succ_lats)
-        if succ_lats:
-            p50 = float(np.percentile(succ_lats, 50))
-            p99 = float(np.percentile(succ_lats, 99))
-            print(f"{m_name:<45} | {len(stats):<5} | {p50:.4f}   | {p99:.4f}   | {fails}")
-        else:
-            p50 = p99 = None
-            print(f"{m_name:<45} | {len(stats):<5} | N/A        | N/A        | {fails}")
-        per_model[m_name] = {
-            "count": len(stats),
-            "errors": fails,
-            "p50_s": p50,
-            "p99_s": p99,
-        }
-
-    print("=" * 70)
-
-    total_duration = run_durations[-1] if run_durations else max(time.time() - t0, 0.0)
-    duration_for_rate = max(total_duration, 1e-6)
-
-    actual_count = 0
-    trace_count = 0
-    total_input_tokens = 0
-    total_output_tokens = 0
-
-    for r in results:
-        if r[2]:
-            req_obj = r[0]
-            apt = r[5]
-            act = r[6]
-            if apt is not None and act is not None:
-                total_input_tokens += apt
-                total_output_tokens += act
-                actual_count += 1
+        per_model = {}
+        for m_name, stats in model_stats.items():
+            succ_lats = [x[1] for x in stats if x[2]]
+            fails = len(stats) - len(succ_lats)
+            if succ_lats:
+                p50 = float(np.percentile(succ_lats, 50))
+                p99 = float(np.percentile(succ_lats, 99))
+                print(f"{m_name:<45} | {len(stats):<5} | {p50:.4f}   | {p99:.4f}   | {fails}")
             else:
-                total_input_tokens += req_obj.input_len
-                total_output_tokens += req_obj.output_len
-                trace_count += 1
+                p50 = p99 = None
+                print(f"{m_name:<45} | {len(stats):<5} | N/A        | N/A        | {fails}")
+            per_model[m_name] = {
+                "count": len(stats),
+                "errors": fails,
+                "p50_s": p50,
+                "p99_s": p99,
+            }
 
-    total_tokens = total_input_tokens + total_output_tokens
-    completed_requests = len(results)
-    scheduled_requests = len(requests)
+        print("=" * 70)
 
-    rps = completed_requests / duration_for_rate
-    tps = total_tokens / duration_for_rate
-    processed_tps = total_input_tokens / duration_for_rate
-    generated_tps = total_output_tokens / duration_for_rate
+        total_duration = run_durations[-1] if run_durations else max(time.time() - t0, 0.0)
+        duration_for_rate = max(total_duration, 1e-6)
 
-    token_source = f"(Usage API: {actual_count}, Trace Spec: {trace_count})" if completed_requests > 0 else ""
+        actual_count = 0
+        trace_count = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
 
-    print(
-        f"System duration: {total_duration:.2f}s | RPS: {rps:.2f} | TPS: {tps:.2f} "
-        f"(Processed: {processed_tps:.2f}, Generated: {generated_tps:.2f}) | "
-        f"Completed: {completed_requests}/{scheduled_requests}"
-    )
-    if token_source:
-        print(f"Token counts from {token_source}")
+        for r in results:
+            if r[2]:
+                req_obj = r[0]
+                apt = r[5]
+                act = r[6]
+                if apt is not None and act is not None:
+                    total_input_tokens += apt
+                    total_output_tokens += act
+                    actual_count += 1
+                else:
+                    total_input_tokens += req_obj.input_len
+                    total_output_tokens += req_obj.output_len
+                    trace_count += 1
 
-    config_result_dir = _config_result_dir(cfg)
-    final_save_path = None
-    if config_result_dir:
-        final_save_path = _next_result_path(config_result_dir)
+        total_tokens = total_input_tokens + total_output_tokens
+        completed_requests = len(results)
+        scheduled_requests = len(requests)
 
-    if final_save_path:
-        print(f">>> [REPLAY] Saving detailed results to {final_save_path} ({len(raw_results)} records)")
-        _save_t0 = time.time()
-        try:
-            with open(final_save_path, 'w') as f:
-                json.dump({
-                    "config": cfg,
-                    "meta": {
-                        "num_runs": num_runs,
-                        "completed_runs": len(all_runs_results),
-                        "warmup_duration_s": warmup_duration_s,
-                        "generation_mode": generation_mode,
-                        "dest": dest,
-                        "cluster_nodes": cluster_nodes,
-                        "mpi_size": mpi_size,
-                        "num_workers_per_rank": num_workers,
-                        "total_workers": total_workers,
-                        "token_counts_from_usage_api": actual_count,
-                        "token_counts_from_trace_spec": trace_count,
-                        "dispatch_timings": dispatch_timings,
-                    },
-                    "summary": {m: len(s) for m, s in model_stats.items()},
-                    "per_model": per_model,
-                    "overall": {
-                        "duration_s": total_duration,
-                        "rps": rps,
-                        "tps": tps,
-                        "processed_tps": processed_tps,
-                        "generated_tps": generated_tps,
-                        "total_tokens": total_tokens,
-                        "total_input_tokens": total_input_tokens,
-                        "total_output_tokens": total_output_tokens,
-                        "requests_completed": completed_requests,
-                        "requests_scheduled": scheduled_requests,
-                        "errors": sum(v["errors"] for v in per_model.values()),
-                        "p50_s": float(np.percentile(
-                            [x[1] for x in results if x[2]], 50
-                        )) if any(x[2] for x in results) else None,
-                        "p99_s": float(np.percentile(
-                            [x[1] for x in results if x[2]], 99
-                        )) if any(x[2] for x in results) else None,
-                        "trace_span_s": dispatch_timings[-1]["trace_span_s"] if dispatch_timings else None,
-                        "actual_dispatch_s": dispatch_timings[-1]["actual_dispatch_s"] if dispatch_timings else None,
-                        "dispatch_overhead_s": dispatch_timings[-1]["overhead_s"] if dispatch_timings else None,
-                    },
-                    "requests": raw_results
-                }, f, indent=2)
-            _save_elapsed = time.time() - _save_t0
-            _save_mb = os.path.getsize(final_save_path) / (1024 * 1024)
-            print(f">>> [REPLAY] Save complete: {_save_mb:.1f} MB in {_save_elapsed:.2f}s")
-        except Exception as e:
-            print(f"!!! ERROR Saving results: {e}")
+        rps = completed_requests / duration_for_rate
+        tps = total_tokens / duration_for_rate
+        processed_tps = total_input_tokens / duration_for_rate
+        generated_tps = total_output_tokens / duration_for_rate
+
+        token_source = f"(Usage API: {actual_count}, Trace Spec: {trace_count})" if completed_requests > 0 else ""
+
+        print(
+            f"System duration: {total_duration:.2f}s | RPS: {rps:.2f} | TPS: {tps:.2f} "
+            f"(Processed: {processed_tps:.2f}, Generated: {generated_tps:.2f}) | "
+            f"Completed: {completed_requests}/{scheduled_requests}"
+        )
+        if token_source:
+            print(f"Token counts from {token_source}")
+
+        config_result_dir = _config_result_dir(cfg)
+        final_save_path = None
+        if config_result_dir:
+            final_save_path = _next_result_path(config_result_dir)
+
+        if final_save_path:
+            print(f">>> [REPLAY] Saving detailed results to {final_save_path} ({len(raw_results)} records)")
+            _save_t0 = time.time()
+            try:
+                with open(final_save_path, 'w') as f:
+                    json.dump({
+                        "config": cfg,
+                        "meta": {
+                            "num_runs": num_runs,
+                            "completed_runs": len(all_runs_results),
+                            "warmup_duration_s": warmup_duration_s,
+                            "generation_mode": generation_mode,
+                            "dest": dest,
+                            "cluster_nodes": cluster_nodes,
+                            "mpi_size": mpi_size,
+                            "num_workers_per_rank": num_workers,
+                            "total_workers": total_workers,
+                            "token_counts_from_usage_api": actual_count,
+                            "token_counts_from_trace_spec": trace_count,
+                            "dispatch_timings": dispatch_timings,
+                        },
+                        "summary": {m: len(s) for m, s in model_stats.items()},
+                        "per_model": per_model,
+                        "overall": {
+                            "duration_s": total_duration,
+                            "rps": rps,
+                            "tps": tps,
+                            "processed_tps": processed_tps,
+                            "generated_tps": generated_tps,
+                            "total_tokens": total_tokens,
+                            "total_input_tokens": total_input_tokens,
+                            "total_output_tokens": total_output_tokens,
+                            "requests_completed": completed_requests,
+                            "requests_scheduled": scheduled_requests,
+                            "errors": sum(v["errors"] for v in per_model.values()),
+                            "p50_s": float(np.percentile(
+                                [x[1] for x in results if x[2]], 50
+                            )) if any(x[2] for x in results) else None,
+                            "p99_s": float(np.percentile(
+                                [x[1] for x in results if x[2]], 99
+                            )) if any(x[2] for x in results) else None,
+                            "trace_span_s": dispatch_timings[-1]["trace_span_s"] if dispatch_timings else None,
+                            "actual_dispatch_s": dispatch_timings[-1]["actual_dispatch_s"] if dispatch_timings else None,
+                            "dispatch_overhead_s": dispatch_timings[-1]["overhead_s"] if dispatch_timings else None,
+                        },
+                        "requests": raw_results
+                    }, f, indent=2)
+                _save_elapsed = time.time() - _save_t0
+                _save_mb = os.path.getsize(final_save_path) / (1024 * 1024)
+                print(f">>> [REPLAY] Save complete: {_save_mb:.1f} MB in {_save_elapsed:.2f}s")
+            except Exception as e:
+                print(f"!!! ERROR Saving results: {e}")
 
 
 if __name__ == "__main__":

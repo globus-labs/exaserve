@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -87,6 +88,19 @@ type dispatchDoneMeta struct {
 	Type           string  `json:"__type__"`
 	LastFireTime   float64 `json:"last_fire_time"`
 	AdjustedRunT0  float64 `json:"adjusted_run_t0"` // effective run_t0 after startup compensation
+}
+
+type summaryRecord struct {
+	Type              string  `json:"__type__"`
+	RequestsCompleted int     `json:"requests_completed"`
+	RequestsScheduled int     `json:"requests_scheduled"`
+	Errors            int     `json:"errors"`
+	P50S              float64 `json:"p50_s"`
+	P99S              float64 `json:"p99_s"`
+	TotalInputTokens  int64   `json:"total_input_tokens"`
+	TotalOutputTokens int64   `json:"total_output_tokens"`
+	LastFireTime      float64 `json:"last_fire_time"`
+	AdjustedRunT0     float64 `json:"adjusted_run_t0"`
 }
 
 // ---------------------------------------------------------------------------
@@ -252,11 +266,11 @@ func run() int {
 		"eliminating the serial dispatch bottleneck at high RPS.")
 	traceFile := flag.String("trace-file", "", "Input trace partition JSONL (required)")
 	resultFile := flag.String("result-file", "", "Output results JSONL (required)")
-	noSave := flag.Bool("no-save", false, "Skip saving result files (for debugging)")
+	sumOnly := flag.Bool("sum-only", false, "Write only a summary line instead of per-request results")
 	flag.Parse()
 
-	if *baseURLsFlag == "" || *traceFile == "" || (*resultFile == "" && !*noSave) || *runT0Flag == 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: --base-urls, --run-t0, --trace-file, --result-file are required (unless --no-save)")
+	if *baseURLsFlag == "" || *traceFile == "" || *resultFile == "" || *runT0Flag == 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: --base-urls, --run-t0, --trace-file, --result-file are required")
 		flag.Usage()
 		return 1
 	}
@@ -412,7 +426,9 @@ func run() int {
 
 			workerClient := clients[workerID]
 
-			// Per-worker semaphore — no cross-worker contention
+			// Per-worker semaphore — limits in-flight requests to prevent
+			// port exhaustion.  Acquired INSIDE the goroutine so the
+			// dispatch loop is never blocked.
 			workerSemSize := *concurrency / N
 			if workerSemSize < 1 {
 				workerSemSize = 1
@@ -470,17 +486,7 @@ func run() int {
 					localLastFireTime = fireTimeF
 				}
 
-				// Acquire per-worker semaphore slot
-				select {
-				case workerSem <- struct{}{}:
-				case <-ctx.Done():
-					break
-				}
-				if ctx.Err() != nil {
-					break
-				}
-
-				// Choose URL (per-worker round-robin)
+					// Choose URL (per-worker round-robin)
 				baseURL := baseURLs[localURLIdx%uint64(len(baseURLs))]
 				localURLIdx++
 
@@ -490,6 +496,8 @@ func run() int {
 				rIdx := reqIdx
 				go func(r preparedRequest, base string, ft float64) {
 					defer workerWgs[wID].Done()
+					// Acquire semaphore inside goroutine — dispatch loop never blocks
+					workerSem <- struct{}{}
 					defer func() { <-workerSem }()
 					workerResults[wID][rIdx] = doRequest(ctx, workerClient, base, r, ft)
 				}(reqCopy, baseURL, fireTimeF)
@@ -516,6 +524,16 @@ func run() int {
 		totalElapsed.Seconds(), totalElapsed.Seconds()-dispatchElapsed.Seconds())
 
 	// ------------------------------------------------------------------
+	// Compute max last fire time across workers
+	// ------------------------------------------------------------------
+	var maxLastFireTime float64
+	for _, ft := range workerLastFireTimes {
+		if ft > maxLastFireTime {
+			maxLastFireTime = ft
+		}
+	}
+
+	// ------------------------------------------------------------------
 	// Merge per-worker results and write JSONL
 	// ------------------------------------------------------------------
 	totalResults := 0
@@ -523,18 +541,76 @@ func run() int {
 		totalResults += len(wr)
 	}
 
-	if *noSave {
-		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results (--no-save, skipping write)\n", totalResults)
+	saveStart := time.Now()
+	out, err := os.Create(*resultFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot create result file %s: %v\n", *resultFile, err)
+		return 1
+	}
+	enc := json.NewEncoder(out)
+
+	if *sumOnly {
+		// Compute summary stats from all results
+		sumStart := time.Now()
+		var successLatencies []float64
+		var completed, errors int
+		var totalInputTokens, totalOutputTokens int64
+
+		for _, wr := range workerResults {
+			for _, rec := range wr {
+				if rec.Success {
+					completed++
+					successLatencies = append(successLatencies, rec.Latency)
+					if rec.ActualPromptTokens != nil {
+						totalInputTokens += int64(*rec.ActualPromptTokens)
+					} else {
+						totalInputTokens += int64(rec.InputLen)
+					}
+					if rec.ActualCompletionTokens != nil {
+						totalOutputTokens += int64(*rec.ActualCompletionTokens)
+					} else {
+						totalOutputTokens += int64(rec.OutputLen)
+					}
+				} else {
+					errors++
+				}
+			}
+		}
+
+		var p50, p99 float64
+		if len(successLatencies) > 0 {
+			sort.Float64s(successLatencies)
+			p50 = successLatencies[len(successLatencies)*50/100]
+			p99 = successLatencies[len(successLatencies)*99/100]
+		}
+
+		sumElapsed := time.Since(sumStart)
+
+		summary := summaryRecord{
+			Type:              "summary",
+			RequestsCompleted: completed,
+			RequestsScheduled: totalResults,
+			Errors:            errors,
+			P50S:              p50,
+			P99S:              p99,
+			TotalInputTokens:  totalInputTokens,
+			TotalOutputTokens: totalOutputTokens,
+			LastFireTime:      maxLastFireTime,
+			AdjustedRunT0:     float64(runT0) / 1e9,
+		}
+		if encErr := enc.Encode(summary); encErr != nil {
+			fmt.Fprintf(os.Stderr, "WARN: failed to encode summary: %v\n", encErr)
+		}
+		out.Close()
+
+		saveElapsed := time.Since(saveStart)
+		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results summarized (compute %.3fs, total %.3fs)\n",
+			totalResults, sumElapsed.Seconds(), saveElapsed.Seconds())
+		fmt.Fprintf(os.Stderr, "[go_dispatch] Summary: completed=%d errors=%d p50=%.3fs p99=%.3fs\n",
+			completed, errors, p50, p99)
 	} else {
-		saveStart := time.Now()
 		fmt.Fprintf(os.Stderr, "[go_dispatch] Saving %d results to %s ...\n", totalResults, *resultFile)
 
-		out, err := os.Create(*resultFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: cannot create result file %s: %v\n", *resultFile, err)
-			return 1
-		}
-		enc := json.NewEncoder(out)
 		for _, wr := range workerResults {
 			for _, rec := range wr {
 				if encErr := enc.Encode(rec); encErr != nil {
@@ -543,15 +619,6 @@ func run() int {
 			}
 		}
 
-		// Compute max last fire time across workers
-		var maxLastFireTime float64
-		for _, ft := range workerLastFireTimes {
-			if ft > maxLastFireTime {
-				maxLastFireTime = ft
-			}
-		}
-
-		// Write dispatch_done metadata line
 		meta := dispatchDoneMeta{
 			Type:          "dispatch_done",
 			LastFireTime:  maxLastFireTime,
@@ -563,7 +630,8 @@ func run() int {
 		out.Close()
 
 		saveElapsed := time.Since(saveStart)
-		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results written to %s (save took %.2fs)\n", totalResults, *resultFile, saveElapsed.Seconds())
+		fmt.Fprintf(os.Stderr, "[go_dispatch] Done. %d results written to %s (save took %.2fs)\n",
+			totalResults, *resultFile, saveElapsed.Seconds())
 	}
 	return 0
 }
