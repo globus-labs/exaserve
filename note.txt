@@ -220,3 +220,6 @@ The fix (conceptually)
 The missing guard should be at the start of the backoff check in the generator — something like:
 if pending_request is None or not pending_request.routing_context.should_backoff:    continue
 Or alternatively, the outer loop in _fulfill_pending_requests should not enter _choose_replicas_with_backoff when pending_request is None.
+
+===============================================================================
+Usefull tool for network monitoring `sar -n DEV 1`
