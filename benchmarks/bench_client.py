@@ -265,6 +265,7 @@ def run_sweep_point(
     sum_only: bool = False,
     num_go_procs: int = 1,
     base_urls: str = None,
+    cpuprofile_dir: str = "",
 ) -> dict:
     """
     Run one (rps, workers, payload) combination using the real replay_client.py.
@@ -292,6 +293,10 @@ def run_sweep_point(
         cmd += ["--base-urls", base_urls]
     else:
         cmd += ["--proxy-port", str(stub_port)]
+    if cpuprofile_dir:
+        prof_dir = os.path.join(point_dir, "profiles")
+        os.makedirs(prof_dir, exist_ok=True)
+        cmd += ["--cpuprofile-dir", prof_dir]
 
     # Port prediction
     pred = port_predict(
@@ -459,6 +464,7 @@ def find_max_rps(
     sum_only: bool = False,
     num_go_procs: int = 1,
     base_urls: str = None,
+    cpuprofile: bool = False,
 ) -> dict:
     """
     Find the maximum sustainable RPS for a given (workers, payload) config.
@@ -475,6 +481,8 @@ def find_max_rps(
     history: list[dict] = []
 
     def _probe(rps: float, duration_s: float, wall_s: float, phase: str) -> dict:
+        # When cpuprofile is on, profile every run (so we capture the failure)
+        prof_dir = work_dir if cpuprofile else ""
         result = run_sweep_point(
             stub_port=stub_port,
             target_rps=rps,
@@ -491,6 +499,7 @@ def find_max_rps(
             sum_only=sum_only,
             num_go_procs=num_go_procs,
             base_urls=base_urls,
+            cpuprofile_dir=prof_dir,
         )
         entry = {
             "phase":        phase,
@@ -541,6 +550,20 @@ def find_max_rps(
             rps = min(rps * 2, max_ceiling * 1.0001)  # cap at ceiling
         else:
             first_bad_rps = rps
+            if cpuprofile:
+                print(f"\n[FindMaxRPS] {cfg_label}: --cpuprofile: stopping after first failure at rps={rps:.1f}",
+                      flush=True)
+                return {
+                    "num_workers":      num_go_workers,
+                    "payload_size":     payload_size,
+                    "max_rps":          last_good_rps if last_good_rps > 0 else rps,
+                    "at_ceiling":       False,
+                    "below_floor":      last_good_rps == 0,
+                    "validated":        False,
+                    "search_history":   history,
+                    "validation_result": r,
+                    "cpuprofile":       True,
+                }
             break
 
     if first_bad_rps is None:
@@ -805,6 +828,8 @@ def main():
     parser.add_argument("--sweep-pools", type=str, default=None, help="(No-op for real replay_client.)")
     parser.add_argument("--target",      type=str, default="stub_server", help="(No-op, kept for compat.)")
     parser.add_argument("--base-url",    type=str, default=None, help="(No-op, use --base-urls instead.)")
+    parser.add_argument("--cpuprofile",  action="store_true", default=False,
+                        help="Enable Go CPU profiling (written during validation runs).")
 
     args = parser.parse_args()
 
@@ -881,6 +906,7 @@ def main():
                 sum_only=args.sum_only,
                 num_go_procs=args.num_go_procs,
                 base_urls=args.base_urls,
+                cpuprofile=args.cpuprofile,
             )
 
         print_max_rps_summary_table(all_results)

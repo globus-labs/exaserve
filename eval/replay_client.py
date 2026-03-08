@@ -205,6 +205,7 @@ def _spawn_go_procs(
     num_go_procs: int = 1,
     warmup_rps: int = 0,
     warmup_duration_s: float = 0,
+    cpuprofile_dir: str = "",
 ) -> tuple[list, list, dict]:
     """
     Spawn Go processes, write trace partitions, and wait for GO_CLI_READY.
@@ -240,6 +241,9 @@ def _spawn_go_procs(
         if warmup_rps > 0 and warmup_duration_s > 0:
             cmd.extend(["--warmup-rps", str(warmup_rps),
                         "--warmup-duration", str(warmup_duration_s)])
+        if cpuprofile_dir:
+            prof_path = os.path.join(cpuprofile_dir, f"rank{rank}_p{p_idx}_cpu.prof")
+            cmd.extend(["--cpuprofile", prof_path])
         if sum_only:
             cmd.append("--sum-only")
         if include_tp:
@@ -425,6 +429,7 @@ async def replay(
     dest: str = "proxy",
     proxy_port: int = None,    # None = auto-detect from port file or config
     base_urls_override: str = None,  # comma-separated URLs, overrides port logic
+    cpuprofile_dir: str = "",        # directory for Go CPU profiles
 ):
     # ------------------------------------------------------------------
     # 1. MPI init (no-op when running without mpiexec)
@@ -650,6 +655,7 @@ async def replay(
                 num_go_procs,
                 run_warmup_rps,
                 run_warmup_dur,
+                cpuprofile_dir,
             )
 
             # All ranks' Go processes are warmed up — synchronise before setting run_t0
@@ -1103,6 +1109,13 @@ if __name__ == "__main__":
             "Overrides port-based URL construction for multi-target benchmarks."
         ),
     )
+    parser.add_argument(
+        "--cpuprofile-dir",
+        type=str,
+        default="",
+        dest="cpuprofile_dir",
+        help="Directory to write Go CPU profiles (one per Go process).",
+    )
     args = parser.parse_args()
 
     if not (0.0 <= args.early_stop <= 1.0):
@@ -1111,4 +1124,5 @@ if __name__ == "__main__":
     asyncio.run(replay(
         args.config, args.include_tp, args.early_stop,
         args.num_runs, args.dest, args.proxy_port, args.base_urls,
+        args.cpuprofile_dir,
     ))

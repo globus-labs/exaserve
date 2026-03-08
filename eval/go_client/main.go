@@ -42,6 +42,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -275,7 +276,26 @@ func run() int {
 	workerID := flag.String("worker-id", "", "Worker identifier for log prefixes (e.g. rank0_p0)")
 	warmupRPS := flag.Int("warmup-rps", 0, "Warm-up requests per second (0 = no warmup)")
 	warmupDuration := flag.Float64("warmup-duration", 0, "Warm-up duration in seconds")
+	cpuprofileFlag := flag.String("cpuprofile", "", "Write CPU profile to this file")
 	flag.Parse()
+
+	// CPU profiling
+	if *cpuprofileFlag != "" {
+		f, err := os.Create(*cpuprofileFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: could not create CPU profile: %v\n", err)
+			return 1
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: could not start CPU profile: %v\n", err)
+			f.Close()
+			return 1
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			f.Close()
+		}()
+	}
 
 	if *baseURLsFlag == "" || *traceFile == "" || *resultFile == "" {
 		fmt.Fprintln(os.Stderr, "ERROR: --base-urls, --trace-file, --result-file are required")

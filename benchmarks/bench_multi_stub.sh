@@ -60,6 +60,7 @@ NO_PORT_MONITOR=false
 PAYLOAD="medium"
 SWEEP_WORKERS_VAL=""
 SWEEP_PAYLOADS_VAL=""
+CPUPROFILE=false
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -86,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --payload)          PAYLOAD="$2";           shift 2 ;;
         --sweep-workers)    SWEEP_WORKERS_VAL="$2"; shift 2 ;;
         --sweep-payloads)   SWEEP_PAYLOADS_VAL="$2"; shift 2 ;;
+        --cpuprofile)       CPUPROFILE=true;         shift   ;;
         *)
             echo "!!! ERROR: Unknown argument '$1'"
             exit 1
@@ -265,6 +267,9 @@ if [ -n "$SWEEP_WORKERS_VAL" ]; then
 fi
 if [ -n "$SWEEP_PAYLOADS_VAL" ]; then
     CLIENT_ARGS+=("--sweep-payloads" "$SWEEP_PAYLOADS_VAL")
+fi
+if [ "$CPUPROFILE" = true ]; then
+    CLIENT_ARGS+=("--cpuprofile")
 fi
 
 # Initialize summary JSON
