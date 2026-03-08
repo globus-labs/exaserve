@@ -125,3 +125,9 @@ bash benchmarks/run_bench.sh \
   --go-concurrency 40 \
   --point-timeout 120 \
   --sum-only
+
+# setting for mutlnode batch
+bash benchmarks/bench_multi_stub.sh \
+    --rps-start 256000 \
+    --num-stubs-list 2 \
+    --num-go-procs 16

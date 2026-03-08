@@ -264,6 +264,7 @@ def run_sweep_point(
     go_concurrency: int = 2000,
     sum_only: bool = False,
     num_go_procs: int = 1,
+    base_urls: str = None,
 ) -> dict:
     """
     Run one (rps, workers, payload) combination using the real replay_client.py.
@@ -286,8 +287,11 @@ def run_sweep_point(
         python, str(_REPLAY_CLIENT),
         "--config",              config_path,
         "--dest",                "proxy",
-        "--proxy-port",          str(stub_port),
     ]
+    if base_urls:
+        cmd += ["--base-urls", base_urls]
+    else:
+        cmd += ["--proxy-port", str(stub_port)]
 
     # Port prediction
     pred = port_predict(
@@ -454,6 +458,7 @@ def find_max_rps(
     go_concurrency: int = 2000,
     sum_only: bool = False,
     num_go_procs: int = 1,
+    base_urls: str = None,
 ) -> dict:
     """
     Find the maximum sustainable RPS for a given (workers, payload) config.
@@ -485,6 +490,7 @@ def find_max_rps(
             go_concurrency=go_concurrency,
             sum_only=sum_only,
             num_go_procs=num_go_procs,
+            base_urls=base_urls,
         )
         entry = {
             "phase":        phase,
@@ -789,9 +795,16 @@ def main():
                             "Use >1 to test single-process Go scheduler bottleneck."
                         ))
     # Legacy sweep args kept for run_bench.sh compatibility
+    parser.add_argument("--base-urls", type=str, default=None,
+                        help=(
+                            "Comma-separated base URLs for multi-target benchmarks "
+                            "(e.g. http://0.0.0.0:8000,http://0.0.0.0:8001). "
+                            "Overrides --stub-port for URL construction."
+                        ))
+    # Legacy sweep args kept for run_bench.sh compatibility
     parser.add_argument("--sweep-pools", type=str, default=None, help="(No-op for real replay_client.)")
     parser.add_argument("--target",      type=str, default="stub_server", help="(No-op, kept for compat.)")
-    parser.add_argument("--base-url",    type=str, default=None, help="(No-op, use --stub-port instead.)")
+    parser.add_argument("--base-url",    type=str, default=None, help="(No-op, use --base-urls instead.)")
 
     args = parser.parse_args()
 
@@ -867,6 +880,7 @@ def main():
                 go_concurrency=args.go_concurrency,
                 sum_only=args.sum_only,
                 num_go_procs=args.num_go_procs,
+                base_urls=args.base_urls,
             )
 
         print_max_rps_summary_table(all_results)
@@ -946,6 +960,7 @@ def main():
             go_concurrency=args.go_concurrency,
             sum_only=args.sum_only,
             num_go_procs=args.num_go_procs,
+            base_urls=args.base_urls,
         )
         all_results.append(result)
 

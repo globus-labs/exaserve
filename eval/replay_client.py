@@ -424,6 +424,7 @@ async def replay(
     num_runs: int,
     dest: str = "proxy",
     proxy_port: int = None,    # None = auto-detect from port file or config
+    base_urls_override: str = None,  # comma-separated URLs, overrides port logic
 ):
     # ------------------------------------------------------------------
     # 1. MPI init (no-op when running without mpiexec)
@@ -494,7 +495,12 @@ async def replay(
     # ------------------------------------------------------------------
     # 3. Build target URL list
     # ------------------------------------------------------------------
-    if dest == "direct":
+    if base_urls_override:
+        cluster_nodes = []
+        base_urls = [u.strip() for u in base_urls_override.split(",")]
+        if is_root:
+            print(f">>> [DEST] base-urls override — {len(base_urls)} target(s): {base_urls}")
+    elif dest == "direct":
         cluster_nodes = _get_cluster_nodes()
         base_urls = [f"http://{node}:{port}" for node in cluster_nodes]
         if is_root:
@@ -1087,6 +1093,16 @@ if __name__ == "__main__":
             "proxy_out/proxy_port (written by driver.py) or from the config YAML."
         ),
     )
+    parser.add_argument(
+        "--base-urls",
+        type=str,
+        default=None,
+        dest="base_urls",
+        help=(
+            "Comma-separated base URLs (e.g. http://0.0.0.0:8000,http://0.0.0.0:8001). "
+            "Overrides port-based URL construction for multi-target benchmarks."
+        ),
+    )
     args = parser.parse_args()
 
     if not (0.0 <= args.early_stop <= 1.0):
@@ -1094,5 +1110,5 @@ if __name__ == "__main__":
 
     asyncio.run(replay(
         args.config, args.include_tp, args.early_stop,
-        args.num_runs, args.dest, args.proxy_port,
+        args.num_runs, args.dest, args.proxy_port, args.base_urls,
     ))
