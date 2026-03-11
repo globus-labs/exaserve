@@ -132,3 +132,82 @@ bash benchmarks/bench_multi_stub.sh \
     --num-stubs-list 2 \
     --num-go-procs 8 \
     --cpuprofile
+
+
+# settign for multinode bench_multi_stub
+bash benchmarks/bench_internode.sh \
+  --rps-start 256000 \
+  --payload medium \
+  --node-list 4 \
+  --go-concurrency 40 \
+  --fast-fail \
+  --num-go-procs 16 \
+  --stub-workers 64
+
+
+# settign for multinode bench_multi_stub
+bash benchmarks/bench_internode.sh \
+  --num-cli 2 \
+  --rps-start 256000 \
+  --payload medium \
+  --node-list 4 \
+  --go-concurrency 40 \
+  --fast-fail \
+  --num-go-procs 16 \
+  --stub-workers 64
+
+# 4 cli, 4 nodes, easily 1M RPS
+# 2 cli, 2 nodes, 600K RPS max
+# 2 cli, 6 nodes, 600K RPS max
+bash benchmarks/bench_internode.sh \
+  --num-cli 2 \
+  --rps-start 128000 \
+  --payload medium \
+  --node-list 8 \
+  --go-concurrency 40 \
+  --fast-fail \
+  --num-go-procs 16 \
+  --stub-workers 64
+
+# 3 cli, 1 stub, expect 1.2M RPS max.
+bash benchmarks/bench_internode.sh \
+  --num-cli 3 \
+  --rps-start 512000 \
+  --payload medium \
+  --node-list 4 \
+  --go-concurrency 40 \
+  --fast-fail \
+  --num-go-procs 16 \
+  --stub-workers 64
+
+# 700K RPS with the following setup
+bash benchmarks/bench_internode.sh \
+  --num-cli 3 \
+  --rps-start 512000 \
+  --payload medium \
+  --node-list 4 \
+  --go-concurrency 40 \
+  --fast-fail \
+  --num-go-procs 16 \
+  --stub-workers 32
+
+# 800K RPS with the following setup
+bash benchmarks/bench_internode.sh \
+  --num-cli 3 \
+  --rps-start 512000 \
+  --payload medium \
+  --node-list 4 \
+  --go-concurrency 40 \
+  --fast-fail \
+  --num-go-procs 16 \
+  --stub-workers 48
+
+bash benchmarks/bench_internode.sh \
+  --num-cli 4 \
+  --rps-start 512000 \
+  --payload medium \
+  --node-list 5 \
+  --go-concurrency 40 \
+  --fast-fail \
+  --num-go-procs 16 \
+  --stub-workers 48

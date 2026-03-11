@@ -60,16 +60,18 @@ NUM_GO_WORKERS=2
 NUM_GO_PROCS=8
 GO_CONCURRENCY=40
 PROBE_DURATION=3
-RPS_START=64000
+RPS_START=256000
 MAX_RPS_CEILING=32000000
 PRECISION=0.1
 DURATION=20
 POINT_TIMEOUT=240
 PAYLOAD="medium"
+PROBE_COOLDOWN=30
 CPUPROFILE=false
 NO_PORT_MONITOR=false
 SWEEP_WORKERS_VAL=""
 SWEEP_PAYLOADS_VAL=""
+NUM_CLI=1
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -90,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --num-go-procs)     NUM_GO_PROCS="$2";      shift 2 ;;
         --go-concurrency)   GO_CONCURRENCY="$2";    shift 2 ;;
         --probe-duration)   PROBE_DURATION="$2";    shift 2 ;;
+        --probe-cooldown)   PROBE_COOLDOWN="$2";    shift 2 ;;
         --rps-start)        RPS_START="$2";         shift 2 ;;
         --max-rps-ceiling)  MAX_RPS_CEILING="$2";   shift 2 ;;
         --precision)        PRECISION="$2";         shift 2 ;;
@@ -100,6 +103,7 @@ while [[ $# -gt 0 ]]; do
         --no-port-monitor)  NO_PORT_MONITOR=true;    shift   ;;
         --sweep-workers)    SWEEP_WORKERS_VAL="$2"; shift 2 ;;
         --sweep-payloads)   SWEEP_PAYLOADS_VAL="$2"; shift 2 ;;
+        --num-cli)          NUM_CLI="$2";           shift 2 ;;
         *)
             echo "!!! ERROR: Unknown argument '$1'"
             exit 1
@@ -157,6 +161,14 @@ if [ "$MAX_N" -gt "$TOTAL_NODES" ]; then
     exit 1
 fi
 
+# Validate each N has at least 1 stub node
+for N in ${NODE_LIST//,/ }; do
+    if [ "$N" -le "$NUM_CLI" ]; then
+        echo "!!! ERROR: --node-list value $N must be > --num-cli $NUM_CLI (need at least 1 stub node)"
+        exit 1
+    fi
+done
+
 # ---------------------------------------------------------------------------
 # Derived paths
 # ---------------------------------------------------------------------------
@@ -188,11 +200,12 @@ done
 # ---------------------------------------------------------------------------
 resolve_hsn() {
     local node="$1"
-    local hsn_host
-    hsn_host=$(getent hosts "${node}.hsn.cm.aurora.alcf.anl.gov" 2>/dev/null \
-               | awk '{ print $1 }' | head -n 1)
-    if [ -n "$hsn_host" ]; then
-        echo "$hsn_host"
+    local hsn_fqdn="${node}.hsn.cm.aurora.alcf.anl.gov"
+    # Verify the FQDN resolves, then return it as-is (not the IP).
+    # Using the FQDN in URLs ensures no_proxy=*.alcf.anl.gov matches,
+    # so requests bypass HTTP_PROXY and connect directly over HSN.
+    if getent hosts "$hsn_fqdn" >/dev/null 2>&1; then
+        echo "$hsn_fqdn"
     else
         # Fallback: use the node hostname directly
         echo "$node"
@@ -261,7 +274,9 @@ start_remote_stubs() {
     local port="$3"
 
     for w in $(seq 1 "$workers"); do
-        ssh "$node" "bash -lc '${ENV_SETUP} && $PYTHON $STUB_SERVER \
+        ssh "$node" "bash -lc '${ENV_SETUP} && \
+            unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ftp_proxy && \
+            $PYTHON $STUB_SERVER \
             --port $port \
             --host 0.0.0.0 \
             --latency-ms $STUB_LATENCY \
@@ -279,15 +294,22 @@ wait_for_remote_stub() {
     local hsn_addr="$1"
     local port="$2"
     local deadline=$((SECONDS + 30))
+    local attempt=0
     while [ $SECONDS -lt $deadline ]; do
+        attempt=$((attempt + 1))
         if "$PYTHON" -c "
-import urllib.request, sys
+import urllib.request, sys, os
+for k in ['HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy']:
+    os.environ.pop(k, None)
 try:
     urllib.request.urlopen('http://${hsn_addr}:${port}/health', timeout=2)
     sys.exit(0)
-except:
+except Exception as e:
+    # Print error on every 5th attempt for visibility
+    if ${attempt} % 5 == 0:
+        print(f'  [health-check] attempt ${attempt}: {e}', flush=True)
     sys.exit(1)
-" 2>/dev/null; then
+" 2>&1; then
             return 0
         fi
         sleep 1
@@ -331,6 +353,14 @@ kill_current() {
 }
 
 # ---------------------------------------------------------------------------
+# Unset proxy for intra-cluster traffic
+# ---------------------------------------------------------------------------
+# env_local sets HTTP_PROXY for internet access, but benchmark traffic is
+# entirely intra-cluster and must NOT go through the ALCF proxy.
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ftp_proxy
+echo "[proxy] Unset HTTP_PROXY/HTTPS_PROXY for intra-cluster benchmark traffic"
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 echo "=================================================="
@@ -338,7 +368,7 @@ echo " INTER-NODE SCALING BENCHMARK"
 echo "=================================================="
 echo " node_list:        $NODE_LIST"
 echo " total_nodes:      $TOTAL_NODES"
-echo " client_node:      $CLIENT_NODE"
+echo " num_cli:          $NUM_CLI"
 echo " stub_workers:     $STUB_WORKERS (SO_REUSEPORT per node)"
 echo " stub_port:        $STUB_PORT"
 echo " stub_latency:     ${STUB_LATENCY}ms"
@@ -377,6 +407,7 @@ CLIENT_ARGS=(
     "--payload"         "$PAYLOAD"
     "--python"          "$PYTHON"
     "--sum-only"
+    "--probe-cooldown"  "$PROBE_COOLDOWN"
 )
 if [ "$POINT_TIMEOUT" -gt 0 ] 2>/dev/null; then
     CLIENT_ARGS+=("--point-timeout" "$POINT_TIMEOUT")
@@ -393,6 +424,9 @@ fi
 if [ "$CPUPROFILE" = true ]; then
     CLIENT_ARGS+=("--cpuprofile")
 fi
+if [ "$NUM_CLI" -gt 1 ]; then
+    CLIENT_ARGS+=("--num-cli-nodes" "$NUM_CLI")
+fi
 
 OVERALL_EXIT=0
 PREV_MAX_RPS=""
@@ -400,11 +434,11 @@ PREV_MAX_RPS=""
 for N in ${NODE_LIST//,/ }; do
     echo ""
     echo "=================================================="
-    echo " N=$N nodes (1 client + $((N-1)) stub node(s))"
+    echo " N=$N nodes ($NUM_CLI client(s) + $((N-NUM_CLI)) stub node(s))"
     echo "=================================================="
 
-    if [ "$N" -lt 2 ]; then
-        echo "!!! ERROR: N must be >= 2 (1 client + at least 1 stub node)"
+    if [ "$N" -le "$NUM_CLI" ]; then
+        echo "!!! ERROR: N=$N must be > num_cli=$NUM_CLI (need at least 1 stub node)"
         OVERALL_EXIT=1
         continue
     fi
@@ -413,16 +447,22 @@ for N in ${NODE_LIST//,/ }; do
     NDIR="$OUTPUT_DIR/N${N}"
     mkdir -p "$NDIR"
 
-    # Select stub nodes and resolve HSN addresses
+    # Select client nodes (indices 0..NUM_CLI-1) and stub nodes (indices NUM_CLI..N-1)
+    CLI_NODES=()
+    for ((i = 0; i < NUM_CLI; i++)); do
+        CLI_NODES+=("${ALL_NODES[$i]}")
+    done
+
     STUB_NODES=()
     HSN_ADDRS=()
-    for i in $(seq 1 $((N-1))); do
+    for ((i = NUM_CLI; i < N; i++)); do
         node="${ALL_NODES[$i]}"
         hsn=$(resolve_hsn "$node")
         STUB_NODES+=("$node")
         HSN_ADDRS+=("$hsn")
     done
 
+    echo ">>> [INTERNODE] Client nodes: ${CLI_NODES[*]}"
     echo ">>> [INTERNODE] Stub nodes: ${STUB_NODES[*]}"
     echo ">>> [INTERNODE] HSN addresses: ${HSN_ADDRS[*]}"
 
@@ -433,11 +473,11 @@ for N in ${NODE_LIST//,/ }; do
         start_remote_stubs "$node" "$STUB_WORKERS" "$STUB_PORT"
     done
 
-    # Start netstats collectors on all nodes (client + stubs)
+    # Start netstats collectors on all nodes (clients + stubs)
     ACTIVE_NETSTATS_NODES=()
     if [ "$NO_NETSTATS" != true ]; then
         echo ">>> [INTERNODE] Starting netstats collectors..."
-        ALL_CURRENT_NODES=("$CLIENT_NODE" "${STUB_NODES[@]}")
+        ALL_CURRENT_NODES=("${CLI_NODES[@]}" "${STUB_NODES[@]}")
         for node in "${ALL_CURRENT_NODES[@]}"; do
             netstats_out="$NDIR/netstats_${node}.jsonl"
             start_netstats "$node" "$netstats_out"
@@ -461,9 +501,74 @@ for N in ${NODE_LIST//,/ }; do
 
     if [ "$ALL_READY" != true ]; then
         echo "!!! ERROR: Not all stub servers became reachable for N=$N"
+        echo ""
+        echo "=== DIAGNOSTICS ==="
+        for i in "${!STUB_NODES[@]}"; do
+            node="${STUB_NODES[$i]}"
+            hsn="${HSN_ADDRS[$i]}"
+            echo "--- Node: $node  HSN: $hsn ---"
+
+            # Check if stub processes are running on remote node
+            echo "  [procs] stub_server.py processes:"
+            ssh "$node" "ps aux | grep stub_server.py | grep -v grep" 2>&1 | sed 's/^/    /' || echo "    (none)"
+
+            # Check what is listening on the stub port
+            echo "  [port] Listeners on port $STUB_PORT:"
+            ssh "$node" "ss -tlnp 2>/dev/null | grep ':${STUB_PORT} '" 2>&1 | sed 's/^/    /' || echo "    (none)"
+
+            # Check remote proxy env
+            echo "  [proxy] HTTP_PROXY on remote:"
+            ssh "$node" "bash -lc '${ENV_SETUP} && echo HTTP_PROXY=\$HTTP_PROXY'" 2>&1 | sed 's/^/    /'
+
+            # Check remote network interfaces
+            echo "  [net] Interfaces with IPs:"
+            ssh "$node" "ip -brief addr show" 2>&1 | sed 's/^/    /'
+
+            # Try a raw TCP connect from client node
+            echo "  [tcp] TCP connect test from client ($(hostname)) to $hsn:$STUB_PORT:"
+            "$PYTHON" -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(3)
+try:
+    s.connect(('${hsn}', ${STUB_PORT}))
+    print('    TCP connect: OK')
+    s.close()
+except Exception as e:
+    print(f'    TCP connect: FAILED — {e}')
+" 2>&1
+
+            # Try HTTP health check with detailed error
+            echo "  [http] HTTP /health test from client:"
+            "$PYTHON" -c "
+import urllib.request, sys, os
+# Ensure no proxy
+for k in ['HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy']:
+    os.environ.pop(k, None)
+try:
+    resp = urllib.request.urlopen('http://${hsn}:${STUB_PORT}/health', timeout=3)
+    print(f'    HTTP /health: {resp.status} {resp.read().decode()[:100]}')
+except Exception as e:
+    print(f'    HTTP /health: FAILED — {e}')
+" 2>&1
+
+            # Show last 5 lines of stub log
+            echo "  [log] Last 5 lines of stub_${node}.log:"
+            tail -5 "$NDIR/stub_${node}.log" 2>/dev/null | sed 's/^/    /' || echo "    (no log file)"
+            echo ""
+        done
+        echo "=== END DIAGNOSTICS ==="
         kill_current
         OVERALL_EXIT=1
         continue
+    fi
+
+    # Create MPI hostfile for multi-client (raw PBS hostnames — MPI routes over HSN internally)
+    if [ "$NUM_CLI" -gt 1 ]; then
+        CLI_HOSTFILE="$NDIR/client_hostfile"
+        printf '%s\n' "${CLI_NODES[@]}" > "$CLI_HOSTFILE"
+        echo ">>> [INTERNODE] MPI hostfile ($CLI_HOSTFILE):"
+        cat "$CLI_HOSTFILE" | sed 's/^/    /'
     fi
 
     # Build URL list
@@ -485,6 +590,9 @@ for N in ${NODE_LIST//,/ }; do
     CLIENT_ARGS_N+=("--base-urls" "$URLS")
     CLIENT_ARGS_N+=("--output" "$RESULT_FILE")
     CLIENT_ARGS_N+=("--work-dir" "$NDIR/client_work")
+    if [ "$NUM_CLI" -gt 1 ]; then
+        CLIENT_ARGS_N+=("--mpi-hostfile" "$CLI_HOSTFILE")
+    fi
 
     "$PYTHON" "$BENCH_CLIENT" "${CLIENT_ARGS_N[@]}" 2>&1 | tee -a "$LOG_FILE"
     local_exit=${PIPESTATUS[0]}
@@ -532,7 +640,7 @@ except:
 
     # Append to summary
     RESULT_JSON=$(cat <<JSONEOF
-{"num_nodes": $N, "num_stub_nodes": $((N-1)), "stub_workers_per_node": $STUB_WORKERS, "total_stub_processes": $(( (N-1) * STUB_WORKERS )), "max_rps": $MAX_RPS, "below_floor": $BELOW_FLOOR, "result_file": "$RESULT_FILE"}
+{"num_nodes": $N, "num_cli_nodes": $NUM_CLI, "num_stub_nodes": $((N-NUM_CLI)), "stub_workers_per_node": $STUB_WORKERS, "total_stub_processes": $(( (N-NUM_CLI) * STUB_WORKERS )), "max_rps": $MAX_RPS, "below_floor": $BELOW_FLOOR, "result_file": "$RESULT_FILE"}
 JSONEOF
     )
     SUMMARY_RESULTS+=("$RESULT_JSON")

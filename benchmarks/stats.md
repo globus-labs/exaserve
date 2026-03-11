@@ -21,9 +21,9 @@
 
 | Spec | Value |
 |------|-------|
-| NICs per node | 2 (`hsn0`, `hsn1`) |
+| NICs per node | 8 (`hsn0`–`hsn7`) |
 | Per-NIC bandwidth | ~25 GB/s per direction (200 Gbps) |
-| Per-node aggregate | ~50 GB/s per direction (400 Gbps) |
+| Per-node aggregate | ~200 GB/s per direction (1.6 Tbps) |
 | Per-NIC PPS | ~30M packets/s |
 | Topology | Dragonfly |
 | MTU | 9000 (jumbo frames on HSN) |

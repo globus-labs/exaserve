@@ -223,3 +223,7 @@ Or alternatively, the outer loop in _fulfill_pending_requests should not enter _
 
 ===============================================================================
 Usefull tool for network monitoring `sar -n DEV 1`
+Confirmed limitations: 
+    - with current go_client, we can achieve max 600K RPS with loopback interface (intra-node) 
+    - and 300K RPS steady rate inter-node per client, per node
+- More RPS seems to be a hardware/Go language limit, the solution would be a physical router on top.

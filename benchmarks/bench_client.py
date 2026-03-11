@@ -168,6 +168,7 @@ def generate_config(
     num_go_workers: int = 4,
     sum_only: bool = False,
     num_go_procs: int = 1,
+    num_cli_nodes: int = 1,
 ) -> str:
     """Write a minimal YAML config for replay_client.py and return its path."""
     cfg = {
@@ -177,7 +178,7 @@ def generate_config(
         },
         "job_replay_client_config": {
             "generation_mode": "deterministic",
-            "num_nodes": 1,
+            "num_nodes": num_cli_nodes,
             "num_runs": 1,
             "dest": "proxy",
             "go_concurrency": go_concurrency,
@@ -266,6 +267,8 @@ def run_sweep_point(
     num_go_procs: int = 1,
     base_urls: str = None,
     cpuprofile_dir: str = "",
+    mpi_hostfile: str = None,
+    num_cli_nodes: int = 1,
 ) -> dict:
     """
     Run one (rps, workers, payload) combination using the real replay_client.py.
@@ -281,14 +284,25 @@ def run_sweep_point(
                                   go_concurrency=go_concurrency,
                                   num_go_workers=num_go_workers,
                                   sum_only=sum_only,
-                                  num_go_procs=num_go_procs)
+                                  num_go_procs=num_go_procs,
+                                  num_cli_nodes=num_cli_nodes)
     generate_trace(target_rps, duration_s, payload_size, trace_path, model)
 
-    cmd = [
-        python, str(_REPLAY_CLIENT),
-        "--config",              config_path,
-        "--dest",                "proxy",
-    ]
+    if num_cli_nodes > 1 and mpi_hostfile:
+        cmd = [
+            "mpiexec", "-n", str(num_cli_nodes),
+            "--ppn", "1", "--cpu-bind", "none",
+            "--hostfile", mpi_hostfile,
+            python, str(_REPLAY_CLIENT),
+            "--config",              config_path,
+            "--dest",                "proxy",
+        ]
+    else:
+        cmd = [
+            python, str(_REPLAY_CLIENT),
+            "--config",              config_path,
+            "--dest",                "proxy",
+        ]
     if base_urls:
         cmd += ["--base-urls", base_urls]
     else:
@@ -303,7 +317,7 @@ def run_sweep_point(
         rps=target_rps,
         num_workers=num_go_workers,
         http_version="2",   # replay_client always uses HTTP/2
-        num_client_nodes=1,
+        num_client_nodes=num_cli_nodes,
     )
     if pred.status != "OK":
         print(f"  [PORT WARN] {pred.warnings[0]}", flush=True)
@@ -465,6 +479,9 @@ def find_max_rps(
     num_go_procs: int = 1,
     base_urls: str = None,
     cpuprofile: bool = False,
+    probe_cooldown: float = 0.0,
+    mpi_hostfile: str = None,
+    num_cli_nodes: int = 1,
 ) -> dict:
     """
     Find the maximum sustainable RPS for a given (workers, payload) config.
@@ -500,6 +517,8 @@ def find_max_rps(
             num_go_procs=num_go_procs,
             base_urls=base_urls,
             cpuprofile_dir=prof_dir,
+            mpi_hostfile=mpi_hostfile,
+            num_cli_nodes=num_cli_nodes,
         )
         entry = {
             "phase":        phase,
@@ -532,6 +551,9 @@ def find_max_rps(
             f"ovhd={result.get('dispatch_overhead_s') or 'N/A'}{reason_str}",
             flush=True,
         )
+        if probe_cooldown > 0:
+            print(f"    [cooldown] waiting {probe_cooldown:.0f}s for TIME_WAIT drain...", flush=True)
+            time.sleep(probe_cooldown)
         return result
 
     print(f"\n[FindMaxRPS] {cfg_label}: starting exponential probe from rps={rps_start}", flush=True)
@@ -739,6 +761,11 @@ def main():
                         help="Upper RPS bound; stop probing above this (default 20000).")
     parser.add_argument("--precision", type=float, default=0.02,
                         help="Binary-search convergence threshold as a fraction (default 0.02 = 2%%).")
+    parser.add_argument("--probe-cooldown", type=float, default=0.0,
+                        help=(
+                            "Seconds to sleep between probes to let TCP TIME_WAIT drain (default 0). "
+                            "Recommended 15-30s for inter-node benchmarks with limited ephemeral ports."
+                        ))
 
     # Sweep dimensions
     parser.add_argument(
@@ -817,6 +844,11 @@ def main():
                             "Each gets 1/N of the requests (interleaved). "
                             "Use >1 to test single-process Go scheduler bottleneck."
                         ))
+    # Multi-client-node (MPI) support
+    parser.add_argument("--mpi-hostfile", type=str, default=None,
+                        help="Path to MPI hostfile for multi-client-node benchmarks.")
+    parser.add_argument("--num-cli-nodes", type=int, default=1,
+                        help="Number of client nodes (MPI ranks). Default 1 = no MPI.")
     # Legacy sweep args kept for run_bench.sh compatibility
     parser.add_argument("--base-urls", type=str, default=None,
                         help=(
@@ -877,6 +909,10 @@ def main():
         print(f"  precision:       {args.precision*100:.0f}%")
         print(f"  probe_duration:  {args.probe_duration}s  full_duration: {args.duration}s")
         print(f"  go_concurrency:  {args.go_concurrency}")
+        if args.probe_cooldown > 0:
+            print(f"  probe_cooldown:  {args.probe_cooldown}s")
+        if args.num_cli_nodes > 1:
+            print(f"  num_cli_nodes:   {args.num_cli_nodes}  (MPI hostfile: {args.mpi_hostfile})")
         print(f"  stub:            http://0.0.0.0:{args.stub_port}\n")
 
         all_results = []
@@ -907,6 +943,9 @@ def main():
                 num_go_procs=args.num_go_procs,
                 base_urls=args.base_urls,
                 cpuprofile=args.cpuprofile,
+                probe_cooldown=args.probe_cooldown,
+                mpi_hostfile=args.mpi_hostfile,
+                num_cli_nodes=args.num_cli_nodes,
             )
 
         print_max_rps_summary_table(all_results)
