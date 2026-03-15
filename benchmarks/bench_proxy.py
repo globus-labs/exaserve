@@ -32,6 +32,7 @@ Usage:
       --litellm-workers 4 --routing least-busy --num-backends 4 --rps 200
 """
 
+import atexit
 import argparse
 import asyncio
 import gc
@@ -73,6 +74,7 @@ except ImportError:
     pass
 
 _BENCH_DIR = Path(__file__).parent
+_DEFAULT_BENCH_RESULTS_DIR = Path.home() / "agpt" / "data" / "bench_results"
 sys.path.insert(0, str(_BENCH_DIR))
 from port_model import PortMonitor, EPHEMERAL_RANGE
 
@@ -80,7 +82,7 @@ from port_model import PortMonitor, EPHEMERAL_RANGE
 # Constants
 # ---------------------------------------------------------------------------
 
-SWEEP_LITELLM_WORKERS  = [1, 2, 4, 8]
+SWEEP_LITELLM_WORKERS  = [1, 2, 4, 8, 16]
 SWEEP_ROUTING          = ["least-busy", "simple-shuffle", "latency-based-routing"]
 SWEEP_BACKENDS         = [1, 2, 4, 8, 16]
 SWEEP_RPS              = [10, 50, 100, 200, 500, 1000]
@@ -94,6 +96,112 @@ MODEL_ID               = "stub-model"
 DEGRADE_LATENCY_S      = 2.0
 # Error fraction threshold for "failure" detection
 DEGRADE_ERROR_FRACTION = 0.05
+
+REPLAY_CLIENT_ROUTING  = "least-busy"
+CHECKPOINT_FILENAME    = "proxy_sweep_checkpoint.json"
+_BENCH_CLIENT          = _BENCH_DIR / "bench_client.py"
+
+_SHUTDOWN_REQUESTED: bool = False
+_ACTIVE_LITELLM_MGR: Optional["LiteLLMManager"] = None
+_ACTIVE_STUB_MGR: Optional["StubServerManager"] = None
+_ACTIVE_CLIENT_PROC: Optional[subprocess.Popen] = None
+_ACTIVE_CHECKPOINT: Optional[dict] = None
+_ACTIVE_CHECKPOINT_PATH: Optional[Path] = None
+
+
+def _config_key(litellm_workers: int, num_backends: int) -> str:
+    return f"lw{litellm_workers}_b{num_backends}"
+
+
+def _checkpoint_path(work_dir: Path) -> Path:
+    return work_dir / CHECKPOINT_FILENAME
+
+
+def _load_checkpoint(work_dir: Path) -> dict:
+    path = _checkpoint_path(work_dir)
+    if not path.exists():
+        return {"meta": {}, "completed": {}}
+    with open(path) as f:
+        checkpoint = json.load(f)
+    checkpoint.setdefault("meta", {})
+    checkpoint.setdefault("completed", {})
+    return checkpoint
+
+
+def _save_checkpoint(work_dir: Path, checkpoint: dict):
+    global _ACTIVE_CHECKPOINT, _ACTIVE_CHECKPOINT_PATH
+
+    path = _checkpoint_path(work_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(checkpoint, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+    _ACTIVE_CHECKPOINT = checkpoint
+    _ACTIVE_CHECKPOINT_PATH = path
+    print(f"[BenchProxy] Checkpoint saved to {path}", flush=True)
+
+
+def _terminate_process(proc: Optional[subprocess.Popen], label: str, timeout_s: float = 10.0):
+    if proc is None or proc.poll() is not None:
+        return
+    print(f"[BenchProxy] Stopping {label} (pid={proc.pid})", flush=True)
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _signal_handler(signum, _frame):
+    global _SHUTDOWN_REQUESTED
+    _SHUTDOWN_REQUESTED = True
+    try:
+        signame = signal.Signals(signum).name
+    except ValueError:
+        signame = str(signum)
+    print(f"\n[BenchProxy] Received {signame}; shutting down after current cleanup.", flush=True)
+
+
+def _cleanup_subprocesses():
+    global _ACTIVE_CLIENT_PROC, _ACTIVE_LITELLM_MGR, _ACTIVE_STUB_MGR
+
+    try:
+        _terminate_process(_ACTIVE_CLIENT_PROC, "bench_client.py", timeout_s=5.0)
+    except Exception as exc:
+        print(f"[BenchProxy] Warning: failed to stop bench_client.py cleanly: {exc}", flush=True)
+    finally:
+        _ACTIVE_CLIENT_PROC = None
+
+    try:
+        if _ACTIVE_LITELLM_MGR is not None:
+            _ACTIVE_LITELLM_MGR.stop()
+    except Exception as exc:
+        print(f"[BenchProxy] Warning: failed to stop LiteLLM cleanly: {exc}", flush=True)
+    finally:
+        _ACTIVE_LITELLM_MGR = None
+
+    try:
+        if _ACTIVE_STUB_MGR is not None:
+            _ACTIVE_STUB_MGR.stop()
+    except Exception as exc:
+        print(f"[BenchProxy] Warning: failed to stop stub servers cleanly: {exc}", flush=True)
+    finally:
+        _ACTIVE_STUB_MGR = None
+
+    if _ACTIVE_CHECKPOINT is not None and _ACTIVE_CHECKPOINT_PATH is not None:
+        try:
+            _save_checkpoint(_ACTIVE_CHECKPOINT_PATH.parent, _ACTIVE_CHECKPOINT)
+        except Exception as exc:
+            print(f"[BenchProxy] Warning: failed to save checkpoint during cleanup: {exc}", flush=True)
+
+
+atexit.register(_cleanup_subprocesses)
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +346,7 @@ class LiteLLMManager:
         env["PORT"] = str(self.port)
         env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
         # Strip proxy env vars
-        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "DEBUG"):
             env.pop(k, None)
 
         log_path = self.work_dir / f"litellm_w{self.num_workers}_{self.routing_strategy}.log"
@@ -277,7 +385,8 @@ class LiteLLMManager:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
-        if hasattr(self, "_log_f"):
+        self.proc = None
+        if hasattr(self, "_log_f") and not self._log_f.closed:
             self._log_f.close()
         print(f"[LiteLLM] Stopped.", flush=True)
 
@@ -503,6 +612,272 @@ def run_ramp_test(
 
 
 # ---------------------------------------------------------------------------
+# Replay-client max-RPS sweep
+# ---------------------------------------------------------------------------
+
+def _replay_client_notes(client_result: dict) -> str:
+    if client_result.get("at_ceiling"):
+        return ">= ceiling"
+    if client_result.get("below_floor"):
+        return "below floor"
+    if client_result.get("validation_result") is None and not client_result.get("validated"):
+        return "validation skipped"
+    if not client_result.get("validated"):
+        return "val failed, stepped back"
+    return ""
+
+
+def _map_replay_client_bottleneck(client_result: dict) -> str:
+    if client_result.get("at_ceiling"):
+        return "client"
+
+    validation_result = client_result.get("validation_result") or {}
+    bottleneck = validation_result.get("bottleneck")
+    if bottleneck == "server":
+        return "proxy"
+    if bottleneck in {"client", "proxy", "none", "unknown"}:
+        return bottleneck
+    return "unknown"
+
+
+def run_find_max_rps_point(proxy_port: int, point_dir: Path, args) -> dict:
+    global _ACTIVE_CLIENT_PROC
+
+    point_dir.mkdir(parents=True, exist_ok=True)
+    client_work_dir = point_dir / "client_work"
+    output_path = point_dir / "bench_client_find_max_rps.json"
+    log_path = point_dir / "bench_client.log"
+
+    cmd = [
+        args.python,
+        str(_BENCH_CLIENT),
+        "--find-max-rps",
+        "--base-urls", f"http://127.0.0.1:{proxy_port}",
+        "--stub-port", str(proxy_port),
+        "--payload", args.payload,
+        "--num-go-workers", str(args.num_go_workers),
+        "--num-go-procs", str(args.num_go_procs),
+        "--go-concurrency", str(args.go_concurrency),
+        "--rps-start", str(args.rps_start),
+        "--max-rps-ceiling", str(args.max_rps_ceiling),
+        "--precision", str(args.precision),
+        "--probe-duration", str(args.probe_duration),
+        "--duration", str(args.replay_client_duration),
+        "--python", args.python,
+        "--work-dir", str(client_work_dir),
+        "--output", str(output_path),
+    ]
+    if args.skip_validation:
+        cmd.append("--skip-validation")
+    if args.no_port_monitor:
+        cmd.append("--no-port-monitor")
+
+    print(f"[BenchProxy] Running replay-client search: {' '.join(cmd)}", flush=True)
+    print(f"[BenchProxy] Replay-client log: {log_path}", flush=True)
+
+    with open(log_path, "w") as log_f:
+        proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
+        _ACTIVE_CLIENT_PROC = proc
+        try:
+            while True:
+                retcode = proc.poll()
+                if retcode is not None:
+                    break
+                if _SHUTDOWN_REQUESTED:
+                    _terminate_process(proc, "bench_client.py", timeout_s=5.0)
+                    raise InterruptedError("Shutdown requested during replay-client point.")
+                time.sleep(1)
+        finally:
+            _ACTIVE_CLIENT_PROC = None
+
+    if retcode != 0:
+        raise subprocess.CalledProcessError(retcode, cmd)
+    if not output_path.exists():
+        raise FileNotFoundError(f"bench_client output not found: {output_path}")
+
+    with open(output_path) as f:
+        output_data = json.load(f)
+
+    results = output_data.get("results", [])
+    if len(results) != 1:
+        raise RuntimeError(f"Expected one bench_client result, found {len(results)} in {output_path}")
+
+    client_result = results[0]
+    return {
+        "test_type": "replay_client_max_rps",
+        "max_rps": client_result.get("max_rps"),
+        "validated": client_result.get("validated", False),
+        "at_ceiling": client_result.get("at_ceiling", False),
+        "below_floor": client_result.get("below_floor", False),
+        "bottleneck": _map_replay_client_bottleneck(client_result),
+        "notes": _replay_client_notes(client_result),
+        "client_result_path": str(output_path),
+        "client_log_path": str(log_path),
+        "search_history": client_result.get("search_history", []),
+        "validation_result": client_result.get("validation_result"),
+    }
+
+
+def run_replay_client_sweep(
+    litellm_python: str,
+    sweep_dims: set,
+    fixed_litellm_workers: int,
+    fixed_num_backends: int,
+    work_dir: Path,
+    stub_latency_ms: float,
+    args,
+) -> dict:
+    global _ACTIVE_LITELLM_MGR, _ACTIVE_STUB_MGR, _ACTIVE_CHECKPOINT, _ACTIVE_CHECKPOINT_PATH
+
+    lw_list = SWEEP_LITELLM_WORKERS if "litellm_workers" in sweep_dims else [fixed_litellm_workers]
+    backends_list = [b for b in SWEEP_BACKENDS if b <= 8] if "backends" in sweep_dims else [fixed_num_backends]
+    total = len(lw_list) * len(backends_list)
+
+    checkpoint = _load_checkpoint(work_dir) if args.resume else {"meta": {}, "completed": {}}
+    checkpoint["meta"] = {
+        **checkpoint.get("meta", {}),
+        "timestamp_start": checkpoint.get("meta", {}).get("timestamp_start") or datetime.now().isoformat(),
+        "mode": "replay_client_proxy_sweep",
+        "litellm_python": litellm_python,
+        "routing": REPLAY_CLIENT_ROUTING,
+        "client_config": {
+            "python": args.python,
+            "go_concurrency": args.go_concurrency,
+            "num_go_procs": args.num_go_procs,
+            "num_go_workers": args.num_go_workers,
+            "payload": args.payload,
+            "rps_start": args.rps_start,
+            "max_rps_ceiling": args.max_rps_ceiling,
+            "precision": args.precision,
+            "probe_duration": args.probe_duration,
+            "replay_client_duration": args.replay_client_duration,
+            "skip_validation": args.skip_validation,
+        },
+    }
+    checkpoint.setdefault("completed", {})
+    _ACTIVE_CHECKPOINT = checkpoint
+    _ACTIVE_CHECKPOINT_PATH = _checkpoint_path(work_dir)
+
+    print(f"[BenchProxy] Replay-client sweep plan: {total} point(s)", flush=True)
+    print(f"  litellm_workers: {lw_list}", flush=True)
+    print(f"  backends:        {backends_list}", flush=True)
+    print(f"  routing:         {REPLAY_CLIENT_ROUTING}", flush=True)
+    print(f"  resume:          {args.resume}", flush=True)
+
+    point_idx = 0
+    for lw in lw_list:
+        for n_backends in backends_list:
+            key = _config_key(lw, n_backends)
+            if key in checkpoint["completed"]:
+                point_idx += 1
+                print(f"[BenchProxy] Point {point_idx}/{total}: skipping completed {key}", flush=True)
+                continue
+            if _SHUTDOWN_REQUESTED:
+                print("[BenchProxy] Shutdown requested before next point; stopping sweep.", flush=True)
+                break
+
+            point_idx += 1
+            print(f"\n[BenchProxy] Point {point_idx}/{total}: lw={lw} backends={n_backends}", flush=True)
+
+            point_dir = work_dir / key
+            stub_mgr = StubServerManager(
+                n=n_backends,
+                python=sys.executable,
+                latency_ms=stub_latency_ms,
+            )
+            litellm_mgr = None
+            result = None
+            try:
+                _ACTIVE_STUB_MGR = stub_mgr
+                backend_ports = stub_mgr.start()
+                proxy_port = _find_free_port(14000)
+
+                litellm_mgr = LiteLLMManager(
+                    python=litellm_python,
+                    port=proxy_port,
+                    num_workers=lw,
+                    routing_strategy=REPLAY_CLIENT_ROUTING,
+                    work_dir=point_dir,
+                )
+                _ACTIVE_LITELLM_MGR = litellm_mgr
+                litellm_mgr.generate_config(backend_ports)
+                litellm_mgr.start()
+                healthy = litellm_mgr.wait_healthy()
+
+                if not healthy:
+                    result = {
+                        "test_type": "replay_client_max_rps",
+                        "litellm_workers": lw,
+                        "routing": REPLAY_CLIENT_ROUTING,
+                        "num_backends": n_backends,
+                        "max_rps": None,
+                        "validated": False,
+                        "at_ceiling": False,
+                        "below_floor": False,
+                        "bottleneck": "unknown",
+                        "notes": "litellm_failed_to_start",
+                        "client_result_path": None,
+                        "error": "litellm_failed_to_start",
+                    }
+                else:
+                    result = run_find_max_rps_point(proxy_port=proxy_port, point_dir=point_dir, args=args)
+                    result["litellm_workers"] = lw
+                    result["routing"] = REPLAY_CLIENT_ROUTING
+                    result["num_backends"] = n_backends
+            except InterruptedError:
+                print(f"[BenchProxy] Interrupted during {key}; leaving it incomplete for resume.", flush=True)
+                result = None
+            except Exception as exc:
+                result = {
+                    "test_type": "replay_client_max_rps",
+                    "litellm_workers": lw,
+                    "routing": REPLAY_CLIENT_ROUTING,
+                    "num_backends": n_backends,
+                    "max_rps": None,
+                    "validated": False,
+                    "at_ceiling": False,
+                    "below_floor": False,
+                    "bottleneck": "unknown",
+                    "notes": str(exc),
+                    "client_result_path": None,
+                    "error": type(exc).__name__,
+                }
+            finally:
+                if litellm_mgr is not None:
+                    litellm_mgr.stop()
+                stub_mgr.stop()
+                _ACTIVE_LITELLM_MGR = None
+                _ACTIVE_STUB_MGR = None
+
+            if result is None:
+                break
+
+            checkpoint["completed"][key] = result
+            _save_checkpoint(work_dir, checkpoint)
+
+            if _SHUTDOWN_REQUESTED:
+                break
+
+            time.sleep(2)
+
+        if _SHUTDOWN_REQUESTED:
+            break
+
+    ordered_results = []
+    for lw in lw_list:
+        for n_backends in backends_list:
+            key = _config_key(lw, n_backends)
+            if key in checkpoint["completed"]:
+                ordered_results.append(checkpoint["completed"][key])
+
+    return {
+        "meta": checkpoint["meta"],
+        "results": ordered_results,
+        "checkpoint": checkpoint,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Full sweep runner
 # ---------------------------------------------------------------------------
 
@@ -523,6 +898,7 @@ def run_sweep(
     monitor_ports: bool,
     stub_latency_ms: float,
 ) -> list[dict]:
+    global _ACTIVE_LITELLM_MGR, _ACTIVE_STUB_MGR
 
     lw_list      = SWEEP_LITELLM_WORKERS if "litellm_workers" in sweep_dims else [fixed_litellm_workers]
     routing_list = SWEEP_ROUTING         if "routing"         in sweep_dims else [fixed_routing]
@@ -544,12 +920,17 @@ def run_sweep(
     point_idx = 0
 
     for n_backends, lw, routing in itertools.product(backends_list, lw_list, routing_list):
+        if _SHUTDOWN_REQUESTED:
+            print("[BenchProxy] Shutdown requested; stopping remaining fixed/ramp sweep points.", flush=True)
+            break
+
         # --- Start stub backends ---
         stub_mgr = StubServerManager(
             n=n_backends,
             python=sys.executable,  # stub uses same env; doesn't need litellm venv
             latency_ms=stub_latency_ms,
         )
+        _ACTIVE_STUB_MGR = stub_mgr
         backend_ports = stub_mgr.start()
         proxy_port = _find_free_port(14000)
 
@@ -561,6 +942,7 @@ def run_sweep(
             routing_strategy=routing,
             work_dir=work_dir,
         )
+        _ACTIVE_LITELLM_MGR = litellm_mgr
         litellm_mgr.generate_config(backend_ports)
         litellm_mgr.start()
         healthy = litellm_mgr.wait_healthy()
@@ -569,6 +951,8 @@ def run_sweep(
             print(f"[BenchProxy] LiteLLM failed to start — skipping (lw={lw}, routing={routing})", flush=True)
             litellm_mgr.stop()
             stub_mgr.stop()
+            _ACTIVE_LITELLM_MGR = None
+            _ACTIVE_STUB_MGR = None
             all_results.append({
                 "litellm_workers": lw, "routing": routing, "num_backends": n_backends,
                 "error": "litellm_failed_to_start",
@@ -620,6 +1004,8 @@ def run_sweep(
 
         litellm_mgr.stop()
         stub_mgr.stop()
+        _ACTIVE_LITELLM_MGR = None
+        _ACTIVE_STUB_MGR = None
         time.sleep(2)  # brief pause between configurations
 
     return all_results
@@ -668,6 +1054,30 @@ def print_summary_table(results: list[dict]):
     print("=" * len(header) + "\n")
 
 
+def print_replay_client_summary_table(results: list[dict]):
+    header = (
+        f"{'lw':>4} {'backends':>8} {'max_rps':>10} "
+        f"{'bottleneck':>10} {'validated':>10} {'notes':>24}"
+    )
+    print("\n" + "=" * len(header))
+    print("  REPLAY-CLIENT PROXY SWEEP")
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+    for r in results:
+        max_rps = r.get("max_rps")
+        max_rps_label = f"{max_rps:.1f}" if isinstance(max_rps, (int, float)) else "N/A"
+        print(
+            f"{r.get('litellm_workers', '?'):>4} "
+            f"{r.get('num_backends', '?'):>8} "
+            f"{max_rps_label:>10} "
+            f"{r.get('bottleneck', 'unknown'):>10} "
+            f"{'YES' if r.get('validated') else 'NO':>10} "
+            f"{r.get('notes', ''):>24}"
+        )
+    print("=" * len(header) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -689,6 +1099,8 @@ def main():
             "E.g. --sweep litellm_workers,routing"
         ),
     )
+    parser.add_argument("--use-replay-client", action="store_true",
+                        help="Use bench_client.py --find-max-rps instead of the built-in httpx load generator.")
 
     # Fixed-point parameters
     parser.add_argument("--litellm-workers", type=int,   default=4,            help="LiteLLM num_workers (fixed).")
@@ -701,8 +1113,35 @@ def main():
     parser.add_argument("--ramp",        action="store_true", help="Run a ramp test to find LiteLLM's breaking point.")
     parser.add_argument("--ramp-start",  type=float, default=10.0,  help="Starting RPS for ramp test.")
     parser.add_argument("--ramp-max",    type=float, default=2000.0,help="Maximum RPS for ramp test.")
-    parser.add_argument("--ramp-step",   type=float, default=1.2,   help="RPS multiplier per step (e.g. 1.2 = +20%).")
+    parser.add_argument("--ramp-step",   type=float, default=1.2,   help="RPS multiplier per step (e.g. 1.2 = +20%%).")
     parser.add_argument("--ramp-window", type=float, default=10.0,  help="Duration of each ramp step (s).")
+
+    # Replay-client max-RPS mode
+    parser.add_argument("--go-concurrency", type=int, default=40,
+                        help="Go replay_client in-flight concurrency for --use-replay-client mode.")
+    parser.add_argument("--num-go-procs", type=int, default=8,
+                        help="Number of Go replay_client processes for --use-replay-client mode.")
+    parser.add_argument("--num-go-workers", type=int, default=2,
+                        help="Number of Go dispatch workers for --use-replay-client mode.")
+    parser.add_argument("--payload", type=str, default="medium",
+                        choices=["small", "medium", "large", "xl"],
+                        help="Payload size for --use-replay-client mode.")
+    parser.add_argument("--rps-start", type=float, default=100.0,
+                        help="Starting RPS for replay-client max-RPS search.")
+    parser.add_argument("--max-rps-ceiling", type=float, default=500000.0,
+                        help="Upper RPS ceiling for replay-client max-RPS search.")
+    parser.add_argument("--precision", type=float, default=0.20,
+                        help="Convergence threshold for replay-client max-RPS search.")
+    parser.add_argument("--probe-duration", type=float, default=2.0,
+                        help="Per-probe duration (s) for replay-client max-RPS search.")
+    parser.add_argument("--replay-client-duration", type=float, default=5.0,
+                        help="Full validation duration (s) when replay-client validation is enabled.")
+    parser.add_argument("--skip-validation", action="store_true",
+                        help="Skip replay-client full-duration validation probes.")
+    parser.add_argument("--python", type=str, default=sys.executable,
+                        help="Python interpreter to use for bench_client.py in replay-client mode.")
+    parser.add_argument("--resume", action="store_true",
+                        help=f"Resume a replay-client sweep from {CHECKPOINT_FILENAME} in --work-dir.")
 
     # Stub server
     parser.add_argument("--stub-latency-ms", type=float, default=0.0,
@@ -721,41 +1160,82 @@ def main():
     sweep_dims = set(d.strip() for d in args.sweep.split(",") if d.strip())
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    work_dir = Path(args.work_dir) if args.work_dir else _BENCH_DIR / "results" / f"proxy_run_{ts}"
+    work_dir = Path(args.work_dir) if args.work_dir else _DEFAULT_BENCH_RESULTS_DIR / f"proxy_run_{ts}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    results = run_sweep(
-        litellm_python=args.litellm_python,
-        sweep_dims=sweep_dims,
-        fixed_litellm_workers=args.litellm_workers,
-        fixed_routing=args.routing,
-        fixed_num_backends=args.num_backends,
-        fixed_rps=args.rps,
-        duration_s=args.duration,
-        work_dir=work_dir,
-        do_ramp=args.ramp,
-        ramp_start=args.ramp_start,
-        ramp_max=args.ramp_max,
-        ramp_step=args.ramp_step,
-        ramp_window=args.ramp_window,
-        monitor_ports=not args.no_port_monitor,
-        stub_latency_ms=args.stub_latency_ms,
-    )
+    if args.use_replay_client:
+        invalid_dims = sweep_dims - {"litellm_workers", "backends"}
+        if args.ramp:
+            parser.error("--ramp is not supported with --use-replay-client.")
+        if invalid_dims:
+            parser.error("--use-replay-client only supports sweep dims: litellm_workers, backends.")
+        if "routing" in sweep_dims or "rps" in sweep_dims:
+            parser.error("--use-replay-client does not allow routing or rps sweeps.")
+        if args.num_backends not in {1, 2, 4, 8} and "backends" not in sweep_dims:
+            parser.error("--use-replay-client expects --num-backends to be one of 1,2,4,8.")
+        if not _BENCH_CLIENT.exists():
+            parser.error(f"bench_client.py not found at {_BENCH_CLIENT}")
+        if args.routing != REPLAY_CLIENT_ROUTING:
+            print(
+                f"[BenchProxy] Warning: forcing routing={REPLAY_CLIENT_ROUTING} in --use-replay-client mode.",
+                flush=True,
+            )
 
-    print_summary_table(results)
+        replay_data = run_replay_client_sweep(
+            litellm_python=args.litellm_python,
+            sweep_dims=sweep_dims,
+            fixed_litellm_workers=args.litellm_workers,
+            fixed_num_backends=args.num_backends,
+            work_dir=work_dir,
+            stub_latency_ms=args.stub_latency_ms,
+            args=args,
+        )
+        results = replay_data["results"]
+        print_replay_client_summary_table(results)
+        output_data = {
+            "meta": {
+                **replay_data["meta"],
+                "timestamp_end": datetime.now().isoformat(),
+                "sweep_dims": list(sweep_dims),
+                "resume": args.resume,
+                "checkpoint_path": str(_checkpoint_path(work_dir)),
+            },
+            "results": results,
+        }
+    else:
+        results = run_sweep(
+            litellm_python=args.litellm_python,
+            sweep_dims=sweep_dims,
+            fixed_litellm_workers=args.litellm_workers,
+            fixed_routing=args.routing,
+            fixed_num_backends=args.num_backends,
+            fixed_rps=args.rps,
+            duration_s=args.duration,
+            work_dir=work_dir,
+            do_ramp=args.ramp,
+            ramp_start=args.ramp_start,
+            ramp_max=args.ramp_max,
+            ramp_step=args.ramp_step,
+            ramp_window=args.ramp_window,
+            monitor_ports=not args.no_port_monitor,
+            stub_latency_ms=args.stub_latency_ms,
+        )
+
+        print_summary_table(results)
+        output_data = {
+            "meta": {
+                "timestamp": ts,
+                "mode": "fixed_or_ramp_proxy_sweep",
+                "litellm_python": args.litellm_python,
+                "sweep_dims": list(sweep_dims),
+                "ramp": args.ramp,
+                "duration_s": args.duration,
+            },
+            "results": results,
+        }
 
     out_path = Path(args.output) if args.output else work_dir / f"proxy_sweep_{ts}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    output_data = {
-        "meta": {
-            "timestamp": ts,
-            "litellm_python": args.litellm_python,
-            "sweep_dims": list(sweep_dims),
-            "ramp": args.ramp,
-            "duration_s": args.duration,
-        },
-        "results": results,
-    }
     with open(out_path, "w") as f:
         json.dump(output_data, f, indent=2)
     print(f"[BenchProxy] Results saved to {out_path}")

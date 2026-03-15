@@ -216,6 +216,7 @@ def build_app() -> Starlette:
 
 def main():
     global _MODEL_ID, _LATENCY_S, _RESPONSE_TOKENS, _RESPONSE_TEXT
+    global _CHAT_RESPONSE_BYTES, _COMPLETION_RESPONSE_BYTES
 
     parser = argparse.ArgumentParser(
         description="Minimal OpenAI-compatible stub HTTP server for benchmarking."

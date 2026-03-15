@@ -479,6 +479,7 @@ def find_max_rps(
     num_go_procs: int = 1,
     base_urls: str = None,
     cpuprofile: bool = False,
+    skip_validation: bool = False,
     probe_cooldown: float = 0.0,
     mpi_hostfile: str = None,
     num_cli_nodes: int = 1,
@@ -593,14 +594,20 @@ def find_max_rps(
         at_ceiling = True
         print(f"  [FindMaxRPS] {cfg_label}: still keeping up at ceiling {max_ceiling}; "
               f"reporting max_rps >= {last_good_rps}", flush=True)
-        vr = _probe(last_good_rps, full_duration_s, full_wall_s, "validation")
+        if skip_validation:
+            print(f"  [FindMaxRPS] {cfg_label}: skipping validation at ceiling.", flush=True)
+            vr = None
+            validated = False
+        else:
+            vr = _probe(last_good_rps, full_duration_s, full_wall_s, "validation")
+            validated = vr["can_keep_up"]
         return {
             "num_workers":      num_go_workers,
             "payload_size":     payload_size,
             "max_rps":          last_good_rps,
             "at_ceiling":       True,
             "below_floor":      False,
-            "validated":        vr["can_keep_up"],
+            "validated":        validated,
             "search_history":   history,
             "validation_result": vr,
         }
@@ -636,6 +643,19 @@ def find_max_rps(
         else:
             hi = mid
 
+    if skip_validation:
+        print(f"\n[FindMaxRPS] {cfg_label}: converged to ~{lo:.1f} RPS — skipping validation", flush=True)
+        return {
+            "num_workers":       num_go_workers,
+            "payload_size":      payload_size,
+            "max_rps":           round(lo, 2),
+            "at_ceiling":        False,
+            "below_floor":       False,
+            "validated":         False,
+            "search_history":    history,
+            "validation_result": None,
+        }
+
     print(f"\n[FindMaxRPS] {cfg_label}: converged to ~{lo:.1f} RPS — running validation", flush=True)
 
     # ---- Phase 3: Validation ------------------------------------------------
@@ -655,7 +675,7 @@ def find_max_rps(
         final_rps = fallback
 
     return {
-        "num_workers":       num_workers,
+        "num_workers":       num_go_workers,
         "payload_size":      payload_size,
         "max_rps":           round(final_rps, 2),
         "at_ceiling":        False,
@@ -686,6 +706,8 @@ def print_max_rps_summary_table(results: list[dict]):
             notes = f">= ceiling"
         elif r.get("below_floor"):
             notes = "below floor"
+        elif r.get("validation_result") is None and not r.get("validated"):
+            notes = "validation skipped"
         elif not r.get("validated"):
             notes = "val failed, stepped back"
         n_steps = len(r.get("search_history", []))
@@ -766,6 +788,8 @@ def main():
                             "Seconds to sleep between probes to let TCP TIME_WAIT drain (default 0). "
                             "Recommended 15-30s for inter-node benchmarks with limited ephemeral ports."
                         ))
+    parser.add_argument("--skip-validation", action="store_true",
+                        help="Skip the final full-duration validation probe in --find-max-rps mode.")
 
     # Sweep dimensions
     parser.add_argument(
@@ -943,10 +967,12 @@ def main():
                 num_go_procs=args.num_go_procs,
                 base_urls=args.base_urls,
                 cpuprofile=args.cpuprofile,
+                skip_validation=args.skip_validation,
                 probe_cooldown=args.probe_cooldown,
                 mpi_hostfile=args.mpi_hostfile,
                 num_cli_nodes=args.num_cli_nodes,
             )
+            all_results.append(result)
 
         print_max_rps_summary_table(all_results)
 
@@ -964,6 +990,7 @@ def main():
                 "precision":      args.precision,
                 "probe_duration_s": args.probe_duration,
                 "full_duration_s":  args.duration,
+                "skip_validation": args.skip_validation,
                 "warmup":         args.warmup,
                 "total_configs":  total_configs,
                 "go_concurrency": args.go_concurrency,

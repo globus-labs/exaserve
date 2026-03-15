@@ -10,3 +10,4 @@ CLAUDE.md
 eval/go_client/bin/
 .claude/
 .log
+plan/
