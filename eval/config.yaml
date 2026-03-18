@@ -1,6 +1,6 @@
 job_replay_client_config:
   config_path: config.yaml
-  dest: cluster
+  dest: proxy
   early_stop: 0.0
   generation_mode: deterministic
   include_tp: false

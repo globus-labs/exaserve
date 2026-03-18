@@ -60,7 +60,6 @@ fi
 # Locate script directory and derive project root (works in both dev repo and snapshots)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-RAY_ORCHESTRATOR_SCRIPT="$PROJECT_ROOT/src/orchestrator.py"
 LAUNCH_CLUSTER_SCRIPT="$PROJECT_ROOT/scripts/launch_cluster.sh"
 REPLAY_CLIENT_SCRIPT="$PROJECT_ROOT/eval/replay_client.py"
 ENV_SETUP_SCRIPT="/home/wenyiw/script/env_aurora"

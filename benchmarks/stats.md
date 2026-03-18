@@ -62,3 +62,11 @@ The metrics collected are equivalent to `sar -n DEV 1` output:
 | `txpck/s` | `pps_tx` |
 
 We use `/proc/net/dev` directly because it does not require the `sysstat` package and provides finer control over which interfaces and polling intervals to use.
+
+## Benchmark Results Reference (Aurora)
+
+| Proxy                              | max RPS | note                          |
+|------------------------------------|---------|-------------------------------|
+| No proxy (replay_client, loopback) | 600K    | per node, can scale           |
+| No proxy (replay_client, remote)   | 300K    | per node, can scale           |
+| LiteLLM                            | 250     | per LiteLLM worker, can scale |

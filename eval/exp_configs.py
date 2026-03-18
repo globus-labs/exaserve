@@ -61,9 +61,9 @@ class WeakScalingExpParams:
 
     # Client (→ ReplayClientConfig)
     client_num_runs: int = 1
-    client_num_go_procs: int = 1          # number of Go processes per replay_client node
-    client_num_go_workers: int = 4        # dispatch goroutines (N) inside each Go process
-    client_go_concurrency: int = 2000     # max in-flight requests per Go process
+    client_num_go_procs: int = 16          # number of Go processes per replay_client node
+    client_num_go_workers: int = 2        # dispatch goroutines (N) inside each Go process
+    client_go_concurrency: int = 40     # max in-flight requests per Go process
     client_warmup_rps: int = 0            # warm-up requests per second (0 = no warmup)
     client_warmup_duration_s: float = 0.0 # warm-up duration in seconds
     client_dest: str = "proxy"            # "proxy": local workers → proxy (ignores MPI args)
@@ -177,6 +177,16 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
 # ---------------------------------------------------------------------------
 
 EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
+    # -- proxy-mode null_compute
+    "null_compute_litellm_test": WeakScalingExpParams(
+        batch_name="null_compute_litellm_test_{backend}",
+        num_nodes_list=[8],
+        null_compute=True,
+        rate_per_node=160,
+        client_num_runs=3,
+        client_dest="proxy",
+    ),
+    
     # --- proxy-mode experiments (litellm in front, local client workers) ---
     "null_compute_litellm": WeakScalingExpParams(
         batch_name="null_compute_litellm_{backend}",
