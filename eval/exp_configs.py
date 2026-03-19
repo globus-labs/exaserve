@@ -1,6 +1,6 @@
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Dict, Optional
 
 # Add src directory to path for schemas
@@ -72,7 +72,7 @@ class WeakScalingExpParams:
     # Proxy (→ ProxyConfig)
     proxy_type: str = "litellm"
     proxy_python_path: str = "/home/wenyiw/agpt/venv/litellm/bin/python3"
-    proxy_num_workers_per_node: int = 1   # litellm uvicorn workers; total = num_nodes * this
+    proxy_num_workers: int = 1            # fixed litellm uvicorn worker count; does not scale with num_nodes
 
 
 def _walltime_and_queue(num_nodes: int):
@@ -150,7 +150,7 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
         proxy_cfg = ProxyConfig(
             type=params.proxy_type,
             python_path=params.proxy_python_path,
-            num_workers=num_nodes * params.proxy_num_workers_per_node,
+            num_workers=params.proxy_num_workers,
         )
 
         exp_cfg = ExpConfig(
@@ -178,14 +178,16 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
 
 EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
     # -- proxy-mode null_compute
-    "null_compute_litellm_test": WeakScalingExpParams(
-        batch_name="null_compute_litellm_test_{backend}",
-        num_nodes_list=[8],
-        null_compute=True,
-        rate_per_node=160,
-        client_num_runs=3,
-        client_dest="proxy",
-    ),
+    # "NC_litellm_pnw_2": WeakScalingExpParams( # pnw=proxy_num_worker
+    #     batch_name="NC_litellm_pnw_2_{backend}",
+    #     num_nodes_list=[1,2,4,8,16,32],
+    #     null_compute=True,
+    #     rate_per_node=100,
+    #     client_num_runs=3,
+    #     client_dest="proxy",
+    #     proxy_type="litellm",
+    #     proxy_num_workers=2
+    # ),
     
     # --- proxy-mode experiments (litellm in front, local client workers) ---
     "null_compute_litellm": WeakScalingExpParams(
@@ -239,6 +241,16 @@ EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
         proxy_type="none",
     ),
 }
+for experiment_name in ("null_compute_litellm", "weak_scaling_litellm"):
+    base_params = EXPERIMENT_REGISTRY[experiment_name]
+    for proxy_num_workers in (2, 4, 8):
+        EXPERIMENT_REGISTRY[f"{experiment_name}_pnw_{proxy_num_workers}"] = replace(
+            base_params,
+            batch_name=base_params.batch_name.replace(
+                "_{backend}", f"_pnw_{proxy_num_workers}" + "_{backend}"
+            ),
+            proxy_num_workers=proxy_num_workers,
+        )
 
 
 # ---------------------------------------------------------------------------

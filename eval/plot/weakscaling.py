@@ -27,6 +27,19 @@ import numpy as np
 from matplotlib import style
 from matplotlib.ticker import ScalarFormatter
 
+# Plot text templates.
+# Common placeholders:
+# {model_name} {gpus_per_node} {run_count} {rate_per_node} {trace_duration_s}
+# {task_duration_s} {proxy_type_label} {proxy_num_workers}
+# {client_summary} {proxy_summary}
+PLOT_TITLE_TEMPLATE = "LiteLLM + RayServe NULL Compute Weak Scaling Performance (ALCF Aurora)"
+PLOT_SUBTITLE_TEMPLATE = (
+    "Empty request body, {gpus_per_node} GPUs per node, {run_count} runs avg"
+    "\n Ray Config: ProxyActor - EveryNode;"
+    "\n Client Config: {rate_per_node} RPS/Node, {trace_duration_s} sec; {task_duration_s}-sec Task."
+    "\n Proxy Config: {proxy_type_label}, {proxy_num_workers} workers"
+)
+
 # Use a modern style (try different style names for compatibility)
 try:
     plt.style.use('seaborn-v0_8-darkgrid')
@@ -39,6 +52,104 @@ except OSError:
         except OSError:
             # Fall back to default with custom styling
             pass
+
+
+class _PlotTemplateFields(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _stringify_template_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else f"{value:g}"
+    return str(value)
+
+
+def _proxy_type_label(proxy_type: str) -> str:
+    return {
+        "litellm": "LiteLLM",
+        "haproxy": "HAProxy",
+        "none": "None",
+    }.get(proxy_type, proxy_type)
+
+
+def _extract_plot_template_fields(
+    result_data: dict,
+    selected_run_count: Optional[int] = None,
+) -> Dict[str, str]:
+    cfg = result_data.get("config") or {}
+    meta = result_data.get("meta") or {}
+    trace_cfg = cfg.get("job_trace_config") or {}
+    deployment_cfg = cfg.get("model_deployment_config") or {}
+    replay_cfg = cfg.get("job_replay_client_config") or {}
+    proxy_cfg = cfg.get("proxy_config") or {}
+
+    model_cfgs = deployment_cfg.get("model_configs") or []
+    model_cfg = model_cfgs[0] if model_cfgs else {}
+    model_id = str(model_cfg.get("model_id", ""))
+    model_name = model_id.split("/")[-1] if model_id else ""
+
+    run_count = selected_run_count
+    if run_count is None:
+        run_count = meta.get("completed_runs") or meta.get("num_runs") or 1
+
+    proxy_type = str(proxy_cfg.get("type", "none"))
+    proxy_type_label = _proxy_type_label(proxy_type)
+    proxy_num_workers = proxy_cfg.get("num_workers", "")
+
+    pbs_job_name = str(cfg.get("pbs_job_name", ""))
+    is_null_compute = "null_compute" in pbs_job_name.lower()
+    task_duration_s = ""
+    if is_null_compute:
+        task_duration_s = os.environ.get("AURORA_NULL_COMPUTE_LATENCY", "1")
+
+    rate_per_node = trace_cfg.get("rpn", "")
+    trace_duration_s = trace_cfg.get("duration", "")
+    gpus_per_node = deployment_cfg.get("num_gpus_per_node", "")
+
+    client_summary = (
+        f"{_stringify_template_value(rate_per_node)} RPS/Node, "
+        f"{_stringify_template_value(trace_duration_s)} sec"
+    )
+    if task_duration_s != "":
+        client_summary += f"; {_stringify_template_value(task_duration_s)}-sec Task."
+
+    if proxy_type == "none":
+        proxy_summary = proxy_type_label
+        proxy_num_workers = ""
+    else:
+        proxy_summary = (
+            f"{proxy_type_label}, {_stringify_template_value(proxy_num_workers)} workers"
+        )
+
+    fields = {
+        "model_id": model_id,
+        "model_name": model_name,
+        "gpus_per_node": gpus_per_node,
+        "run_count": run_count,
+        "rate_per_node": rate_per_node,
+        "trace_duration_s": trace_duration_s,
+        "input_len": trace_cfg.get("input_len", ""),
+        "output_len": trace_cfg.get("output_len", ""),
+        "proxy_type": proxy_type,
+        "proxy_type_label": proxy_type_label,
+        "proxy_num_workers": proxy_num_workers,
+        "num_go_procs": meta.get("num_go_procs", replay_cfg.get("num_go_procs", "")),
+        "num_go_workers": meta.get("num_go_workers", replay_cfg.get("num_go_workers", "")),
+        "go_concurrency": meta.get("go_concurrency", replay_cfg.get("go_concurrency", "")),
+        "warmup_rps": meta.get("warmup_rps", replay_cfg.get("warmup_rps", "")),
+        "warmup_duration_s": meta.get("warmup_duration_s", replay_cfg.get("warmup_duration_s", "")),
+        "task_duration_s": task_duration_s,
+        "client_summary": client_summary,
+        "proxy_summary": proxy_summary,
+    }
+    return {key: _stringify_template_value(value) for key, value in fields.items()}
+
+
+def _format_plot_text(template: str, template_fields: Optional[Dict[str, str]]) -> str:
+    return template.format_map(_PlotTemplateFields(template_fields or {}))
 
 
 def extract_node_count(directory_name: str) -> int:
@@ -109,7 +220,7 @@ def load_results(
     target_indices: List[int] = None,
     excluded_nodes: List[int] = None,
     node_select_map: Dict[int, int] = None,
-) -> Tuple[List[Tuple], List[str]]:
+) -> Tuple[List[Tuple], List[str], Dict[str, str]]:
     """
     Load results from all node configurations.
     
@@ -128,9 +239,11 @@ def load_results(
         results: List of tuples (num_nodes, tps_mean, tps_std, rps_mean, rps_std,
                  p50, p99, lat_min, lat_max, lat_mean, errors_mean)
         missing_files: List of missing file paths
+        template_fields: Placeholder values extracted from the first loaded result JSON
     """
     results = []
     missing_files = []
+    template_fields = None
     results_path = Path(results_folder)
     
     if not results_path.exists():
@@ -161,6 +274,8 @@ def load_results(
                 try:
                     with open(fpath, 'r') as f:
                         data = json.load(f)
+                    if template_fields is None:
+                        template_fields = _extract_plot_template_fields(data)
                     overall = data.get("overall", {})
                     tps = overall.get("tps", 0.0)
                     rps = overall.get("rps", 0.0)
@@ -188,6 +303,8 @@ def load_results(
                 try:
                     with open(latest_file, 'r') as f:
                         data = json.load(f)
+                    if template_fields is None:
+                        template_fields = _extract_plot_template_fields(data)
                     overall = data.get("overall", {})
                     tps = overall.get("tps", 0.0)
                     rps = overall.get("rps", 0.0)
@@ -204,6 +321,7 @@ def load_results(
             tps_list, rps_list = [], []
             p50_list, p99_list, lat_min_list, lat_max_list, lat_mean_list = [], [], [], [], []
             errors_list = []
+            first_loaded_data = None
             for idx in target_indices:
                 fpath = subdir / "results" / f"result{idx}.json"
                 if not fpath.exists():
@@ -212,6 +330,8 @@ def load_results(
                 try:
                     with open(fpath, 'r') as f:
                         data = json.load(f)
+                    if first_loaded_data is None:
+                        first_loaded_data = data
                     overall = data.get("overall", {})
                     tps_list.append(overall.get("tps", 0.0))
                     rps_list.append(overall.get("rps", 0.0))
@@ -239,6 +359,11 @@ def load_results(
             lat_min_mean = np.mean(lat_min_list) if lat_min_list else 0.0
             lat_max_mean = np.mean(lat_max_list) if lat_max_list else 0.0
             lat_mean_mean = np.mean(lat_mean_list) if lat_mean_list else 0.0
+            if template_fields is None and first_loaded_data is not None:
+                template_fields = _extract_plot_template_fields(
+                    first_loaded_data,
+                    selected_run_count=len(tps_list),
+                )
             
             print(f"Loaded {subdir.name}: {len(tps_list)} runs. TPS={tps_mean:.2f}±{tps_std:.2f}, RPS={rps_mean:.2f}±{rps_std:.2f}, Errors={errors_mean:.1f}")
             results.append((node_count, tps_mean, tps_std, rps_mean, rps_std, p50_mean, p99_mean, lat_min_mean, lat_max_mean, lat_mean_mean, errors_mean))
@@ -270,6 +395,8 @@ def load_results(
         try:
             with open(latest_file, 'r') as f:
                 data = json.load(f)
+            if template_fields is None:
+                template_fields = _extract_plot_template_fields(data)
             overall = data.get("overall", {})
             tps = overall.get("tps", 0.0)
             rps = overall.get("rps", 0.0)
@@ -282,10 +409,15 @@ def load_results(
     
     # Sort by number of nodes
     results.sort(key=lambda x: x[0])
-    return results, missing_files
+    return results, missing_files, (template_fields or {})
 
 
-def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: bool = False):
+def plot_weak_scaling(
+    results: List[Tuple],
+    output_path: str = None,
+    log_scale: bool = False,
+    template_fields: Dict[str, str] = None,
+):
     """
     Plot weak scaling chart with TPS (left), RPS (right), latency (right offset), and errors.
     Includes p99/p50 latency lines and scatter points for min, max, mean latency.
@@ -514,9 +646,8 @@ def plot_weak_scaling(results: List[Tuple], output_path: str = None, log_scale: 
         spine.set_linewidth(1.2)
     
     # Enhanced title with better formatting
-    title_text = 'RayServe vLLM Weak Scaling Performance (ALCF Aurora)'
-    subtitle_text = 'Meta-Llama-3-8B-Instruct, chat mode, 12 GPUs per node, 3 runs avg'
-    subtitle_text += '\n Note: Configuration may not be optimal. Single-node performance could be higher.'
+    title_text = _format_plot_text(PLOT_TITLE_TEMPLATE, template_fields)
+    subtitle_text = _format_plot_text(PLOT_SUBTITLE_TEMPLATE, template_fields)
     
     # title_text = 'RayServe Null Compute Weak Scaling Performance w/ Round-robin Clients (ALCF Aurora)'
     # # subtitle_text = '1 client per 8 nodes, 4 workers per client, 3 runs avg.'
@@ -602,7 +733,9 @@ def main():
         print(f"Excluding nodes: {excluded_nodes}")
     
     print(f"Loading results from: {results_folder}")
-    results, missing_files = load_results(results_folder, target_indices, excluded_nodes, node_select_map)
+    results, missing_files, template_fields = load_results(
+        results_folder, target_indices, excluded_nodes, node_select_map
+    )
     
     if missing_files:
         print("\n" + "!"*50)
@@ -618,7 +751,12 @@ def main():
     print(f"\nFound {len(results)} node configurations")
     print("\nGenerating plot...")
     
-    plot_weak_scaling(results, args.output_path, log_scale=not args.linear)
+    plot_weak_scaling(
+        results,
+        args.output_path,
+        log_scale=not args.linear,
+        template_fields=template_fields,
+    )
 
 
 if __name__ == "__main__":
