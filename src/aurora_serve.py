@@ -186,7 +186,7 @@ class VLLMWorker:
             # No tokenizer available; flatten messages to a plain string.
             prompt = " ".join(m.get("content", "") for m in messages)
         else:
-            tokenizer = await self.engine.get_tokenizer()
+            tokenizer = self.engine.get_tokenizer()
             prompt = tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )

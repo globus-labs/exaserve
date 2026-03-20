@@ -250,6 +250,7 @@ for experiment_name in ("null_compute_litellm", "weak_scaling_litellm"):
                 "_{backend}", f"_pnw_{proxy_num_workers}" + "_{backend}"
             ),
             proxy_num_workers=proxy_num_workers,
+            output_len=128
         )
 
 
