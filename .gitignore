@@ -9,5 +9,7 @@ CLAUDE.md
 *.png
 eval/go_client/bin/
 .claude/
-.log
+*.log
 plan/
+tools/bcast
+tools/*.o

@@ -11,6 +11,7 @@ from typing import Optional, Union
 from dataclasses import asdict
 
 from exp_configs import *
+from model_paths import get_model_storage_path
 
 try:
     from transformers import AutoTokenizer
@@ -33,10 +34,8 @@ class TraceGenerator:
         self.model_specs = {}
         
         for model_cfg in exp_config.model_deployment_config.model_configs:
-            # Match model_staging convention: local dirs use model_id with "/" -> "--"
             storage_path = exp_config.model_deployment_config.model_storage_path
-            safe_name = model_cfg.model_id.replace("/", "--")
-            local_path = os.path.join(storage_path, safe_name)
+            local_path = str(get_model_storage_path(model_cfg.model_id, storage_path))
             tokenizer_path = local_path if os.path.isdir(local_path) else model_cfg.model_id
             model_entry = {
                 model_cfg.model_id: {

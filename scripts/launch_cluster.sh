@@ -52,7 +52,11 @@ echo "[System] Launching Cluster..."
 #     options:
 #       master_key: "sk-aurora-master-key"
 #       routing_strategy: "least-busy"
-DEPLOYMENT_CONFIG_PATH="${1:-}"
+DEPLOYMENT_CONFIG_PATH="${1:-config.yaml}"
+if [ ! -f "$DEPLOYMENT_CONFIG_PATH" ]; then
+    echo "ERROR: Deployment config not found: $DEPLOYMENT_CONFIG_PATH"
+    exit 1
+fi
 
 export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
 export ZE_AFFINITY_MASK=""
@@ -67,11 +71,14 @@ export ONEAPI_DEVICE_SELECTOR="level_zero:0,1,2,3,4,5,6,7,8,9,10,11"
 
 PYTHON_EXEC=$(which python3)
 
-if [ -n "$DEPLOYMENT_CONFIG_PATH" ]; then
-    echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
-    mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
-        $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379 --config "$DEPLOYMENT_CONFIG_PATH"
+echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
+
+if [ "${AURORA_NULL_COMPUTE:-0}" = "1" ]; then
+    echo "[System] NULL-COMPUTE mode enabled; skipping model staging"
 else
-    mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
-        $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379
+    echo "[System] Staging models to node-local storage via MPI bcast..."
+    $PYTHON_EXEC src/model_bcast.py --config "$DEPLOYMENT_CONFIG_PATH" --num-nodes "$NODE_COUNT"
 fi
+
+mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
+    $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379 --config "$DEPLOYMENT_CONFIG_PATH"

@@ -52,9 +52,11 @@ class WeakScalingExpParams:
     # Model (→ ModelConfig)
     model_id: str = "meta-llama/Meta-Llama-3-8B-Instruct"
     model_tensor_parallel_size: int = 1
+    model_pipeline_parallel_size: int = 1
     model_max_model_len: int = 4096
     model_size: int = 8                   # used by trace generator
     model_storage_path: str = DEFAULT_MODEL_PATH
+    local_stage_path: str = "/tmp/hf_home"
 
     # Deployment (→ DeploymentConfig)
     deployment_worker_max_ongoing: int = 64
@@ -102,6 +104,7 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
             tensor_parallel_size=params.model_tensor_parallel_size,
             max_model_len=params.model_max_model_len,
             size=params.model_size,
+            pipeline_parallel_size=params.model_pipeline_parallel_size,
         ),
     ]
 
@@ -134,6 +137,7 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
             model_configs=model_cfgs,
             num_nodes=num_nodes,
             model_storage_path=params.model_storage_path,
+            local_stage_path=params.local_stage_path,
             worker_max_ongoing=params.deployment_worker_max_ongoing,
         )
         replay_cfg = ReplayClientConfig(
@@ -236,6 +240,19 @@ EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
         num_nodes_list=[1, 2, 4, 8, 16],
         null_compute=True,
         rate_per_node=80,
+        client_num_runs=1,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+    "whole_node_pp_smoke": WeakScalingExpParams(
+        batch_name="whole_node_pp_smoke_{backend}",
+        num_nodes_list=[2],
+        rate_per_node=8,
+        duration=30.0,
+        input_len=512,
+        output_len=128,
+        model_tensor_parallel_size=12,
+        model_pipeline_parallel_size=2,
         client_num_runs=1,
         client_dest="direct",
         proxy_type="none",

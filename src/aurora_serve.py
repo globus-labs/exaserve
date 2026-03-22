@@ -11,6 +11,7 @@ No patched Ray libraries needed — just NOSET=1 + global ONEAPI_DEVICE_SELECTOR
 """
 
 import asyncio
+import inspect
 import json
 import os
 import time
@@ -29,7 +30,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
 from schemas import ModelConfig, DeploymentConfig, load_deployment_config
-from model_staging import stage_models, print_red
+from model_paths import get_model_route_name
+from model_staging import print_red, resolve_model_paths
 
 
 def get_hsn_ip():
@@ -47,16 +49,46 @@ def get_hsn_ip():
         return socket.gethostbyname(socket.gethostname())
 
 
-def get_open_port(start_port: int, max_retries: int = 100) -> Optional[int]:
-    """Finds a free port starting from `start_port`."""
+def get_open_port(
+    start_port: int,
+    max_retries: int = 100,
+    bind_host: str = "127.0.0.1",
+) -> Optional[int]:
+    """Find a free port starting from `start_port`."""
     for port in range(start_port, start_port + max_retries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("127.0.0.1", port))
+                s.bind((bind_host, port))
                 return port
             except OSError:
                 continue
     return None
+
+
+def async_engine_arg_supported(arg_name: str) -> bool:
+    """Best-effort compatibility gate for installed vLLM builds."""
+    try:
+        signature = inspect.signature(AsyncEngineArgs.__init__)
+    except (TypeError, ValueError):
+        return hasattr(AsyncEngineArgs, arg_name)
+
+    if any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    ):
+        return True
+    return arg_name in signature.parameters
+
+
+def default_num_replicas(
+    model_config: ModelConfig,
+    total_gpus: int,
+    config: DeploymentConfig,
+) -> int:
+    """Compute the default replica count for a model."""
+    if model_config.pipeline_parallel_size > 1:
+        return max(1, config.num_nodes // model_config.pipeline_parallel_size)
+    return max(1, total_gpus // model_config.tensor_parallel_size)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -83,6 +115,7 @@ class VLLMWorker:
         local_model_path: str = None,
         null_compute: bool = False,
         tensor_parallel_size: int = 1,
+        pipeline_parallel_size: int = 1,
         gpu_memory_utilization: float = 0.9,
         max_model_len: int = 4096,
         enforce_eager: bool = True,
@@ -115,22 +148,40 @@ class VLLMWorker:
         )
 
         # ---- Distributed init port -------------------------------------------
-        port = get_open_port(23000 + device_id * 100)
+        master_addr = "127.0.0.1"
+        bind_host = "127.0.0.1"
+        if pipeline_parallel_size > 1:
+            if not async_engine_arg_supported("pipeline_parallel_size"):
+                raise RuntimeError(
+                    "Installed vLLM build does not expose pipeline_parallel_size on "
+                    "AsyncEngineArgs. Validate the Aurora runtime before using PP."
+                )
+            master_addr = get_hsn_ip()
+            bind_host = "0.0.0.0"
+
+        port = get_open_port(23000 + device_id * 100, bind_host=bind_host)
         if port is None:
             raise RuntimeError(f"No free port for distributed init (device {device_id})")
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(port)
-        print(f"[VLLMWorker pid={pid}] Using distributed port {port}", flush=True)
+        print(
+            f"[VLLMWorker pid={pid}] Using distributed master {master_addr}:{port} "
+            f"(PP={pipeline_parallel_size})",
+            flush=True,
+        )
 
         # ---- vLLM async engine -----------------------------------------------
         model_path = local_model_path or model_id
-        engine_args = AsyncEngineArgs(
+        engine_kwargs = dict(
             model=model_path,
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
             enforce_eager=enforce_eager,
         )
+        if pipeline_parallel_size > 1:
+            engine_kwargs["pipeline_parallel_size"] = pipeline_parallel_size
+        engine_args = AsyncEngineArgs(**engine_kwargs)
         if not hasattr(engine_args, "enable_log_requests"):
             engine_args.enable_log_requests = True
 
@@ -365,15 +416,16 @@ def deploy_model(
     local_path = model_path_map.get(model_id, model_id)
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
 
-    num_replicas = model_config.num_replicas or max(
-        1, total_gpus // model_config.tensor_parallel_size
+    num_replicas = model_config.num_replicas or default_num_replicas(
+        model_config, total_gpus, config
     )
 
-    safe_name = model_id.replace("/", "--").replace(".", "-")
+    safe_name = get_model_route_name(model_id)
 
     print(
         f"[AuroraServe] Configuring VLLMWorker for {model_id}\n"
-        f"  Replicas    : {num_replicas} (TP={model_config.tensor_parallel_size})\n"
+        f"  Replicas    : {num_replicas} "
+        f"(TP={model_config.tensor_parallel_size}, PP={model_config.pipeline_parallel_size})\n"
         f"  NullCompute : {null_compute}\n"
         f"  Local path  : {local_path}",
         flush=True,
@@ -388,7 +440,10 @@ def deploy_model(
     # Replicas per node = tiles per node / TP size. Ray's GPU resource scheduling
     # already enforces this implicitly, but being explicit avoids stacking replicas
     # onto a subset of nodes when cluster membership fluctuates.
-    replicas_per_node = max(1, config.num_gpus_per_node // model_config.tensor_parallel_size)
+    if model_config.pipeline_parallel_size > 1:
+        replicas_per_node = 1
+    else:
+        replicas_per_node = max(1, config.num_gpus_per_node // model_config.tensor_parallel_size)
 
     deployment = VLLMWorker.options(
         name=f"VLLMWorker-{safe_name}",
@@ -406,6 +461,7 @@ def deploy_model(
         local_model_path=local_path,
         null_compute=null_compute,
         tensor_parallel_size=model_config.tensor_parallel_size,
+        pipeline_parallel_size=model_config.pipeline_parallel_size,
         gpu_memory_utilization=model_config.gpu_memory_utilization,
         max_model_len=model_config.max_model_len,
         enforce_eager=model_config.enforce_eager,
@@ -437,7 +493,7 @@ def deploy_multi_model(
             flush=True,
         )
         deployment, model_id = deploy_model(model_config, model_path_map, total_gpus, config, idx)
-        safe_name = model_id.replace("/", "--").replace(".", "-")
+        safe_name = get_model_route_name(model_id)
         route_prefix = f"/{safe_name}"
         serve.run(deployment, name=safe_name, route_prefix=route_prefix)
         print(
@@ -470,7 +526,11 @@ if __name__ == "__main__":
     print(f"[AuroraServe] Loaded config from {config_path}: {config.deployment_name}", flush=True)
     print(f"[AuroraServe] Models: {len(config.model_configs)}", flush=True)
     for cfg in config.model_configs:
-        print(f"  - {cfg.model_id} (size={cfg.size}B, TP={cfg.tensor_parallel_size})", flush=True)
+        print(
+            f"  - {cfg.model_id} "
+            f"(size={cfg.size}B, TP={cfg.tensor_parallel_size}, PP={cfg.pipeline_parallel_size})",
+            flush=True,
+        )
 
     # ---- Stage 1: Initialize Ray cluster ------------------------------------
     stage_start = time.time()
@@ -492,7 +552,7 @@ if __name__ == "__main__":
     total_gpus = int(resources.get("GPU", default_gpus))
     print(f"[AuroraServe] Detected {total_gpus} GPUs in cluster", flush=True)
 
-    # ---- Stage 2: Stage models ----------------------------------------------
+    # ---- Stage 2: Resolve staged local models -------------------------------
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
     if null_compute:
         print(
@@ -503,12 +563,17 @@ if __name__ == "__main__":
     else:
         stage_start = time.time()
         print(
-            f"[AuroraServe] Stage 2: Staging models to {config.model_storage_path}...",
+            f"[AuroraServe] Stage 2: Resolving staged models from {config.local_stage_path}...",
             flush=True,
         )
-        model_path_map = stage_models(config.model_configs, config.model_storage_path)
+        model_path_map = resolve_model_paths(
+            config.model_configs,
+            config.local_stage_path,
+            require_complete=True,
+        )
         print_red(
-            f"[AuroraServe] ✓ Stage 2 stage_models() completed in {time.time() - stage_start:.2f}s"
+            f"[AuroraServe] ✓ Stage 2 local model resolution completed in "
+            f"{time.time() - stage_start:.2f}s"
         )
 
     # ---- Stage 3: Deploy model services -------------------------------------

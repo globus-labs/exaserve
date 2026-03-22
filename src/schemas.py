@@ -1,8 +1,14 @@
 import os
-import yaml
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Union, Dict, Any
 from pathlib import Path
+from model_paths import iter_unique_model_ids
+
+
+def require_yaml():
+    import yaml
+
+    return yaml
 
 
 @dataclass
@@ -11,6 +17,7 @@ class ModelConfig: # model configs for the engine
     tensor_parallel_size: int # EngineArgs
     max_model_len: int # TraceGenerator & EngineArgs
     size: int # TraceGenerator - used when generating trace
+    pipeline_parallel_size: int = 1 # EngineArgs
     # model_path: Optional[Union[str, Path]] = None # EngineArgs - path to the model
     gpu_memory_utilization: float = 0.90 # EngineArgs
     enforce_eager: bool = True # EngineArgs
@@ -23,6 +30,7 @@ class DeploymentConfig:
     num_nodes: int # TODO: right now just keep num_nodes = pbs_num_nodes, future support smaller num_nodes.
     model_configs: List[ModelConfig]
     model_storage_path: str = "/lus/flare/projects/AuroraGPT/wenyiw/models"
+    local_stage_path: str = "/tmp/hf_home"
     deployment_name: str = "aurora_serve"
     worker_max_ongoing: int = 32
     num_gpus_per_node: int = 12 # machine spec
@@ -108,6 +116,7 @@ def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
     return ModelConfig(
         model_id=d["model_id"],
         tensor_parallel_size=int(d.get("tensor_parallel_size", 1)),
+        pipeline_parallel_size=int(d.get("pipeline_parallel_size", 1)),
         max_model_len=int(d.get("max_model_len", 4096)),
         size=int(d.get("size", 8)),
         gpu_memory_utilization=float(d.get("gpu_memory_utilization", 0.90)),
@@ -128,10 +137,79 @@ def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
         num_nodes=int(d.get("num_nodes", 1)),
         model_configs=model_configs,
         model_storage_path=str(d.get("model_storage_path", "/lus/flare/projects/AuroraGPT/wenyiw/models")),
+        local_stage_path=str(d.get("local_stage_path", "/tmp/hf_home")),
         deployment_name=str(d.get("deployment_name", "aurora_serve")),
         worker_max_ongoing=int(d.get("worker_max_ongoing", 32)),
         num_gpus_per_node=int(d.get("num_gpus_per_node", 12)),
     )
+
+
+def validate_deployment_config(config: DeploymentConfig) -> DeploymentConfig:
+    """
+    Validate deployment settings that affect startup, placement, and staging.
+    """
+    if config.num_nodes < 1:
+        raise ValueError(f"num_nodes must be >= 1, got {config.num_nodes}")
+    if config.num_gpus_per_node < 1:
+        raise ValueError(f"num_gpus_per_node must be >= 1, got {config.num_gpus_per_node}")
+    if config.worker_max_ongoing < 1:
+        raise ValueError(f"worker_max_ongoing must be >= 1, got {config.worker_max_ongoing}")
+    if not config.model_configs:
+        raise ValueError("model_configs must contain at least one model")
+    if not Path(config.local_stage_path).is_absolute():
+        raise ValueError(f"local_stage_path must be an absolute path, got {config.local_stage_path}")
+
+    unique_model_ids = list(iter_unique_model_ids(config.model_configs))
+    if len(unique_model_ids) != len(config.model_configs):
+        raise ValueError("model_ids must be unique within model_configs")
+
+    has_pipeline_parallel = False
+    for model_cfg in config.model_configs:
+        tp = model_cfg.tensor_parallel_size
+        pp = model_cfg.pipeline_parallel_size
+
+        if tp < 1:
+            raise ValueError(f"tensor_parallel_size must be >= 1 for {model_cfg.model_id}, got {tp}")
+        if pp < 1:
+            raise ValueError(f"pipeline_parallel_size must be >= 1 for {model_cfg.model_id}, got {pp}")
+        if tp > config.num_gpus_per_node:
+            raise ValueError(
+                f"tensor_parallel_size for {model_cfg.model_id} exceeds num_gpus_per_node: "
+                f"{tp} > {config.num_gpus_per_node}"
+            )
+        if pp > config.num_nodes:
+            raise ValueError(
+                f"pipeline_parallel_size for {model_cfg.model_id} exceeds num_nodes: "
+                f"{pp} > {config.num_nodes}"
+            )
+        if model_cfg.num_replicas is not None and model_cfg.num_replicas < 1:
+            raise ValueError(
+                f"num_replicas must be >= 1 for {model_cfg.model_id}, got {model_cfg.num_replicas}"
+            )
+
+        if pp > 1:
+            has_pipeline_parallel = True
+            if tp != config.num_gpus_per_node:
+                raise ValueError(
+                    f"Whole-node pipeline parallelism requires tensor_parallel_size == "
+                    f"num_gpus_per_node for {model_cfg.model_id}, got tp={tp}, "
+                    f"num_gpus_per_node={config.num_gpus_per_node}"
+                )
+            max_pp_replicas = config.num_nodes // pp
+            if max_pp_replicas < 1:
+                raise ValueError(
+                    f"Not enough nodes to run {model_cfg.model_id} with pipeline_parallel_size={pp}"
+                )
+            if model_cfg.num_replicas is not None and model_cfg.num_replicas > max_pp_replicas:
+                raise ValueError(
+                    f"num_replicas for {model_cfg.model_id} exceeds whole-node PP capacity: "
+                    f"{model_cfg.num_replicas} > {max_pp_replicas}"
+                )
+
+    if has_pipeline_parallel and len(config.model_configs) != 1:
+        raise ValueError("v1 whole-node pipeline parallelism only supports single-model deployments")
+
+    return config
 
 
 def _proxy_config_from_dict(d: Dict[str, Any]) -> ProxyConfig:
@@ -152,6 +230,7 @@ def load_proxy_config(path: str) -> ProxyConfig:
     Reads the optional top-level 'proxy_config' key.
     Returns a default (type="none") ProxyConfig if the key is absent.
     """
+    yaml = require_yaml()
     with open(path, "r") as f:
         data = yaml.safe_load(f) or {}
     proxy_data = data.get("proxy_config", {})
@@ -164,11 +243,12 @@ def load_deployment_config(path: str) -> DeploymentConfig:
     If the file has top-level key 'model_deployment_config', that subtree is used
     (experiment config format). Otherwise the root dict is treated as deployment config.
     """
+    yaml = require_yaml()
     with open(path, "r") as f:
         data = yaml.safe_load(f) or {}
     if "model_deployment_config" in data:
         data = data["model_deployment_config"]
-    return _deployment_config_from_dict(data)
+    return validate_deployment_config(_deployment_config_from_dict(data))
 
 
 @dataclass
@@ -198,6 +278,7 @@ class ExpConfig:
 
     def save_yaml(self, path: str):
         """Save the config as a YAML file."""
+        yaml = require_yaml()
         yaml_dict = self.to_yaml_dict()
         parent = os.path.dirname(os.path.abspath(path))
         if parent:

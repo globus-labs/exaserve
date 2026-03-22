@@ -19,6 +19,7 @@ from exp_configs import (
     TraceGeneratorConfig,
     build_weak_scaling_configs,
 )
+from schemas import validate_deployment_config
 from trace_generator import TraceGenerator
 VALID_BACKENDS = ["ray", "mpi"]
 
@@ -95,12 +96,7 @@ def _setup_one_weak_scaling_experiment(item):
             trace_gen.generate_trace(exp_cfg)
         else:
             raise ValueError(f"Unknown trace_config type: {type(exp_cfg.job_trace_config)}")
-    dep = exp_cfg.model_deployment_config
-    gpus_per_node = dep.num_gpus_per_node
-    for model_cfg in dep.model_configs:
-        tp_size = model_cfg.tensor_parallel_size
-        replicas_per_node = gpus_per_node // tp_size
-        total_replicas = replicas_per_node * exp_cfg.model_deployment_config.num_nodes
+    exp_cfg.model_deployment_config = validate_deployment_config(exp_cfg.model_deployment_config)
     config_path = exp_cfg.job_replay_client_config.config_path
     exp_cfg.save_yaml(config_path)
     pbs_output_dir = os.path.dirname(exp_cfg.pbs_stdout_dir)

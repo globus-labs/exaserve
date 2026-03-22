@@ -34,8 +34,10 @@ model_deployment_config:
     model_id: meta-llama/Meta-Llama-3-8B-Instruct
     num_cpus_per_replica: 4
     num_replicas: null
+    pipeline_parallel_size: 1
     size: 8
     tensor_parallel_size: 1
+  local_stage_path: /tmp/hf_home
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   num_gpus_per_node: 12
   num_nodes: 2

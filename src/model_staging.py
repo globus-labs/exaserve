@@ -9,9 +9,12 @@ instead of downloading from HuggingFace directly.
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
-from huggingface_hub import snapshot_download
+from typing import Dict, List
 from schemas import ModelConfig
+from model_paths import (
+    get_model_storage_path,
+    iter_unique_model_ids,
+)
 
 
 def print_red(message: str):
@@ -47,6 +50,15 @@ def check_model_exists(model_path: Path) -> bool:
     return len(required_files) == 0 and has_weights
 
 
+def get_model_dir_state(model_path: Path) -> str:
+    """
+    Return 'missing', 'partial', or 'complete' for a model directory.
+    """
+    if not model_path.exists():
+        return "missing"
+    return "complete" if check_model_exists(model_path) else "partial"
+
+
 def download_model(model_id: str, local_path: Path, tokenizer_only: bool = False) -> str:
     """
     Download a model from HuggingFace to the specified local path.
@@ -63,6 +75,8 @@ def download_model(model_id: str, local_path: Path, tokenizer_only: bool = False
     start_time = time.time()
     
     try:
+        from huggingface_hub import snapshot_download
+
         # Create parent directory if it doesn't exist
         local_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -106,20 +120,24 @@ def stage_models(model_configs: List[ModelConfig], storage_path: str) -> dict:
     storage_path = Path(storage_path)
     storage_path.mkdir(parents=True, exist_ok=True)
     
-    model_paths = {}
-    unique_models = set(config.model_id for config in model_configs)
+    model_paths: Dict[str, str] = {}
+    unique_models = list(iter_unique_model_ids(model_configs))
     
     print(f"[ModelStaging] Staging {len(unique_models)} unique model(s) to {storage_path}", flush=True)
     total_start = time.time()
     
     for model_id in unique_models:
-        # Convert model ID to safe directory name
-        safe_name = model_id.replace("/", "--")
-        local_path = storage_path / safe_name
-        
-        if check_model_exists(local_path):
+        local_path = get_model_storage_path(model_id, storage_path)
+        state = get_model_dir_state(local_path)
+
+        if state == "complete":
             print(f"[ModelStaging] ✓ Model {model_id} already exists at {local_path}", flush=True)
             model_paths[model_id] = str(local_path)
+        elif state == "partial":
+            raise RuntimeError(
+                f"[ModelStaging] Found partial/corrupt model directory for {model_id} at {local_path}. "
+                "Refusing to overwrite it automatically."
+            )
         else:
             print(f"[ModelStaging] Model {model_id} not found, downloading...", flush=True)
             try:
@@ -135,6 +153,30 @@ def stage_models(model_configs: List[ModelConfig], storage_path: str) -> dict:
     return model_paths
 
 
+def resolve_model_paths(
+    model_configs: List[ModelConfig],
+    storage_path: str,
+    require_complete: bool = False,
+) -> Dict[str, str]:
+    """
+    Resolve model IDs to cache paths under `storage_path`.
+
+    When `require_complete` is True, every resolved directory must already exist
+    and pass the completeness check.
+    """
+    model_paths: Dict[str, str] = {}
+    for model_id in iter_unique_model_ids(model_configs):
+        local_path = get_model_storage_path(model_id, storage_path)
+        state = get_model_dir_state(local_path)
+        if require_complete and state != "complete":
+            raise RuntimeError(
+                f"[ModelStaging] Expected a complete staged model for {model_id} at {local_path}, "
+                f"but found state={state}."
+            )
+        model_paths[model_id] = str(local_path)
+    return model_paths
+
+
 def get_local_model_path(model_id: str, storage_path: str) -> str:
     """
     Get the local path for a model.
@@ -146,5 +188,4 @@ def get_local_model_path(model_id: str, storage_path: str) -> str:
     Returns:
         str: Local path to the model
     """
-    safe_name = model_id.replace("/", "--")
-    return str(Path(storage_path) / safe_name)
+    return str(get_model_storage_path(model_id, storage_path))
