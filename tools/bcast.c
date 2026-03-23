@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
             // Use cwd as base if no path provided
         }
 
-        snprintf(command, sizeof(command), "tar -C %s -cf - %s", left, right);
+        snprintf(command, sizeof(command), "tar -C %s -chf - %s", left, right);
         archive = popen(command, "r");
         CHECK_ERROR(!archive, "popen (read)");
         free(dup);

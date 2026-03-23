@@ -12,6 +12,7 @@ from dataclasses import asdict
 
 from exp_configs import *
 from model_paths import get_model_storage_path
+from model_staging import resolve_existing_model_path
 
 try:
     from transformers import AutoTokenizer
@@ -35,7 +36,12 @@ class TraceGenerator:
         
         for model_cfg in exp_config.model_deployment_config.model_configs:
             storage_path = exp_config.model_deployment_config.model_storage_path
-            local_path = str(get_model_storage_path(model_cfg.model_id, storage_path))
+            existing_path = resolve_existing_model_path(model_cfg.model_id, storage_path)
+            local_path = (
+                str(existing_path)
+                if existing_path is not None
+                else str(get_model_storage_path(model_cfg.model_id, storage_path))
+            )
             tokenizer_path = local_path if os.path.isdir(local_path) else model_cfg.model_id
             model_entry = {
                 model_cfg.model_id: {

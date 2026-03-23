@@ -13,16 +13,113 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-echo "[System] Project Root: $PROJECT_ROOT"
-echo "[System] Nodefile: $PBS_NODEFILE"
-
 # Use debug_libs
 # export PYTHONPATH="/home/wenyiw/debug_libs:$PYTHONPATH"
+export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+PYTHON_EXEC=$(which python3)
+
+DEPLOYMENT_CONFIG_PATH="${1:-config.yaml}"
+if [ ! -f "$DEPLOYMENT_CONFIG_PATH" ]; then
+    echo "ERROR: Deployment config not found: $DEPLOYMENT_CONFIG_PATH"
+    exit 1
+fi
+DEPLOYMENT_CONFIG_PATH="$(readlink -f "$DEPLOYMENT_CONFIG_PATH")"
+
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+CONFIG_BASENAME="$(basename "$DEPLOYMENT_CONFIG_PATH")"
+CONFIG_STEM="${CONFIG_BASENAME%.*}"
+RUN_LOG_ROOT="${AURORA_RUN_LOG_ROOT:-$PROJECT_ROOT/run_logs}"
+RUN_LOG_DIR="${AURORA_RUN_LOG_DIR:-$RUN_LOG_ROOT/${RUN_STAMP}_${CONFIG_STEM}}"
+RUN_LOG_FILE="${AURORA_RUN_LOG_FILE:-$RUN_LOG_DIR/launch.log}"
+mkdir -p "$RUN_LOG_DIR"
+
+if [ "${AURORA_PROJECT_LOGGING_INITIALIZED:-0}" != "1" ]; then
+    export AURORA_PROJECT_LOGGING_INITIALIZED=1
+    export AURORA_RUN_LOG_DIR="$RUN_LOG_DIR"
+    export AURORA_RUN_LOG_FILE="$RUN_LOG_FILE"
+    exec > >(tee -a "$RUN_LOG_FILE") 2>&1
+fi
+
+HOSTNAME_SHORT="$(hostname -s)"
+UNIQUE_NODES_FILE="$RUN_LOG_DIR/pbs_nodes.txt"
+sort -u "$PBS_NODEFILE" > "$UNIQUE_NODES_FILE"
+cp "$DEPLOYMENT_CONFIG_PATH" "$RUN_LOG_DIR/deployment_config.yaml"
+
+collect_ray_logs() {
+    local source_logs=$1
+    local dest_dir=$2
+    mkdir -p "$dest_dir"
+    if [ -d "$source_logs" ]; then
+        cp -a "$source_logs/." "$dest_dir/" 2>/dev/null || true
+    fi
+}
+
+collect_remote_ray_logs() {
+    local node=$1
+    local dest_dir=$2
+    mkdir -p "$dest_dir"
+    ssh "$node" "readlink -f /tmp/ray/session_latest 2>/dev/null || true" \
+        > "$dest_dir/session_path.txt" 2>/dev/null || true
+    scp -r "$node:/tmp/ray/session_latest/logs/." "$dest_dir/" >/dev/null 2>&1 || true
+}
+
+finalize_run_logs() {
+    local exit_code=$1
+    local metadata_file="$RUN_LOG_DIR/run_metadata.txt"
+    {
+        echo "run_timestamp_utc=$RUN_STAMP"
+        echo "launcher_host=$HOSTNAME_SHORT"
+        echo "deployment_config=$DEPLOYMENT_CONFIG_PATH"
+        echo "pbs_jobid=${PBS_JOBID:-}"
+        echo "pbs_nodefile=$PBS_NODEFILE"
+        echo "exit_code=$exit_code"
+    } > "$metadata_file"
+
+    local ray_log_root="$RUN_LOG_DIR/ray_logs"
+    mkdir -p "$ray_log_root"
+    while read -r node; do
+        [ -z "$node" ] && continue
+        local short_node="${node%%.*}"
+        local dest_dir="$ray_log_root/$short_node"
+        mkdir -p "$dest_dir"
+        if [ "$short_node" = "$HOSTNAME_SHORT" ] || [ "$node" = "$(hostname)" ]; then
+            local session_dir
+            session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
+            if [ -n "$session_dir" ]; then
+                echo "$session_dir" > "$dest_dir/session_path.txt"
+                collect_ray_logs "$session_dir/logs" "$dest_dir"
+            fi
+        else
+            collect_remote_ray_logs "$node" "$dest_dir"
+        fi
+    done < "$UNIQUE_NODES_FILE"
+
+    echo "[System] Persistent run log: $RUN_LOG_FILE"
+    echo "[System] Persistent Ray logs: $ray_log_root"
+    echo "[System] Launcher exit code: $exit_code"
+}
+
+trap 'finalize_run_logs $?' EXIT
+
+echo "[System] Project Root: $PROJECT_ROOT"
+echo "[System] Nodefile: $PBS_NODEFILE"
 echo "[System] PYTHONPATH: $PYTHONPATH"
+echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
+echo "[System] Persistent run dir: $RUN_LOG_DIR"
+
 # --- 2. IP Resolution (The Scout) ---
 echo "[System] Resolving Head Node IP..."
-# HEAD_IP=$(python3 scripts/resolve_ip.py)
-HEAD_IP=$(getent hosts $(hostname).hsn.cm.aurora.alcf.anl.gov | awk '{ print $1 }' | tr ' ' '\n' | sort | head -n 1)
+HEAD_IP=$(AURORA_VLLM_PATCH_PP_LAYER_FILTER=0 $PYTHON_EXEC - <<'PY'
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    sock.connect(("10.255.255.255", 1))
+    print(sock.getsockname()[0])
+finally:
+    sock.close()
+PY
+)
 
 
 if [ -z "$HEAD_IP" ]; then
@@ -33,43 +130,38 @@ fi
 echo "[System] Head IP (HSN): $HEAD_IP"
 
 # --- 3. Calculate Node Count ---
-NODE_COUNT=$(wc -l < $PBS_NODEFILE)
+NODE_COUNT=$(wc -l < "$UNIQUE_NODES_FILE")
 echo "[System] Total Nodes: $NODE_COUNT"
 
 # --- 4. Atomic Launch ---
 echo "[System] Launching Cluster..."
 
-# Optional: path to deployment/experiment config passed from run_exp.sh (for PBS jobs).
-# The proxy layer is configured via the optional 'proxy_config' section in this YAML
-# (type, port, backend_port, options). Set type: "none" or omit the section entirely
-# to disable the proxy (backward-compatible default).
-#
-# Example proxy_config section to add to the experiment config YAML:
-#   proxy_config:
-#     type: litellm          # or "haproxy"
-#     port: 4000             # port users will hit
-#     backend_port: 8000     # port Ray Serve listens on (default)
-#     options:
-#       master_key: "sk-aurora-master-key"
-#       routing_strategy: "least-busy"
-DEPLOYMENT_CONFIG_PATH="${1:-config.yaml}"
-if [ ! -f "$DEPLOYMENT_CONFIG_PATH" ]; then
-    echo "ERROR: Deployment config not found: $DEPLOYMENT_CONFIG_PATH"
-    exit 1
-fi
-
 export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
 export ZE_AFFINITY_MASK=""
 export CCL_PROCESS_LAUNCHER="hydra"
 
-# NOSET=1 + all-tiles-visible prevents the SYCL crash for non-GPU actors.
-# Each ModelWorker narrows ONEAPI_DEVICE_SELECTOR to its assigned tile
-# before forking the vLLM EngineCore subprocess, giving real per-tile
-# device isolation (Level Zero reads the selector fresh in the child).
-export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR="1"
-export ONEAPI_DEVICE_SELECTOR="level_zero:0,1,2,3,4,5,6,7,8,9,10,11"
+# Aurora shells can inherit an unusually large per-thread stack size, which
+# causes Ray worker creation to fail once vLLM launches many distributed
+# workers. Clamp it before starting Ray so child processes can create threads.
+ulimit -s 8192 || true
 
-PYTHON_EXEC=$(which python3)
+# Ray's Intel GPU runtime rewrites ONEAPI_DEVICE_SELECTOR to
+# "level_zero:...". On Aurora that value crashes Triton's SYCL device probe.
+# Keep Ray from touching the selector and rely on ZE_AFFINITY_MASK for all
+# device isolation instead.
+export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR="1"
+unset ONEAPI_DEVICE_SELECTOR
+
+# Whole-node PP launches many Ray core workers at once. On Aurora the default
+# per-worker gRPC/server thread fan-out can exhaust the node's process/thread
+# budget before model init completes, so clamp the Ray internals to a smaller
+# footprint for this launcher.
+export RAY_num_server_call_thread="${RAY_num_server_call_thread:-1}"
+export RAY_core_worker_num_server_call_thread="${RAY_core_worker_num_server_call_thread:-1}"
+export RAY_num_grpc_internal_threads="${RAY_num_grpc_internal_threads:-1}"
+export RAY_worker_num_grpc_internal_threads="${RAY_worker_num_grpc_internal_threads:-1}"
+export RAY_task_events_report_interval_ms="${RAY_task_events_report_interval_ms:-0}"
+export RAY_enable_metrics_collection="${RAY_enable_metrics_collection:-0}"
 
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 
@@ -79,6 +171,8 @@ else
     echo "[System] Staging models to node-local storage via MPI bcast..."
     $PYTHON_EXEC src/model_bcast.py --config "$DEPLOYMENT_CONFIG_PATH" --num-nodes "$NODE_COUNT"
 fi
+
+export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1}"
 
 mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
     $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379 --config "$DEPLOYMENT_CONFIG_PATH"

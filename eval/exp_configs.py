@@ -257,6 +257,21 @@ EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
         client_dest="direct",
         proxy_type="none",
     ),
+    "whole_node_pp_smoke_flare": WeakScalingExpParams(
+        batch_name="whole_node_pp_smoke_flare_{backend}",
+        num_nodes_list=[2],
+        rate_per_node=8,
+        duration=30.0,
+        input_len=512,
+        output_len=128,
+        model_id="meta-llama/Llama-2-7b-chat-hf",
+        model_tensor_parallel_size=12,
+        model_pipeline_parallel_size=2,
+        model_storage_path="/flare/datasets/model-weights/hub",
+        client_num_runs=1,
+        client_dest="direct",
+        proxy_type="none",
+    ),
 }
 for experiment_name in ("null_compute_litellm", "weak_scaling_litellm"):
     base_params = EXPERIMENT_REGISTRY[experiment_name]

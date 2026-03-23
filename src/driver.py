@@ -16,26 +16,44 @@ os.environ["TMPDIR"] = "/tmp"
 # Disable Ray log deduplication to see all replica logs
 # os.environ["RAY_DEDUP_LOGS"] = "0"
 
-# --- GPU device isolation ---
-# NOSET=1 keeps all tiles visible to every Ray worker process (avoiding
-# the "level_zero:" SYCL crash for non-GPU actors).  The global
-# ONEAPI_DEVICE_SELECTOR lists all 12 tiles so SYCL can parse it.
-#
-# Per-tile isolation: each ModelWorker.__init__ narrows
-# ONEAPI_DEVICE_SELECTOR to its assigned tile *before* creating the vLLM
-# engine.  vLLM v1 forks a separate EngineCore subprocess that inherits
-# the restricted selector; Level Zero reads it fresh at library-load time,
-# so the subprocess sees only the correct tile.
-#
-# Architecture: Router (CPU, HTTP ingress) → ModelWorker (1 GPU, vLLM engine).
-# Replica counts auto-scale to cluster size in aurora_serve.py.
-NUM_GPU_TILES_PER_NODE = 12  # 6 PVC cards × 2 tiles (ZE_FLAT_DEVICE_HIERARCHY=FLAT)
-
 # Ray Serve HTTP proxy port -- must match aurora_serve.py serve.start() config
 RAY_SERVE_PORT = 8000
 
 # How long to wait for Ray Serve to become healthy before starting the proxy
 RAY_SERVE_HEALTH_TIMEOUT_S = 1800  # 30 min covers large-scale deployments
+
+# Aurora nodes expose 208 CPUs, and Ray uses the advertised CPU count to derive
+# both maximum worker startup concurrency and the number of prestarted Python
+# workers. Large PP launches only need a handful of CPUs for coordination, so
+# keep the default low to avoid thread explosions while still allowing an
+# override for future tuning.
+RAY_NODE_CPUS = int(os.environ.get("AURORA_RAY_NODE_CPUS", "8"))
+DEBUG_HOLD_ON_FAILURE_S = int(os.environ.get("AURORA_DEBUG_HOLD_ON_FAILURE_S", "0"))
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def prepend_pythonpath(env: dict[str, str], path: str) -> None:
+    current = env.get("PYTHONPATH")
+    if not current:
+        env["PYTHONPATH"] = path
+        return
+
+    entries = current.split(os.pathsep)
+    if path in entries:
+        return
+    env["PYTHONPATH"] = os.pathsep.join([path, *entries])
+
+
+def get_hsn_ip() -> str:
+    """
+    Pick the IP address on the high-speed fabric.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("10.255.255.255", 1))
+            return sock.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
 
 
 def get_rank():
@@ -60,6 +78,11 @@ def get_ray_env():
     env["ZE_AFFINITY_MASK"] = ""              # All tiles visible (baseline)
     env["VLLM_TARGET_DEVICE"] = "xpu"         # Tell vLLM we are on Intel 
     env["RAY_ENABLE_METRICS_COLLECTION"] = "0"
+    env["AURORA_VLLM_PATCH_PP_LAYER_FILTER"] = env.get(
+        "AURORA_VLLM_PATCH_PP_LAYER_FILTER",
+        "1",
+    )
+    prepend_pythonpath(env, SRC_DIR)
 
     # At large replica counts (64+ nodes) the default 0.1s deadline causes
     # every replica to time out simultaneously, triggering a NoneType crash
@@ -67,29 +90,27 @@ def get_ray_env():
     # round trips in a large cluster.
     env["RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S"] = "300.0"
 
-    # NOSET=1 prevents Ray from writing per-worker ONEAPI_DEVICE_SELECTOR
-    # (avoids the "level_zero:" empty-string SYCL crash for non-GPU actors).
-    # Global ONEAPI_DEVICE_SELECTOR lists all tiles as a safe baseline for
-    # non-GPU actors (Routers).  Real per-tile isolation: each ModelWorker
-    # overrides ZE_AFFINITY_MASK to its assigned tile and sets
-    # ONEAPI_DEVICE_SELECTOR=level_zero:0 (re-indexed).  ZE_AFFINITY_MASK
-    # provides hardware-level Level Zero isolation that is reliably inherited
-    # by the vLLM EngineCore subprocess under 'spawn' multiprocessing.
+    # Ray's Intel GPU integration rewrites ONEAPI_DEVICE_SELECTOR to a
+    # "level_zero:..." list, but Triton's SYCL probe crashes on Aurora when
+    # that value is present. Keep the selector unset and rely on
+    # ZE_AFFINITY_MASK for device isolation instead.
     env["RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR"] = "1"
-    env["ONEAPI_DEVICE_SELECTOR"] = (
-        "level_zero:" + ",".join(str(i) for i in range(NUM_GPU_TILES_PER_NODE))
-    )
+    env.pop("ONEAPI_DEVICE_SELECTOR", None)
 
     return env
 
 
 def start_ray_head(ip, port):
-    print(f"[Driver] Starting RAY HEAD on {ip}:{port}", flush=True)
+    print(
+        f"[Driver] Starting RAY HEAD on {ip}:{port} "
+        f"with advertised CPUs={RAY_NODE_CPUS}",
+        flush=True,
+    )
     # --block is CRITICAL: It keeps the subprocess alive.
     cmd = [
         "ray", "start",
         "--head",
-        "--num-cpus=64",
+        f"--num-cpus={RAY_NODE_CPUS}",
         "--num-gpus=12",
         f"--node-ip-address={ip}",
         f"--port={port}",
@@ -102,10 +123,17 @@ def start_ray_head(ip, port):
 
 
 def start_ray_worker(head_ip, head_port):
-    print(f"[Driver] Starting RAY WORKER connecting to {head_ip}:{head_port}", flush=True)
+    worker_ip = get_hsn_ip()
+    print(
+        f"[Driver] Starting RAY WORKER connecting to {head_ip}:{head_port} "
+        f"from {worker_ip} with advertised CPUs={RAY_NODE_CPUS}",
+        flush=True,
+    )
     cmd = [
         "ray", "start",
         f"--address={head_ip}:{head_port}",
+        f"--node-ip-address={worker_ip}",
+        f"--num-cpus={RAY_NODE_CPUS}",
         "--num-gpus=12",
         "--block",
     ]
@@ -260,8 +288,10 @@ def main():
             serve_cmd = [sys.executable, "src/aurora_serve.py"]
             if args.config:
                 serve_cmd.extend(["--config", args.config])
+            serve_env = get_ray_env()
+            serve_env["RAY_ADDRESS"] = f"{args.head_ip}:{args.port}"
             print(f"[Driver] Launching Aurora Serve: {' '.join(serve_cmd)}", flush=True)
-            serve_process = subprocess.Popen(serve_cmd, env=get_ray_env())
+            serve_process = subprocess.Popen(serve_cmd, env=serve_env)
 
             # 4. Load proxy config (if a config file was provided)
             if args.config:
@@ -287,6 +317,13 @@ def main():
                     f"[Driver] Aurora Serve exited with code {serve_process.returncode}.",
                     flush=True,
                 )
+                if DEBUG_HOLD_ON_FAILURE_S > 0:
+                    print(
+                        "[Driver] Debug hold enabled; keeping Ray alive for "
+                        f"{DEBUG_HOLD_ON_FAILURE_S}s before cleanup.",
+                        flush=True,
+                    )
+                    time.sleep(DEBUG_HOLD_ON_FAILURE_S)
 
             print("[Driver] Aurora Serve finished. Shutting down cluster.", flush=True)
 

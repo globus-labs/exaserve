@@ -10,6 +10,8 @@ CLAUDE.md
 eval/go_client/bin/
 .claude/
 *.log
+run_logs/
 plan/
 tools/bcast
 tools/*.o
+tmp/

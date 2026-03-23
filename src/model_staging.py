@@ -6,6 +6,7 @@ before launching services, ensuring all vLLM instances can use local copies
 instead of downloading from HuggingFace directly.
 """
 
+import json
 import os
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Dict, List
 from schemas import ModelConfig
 from model_paths import (
     get_model_storage_path,
+    get_model_storage_name,
     iter_unique_model_ids,
 )
 
@@ -57,6 +59,86 @@ def get_model_dir_state(model_path: Path) -> str:
     if not model_path.exists():
         return "missing"
     return "complete" if check_model_exists(model_path) else "partial"
+
+
+def _resolve_hf_cache_snapshot(cache_dir: Path) -> Path | None:
+    """
+    Resolve a usable snapshot directory from a Hugging Face cache directory.
+    """
+    refs_main = cache_dir / "refs" / "main"
+    snapshot_id = None
+    if refs_main.is_file():
+        snapshot_id = refs_main.read_text().strip()
+
+    snapshots_dir = cache_dir / "snapshots"
+    if snapshot_id:
+        snapshot_dir = snapshots_dir / snapshot_id
+        if snapshot_dir.is_dir():
+            return snapshot_dir
+
+    if snapshots_dir.is_dir():
+        candidates = sorted(p for p in snapshots_dir.iterdir() if p.is_dir())
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def resolve_existing_model_path(model_id: str, storage_path: str) -> Path | None:
+    """
+    Resolve an already-downloaded model directory under `storage_path`.
+
+    Supports both the repo's flat cache layout (`org--name`) and the Hugging
+    Face shared cache layout (`models--org--name/snapshots/<rev>`), including a
+    nested `hub/` directory when present.
+    """
+    base_path = Path(storage_path)
+    flat_dir = get_model_storage_path(model_id, base_path)
+    if get_model_dir_state(flat_dir) == "complete":
+        return flat_dir
+
+    hf_cache_name = f"models--{get_model_storage_name(model_id)}"
+    cache_roots = [base_path, base_path / "hub"]
+    for root in cache_roots:
+        cache_dir = root / hf_cache_name
+        if not cache_dir.is_dir():
+            continue
+        snapshot_dir = _resolve_hf_cache_snapshot(cache_dir)
+        if snapshot_dir and get_model_dir_state(snapshot_dir) == "complete":
+            return snapshot_dir
+    return None
+
+
+def load_model_config(model_path: Path) -> dict:
+    """
+    Load the Hugging Face `config.json` for a resolved model directory.
+    """
+    config_path = model_path / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Missing config.json for model at {model_path}")
+    return json.loads(config_path.read_text())
+
+
+def validate_tensor_parallel_compatibility(
+    model_id: str,
+    model_path: Path,
+    tensor_parallel_size: int,
+) -> None:
+    """
+    Fail fast when the model architecture cannot support the requested TP size.
+
+    This catches obvious incompatibilities before we spend time staging the
+    model to node-local storage and before Ray/vLLM startup.
+    """
+    config_data = load_model_config(model_path)
+    num_attention_heads = config_data.get("num_attention_heads")
+    if not isinstance(num_attention_heads, int) or num_attention_heads < 1:
+        return
+    if num_attention_heads % tensor_parallel_size != 0:
+        raise RuntimeError(
+            f"[ModelStaging] Model {model_id} at {model_path} is incompatible with "
+            f"tensor_parallel_size={tensor_parallel_size}: num_attention_heads="
+            f"{num_attention_heads} is not divisible by {tensor_parallel_size}."
+        )
 
 
 def download_model(model_id: str, local_path: Path, tokenizer_only: bool = False) -> str:
@@ -127,7 +209,8 @@ def stage_models(model_configs: List[ModelConfig], storage_path: str) -> dict:
     total_start = time.time()
     
     for model_id in unique_models:
-        local_path = get_model_storage_path(model_id, storage_path)
+        existing_path = resolve_existing_model_path(model_id, str(storage_path))
+        local_path = existing_path or get_model_storage_path(model_id, storage_path)
         state = get_model_dir_state(local_path)
 
         if state == "complete":

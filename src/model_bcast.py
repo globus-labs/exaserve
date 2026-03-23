@@ -3,11 +3,17 @@ import json
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List
 
-from model_paths import get_model_storage_path, iter_unique_model_ids
-from model_staging import get_model_dir_state, print_red, stage_models
+from model_paths import get_model_storage_name, get_model_storage_path, iter_unique_model_ids
+from model_staging import (
+    get_model_dir_state,
+    print_red,
+    stage_models,
+    validate_tensor_parallel_compatibility,
+)
 from schemas import load_deployment_config
 
 
@@ -139,6 +145,12 @@ def bcast_models(
     local_model_paths: Dict[str, str] = {}
 
     for model_id in iter_unique_model_ids(model_configs):
+        model_config = next(cfg for cfg in model_configs if cfg.model_id == model_id)
+        validate_tensor_parallel_compatibility(
+            model_id,
+            Path(lustre_model_paths[model_id]),
+            model_config.tensor_parallel_size,
+        )
         target_path = get_model_storage_path(model_id, local_path)
         cache_state = check_cache_state(model_id, local_path, num_nodes, script_path)
 
@@ -150,28 +162,40 @@ def bcast_models(
             local_model_paths[model_id] = str(target_path)
             continue
 
-        src_path = Path(lustre_model_paths[model_id])
-        print(
-            f"[ModelBcast] Broadcasting {model_id} from {src_path} to {local_path} "
-            f"across {num_nodes} node(s)...",
-            flush=True,
-        )
-        subprocess.run(
-            [
-                "mpiexec",
-                "-n",
-                str(num_nodes),
-                "-ppn",
-                "1",
-                "--cpu-bind",
-                "none",
-                str(binary_path),
-                str(src_path),
-                str(local_path),
-            ],
-            check=True,
-            cwd=str(project_root),
-        )
+        source_path = Path(lustre_model_paths[model_id])
+        safe_name = get_model_storage_name(model_id)
+
+        # HF cache snapshots use a revision hash as the directory name. Create a
+        # temporary symlink with the stable model cache name so the extracted
+        # node-local directory always lands at <local_stage_path>/<safe_name>.
+        with tempfile.TemporaryDirectory(prefix=f"model-bcast-{safe_name}-") as tmpdir:
+            bcast_source = source_path
+            if source_path.name != safe_name:
+                symlink_path = Path(tmpdir) / safe_name
+                symlink_path.symlink_to(source_path, target_is_directory=True)
+                bcast_source = symlink_path
+
+            print(
+                f"[ModelBcast] Broadcasting {model_id} from {source_path} to {target_path} "
+                f"across {num_nodes} node(s)...",
+                flush=True,
+            )
+            subprocess.run(
+                [
+                    "mpiexec",
+                    "-n",
+                    str(num_nodes),
+                    "-ppn",
+                    "1",
+                    "--cpu-bind",
+                    "none",
+                    str(binary_path),
+                    str(bcast_source),
+                    str(local_path),
+                ],
+                check=True,
+                cwd=str(project_root),
+            )
 
         final_state = check_cache_state(model_id, local_path, num_nodes, script_path)
         if final_state != "complete":
