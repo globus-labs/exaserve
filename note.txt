@@ -1,7 +1,7 @@
 new packages tree,
 
 source ~/agpt/venv/llm-dev/bin/activate
-export PYTHONPATH=/home/wenyiw/agpt/venv/llm-dev/lib/python3.10/site-packages:$PYTHONPATH
+export PYTHONPATH=/path/to/llm-dev/lib/python3.10/site-packages:$PYTHONPATH
 
 For build_openai_app, does router replica scales with the model replica?
 Default behavior: auto-scales with model replicas

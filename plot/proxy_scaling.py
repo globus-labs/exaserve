@@ -15,8 +15,16 @@ Usage:
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Iterable, List, Tuple
+
+_PLOT_DIR = Path(__file__).parent
+_REPO_ROOT = _PLOT_DIR.parent
+_SRC_DIR = _REPO_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+from site_config import get_site_config
 
 # Edit this string directly to change the subtitle without lengthening the CLI.
 DEFAULT_SUBTITLE = (
@@ -29,7 +37,7 @@ DEFAULT_SUBTITLE = (
 def _candidate_roots():
     return [
         Path("data/bench_results"),
-        Path.home() / "agpt" / "data" / "bench_results",
+        Path(get_site_config().bench_results_dir),
         Path("benchmarks/results"),
     ]
 
@@ -258,7 +266,7 @@ def main() -> None:
         default=None,
         help=(
             "Path to a proxy_sweep_*.json file. If omitted, the latest result is "
-            "discovered under data/bench_results, ~/agpt/data/bench_results, or benchmarks/results."
+            "discovered under data/bench_results, site_config.bench_results_dir, or benchmarks/results."
         ),
     )
     parser.add_argument(

@@ -13,8 +13,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-# Use debug_libs
-# export PYTHONPATH="/home/wenyiw/debug_libs:$PYTHONPATH"
+# Optional: prepend a local debug_libs checkout if you need one.
+# export PYTHONPATH="/path/to/debug_libs:$PYTHONPATH"
 export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON_EXEC=$(which python3)
 

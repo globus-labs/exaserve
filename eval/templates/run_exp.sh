@@ -62,8 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LAUNCH_CLUSTER_SCRIPT="$PROJECT_ROOT/scripts/launch_cluster.sh"
 REPLAY_CLIENT_SCRIPT="$PROJECT_ROOT/eval/replay_client.py"
-ENV_SETUP_SCRIPT="/home/wenyiw/script/env_aurora"
-# ENV_SETUP_SCRIPT="/home/wenyiw/script/env_local"
+ENV_SETUP_SCRIPT="${AURORA_ENV_SETUP_SCRIPT:-$HOME/script/env_aurora}"
 
 # ==============================================================================
 # VALIDATION
@@ -103,7 +102,13 @@ fi
 echo "[✓] Dest mode:        $DEST"
 
 # Check for trace file in config
-TRACE_PATH=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c['benchmark']['output_trace_path'])" 2>/dev/null || echo "")
+TRACE_PATH=$(python3 -c "
+import yaml
+c = yaml.safe_load(open('$CONFIG_PATH')) or {}
+job_trace = c.get('job_trace_config', {})
+benchmark = c.get('benchmark', {})
+print(job_trace.get('output_trace_path') or benchmark.get('output_trace_path', ''))
+" 2>/dev/null || echo "")
 if [ -n "$TRACE_PATH" ] && [ ! -f "$TRACE_PATH" ]; then
     echo "!!! ERROR: Trace file not found: $TRACE_PATH"
     echo "    Generate trace first with trace_generator.py"

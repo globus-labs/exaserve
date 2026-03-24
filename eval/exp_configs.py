@@ -5,6 +5,7 @@ from typing import List, Dict, Optional
 
 # Add src directory to path for schemas
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
+from site_config import get_site_config
 from schemas import (
     ModelConfig,
     DeploymentConfig,
@@ -15,17 +16,19 @@ from schemas import (
     ExpConfig,
 )
 
+SITE_CONFIG = get_site_config()
+
 # Constants
-DEFAULT_DATA_ROOT = "/lus/flare/projects/AuroraGPT/wenyiw/data"
-DEFAULT_MODEL_PATH = "/lus/flare/projects/AuroraGPT/wenyiw/models"
+DEFAULT_DATA_ROOT = SITE_CONFIG.user_data_root
+DEFAULT_MODEL_PATH = SITE_CONFIG.model_storage_path
 
 # Download before running the experiment
 # wget https://azurepublicdatasettraces.blob.core.windows.net/azurellminfererencetrace/AzureLLMInferenceTrace_code_1week.csv
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json
-DEFAULT_INPUT_TRACE_PATH = os.path.join(DEFAULT_DATA_ROOT, "input_traces/AzureLLMInferenceTrace_code_1week.csv") 
-DEFAULT_INPUT_PROMPT_PATH = os.path.join(DEFAULT_DATA_ROOT, "input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json")
-DEFAULT_OUTPUT_TRACE_DIR = os.path.join(DEFAULT_DATA_ROOT, "output_traces")
-DEFAULT_EXPERIMENTS_ROOT = os.path.join(DEFAULT_DATA_ROOT, "experiments")
+DEFAULT_INPUT_TRACE_PATH = SITE_CONFIG.input_trace_path
+DEFAULT_INPUT_PROMPT_PATH = SITE_CONFIG.input_prompt_path
+DEFAULT_OUTPUT_TRACE_DIR = SITE_CONFIG.output_trace_dir
+DEFAULT_EXPERIMENTS_ROOT = SITE_CONFIG.experiments_root
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +60,7 @@ class WeakScalingExpParams:
     model_max_model_len: int = 4096
     model_size: int = 8                   # used by trace generator
     model_storage_path: str = DEFAULT_MODEL_PATH
-    local_stage_path: str = "/tmp/hf_home"
+    local_stage_path: str = SITE_CONFIG.local_stage_path
     additional_model_configs: List[Dict[str, object]] = field(default_factory=list)
 
     # Deployment (→ DeploymentConfig)
@@ -75,7 +78,7 @@ class WeakScalingExpParams:
 
     # Proxy (→ ProxyConfig)
     proxy_type: str = "litellm"
-    proxy_python_path: str = "/home/wenyiw/agpt/venv/litellm/bin/python3"
+    proxy_python_path: str = SITE_CONFIG.litellm_python_path
     proxy_num_workers: int = 1            # fixed litellm uvicorn worker count; does not scale with num_nodes
 
 

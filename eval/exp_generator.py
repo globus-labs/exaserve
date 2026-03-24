@@ -15,6 +15,7 @@ if SCRIPT_DIR not in sys.path:
 
 from exp_configs import (
     EXPERIMENT_REGISTRY,
+    SITE_CONFIG,
     WeakScalingConfig,
     TraceGeneratorConfig,
     build_weak_scaling_configs,
@@ -101,8 +102,12 @@ def _setup_one_weak_scaling_experiment(item):
     exp_cfg.save_yaml(config_path)
     pbs_output_dir = os.path.dirname(exp_cfg.pbs_stdout_dir)
     env_exports = "export AURORA_NULL_COMPUTE=1" if null_compute else ""
+    pbs_mail_directives = ""
+    if SITE_CONFIG.pbs_mail_user:
+        pbs_mail_directives = f"#PBS -m bae\n#PBS -M {SITE_CONFIG.pbs_mail_user}"
     pbs_content = pbs_template_content \
         .replace("{{JOB_NAME}}", exp_cfg.pbs_job_name) \
+        .replace("{{PBS_MAIL_DIRECTIVES}}", pbs_mail_directives) \
         .replace("{{NUM_NODES}}", str(exp_cfg.model_deployment_config.num_nodes)) \
         .replace("{{WALLTIME}}", exp_cfg.pbs_walltime) \
         .replace("{{QUEUE}}", exp_cfg.pbs_queue_name) \
@@ -250,8 +255,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--snapshot-dir",
-        default="/home/wenyiw/agpt/data/snapshots",
-        help="Base directory for code snapshots (default: /home/wenyiw/agpt/data/snapshots)",
+        default=SITE_CONFIG.snapshot_dir,
+        help="Base directory for code snapshots (default: site_config.snapshot_dir)",
     )
     parser.add_argument(
         "--no-snapshot",

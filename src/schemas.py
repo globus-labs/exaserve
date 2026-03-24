@@ -3,6 +3,19 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Union, Dict, Any
 from pathlib import Path
 from model_paths import iter_unique_model_ids
+from site_config import get_site_config
+
+
+def _default_model_storage_path() -> str:
+    return get_site_config().model_storage_path
+
+
+def _default_local_stage_path() -> str:
+    return get_site_config().local_stage_path
+
+
+def _default_num_gpus_per_node() -> int:
+    return get_site_config().num_gpus_per_node
 
 
 def require_yaml():
@@ -29,11 +42,11 @@ class ModelConfig: # model configs for the engine
 class DeploymentConfig:
     num_nodes: int # TODO: right now just keep num_nodes = pbs_num_nodes, future support smaller num_nodes.
     model_configs: List[ModelConfig]
-    model_storage_path: str = "/lus/flare/projects/AuroraGPT/wenyiw/models"
-    local_stage_path: str = "/tmp/hf_home"
+    model_storage_path: str = field(default_factory=_default_model_storage_path)
+    local_stage_path: str = field(default_factory=_default_local_stage_path)
     deployment_name: str = "aurora_serve"
     worker_max_ongoing: int = 32
-    num_gpus_per_node: int = 12 # machine spec
+    num_gpus_per_node: int = field(default_factory=_default_num_gpus_per_node) # machine spec
   
 @dataclass
 class TraceGeneratorConfig:
@@ -136,11 +149,11 @@ def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
     return DeploymentConfig(
         num_nodes=int(d.get("num_nodes", 1)),
         model_configs=model_configs,
-        model_storage_path=str(d.get("model_storage_path", "/lus/flare/projects/AuroraGPT/wenyiw/models")),
-        local_stage_path=str(d.get("local_stage_path", "/tmp/hf_home")),
+        model_storage_path=str(d.get("model_storage_path", _default_model_storage_path())),
+        local_stage_path=str(d.get("local_stage_path", _default_local_stage_path())),
         deployment_name=str(d.get("deployment_name", "aurora_serve")),
         worker_max_ongoing=int(d.get("worker_max_ongoing", 32)),
-        num_gpus_per_node=int(d.get("num_gpus_per_node", 12)),
+        num_gpus_per_node=int(d.get("num_gpus_per_node", _default_num_gpus_per_node())),
     )
 
 

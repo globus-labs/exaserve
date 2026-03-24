@@ -4,7 +4,7 @@ bash benchmarks/run_bench.sh --mode client --find-max-rps \
   --go-concurrency 4000 \
   --sweep-payloads medium \
   --stub-workers 16 \
-  --python /home/wenyiw/agpt/venv/litellm/bin/python3
+  --python /path/to/python3
 
 
   --sweep-workers 4000,8000 \

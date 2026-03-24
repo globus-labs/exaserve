@@ -37,7 +37,7 @@
 #   --stub-latency   Stub server artificial latency in ms (default: 0)
 #   --stub-workers   Number of uvicorn worker processes for the stub server (default: 1)
 #   --num-stubs      Number of stub server instances (default: 1, for proxy mode)
-#   --litellm-python Path to the litellm venv Python (required for proxy mode)
+#   --litellm-python Path to the litellm venv Python (default: site_config.litellm_python_path)
 #   --litellm-workers Fixed LiteLLM num_workers (default: 4)
 #   --routing        Fixed LiteLLM routing strategy (default: least-busy)
 #   --num-backends   Fixed number of stub backends for proxy (default: 4)
@@ -49,7 +49,7 @@
 #   --plots          Plot types for analyze.py (default: all)
 #   --no-analyze     Skip analyze.py after benchmark
 #   --no-port-monitor Skip live port monitoring
-#   --output-dir     Where to save results (default: benchmarks/results/<timestamp>)
+#   --output-dir     Where to save results (default: site_config.bench_results_dir/run_<timestamp>)
 #   --python         Python interpreter to use (default: python3)
 #   --find-max-rps   Auto-discover max sustainable RPS per (workers, payload) via
 #                    exponential probe + binary search + validation
@@ -167,10 +167,20 @@ done
 # Derived paths
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 
+resolve_site_config_field() {
+    local field="$1"
+    PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python3 -S -m site_config get "$field" 2>/dev/null || true
+}
+
+SITE_BENCH_ROOT="$(resolve_site_config_field bench_results_dir)"
+SITE_LITELLM_PYTHON="$(resolve_site_config_field litellm_python_path)"
+
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_DIR="/home/wenyiw/agpt/data/bench_results/run_${TIMESTAMP}"
+    OUTPUT_BASE="${SITE_BENCH_ROOT:-$HOME/agpt/data/bench_results}"
+    OUTPUT_DIR="${OUTPUT_BASE}/run_${TIMESTAMP}"
 fi
 mkdir -p "$OUTPUT_DIR"
 
@@ -206,8 +216,11 @@ echo "=================================================="
 
 if [ "$MODE" = "proxy" ] || [ "$MODE" = "all" ]; then
     if [ -z "$LITELLM_PYTHON" ]; then
-        echo "!!! ERROR: --litellm-python is required for proxy/all mode."
-        echo "    Example: --litellm-python /home/wenyiw/agpt/venv/litellm/bin/python3"
+        LITELLM_PYTHON="$SITE_LITELLM_PYTHON"
+    fi
+    if [ -z "$LITELLM_PYTHON" ]; then
+        echo "!!! ERROR: No LiteLLM Python configured for proxy/all mode."
+        echo "    Pass --litellm-python or set site_config.litellm_python_path."
         exit 1
     fi
     if [ ! -x "$LITELLM_PYTHON" ]; then

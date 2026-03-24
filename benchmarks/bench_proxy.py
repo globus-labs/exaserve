@@ -74,7 +74,13 @@ except ImportError:
     pass
 
 _BENCH_DIR = Path(__file__).parent
-_DEFAULT_BENCH_RESULTS_DIR = Path.home() / "agpt" / "data" / "bench_results"
+_REPO_ROOT = _BENCH_DIR.parent
+_SRC_DIR = _REPO_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+from site_config import get_site_config
+
+_DEFAULT_BENCH_RESULTS_DIR = Path(get_site_config().bench_results_dir)
 sys.path.insert(0, str(_BENCH_DIR))
 from port_model import PortMonitor, EPHEMERAL_RANGE
 

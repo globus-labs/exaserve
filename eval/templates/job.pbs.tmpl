@@ -1,7 +1,6 @@
 #!/bin/bash -l
 #PBS -N {{JOB_NAME}}
-#PBS -m bae
-#PBS -M wenyiw@uchicago.edu
+{{PBS_MAIL_DIRECTIVES}}
 #PBS -l filesystems=home:flare
 #PBS -A AuroraGPT
 #PBS -k doe

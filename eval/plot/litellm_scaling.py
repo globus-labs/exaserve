@@ -41,8 +41,8 @@ PLOT_TITLE_TEMPLATE = "LiteLLM Proxy + Ray Serve (EveryNode) + Dummy RayWorkers 
 PLOT_TITLE_TEMPLATE = "LiteLLM Proxy + Ray Serve (EveryNode) + vLLM Workers"
 PLOT_TITLE_TEMPLATE += "\nWeak Scaling (ALCF Aurora)"
 PLOT_SUBTITLE_TEMPLATE = (
-    "{model_name}, {gpus_per_node} GPUs per node, {run_count} runs mean"
-    "\nClient: {rate_per_node} RPS/node, {trace_duration_s} sec, 1 sec tasks"
+    "{model_name}, TP={tensor_parallel_size}, {gpus_per_node} GPUs per node, {run_count} runs mean"
+    "\nClient: {rate_per_node} RPS/node, {trace_duration_s} seconds"
     "\nProxy: {proxy_type_label}, {proxy_num_workers} workers"
 )
 
@@ -311,7 +311,7 @@ def plot_litellm_scaling(
         color=ideal_color,
         linewidth=2.2,
         markersize=8,
-        label="Ideal RPS Scaling",
+        label="Ideal Serving RPS Scaling",
         alpha=0.9,
         zorder=2,
     )
@@ -323,7 +323,7 @@ def plot_litellm_scaling(
         color=client_color,
         linewidth=2.4,
         markersize=9,
-        label="Client RPS",
+        label="Client Request Generation Rate (RPS)",
         alpha=0.95,
         zorder=3,
     )
@@ -337,7 +337,7 @@ def plot_litellm_scaling(
         color=measured_color,
         linewidth=3.0,
         markersize=9,
-        label=f"{proxy_label} Measured RPS",
+        label=f"{proxy_label} Measured Serving RPS",
         alpha=0.95,
         zorder=4,
     )
@@ -476,18 +476,21 @@ def plot_litellm_scaling(
         padding = max(node_range * 0.05, 0.5)
         ax.set_xlim(min(num_nodes) - padding, max(num_nodes) + padding)
 
-    workers_per_node = (template_fields or {}).get("gpus_per_node", "")
-    workers_per_node_int = None
-    if workers_per_node:
+    gpu_workers_per_node = (template_fields or {}).get("tensor_parallel_size", "")
+    gpu_workers_per_node_int = None
+    if gpu_workers_per_node:
         try:
-            workers_per_node_int = int(workers_per_node)
+            gpu_workers_per_node_int = int(gpu_workers_per_node)
         except ValueError:
-            workers_per_node_int = None
+            gpu_workers_per_node_int = None
 
     ax.set_xticks(num_nodes)
-    if workers_per_node_int is not None:
+    if gpu_workers_per_node_int is not None:
         ax.set_xticklabels(
-            [f"{node_count}\n({node_count * workers_per_node_int} workers)" for node_count in num_nodes]
+            [
+                f"{node_count}\n({node_count * gpu_workers_per_node_int} GPU workers)"
+                for node_count in num_nodes
+            ]
         )
     else:
         ax.set_xticklabels([str(node_count) for node_count in num_nodes])

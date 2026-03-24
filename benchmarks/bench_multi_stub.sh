@@ -99,10 +99,19 @@ done
 # Derived paths
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 
+resolve_site_config_field() {
+    local field="$1"
+    PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python3 -S -m site_config get "$field" 2>/dev/null || true
+}
+
+SITE_BENCH_ROOT="$(resolve_site_config_field bench_results_dir)"
+
 if [ -z "$OUTPUT_DIR" ]; then
-    OUTPUT_DIR="/home/wenyiw/agpt/data/bench_results/multi_stub_${TIMESTAMP}"
+    OUTPUT_BASE="${SITE_BENCH_ROOT:-$HOME/agpt/data/bench_results}"
+    OUTPUT_DIR="${OUTPUT_BASE}/multi_stub_${TIMESTAMP}"
 fi
 mkdir -p "$OUTPUT_DIR"
 

@@ -90,6 +90,7 @@ def _extract_plot_template_fields(
     model_cfg = model_cfgs[0] if model_cfgs else {}
     model_id = str(model_cfg.get("model_id", ""))
     model_name = model_id.split("/")[-1] if model_id else ""
+    tensor_parallel_size = model_cfg.get("tensor_parallel_size", "")
 
     run_count = selected_run_count
     if run_count is None:
@@ -127,6 +128,7 @@ def _extract_plot_template_fields(
     fields = {
         "model_id": model_id,
         "model_name": model_name,
+        "tensor_parallel_size": tensor_parallel_size,
         "gpus_per_node": gpus_per_node,
         "run_count": run_count,
         "rate_per_node": rate_per_node,

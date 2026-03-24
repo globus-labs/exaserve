@@ -1,3 +1,4 @@
+# Sample config. Copy and adjust paths or generate configs via eval/exp_generator.py.
 job_replay_client_config:
   config_path: config.yaml
   dest: proxy
@@ -15,13 +16,13 @@ job_replay_client_config:
 job_seed: 42
 job_trace_config:
   duration: 300.0
-  input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json
-  input_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/AzureLLMInferenceTrace_code_1week.csv
+  input_prompt_path: /path/to/data/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json
+  input_trace_path: /path/to/data/input_traces/AzureLLMInferenceTrace_code_1week.csv
   modes:
     chat: 1
     completion: 0
   output_len: 128
-  output_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/output_traces/sparse_300s_300x.jsonl
+  output_trace_path: /path/to/data/output_traces/sample_sparse_300s_300x.jsonl
   sampling_strategy: sparse
   speedup: 300.0
 model_deployment_config:
@@ -38,21 +39,21 @@ model_deployment_config:
     size: 8
     tensor_parallel_size: 1
   local_stage_path: /tmp/hf_home
-  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  model_storage_path: /path/to/models
   num_gpus_per_node: 12
   num_nodes: 2
   worker_max_ongoing: 32
-pbs_job_name: sparse
+pbs_job_name: sample_sparse
 pbs_num_nodes: 2
 pbs_queue_name: debug
-pbs_result_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/results/sparse
-pbs_stderr_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/sparse/stderr
-pbs_stdout_dir: /lus/flare/projects/AuroraGPT/wenyiw/data/pbs_output/sparse/stdout
+pbs_result_dir: /path/to/data/results/sample_sparse
+pbs_stderr_dir: /path/to/data/pbs_output/sample_sparse/stderr
+pbs_stdout_dir: /path/to/data/pbs_output/sample_sparse/stdout
 pbs_walltime: 00:30:00
 pbs_working_dir: .
 proxy_config:
   backend_port: 8000
-  python_path: "/home/wenyiw/agpt/venv/litellm/bin/python3"
+  python_path: /path/to/litellm/bin/python3
   options: {}
   port: 4001
   type: litellm
