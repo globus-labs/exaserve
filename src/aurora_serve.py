@@ -12,14 +12,14 @@ isolation and keeps ONEAPI_DEVICE_SELECTOR unset because Triton's SYCL probe
 crashes on Aurora when Ray rewrites it to a "level_zero:..." list.
 """
 
+import argparse
 import asyncio
 import inspect
 import json
 import os
+import socket
 import time
 import uuid
-import socket
-import argparse
 from typing import Optional, List, Dict, Any
 
 import ray
@@ -34,6 +34,13 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from schemas import ModelConfig, DeploymentConfig, load_deployment_config
 from model_paths import get_model_route_name
 from model_staging import print_red, resolve_model_paths
+from replica_planner import (
+    NodeInventory,
+    DeploymentReplicaPlan,
+    ModelReplicaPlan,
+    compute_replica_plan,
+    format_replica_plan,
+)
 
 
 def get_hsn_ip():
@@ -103,6 +110,14 @@ def default_num_replicas(
     return max(1, total_gpus // model_config.tensor_parallel_size)
 
 
+def should_use_global_planner(config: DeploymentConfig) -> bool:
+    """Use the planner for any PP deployment or any mixed-model deployment."""
+    return len(config.model_configs) > 1 or any(
+        model_config.pipeline_parallel_size > 1
+        for model_config in config.model_configs
+    )
+
+
 def get_alive_ray_gpu_nodes() -> List[Dict[str, Any]]:
     """Return alive Ray nodes that advertise GPU resources."""
     alive_nodes: List[Dict[str, Any]] = []
@@ -125,9 +140,36 @@ def get_alive_ray_gpu_nodes() -> List[Dict[str, Any]]:
                 "ip": node_ip,
                 "resource_key": resource_key,
                 "gpu_count": gpu_count,
+                "cpu_count": int(resources.get("CPU", 0)),
             }
         )
     return alive_nodes
+
+
+def build_node_inventory() -> list[NodeInventory]:
+    """Build a deterministic planner inventory from current alive Ray GPU nodes."""
+    alive_nodes = sorted(get_alive_ray_gpu_nodes(), key=lambda item: item["ip"])
+    return [
+        NodeInventory(
+            ip=str(node["ip"]),
+            resource_key=str(node["resource_key"]),
+            total_gpus=int(node["gpu_count"]),
+            remaining_gpus=int(node["gpu_count"]),
+            total_cpus=int(node["cpu_count"]),
+            remaining_cpus=int(node["cpu_count"]),
+        )
+        for node in alive_nodes
+    ]
+
+
+def get_pp_bundle_indices(model_config: ModelConfig) -> str:
+    """Map TP workers to stage bundles: [0]*tp + [1]*tp + ..."""
+    bundle_indices: list[str] = []
+    for stage_bundle_index in range(model_config.pipeline_parallel_size):
+        bundle_indices.extend(
+            [str(stage_bundle_index)] * model_config.tensor_parallel_size
+        )
+    return ",".join(bundle_indices)
 
 
 def build_pp_placement_group_bundles(
@@ -175,7 +217,42 @@ def build_pp_placement_group_bundles(
     return bundles, [str(node["ip"]) for node in stage_nodes]
 
 
-def build_actor_runtime_env() -> Dict[str, Dict[str, str]]:
+def build_planner_placement_group(
+    model_config: ModelConfig,
+) -> tuple[List[Dict[str, float]], str, int]:
+    """
+    Build placement-group bundles that match the planner's capacity model.
+
+    For PP, the coordinator shares the stage-0 bundle so the vLLM driver stays
+    colocated with its first stage. The remaining bundles are one multi-GPU
+    stage each. For TP-only, the actor directly consumes a single CPU+GPU
+    bundle.
+    """
+    if model_config.pipeline_parallel_size > 1:
+        bundles = [
+            {
+                "CPU": float(model_config.num_cpus_per_replica),
+                "GPU": float(model_config.tensor_parallel_size),
+            }
+        ]
+        bundles.extend(
+            {"GPU": float(model_config.tensor_parallel_size)}
+            for _ in range(model_config.pipeline_parallel_size - 1)
+        )
+        return bundles, "SPREAD", 0
+
+    bundles = [
+        {
+            "CPU": float(model_config.num_cpus_per_replica),
+            "GPU": float(model_config.tensor_parallel_size),
+        }
+    ]
+    return bundles, "PACK", model_config.tensor_parallel_size
+
+
+def build_actor_runtime_env(
+    extra_env_vars: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict[str, str]]:
     """Propagate Aurora-specific env vars into Serve replica actors."""
     env_vars: Dict[str, str] = {}
     for key in (
@@ -193,6 +270,8 @@ def build_actor_runtime_env() -> Dict[str, Dict[str, str]]:
         value = os.environ.get(key)
         if value:
             env_vars[key] = value
+    if extra_env_vars:
+        env_vars.update(extra_env_vars)
 
     return {"env_vars": env_vars}
 
@@ -633,6 +712,10 @@ def deploy_model(
     total_gpus: int,
     config: DeploymentConfig,
     model_index: int = 0,
+    *,
+    num_replicas_override: Optional[int] = None,
+    use_global_planner: bool = False,
+    planner_max_replicas_per_node: Optional[int] = None,
 ) -> tuple:
     """
     Build a bound VLLMWorker deployment for one model.
@@ -647,8 +730,11 @@ def deploy_model(
     local_path = model_path_map.get(model_id, model_id)
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
 
-    num_replicas = model_config.num_replicas or default_num_replicas(
-        model_config, total_gpus, config
+    num_replicas = (
+        num_replicas_override
+        if num_replicas_override is not None
+        else model_config.num_replicas
+        or default_num_replicas(model_config, total_gpus, config)
     )
 
     safe_name = get_model_route_name(model_id)
@@ -670,26 +756,54 @@ def deploy_model(
 
     placement_group_bundles: Optional[List[Dict[str, float]]] = None
     placement_group_strategy: Optional[str] = None
+    actor_num_gpus: int
+    extra_env_vars: Dict[str, str] = {}
 
-    # Replicas per node = tiles per node / TP size. Ray's GPU resource scheduling
-    # already enforces this implicitly, but being explicit avoids stacking replicas
-    # onto a subset of nodes when cluster membership fluctuates.
-    if model_config.pipeline_parallel_size > 1:
-        replicas_per_node = 1
-        placement_group_bundles, stage_node_ips = build_pp_placement_group_bundles(
-            model_config, config
-        )
-        placement_group_strategy = "PACK"
-        print(
-            f"[AuroraServe] PP placement for {model_id}: "
-            f"stage nodes={stage_node_ips}, bundles={len(placement_group_bundles)} "
-            f"(1 coordinator + {model_config.pipeline_parallel_size} x {model_config.tensor_parallel_size} GPU workers)",
-            flush=True,
-        )
+    if use_global_planner:
+        if model_config.pipeline_parallel_size > 1:
+            placement_group_bundles, placement_group_strategy, actor_num_gpus = (
+                build_planner_placement_group(model_config)
+            )
+            extra_env_vars["VLLM_RAY_BUNDLE_INDICES"] = get_pp_bundle_indices(
+                model_config
+            )
+            print(
+                f"[AuroraServe] Planner placement for {model_id}: "
+                f"strategy={placement_group_strategy}, bundles={placement_group_bundles}",
+                flush=True,
+            )
+        else:
+            actor_num_gpus = model_config.tensor_parallel_size
+            print(
+                f"[AuroraServe] Planner scheduling for {model_id}: "
+                "using direct actor GPU reservation for TP-only replicas",
+                flush=True,
+            )
     else:
-        replicas_per_node = max(1, config.num_gpus_per_node // model_config.tensor_parallel_size)
-
-    actor_num_gpus = 0 if model_config.pipeline_parallel_size > 1 else model_config.tensor_parallel_size
+        # Replicas per node = tiles per node / TP size. Ray's GPU resource scheduling
+        # already enforces this implicitly, but being explicit avoids stacking replicas
+        # onto a subset of nodes when cluster membership fluctuates.
+        if model_config.pipeline_parallel_size > 1:
+            replicas_per_node = 1
+            placement_group_bundles, stage_node_ips = build_pp_placement_group_bundles(
+                model_config, config
+            )
+            placement_group_strategy = "PACK"
+            print(
+                f"[AuroraServe] PP placement for {model_id}: "
+                f"stage nodes={stage_node_ips}, bundles={len(placement_group_bundles)} "
+                f"(1 coordinator + {model_config.pipeline_parallel_size} x {model_config.tensor_parallel_size} GPU workers)",
+                flush=True,
+            )
+        else:
+            replicas_per_node = max(
+                1, config.num_gpus_per_node // model_config.tensor_parallel_size
+            )
+        actor_num_gpus = (
+            0
+            if model_config.pipeline_parallel_size > 1
+            else model_config.tensor_parallel_size
+        )
 
     deployment_options = dict(
         name=f"VLLMWorker-{safe_name}",
@@ -697,7 +811,7 @@ def deploy_model(
         ray_actor_options={
             "num_gpus": actor_num_gpus,
             "num_cpus": model_config.num_cpus_per_replica,
-            "runtime_env": build_actor_runtime_env(),
+            "runtime_env": build_actor_runtime_env(extra_env_vars),
         },
         max_ongoing_requests=config.worker_max_ongoing,
         health_check_period_s=30,
@@ -706,8 +820,10 @@ def deploy_model(
     if placement_group_bundles is not None:
         deployment_options["placement_group_bundles"] = placement_group_bundles
         deployment_options["placement_group_strategy"] = placement_group_strategy
-    else:
+    elif not use_global_planner:
         deployment_options["max_replicas_per_node"] = replicas_per_node
+    elif planner_max_replicas_per_node is not None:
+        deployment_options["max_replicas_per_node"] = planner_max_replicas_per_node
 
     deployment = VLLMWorker.options(**deployment_options).bind(
         model_id=model_id,
@@ -721,6 +837,84 @@ def deploy_model(
     )
 
     return deployment, model_id
+
+
+def deploy_from_replica_plan(
+    config: DeploymentConfig,
+    model_path_map: Dict[str, str],
+    total_gpus: int,
+    replica_plan: DeploymentReplicaPlan,
+) -> None:
+    """Deploy model services using planner-assigned replica counts."""
+    active_plans = replica_plan.active_model_plans
+    if not active_plans:
+        raise RuntimeError(
+            "Replica planner assigned zero replicas to every model; nothing to deploy."
+        )
+
+    for skipped_plan in replica_plan.skipped_model_plans:
+        if skipped_plan.skipped_reason:
+            print(
+                f"[AuroraServe] Skipping {skipped_plan.model_config.model_id}: "
+                f"{skipped_plan.skipped_reason}",
+                flush=True,
+            )
+
+    use_root_route = len(config.model_configs) == 1
+    if not use_root_route:
+        print(
+            f"[AuroraServe] Deploying {len(active_plans)} active planned models "
+            "with per-model route_prefix",
+            flush=True,
+        )
+
+    for model_index, model_plan in enumerate(active_plans):
+        model_config = model_plan.model_config
+        planner_max_replicas_per_node: Optional[int] = None
+        if model_config.pipeline_parallel_size == 1 and model_plan.placements:
+            primary_node_counts: Dict[str, int] = {}
+            for placement in model_plan.placements:
+                primary_node = placement.node_ips[0]
+                primary_node_counts[primary_node] = (
+                    primary_node_counts.get(primary_node, 0) + 1
+                )
+            planner_max_replicas_per_node = max(primary_node_counts.values())
+        print(
+            f"\n[AuroraServe] ═══ Deploying planned model {model_index + 1}/{len(active_plans)} ═══",
+            flush=True,
+        )
+        deployment, model_id = deploy_model(
+            model_config,
+            model_path_map,
+            total_gpus,
+            config,
+            model_index,
+            num_replicas_override=model_plan.assigned_replicas,
+            use_global_planner=True,
+            planner_max_replicas_per_node=planner_max_replicas_per_node,
+        )
+
+        if use_root_route:
+            serve_start = time.time()
+            serve.run(deployment, route_prefix="/")
+            print_red(
+                f"[AuroraServe] serve.run() call: {time.time() - serve_start:.2f}s"
+            )
+            print(
+                f"[AuroraServe] Service available at http://localhost:8000/v1 "
+                f"(model: {model_id}, replicas={model_plan.assigned_replicas})",
+                flush=True,
+            )
+            continue
+
+        safe_name = get_model_route_name(model_id)
+        route_prefix = f"/{safe_name}"
+        serve.run(deployment, name=safe_name, route_prefix=route_prefix)
+        print(
+            f"[AuroraServe] ✓ {model_id} → http://localhost:8000{route_prefix}/v1 "
+            f"(replicas={model_plan.assigned_replicas})",
+            flush=True,
+        )
 
 
 def deploy_multi_model(
@@ -833,11 +1027,20 @@ if __name__ == "__main__":
             f"{time.time() - stage_start:.2f}s"
         )
 
+    planner_enabled = should_use_global_planner(config)
+
     # ---- Stage 3: Deploy model services -------------------------------------
     stage_start = time.time()
     print("[AuroraServe] Stage 3: Deploying model services to Ray Serve...", flush=True)
 
-    if len(config.model_configs) == 1:
+    if planner_enabled:
+        planner_nodes = build_node_inventory()
+        if not planner_nodes:
+            raise RuntimeError("No alive Ray GPU nodes found for replica planning")
+        replica_plan = compute_replica_plan(config.model_configs, planner_nodes)
+        print(format_replica_plan(replica_plan), flush=True)
+        deploy_from_replica_plan(config, model_path_map, total_gpus, replica_plan)
+    elif len(config.model_configs) == 1:
         primary_config = config.model_configs[0]
         deployment, model_id = deploy_model(primary_config, model_path_map, total_gpus, config)
         serve_start = time.time()

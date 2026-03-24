@@ -654,6 +654,444 @@ def _install_vllm_gpu_model_runner_import_hook() -> None:
 _install_vllm_gpu_model_runner_import_hook()
 
 
+def _patch_vllm_ray_multigpu_bundles() -> None:
+    if os.getenv("AURORA_VLLM_PATCH_PP_LAYER_FILTER") != "1":
+        return
+
+    try:
+        from collections import defaultdict
+
+        import ray
+        import vllm.v1.executor.ray_executor as ray_executor
+        import vllm.v1.executor.ray_utils as ray_utils
+    except Exception:
+        return
+
+    initialize_ray_cluster = ray_utils.initialize_ray_cluster
+    if getattr(initialize_ray_cluster, "_aurora_multigpu_bundle_patch", False):
+        return
+
+    def _format_device_count(count: float) -> str:
+        if float(count).is_integer():
+            return str(int(count))
+        return f"{count:g}"
+
+    def _verify_bundles(
+        placement_group,
+        parallel_config,
+        device_str: str,
+    ) -> None:
+        assert ray.is_initialized(), (
+            "Ray is not initialized although distributed-executor-backend is ray."
+        )
+        pg_data = ray_utils.placement_group_table(placement_group)
+        bundle_to_node_ids = pg_data["bundles_to_node_id"]
+        bundles = pg_data["bundles"]
+        node_id_to_bundle = defaultdict(list)
+
+        for bundle_idx, node_id in bundle_to_node_ids.items():
+            node_id_to_bundle[node_id].append(bundles[bundle_idx])
+        driver_node_id = ray.get_runtime_context().get_node_id()
+
+        if driver_node_id not in node_id_to_bundle:
+            raise RuntimeError(
+                f"driver node id {driver_node_id} is not included in a placement "
+                f"group {placement_group.id}. Node id -> bundles "
+                f"{node_id_to_bundle}. "
+                "You don't have enough GPUs available in a current node. Check "
+                "`ray status` and `ray list nodes` to see if you have available "
+                "GPUs in a node `{driver_node_id}` before starting an vLLM engine."
+            )
+
+        for node_id, node_bundles in node_id_to_bundle.items():
+            reserved_devices = sum(
+                float(bundle.get(device_str, 0) or 0) for bundle in node_bundles
+            )
+            if reserved_devices + 1e-9 < parallel_config.tensor_parallel_size:
+                ray_utils.logger.warning(
+                    "tensor_parallel_size=%d "
+                    "is bigger than a reserved number of %ss (%s "
+                    "%ss) in a node %s. Tensor parallel workers can be "
+                    "spread out to 2+ nodes which can degrade the performance "
+                    "unless you have fast interconnect across nodes, like "
+                    "Infiniband. To resolve this issue, make sure you have more "
+                    "than %d GPUs available at each node.",
+                    parallel_config.tensor_parallel_size,
+                    device_str,
+                    _format_device_count(reserved_devices),
+                    device_str,
+                    node_id,
+                    parallel_config.tensor_parallel_size,
+                )
+
+    def initialize_ray_cluster(parallel_config, ray_address=None):
+        ray_utils.assert_ray_available()
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cuda() and parallel_config.world_size > 1:
+            from vllm.utils.torch_utils import cuda_device_count_stateless
+
+            available_gpus = cuda_device_count_stateless()
+            if parallel_config.world_size > available_gpus:
+                ray_utils.logger.warning(
+                    "Tensor parallel size (%d) exceeds available GPUs (%d). "
+                    "This may result in Ray placement group allocation failures. "
+                    "Consider reducing tensor_parallel_size to %d or less, "
+                    "or ensure your Ray cluster has %d GPUs available.",
+                    parallel_config.world_size,
+                    available_gpus,
+                    available_gpus,
+                    parallel_config.world_size,
+                )
+
+        if ray.is_initialized():
+            ray_utils.logger.info(
+                "Ray is already initialized. Skipping Ray initialization."
+            )
+        elif current_platform.is_rocm() or current_platform.is_xpu():
+            try:
+                ray.init("auto")
+            except ConnectionError:
+                ray_utils.logger.warning(
+                    "No existing RAY instance detected. "
+                    "A new instance will be launched with current node resources."
+                )
+                ray.init(
+                    address=ray_address,
+                    num_gpus=parallel_config.world_size,
+                    runtime_env=parallel_config.ray_runtime_env,
+                )
+        else:
+            ray.init(
+                address=ray_address,
+                runtime_env=parallel_config.ray_runtime_env,
+            )
+
+        device_str = current_platform.ray_device_key
+        if not device_str:
+            raise ValueError(
+                f"current platform {current_platform.device_name} does not support ray."
+            )
+
+        if parallel_config.placement_group:
+            current_placement_group = parallel_config.placement_group
+        else:
+            current_placement_group = ray.util.get_current_placement_group()
+
+        if current_placement_group:
+            ray_utils.logger.info("Using the existing placement group")
+
+            total_devices = sum(
+                float(bundle.get(device_str, 0) or 0)
+                for bundle in current_placement_group.bundle_specs
+            )
+            if parallel_config.world_size > total_devices + 1e-9:
+                raise ValueError(
+                    f"The number of required {device_str}s exceeds the total "
+                    f"number of available {device_str}s in the placement group. "
+                    f"Required number of devices: {parallel_config.world_size}. "
+                    f"Total number of devices: {_format_device_count(total_devices)}."
+                )
+        else:
+            ray_utils.logger.info(
+                "No current placement group found. Creating a new placement group."
+            )
+            num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+            if parallel_config.world_size > num_devices_in_cluster:
+                ray_utils.logger.warning(
+                    "The number of required %ss exceeds the total "
+                    "number of available %ss in the placement group.",
+                    device_str,
+                    device_str,
+                )
+            placement_group_specs = [
+                {device_str: 1.0} for _ in range(parallel_config.world_size)
+            ]
+
+            current_ip = ray_utils.get_ip()
+            current_node_id = ray.get_runtime_context().get_node_id()
+            current_node_resource = ray_utils.available_resources_per_node()[
+                current_node_id
+            ]
+            if current_node_resource.get(device_str, 0) < 1:
+                raise ValueError(
+                    f"Current node has no {device_str} available. "
+                    f"current_node_resource={current_node_resource}. "
+                    f"vLLM engine cannot start without "
+                    f"{device_str}. Make sure you have at least 1 {device_str} "
+                    f"available in a node current_node_id={current_node_id} "
+                    f"current_ip={current_ip}."
+                )
+            placement_group_specs[0][f"node:{current_ip}"] = 0.001
+
+            current_placement_group = ray.util.placement_group(
+                placement_group_specs,
+                strategy="PACK",
+            )
+            ray_utils._wait_until_pg_ready(current_placement_group)
+
+        assert current_placement_group is not None
+        _verify_bundles(current_placement_group, parallel_config, device_str)
+        parallel_config.placement_group = current_placement_group
+
+    _verify_bundles._aurora_multigpu_bundle_patch = True
+    initialize_ray_cluster._aurora_multigpu_bundle_patch = True
+    ray_utils._verify_bundles = _verify_bundles
+    ray_utils.initialize_ray_cluster = initialize_ray_cluster
+    ray_executor.initialize_ray_cluster = initialize_ray_cluster
+    _patch_log("Applied vLLM Ray multi-GPU placement-group patch")
+
+
+_patch_vllm_ray_multigpu_bundles()
+
+
+def _patch_vllm_ray_executor_bundle_indices() -> None:
+    if os.getenv("AURORA_VLLM_PATCH_PP_LAYER_FILTER") != "1":
+        return
+
+    try:
+        from collections import defaultdict
+
+        import ray
+        import vllm.v1.executor.ray_executor as ray_executor
+    except Exception:
+        return
+
+    executor_cls = ray_executor.RayDistributedExecutor
+    init_workers = executor_cls._init_workers_ray
+    if getattr(init_workers, "_aurora_bundle_index_patch", False):
+        return
+
+    def _init_workers_ray(self, placement_group, **ray_remote_kwargs):
+        num_gpus = ray_executor.envs.VLLM_RAY_PER_WORKER_GPUS
+
+        self.driver_dummy_worker = None
+        self.workers = []
+        self.pp_tp_workers = []
+
+        if self.parallel_config.ray_workers_use_nsight:
+            ray_remote_kwargs = self._configure_ray_workers_use_nsight(
+                ray_remote_kwargs
+            )
+
+        preserve_bundle_order = False
+        if ray_executor.envs.VLLM_RAY_BUNDLE_INDICES:
+            bundle_indices = list(
+                map(int, ray_executor.envs.VLLM_RAY_BUNDLE_INDICES.split(","))
+            )
+            assert len(bundle_indices) == self.parallel_config.world_size, (
+                "VLLM_RAY_BUNDLE_INDICES must have the same size"
+                f" as the world size, but got bundle_indices={bundle_indices} "
+                "and "
+                f"world_size={self.parallel_config.world_size}"
+            )
+            preserve_bundle_order = True
+        else:
+            bundle_indices = []
+            for bundle_id, bundle in enumerate(placement_group.bundle_specs):
+                bundle_devices = float(
+                    bundle.get(ray_executor.current_platform.ray_device_key, 0) or 0
+                )
+                if bundle_devices <= 0:
+                    continue
+                workers_in_bundle = max(
+                    1,
+                    int(round(bundle_devices / float(num_gpus))),
+                )
+                bundle_indices.extend([bundle_id] * workers_in_bundle)
+            bundle_indices = bundle_indices[: self.parallel_config.world_size]
+
+        worker_metadata = []
+        driver_ip = (
+            os.environ.get("VLLM_HOST_IP")
+            or os.environ.get("MASTER_ADDR")
+            or ray_executor.get_ip()
+        )
+        for rank, bundle_id in enumerate(bundle_indices):
+            scheduling_strategy = ray_executor.PlacementGroupSchedulingStrategy(
+                placement_group=placement_group,
+                placement_group_capture_child_tasks=True,
+                placement_group_bundle_index=bundle_id,
+            )
+
+            if ray_executor.current_platform.ray_device_key == "GPU":
+                worker = ray.remote(
+                    num_cpus=0,
+                    num_gpus=num_gpus,
+                    scheduling_strategy=scheduling_strategy,
+                    **ray_remote_kwargs,
+                )(ray_executor.RayWorkerWrapper).remote(rpc_rank=rank)
+            else:
+                worker = ray.remote(
+                    num_cpus=0,
+                    num_gpus=0,
+                    resources={
+                        ray_executor.current_platform.ray_device_key: num_gpus
+                    },
+                    scheduling_strategy=scheduling_strategy,
+                    **ray_remote_kwargs,
+                )(ray_executor.RayWorkerWrapper).remote(rpc_rank=rank)
+
+            worker_metadata.append(
+                ray_executor.RayWorkerMetaData(worker=worker, created_rank=rank)
+            )
+
+        worker_ips = ray.get(
+            [
+                each.worker.get_node_ip.remote()  # type: ignore[attr-defined]
+                for each in worker_metadata
+            ]
+        )
+
+        for each, ip in zip(worker_metadata, worker_ips):
+            each.ip = ip
+
+        ray_executor.logger.debug("workers: %s", worker_metadata)
+        ray_executor.logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
+
+        if preserve_bundle_order:
+            sorted_worker_metadata = worker_metadata
+        else:
+            ip_counts = {}
+            for ip in worker_ips:
+                ip_counts[ip] = ip_counts.get(ip, 0) + 1
+
+            def sort_by_driver_then_worker_ip(item):
+                ip = item.ip
+                return 0 if ip == driver_ip else 1, ip_counts[ip], ip
+
+            sorted_worker_metadata = sorted(
+                worker_metadata,
+                key=sort_by_driver_then_worker_ip,
+            )
+
+        for i, item in enumerate(sorted_worker_metadata):
+            item.adjusted_rank = i
+        self.workers = [item.worker for item in sorted_worker_metadata]
+        rerank_mapping = {
+            item.created_rank: item.adjusted_rank
+            for item in sorted_worker_metadata
+        }
+        self.collective_rpc("adjust_rank", args=(rerank_mapping,))
+
+        worker_node_and_gpu_ids = []
+        for worker in [self.driver_dummy_worker] + self.workers:
+            if worker is None:
+                continue
+            worker_node_and_gpu_ids.append(
+                ray.get(worker.get_node_and_gpu_ids.remote())
+            )  # type: ignore[attr-defined]
+
+        node_workers = defaultdict(list)
+        node_gpus = defaultdict(list)
+
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+            node_workers[node_id].append(i)
+            gpu_ids = [int(x) for x in gpu_ids]
+            node_gpus[node_id].extend(gpu_ids)
+        for node_id, gpu_ids in node_gpus.items():
+            node_gpus[node_id] = sorted(gpu_ids)
+
+        single_node_worker_topology = len(node_workers) == 1
+        if single_node_worker_topology:
+            driver_ip = "127.0.0.1"
+
+        all_ips = set(worker_ips)
+        if not single_node_worker_topology and (
+            not preserve_bundle_order or driver_ip in all_ips
+        ):
+            all_ips.add(driver_ip)
+        n_ips = len(all_ips)
+        n_nodes = len(node_workers)
+
+        if (
+            preserve_bundle_order
+            and not single_node_worker_topology
+            and driver_ip not in set(worker_ips)
+        ):
+            _patch_log(
+                "Driver IP is not among worker IPs for explicit bundle order; "
+                f"using driver_ip={driver_ip}, worker_ips={worker_ips}"
+            )
+        elif not single_node_worker_topology and n_nodes != n_ips:
+            raise RuntimeError(
+                f"Every node should have a unique IP address. Got {n_nodes}"
+                f" nodes with node ids {list(node_workers.keys())} and "
+                f"{n_ips} unique IP addresses {all_ips}. Please check your"
+                " network configuration. If you set `VLLM_HOST_IP`"
+                " environment variable, make sure it is unique for"
+                " each node."
+            )
+
+        all_args_to_update_environment_variables = [
+            {
+                ray_executor.current_platform.device_control_env_var: ",".join(
+                    map(str, node_gpus[node_id])
+                ),
+            }
+            for (node_id, _) in worker_node_and_gpu_ids
+        ]
+
+        env_vars_to_copy = ray_executor.get_env_vars_to_copy(
+            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            additional_vars=set(
+                ray_executor.current_platform.additional_env_vars
+            ).union(self.ADDITIONAL_ENV_VARS),
+            destination="workers",
+        )
+
+        for args in all_args_to_update_environment_variables:
+            for name in env_vars_to_copy:
+                if name in os.environ:
+                    args[name] = os.environ[name]
+
+        self._env_vars_for_all_workers = all_args_to_update_environment_variables
+
+        self.collective_rpc(
+            "update_environment_variables",
+            args=(self._get_env_vars_to_be_updated(),),
+        )
+
+        distributed_init_method = ray_executor.get_distributed_init_method(
+            driver_ip,
+            ray_executor.get_open_port(),
+        )
+
+        all_kwargs = []
+        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+            local_rank = node_workers[node_id].index(rank)
+            kwargs = dict(
+                vllm_config=self.vllm_config,
+                local_rank=local_rank,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                is_driver_worker=(not self.parallel_config)
+                or (rank % self.parallel_config.tensor_parallel_size == 0),
+            )
+            all_kwargs.append(kwargs)
+        self.collective_rpc("init_worker", args=(all_kwargs,))
+
+        self.collective_rpc("init_device")
+        self.collective_rpc("load_model")
+
+        for pp_rank in range(self.parallel_config.pipeline_parallel_size):
+            self.pp_tp_workers.append([])
+            for tp_rank in range(self.parallel_config.tensor_parallel_size):
+                rank = (
+                    pp_rank * self.parallel_config.tensor_parallel_size
+                ) + tp_rank
+                assert len(self.pp_tp_workers[pp_rank]) == tp_rank
+                assert pp_rank < len(self.pp_tp_workers)
+                self.pp_tp_workers[pp_rank].append(self.workers[rank])
+
+    _init_workers_ray._aurora_bundle_index_patch = True
+    executor_cls._init_workers_ray = _init_workers_ray
+    _patch_log("Applied vLLM Ray bundle index ordering patch")
+
+
+_patch_vllm_ray_executor_bundle_indices()
+
+
 def _patch_vllm_ray_executor_channel_type() -> None:
     if os.getenv("AURORA_VLLM_PATCH_PP_LAYER_FILTER") != "1":
         return

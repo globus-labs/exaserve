@@ -1,6 +1,6 @@
 import os
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import List, Dict, Optional
 
 # Add src directory to path for schemas
@@ -53,10 +53,12 @@ class WeakScalingExpParams:
     model_id: str = "meta-llama/Meta-Llama-3-8B-Instruct"
     model_tensor_parallel_size: int = 1
     model_pipeline_parallel_size: int = 1
+    model_num_replicas: Optional[int] = None
     model_max_model_len: int = 4096
     model_size: int = 8                   # used by trace generator
     model_storage_path: str = DEFAULT_MODEL_PATH
     local_stage_path: str = "/tmp/hf_home"
+    additional_model_configs: List[Dict[str, object]] = field(default_factory=list)
 
     # Deployment (→ DeploymentConfig)
     deployment_worker_max_ongoing: int = 64
@@ -105,8 +107,29 @@ def build_weak_scaling_configs(backend: str, params: WeakScalingExpParams) -> Li
             max_model_len=params.model_max_model_len,
             size=params.model_size,
             pipeline_parallel_size=params.model_pipeline_parallel_size,
+            num_replicas=params.model_num_replicas,
         ),
     ]
+    for extra_model in params.additional_model_configs:
+        model_cfgs.append(
+            ModelConfig(
+                model_id=str(extra_model["model_id"]),
+                tensor_parallel_size=int(extra_model.get("tensor_parallel_size", 1)),
+                pipeline_parallel_size=int(
+                    extra_model.get("pipeline_parallel_size", 1)
+                ),
+                max_model_len=int(extra_model.get("max_model_len", 4096)),
+                size=int(extra_model.get("size", 8)),
+                num_replicas=(
+                    None
+                    if extra_model.get("num_replicas") is None
+                    else int(extra_model["num_replicas"])
+                ),
+                num_cpus_per_replica=int(
+                    extra_model.get("num_cpus_per_replica", 4)
+                ),
+            )
+        )
 
     configs = []
     for num_nodes in params.num_nodes_list:
@@ -268,6 +291,64 @@ EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
         model_tensor_parallel_size=12,
         model_pipeline_parallel_size=2,
         model_storage_path="/flare/datasets/model-weights/hub",
+        client_num_runs=1,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+    "multi_replica_pp_smoke_llama31_8b": WeakScalingExpParams(
+        batch_name="multi_replica_pp_smoke_llama31_8b_{backend}",
+        num_nodes_list=[4],
+        rate_per_node=8,
+        duration=30.0,
+        input_len=512,
+        output_len=128,
+        model_id="meta-llama/Llama-3.1-8B-Instruct",
+        model_tensor_parallel_size=8,
+        model_pipeline_parallel_size=2,
+        model_storage_path="/flare/datasets/model-weights/hub",
+        client_num_runs=1,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+    "multi_replica_pp_smoke_llama33_70b": WeakScalingExpParams(
+        batch_name="multi_replica_pp_smoke_llama33_70b_{backend}",
+        num_nodes_list=[4],
+        rate_per_node=4,
+        duration=30.0,
+        input_len=512,
+        output_len=128,
+        model_id="meta-llama/Llama-3.3-70B-Instruct",
+        model_tensor_parallel_size=8,
+        model_pipeline_parallel_size=2,
+        model_num_replicas=2,
+        model_size=70,
+        model_storage_path="/flare/datasets/model-weights/hub",
+        client_num_runs=1,
+        client_dest="direct",
+        proxy_type="none",
+    ),
+    "mixed_model_pp_smoke": WeakScalingExpParams(
+        batch_name="mixed_model_pp_smoke_{backend}",
+        num_nodes_list=[4],
+        rate_per_node=4,
+        duration=30.0,
+        input_len=512,
+        output_len=128,
+        model_id="meta-llama/Llama-3.1-8B-Instruct",
+        model_tensor_parallel_size=8,
+        model_pipeline_parallel_size=2,
+        model_num_replicas=1,
+        model_storage_path="/flare/datasets/model-weights/hub",
+        additional_model_configs=[
+            {
+                "model_id": "facebook/opt-125m",
+                "tensor_parallel_size": 4,
+                "pipeline_parallel_size": 1,
+                "max_model_len": 2048,
+                "size": 1,
+                "num_replicas": None,
+            }
+        ],
         client_num_runs=1,
         client_dest="direct",
         proxy_type="none",

@@ -163,7 +163,6 @@ def validate_deployment_config(config: DeploymentConfig) -> DeploymentConfig:
     if len(unique_model_ids) != len(config.model_configs):
         raise ValueError("model_ids must be unique within model_configs")
 
-    has_pipeline_parallel = False
     for model_cfg in config.model_configs:
         tp = model_cfg.tensor_parallel_size
         pp = model_cfg.pipeline_parallel_size
@@ -187,26 +186,11 @@ def validate_deployment_config(config: DeploymentConfig) -> DeploymentConfig:
                 f"num_replicas must be >= 1 for {model_cfg.model_id}, got {model_cfg.num_replicas}"
             )
 
-        if pp > 1:
-            has_pipeline_parallel = True
-            if tp > config.num_gpus_per_node:
-                raise ValueError(
-                    f"tensor_parallel_size for {model_cfg.model_id} exceeds per-node "
-                    f"GPU capacity required by one PP stage: {tp} > {config.num_gpus_per_node}"
-                )
-            if config.num_nodes < pp:
-                raise ValueError(
-                    f"Not enough nodes to run {model_cfg.model_id} with pipeline_parallel_size={pp}"
-                )
-            if model_cfg.num_replicas is not None and model_cfg.num_replicas != 1:
-                raise ValueError(
-                    "v1 partial-node pipeline parallelism currently supports exactly "
-                    f"one replica per deployment for {model_cfg.model_id}; got "
-                    f"num_replicas={model_cfg.num_replicas}"
-                )
-
-    if has_pipeline_parallel and len(config.model_configs) != 1:
-        raise ValueError("v1 pipeline parallelism only supports single-model deployments")
+        if pp > 1 and config.num_nodes < pp:
+            raise ValueError(
+                f"Not enough nodes to run {model_cfg.model_id} with "
+                f"pipeline_parallel_size={pp}"
+            )
 
     return config
 
