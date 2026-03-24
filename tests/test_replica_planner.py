@@ -9,7 +9,11 @@ SRC_DIR = os.path.join(REPO_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from replica_planner import NodeInventory, compute_replica_plan
+from replica_planner import (
+    NodeInventory,
+    compute_replica_plan,
+    tp_replica_capacity_for_nodes,
+)
 from schemas import ModelConfig
 
 
@@ -50,6 +54,26 @@ def make_model(
 
 
 class ReplicaPlannerTests(unittest.TestCase):
+    def test_tp_capacity_counts_per_node_gpu_slots(self) -> None:
+        total, per_node = tp_replica_capacity_for_nodes(
+            make_nodes(2, gpus_per_node=12, cpus_per_node=8),
+            tensor_parallel_size=8,
+            num_cpus_per_replica=4,
+        )
+
+        self.assertEqual(total, 2)
+        self.assertEqual(per_node, 1)
+
+    def test_tp_capacity_respects_cpu_limit(self) -> None:
+        total, per_node = tp_replica_capacity_for_nodes(
+            make_nodes(2, gpus_per_node=12, cpus_per_node=4),
+            tensor_parallel_size=4,
+            num_cpus_per_replica=4,
+        )
+
+        self.assertEqual(total, 2)
+        self.assertEqual(per_node, 1)
+
     def test_three_nodes_fit_only_one_pp_replica(self) -> None:
         plan = compute_replica_plan(
             [make_model("llama", tp=8, pp=2)],

@@ -54,6 +54,32 @@ class DeploymentReplicaPlan:
         return [plan for plan in self.model_plans if not plan.active]
 
 
+def tp_replica_capacity_for_nodes(
+    nodes: Sequence[NodeInventory],
+    tensor_parallel_size: int,
+    num_cpus_per_replica: int,
+) -> Tuple[int, int]:
+    """
+    Compute TP-only replica capacity from per-node GPU and CPU budgets.
+
+    Returns:
+        (total_replicas_that_fit, max_replicas_that_fit_on_any_single_node)
+    """
+    if tensor_parallel_size < 1:
+        raise ValueError("tensor_parallel_size must be >= 1")
+
+    per_node_caps: List[int] = []
+    for node in nodes:
+        gpu_cap = node.remaining_gpus // tensor_parallel_size
+        if num_cpus_per_replica > 0:
+            cpu_cap = node.remaining_cpus // num_cpus_per_replica
+            per_node_caps.append(min(gpu_cap, cpu_cap))
+        else:
+            per_node_caps.append(gpu_cap)
+
+    return sum(per_node_caps), max(per_node_caps, default=0)
+
+
 def clone_nodes(nodes: Sequence[NodeInventory]) -> List[NodeInventory]:
     return [
         NodeInventory(

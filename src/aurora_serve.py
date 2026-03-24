@@ -40,6 +40,7 @@ from replica_planner import (
     ModelReplicaPlan,
     compute_replica_plan,
     format_replica_plan,
+    tp_replica_capacity_for_nodes,
 )
 
 
@@ -107,7 +108,14 @@ def default_num_replicas(
     """Compute the default replica count for a model."""
     if model_config.pipeline_parallel_size > 1:
         return 1
-    return max(1, total_gpus // model_config.tensor_parallel_size)
+    cluster_capacity, _ = get_tp_replica_capacity(model_config, config)
+    if cluster_capacity < 1:
+        raise RuntimeError(
+            f"No feasible TP-only replica placement for {model_config.model_id} "
+            f"with TP={model_config.tensor_parallel_size} and "
+            f"CPUs/replica={model_config.num_cpus_per_replica}"
+        )
+    return cluster_capacity
 
 
 def should_use_global_planner(config: DeploymentConfig) -> bool:
@@ -160,6 +168,28 @@ def build_node_inventory() -> list[NodeInventory]:
         )
         for node in alive_nodes
     ]
+
+
+def get_tp_replica_capacity(
+    model_config: ModelConfig,
+    config: DeploymentConfig,
+) -> tuple[int, int]:
+    """
+    Compute TP-only capacity using live Ray nodes when available.
+
+    Returns:
+        (total_cluster_capacity, max_replicas_that_fit_on_any_single_node)
+    """
+    live_nodes = build_node_inventory()
+    if live_nodes:
+        return tp_replica_capacity_for_nodes(
+            live_nodes,
+            tensor_parallel_size=model_config.tensor_parallel_size,
+            num_cpus_per_replica=model_config.num_cpus_per_replica,
+        )
+
+    per_node_cap = config.num_gpus_per_node // model_config.tensor_parallel_size
+    return config.num_nodes * per_node_cap, per_node_cap
 
 
 def get_pp_bundle_indices(model_config: ModelConfig) -> str:
@@ -796,9 +826,16 @@ def deploy_model(
                 flush=True,
             )
         else:
-            replicas_per_node = max(
-                1, config.num_gpus_per_node // model_config.tensor_parallel_size
+            _, replicas_per_node = get_tp_replica_capacity(
+                model_config,
+                config,
             )
+            if replicas_per_node < 1:
+                raise RuntimeError(
+                    f"No single Ray node can fit TP-only replica for {model_id} "
+                    f"(TP={model_config.tensor_parallel_size}, "
+                    f"CPUs/replica={model_config.num_cpus_per_replica})"
+                )
         actor_num_gpus = (
             0
             if model_config.pipeline_parallel_size > 1
