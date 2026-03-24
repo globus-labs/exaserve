@@ -232,6 +232,17 @@ EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
         client_num_runs=3,
         client_dest="proxy",
     ),
+    "weak_scaling_gpt_oss_120b_litellm": WeakScalingExpParams(
+        batch_name="weak_scaling_gpt_oss_120b_litellm_{backend}",
+        num_nodes_list=[1, 2, 4, 8, 16, 32, 64],
+        rate_per_node=4,
+        client_num_runs=3,
+        client_dest="proxy",
+        model_id="openai/gpt-oss-120b",
+        model_tensor_parallel_size=8,
+        model_size=120,
+        model_storage_path="/flare/datasets/model-weights/hub",
+    ),
     # --- direct-mode experiments (MPI round-robin, no proxy, lower-bound baseline) ---
     "weak_scaling": WeakScalingExpParams(
         batch_name="weak_scaling_{backend}_2",
@@ -354,7 +365,11 @@ EXPERIMENT_REGISTRY: Dict[str, WeakScalingExpParams] = {
         proxy_type="none",
     ),
 }
-for experiment_name in ("null_compute_litellm", "weak_scaling_litellm"):
+for experiment_name in (
+    "null_compute_litellm",
+    "weak_scaling_litellm",
+    "weak_scaling_gpt_oss_120b_litellm",
+):
     base_params = EXPERIMENT_REGISTRY[experiment_name]
     for proxy_num_workers in (2, 4, 8):
         EXPERIMENT_REGISTRY[f"{experiment_name}_pnw_{proxy_num_workers}"] = replace(
