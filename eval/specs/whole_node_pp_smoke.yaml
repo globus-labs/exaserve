@@ -1,0 +1,37 @@
+name: whole_node_pp_smoke
+matrix:
+  name_template: "{num_nodes}_nodes"
+  axes:
+    - name: num_nodes
+      values: [2]
+      targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+      label_template: "{value}_nodes"
+trace:
+  kind: weak_scaling
+workload:
+  duration: 30.0
+  input_len: 512
+  output_len: 128
+  rate_per_node: 8.0
+deployment:
+  models:
+    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+      tensor_parallel_size: 12
+      pipeline_parallel_size: 2
+      max_model_len: 4096
+      size: 8
+  worker_max_ongoing: 64
+client:
+  num_runs: 1
+  dest: direct
+  num_go_procs: 16
+  num_go_workers: 2
+  go_concurrency: 40
+backend:
+  default: ray
+  args:
+    ray:
+      proxy:
+        type: none
+scheduler:
+  type: pbs

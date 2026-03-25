@@ -2,8 +2,13 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Union, Dict, Any
 from pathlib import Path
-from model_paths import iter_unique_model_ids
-from site_config import get_site_config
+
+try:
+    from .model_paths import iter_unique_model_ids
+    from .site_config import get_site_config
+except ImportError:  # pragma: no cover - script-mode fallback
+    from model_paths import iter_unique_model_ids
+    from site_config import get_site_config
 
 
 def _default_model_storage_path() -> str:
@@ -247,6 +252,46 @@ def load_deployment_config(path: str) -> DeploymentConfig:
     return validate_deployment_config(_deployment_config_from_dict(data))
 
 
+def _trace_config_from_dict(d: Dict[str, Any]) -> Union["TraceGeneratorConfig", "WeakScalingConfig"]:
+    if "rpn" in d:
+        return WeakScalingConfig(
+            input_prompt_path=str(d.get("input_prompt_path", "")),
+            duration=float(d.get("duration", 0.0)),
+            rpn=float(d.get("rpn", 0.0)),
+            input_len=int(d.get("input_len", 0)),
+            output_len=int(d.get("output_len", 0)),
+            output_trace_path=str(d.get("output_trace_path", "")),
+        )
+    return TraceGeneratorConfig(
+        input_trace_path=str(d.get("input_trace_path", "")),
+        input_prompt_path=str(d.get("input_prompt_path", "")),
+        duration=float(d.get("duration", 0.0)),
+        sampling_strategy=str(d.get("sampling_strategy", "peak")),
+        speedup=float(d.get("speedup", 1.0)),
+        output_len=int(d.get("output_len", 0)),
+        output_trace_path=str(d.get("output_trace_path", "")),
+        modes=dict(d.get("modes", {"chat": 1, "completion": 0})),
+    )
+
+
+def _replay_config_from_dict(d: Dict[str, Any]) -> "ReplayClientConfig":
+    return ReplayClientConfig(
+        config_path=str(d.get("config_path", "config.yaml")),
+        include_tp=bool(d.get("include_tp", False)),
+        early_stop=float(d.get("early_stop", 0.0)),
+        num_runs=int(d.get("num_runs", 1)),
+        generation_mode=str(d.get("generation_mode", "deterministic")),
+        dest=str(d.get("dest", "proxy")),
+        num_nodes=int(d.get("num_nodes", 1)),
+        num_go_procs=int(d.get("num_go_procs", 1)),
+        num_go_workers=int(d.get("num_go_workers", 4)),
+        go_concurrency=int(d.get("go_concurrency", 2000)),
+        warmup_rps=int(d.get("warmup_rps", 0)),
+        warmup_duration_s=float(d.get("warmup_duration_s", 0.0)),
+        sum_only=bool(d.get("sum_only", False)),
+    )
+
+
 @dataclass
 class ExpConfig:
     # PBS Job Header Config
@@ -281,6 +326,31 @@ class ExpConfig:
             os.makedirs(parent, exist_ok=True)
         with open(path, 'w') as f:
             yaml.dump(yaml_dict, f, default_flow_style=False)
+
+
+def load_exp_config(path: str) -> ExpConfig:
+    yaml = require_yaml()
+    with open(path, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    return ExpConfig(
+        pbs_result_dir=str(data.get("pbs_result_dir", "")),
+        pbs_stdout_dir=str(data.get("pbs_stdout_dir", "")),
+        pbs_stderr_dir=str(data.get("pbs_stderr_dir", "")),
+        pbs_num_nodes=int(data.get("pbs_num_nodes", 1)),
+        pbs_walltime=str(data.get("pbs_walltime", "")),
+        pbs_queue_name=str(data.get("pbs_queue_name", "")),
+        pbs_job_name=str(data.get("pbs_job_name", "")),
+        pbs_working_dir=str(data.get("pbs_working_dir", "")),
+        job_trace_config=_trace_config_from_dict(data.get("job_trace_config", {})),
+        job_replay_client_config=_replay_config_from_dict(
+            data.get("job_replay_client_config", {})
+        ),
+        job_seed=int(data.get("job_seed", 42)),
+        model_deployment_config=validate_deployment_config(
+            _deployment_config_from_dict(data.get("model_deployment_config", {}))
+        ),
+        proxy_config=_proxy_config_from_dict(data.get("proxy_config", {})),
+    )
 
 
 def _path_to_str(obj: Any) -> Any:

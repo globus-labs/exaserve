@@ -1,0 +1,39 @@
+name: weak_scaling_gpt_oss_120b_litellm
+matrix:
+  name_template: "{num_nodes}_nodes"
+  axes:
+    - name: num_nodes
+      values: [1, 2, 4, 8, 16, 32, 64]
+      targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+      label_template: "{value}_nodes"
+trace:
+  kind: weak_scaling
+workload:
+  duration: 5.0
+  input_len: 2048
+  output_len: 512
+  rate_per_node: 4.0
+deployment:
+  model_storage_path: /flare/datasets/model-weights/hub
+  models:
+    - model_id: openai/gpt-oss-120b
+      tensor_parallel_size: 8
+      pipeline_parallel_size: 1
+      max_model_len: 4096
+      size: 120
+  worker_max_ongoing: 64
+client:
+  num_runs: 3
+  dest: proxy
+  num_go_procs: 16
+  num_go_workers: 2
+  go_concurrency: 40
+backend:
+  default: ray
+  args:
+    ray:
+      proxy:
+        type: litellm
+        num_workers: 1
+scheduler:
+  type: pbs

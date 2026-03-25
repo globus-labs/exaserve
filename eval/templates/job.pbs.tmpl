@@ -1,30 +1,14 @@
 #!/bin/bash -l
 #PBS -N {{JOB_NAME}}
-{{PBS_MAIL_DIRECTIVES}}
-#PBS -l filesystems=home:flare
-#PBS -A AuroraGPT
-#PBS -k doe
+{{PBS_MAIL_DIRECTIVES}}#PBS -l filesystems={{FILESYSTEMS}}
+#PBS -A {{PROJECT}}
+#PBS -k {{KEEP_OUTPUT}}
 #PBS -l select={{NUM_NODES}}
 #PBS -l walltime={{WALLTIME}}
 #PBS -q {{QUEUE}}
-#PBS -o {{PBS_OUT_DIR}}/stdout/
-#PBS -e {{PBS_OUT_DIR}}/stderr/
+#PBS -o {{PBS_STDOUT_DIR}}/
+#PBS -e {{PBS_STDERR_DIR}}/
 
-# Navigate to Experiment Directory
-cd {{RUN_DIR}}
-
-echo "=================================================="
-echo "PBS Job Information"
-echo "=================================================="
-echo "Job ID:     $PBS_JOBID"
-echo "Job Name:   {{JOB_NAME}}"
-echo "Hostname:   $(hostname)"
-echo "Nodes:      {{NUM_NODES}}"
-echo "Backend:    {{BACKEND}}"
-echo "Work Dir:   $(pwd)"
-echo "Config:     {{CONFIG_FILE}}"
-echo "=================================================="
-
-{{ENV_EXPORTS}}
-# Invoke Experiment Driver (using absolute path) with backend specification
-bash "{{RUN_EXP_SCRIPT}}" {{CONFIG_FILE}} --backend {{BACKEND}} --num-runs {{NUM_RUNS}}
+cd {{CODE_ROOT}}
+source "{{ENV_SCRIPT}}"
+python -m eval.cli run execute "{{RUN_YAML}}"
