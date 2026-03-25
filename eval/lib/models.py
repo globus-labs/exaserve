@@ -31,6 +31,23 @@ class ModelSpec:
     enforce_eager: bool = True
     enable_log_requests: bool = True
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ModelSpec":
+        return cls(
+            model_id=str(data["model_id"]),
+            tensor_parallel_size=int(data.get("tensor_parallel_size", 1)),
+            max_model_len=int(data.get("max_model_len", 4096)),
+            size=int(data.get("size", 8)),
+            pipeline_parallel_size=int(data.get("pipeline_parallel_size", 1)),
+            num_replicas=(
+                None if data.get("num_replicas") is None else int(data["num_replicas"])
+            ),
+            num_cpus_per_replica=int(data.get("num_cpus_per_replica", 4)),
+            gpu_memory_utilization=float(data.get("gpu_memory_utilization", 0.90)),
+            enforce_eager=bool(data.get("enforce_eager", True)),
+            enable_log_requests=bool(data.get("enable_log_requests", True)),
+        )
+
 
 @dataclass
 class TraceSpec:
@@ -141,6 +158,10 @@ class RunBundle:
     runtime_dir: str
 
 
+# TODO: Consider slimming RunPlan to store only spec_snapshot_path + variant
+# overrides instead of duplicating full DeploymentSpec/ClientSpec/etc. This would
+# reduce run.yaml size and avoid data staleness, at the cost of requiring the
+# spec snapshot to be resolved at load time.
 @dataclass
 class RunPlan:
     run_id: str

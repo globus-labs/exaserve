@@ -47,6 +47,9 @@ class ModelConfig: # model configs for the engine
 class DeploymentConfig:
     num_nodes: int # TODO: right now just keep num_nodes = pbs_num_nodes, future support smaller num_nodes.
     model_configs: List[ModelConfig]
+    # NOTE: default_factory is only used when constructing DeploymentConfig programmatically
+    # (e.g., from eval/lib/). Runtime code always loads from YAML with explicit values via
+    # load_deployment_config(), so site_config is never invoked in the serving hot path.
     model_storage_path: str = field(default_factory=_default_model_storage_path)
     local_stage_path: str = field(default_factory=_default_local_stage_path)
     deployment_name: str = "aurora_serve"

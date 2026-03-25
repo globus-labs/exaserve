@@ -11,6 +11,7 @@ from .matrix import expand_matrix
 from .models import (
     ClientSpec,
     DeploymentSpec,
+    ModelSpec,
     RunBundle,
     RunPlan,
     SchedulerSpec,
@@ -32,11 +33,8 @@ from .utils import (
 )
 
 
-SITE_CONFIG = get_site_config()
-
-
 def runs_root(root: str | None = None) -> str:
-    base_root = root or os.path.join(SITE_CONFIG.experiments_root, "runs")
+    base_root = root or os.path.join(get_site_config().experiments_root, "runs")
     return ensure_dir(base_root)
 
 
@@ -107,7 +105,7 @@ def load_run_plan(path: str) -> RunPlan:
     deployment = DeploymentSpec(
         num_nodes=int(deployment_raw["num_nodes"]),
         models=[
-            _model_from_dict(model_raw) for model_raw in deployment_raw.get("models", [])
+            ModelSpec.from_dict(model_raw) for model_raw in deployment_raw.get("models", [])
         ],
         model_storage_path=str(deployment_raw["model_storage_path"]),
         local_stage_path=str(deployment_raw["local_stage_path"]),
@@ -277,20 +275,3 @@ def _resolve_scheduler(spec: SchedulerSpec) -> SchedulerSpec:
     return replace(spec, queue=queue, walltime=walltime)
 
 
-def _model_from_dict(data: dict[str, Any]):
-    from .models import ModelSpec
-
-    return ModelSpec(
-        model_id=str(data["model_id"]),
-        tensor_parallel_size=int(data["tensor_parallel_size"]),
-        max_model_len=int(data["max_model_len"]),
-        size=int(data["size"]),
-        pipeline_parallel_size=int(data.get("pipeline_parallel_size", 1)),
-        num_replicas=(
-            None if data.get("num_replicas") is None else int(data["num_replicas"])
-        ),
-        num_cpus_per_replica=int(data.get("num_cpus_per_replica", 4)),
-        gpu_memory_utilization=float(data.get("gpu_memory_utilization", 0.90)),
-        enforce_eager=bool(data.get("enforce_eager", True)),
-        enable_log_requests=bool(data.get("enable_log_requests", True)),
-    )

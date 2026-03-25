@@ -21,26 +21,10 @@ from .models import (
 from .utils import dump_yaml_file, load_yaml_file, resolve_path
 
 
-SITE_CONFIG = get_site_config()
 SUPPORTED_TRACE_KINDS = {"weak_scaling", "azure_trace"}
 SUPPORTED_BACKENDS = {"ray", "mock"}
 
 
-def _model_from_dict(data: dict[str, Any]) -> ModelSpec:
-    return ModelSpec(
-        model_id=str(data["model_id"]),
-        tensor_parallel_size=int(data.get("tensor_parallel_size", 1)),
-        max_model_len=int(data.get("max_model_len", 4096)),
-        size=int(data.get("size", 8)),
-        pipeline_parallel_size=int(data.get("pipeline_parallel_size", 1)),
-        num_replicas=(
-            None if data.get("num_replicas") is None else int(data["num_replicas"])
-        ),
-        num_cpus_per_replica=int(data.get("num_cpus_per_replica", 4)),
-        gpu_memory_utilization=float(data.get("gpu_memory_utilization", 0.90)),
-        enforce_eager=bool(data.get("enforce_eager", True)),
-        enable_log_requests=bool(data.get("enable_log_requests", True)),
-    )
 
 
 def _matrix_from_dict(data: dict[str, Any]) -> MatrixSpec:
@@ -75,12 +59,12 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
     trace = TraceSpec(
         kind=str(trace_raw["kind"]),
         input_prompt_path=resolve_path(
-            trace_raw.get("input_prompt_path") or SITE_CONFIG.input_prompt_path,
+            trace_raw.get("input_prompt_path") or get_site_config().input_prompt_path,
             base_dir=base_dir,
         )
         or "",
         input_trace_path=resolve_path(
-            trace_raw.get("input_trace_path") or SITE_CONFIG.input_trace_path,
+            trace_raw.get("input_trace_path") or get_site_config().input_trace_path,
             base_dir=base_dir,
         )
         or "",
@@ -101,20 +85,20 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
     )
     deployment = DeploymentSpec(
         num_nodes=int(deployment_raw.get("num_nodes", scheduler_raw.get("nodes", 1))),
-        models=[_model_from_dict(item) for item in deployment_raw.get("models", [])],
+        models=[ModelSpec.from_dict(item) for item in deployment_raw.get("models", [])],
         model_storage_path=resolve_path(
-            deployment_raw.get("model_storage_path") or SITE_CONFIG.model_storage_path,
+            deployment_raw.get("model_storage_path") or get_site_config().model_storage_path,
             base_dir=base_dir,
         )
-        or SITE_CONFIG.model_storage_path,
+        or get_site_config().model_storage_path,
         local_stage_path=resolve_path(
-            deployment_raw.get("local_stage_path") or SITE_CONFIG.local_stage_path,
+            deployment_raw.get("local_stage_path") or get_site_config().local_stage_path,
             base_dir=base_dir,
         )
-        or SITE_CONFIG.local_stage_path,
+        or get_site_config().local_stage_path,
         worker_max_ongoing=int(deployment_raw.get("worker_max_ongoing", 64)),
         num_gpus_per_node=int(
-            deployment_raw.get("num_gpus_per_node", SITE_CONFIG.num_gpus_per_node)
+            deployment_raw.get("num_gpus_per_node", get_site_config().num_gpus_per_node)
         ),
     )
     client = ClientSpec(
@@ -142,7 +126,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         project=str(scheduler_raw.get("project", "AuroraGPT")),
         filesystems=str(scheduler_raw.get("filesystems", "home:flare")),
         keep_output=str(scheduler_raw.get("keep_output", "doe")),
-        mail_user=str(scheduler_raw.get("mail_user", SITE_CONFIG.pbs_mail_user)),
+        mail_user=str(scheduler_raw.get("mail_user", get_site_config().pbs_mail_user)),
         mail_events=str(scheduler_raw.get("mail_events", "bae")),
     )
     spec = ExperimentSpec(
@@ -173,9 +157,9 @@ def normalize_experiment_spec(spec: ExperimentSpec) -> ExperimentSpec:
     if normalized.scheduler.nodes < 1:
         normalized.scheduler.nodes = normalized.deployment.num_nodes
     if not normalized.trace.input_prompt_path:
-        normalized.trace.input_prompt_path = SITE_CONFIG.input_prompt_path
+        normalized.trace.input_prompt_path = get_site_config().input_prompt_path
     if normalized.trace.kind == "azure_trace" and not normalized.trace.input_trace_path:
-        normalized.trace.input_trace_path = SITE_CONFIG.input_trace_path
+        normalized.trace.input_trace_path = get_site_config().input_trace_path
     return normalized
 
 

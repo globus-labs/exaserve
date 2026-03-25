@@ -40,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import warnings
+    warnings.warn(
+        "eval/trace_generator.py is deprecated. Use 'python -m eval.cli trace materialize' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     parser = build_parser()
     args = parser.parse_args(argv)
     spec_name = args.spec or LEGACY_SPEC_BY_EXP_TYPE[args.exp_type]

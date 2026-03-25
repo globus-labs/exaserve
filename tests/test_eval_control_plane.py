@@ -81,7 +81,7 @@ def temp_spec(tmp_path, monkeypatch):
     spec_path = tmp_path / "spec.yaml"
     _write_prompt_dataset(prompt_path)
     _write_spec(spec_path, prompt_path)
-    monkeypatch.setattr("eval.lib.trace_store._build_tokenizer_map", lambda _spec: {})
+    monkeypatch.setattr("eval.lib.trace_generators.build_tokenizer_map", lambda _spec: {})
     return spec_path
 
 

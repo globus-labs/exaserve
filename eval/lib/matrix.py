@@ -22,8 +22,11 @@ def expand_matrix(spec: ExperimentSpec) -> list[VariantSpec]:
             for target in axis.targets:
                 dotted_set(spec_copy, target, value)
 
-        spec_copy.client.num_nodes = spec_copy.deployment.num_nodes
-        spec_copy.scheduler.nodes = spec_copy.deployment.num_nodes
+        targeted_fields = {t for axis in spec.matrix.axes for t in axis.targets}
+        if "client.num_nodes" not in targeted_fields:
+            spec_copy.client.num_nodes = spec_copy.deployment.num_nodes
+        if "scheduler.nodes" not in targeted_fields:
+            spec_copy.scheduler.nodes = spec_copy.deployment.num_nodes
 
         if spec.matrix.name_template:
             variant_name = format_template(spec.matrix.name_template, values)

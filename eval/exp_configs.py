@@ -13,14 +13,13 @@ except ImportError:  # pragma: no cover - package-mode fallback
 from eval.lib.catalog import find_spec_path, list_spec_names
 
 
-SITE_CONFIG = get_site_config()
-
-DEFAULT_DATA_ROOT = SITE_CONFIG.user_data_root
-DEFAULT_MODEL_PATH = SITE_CONFIG.model_storage_path
-DEFAULT_INPUT_TRACE_PATH = SITE_CONFIG.input_trace_path
-DEFAULT_INPUT_PROMPT_PATH = SITE_CONFIG.input_prompt_path
-DEFAULT_OUTPUT_TRACE_DIR = SITE_CONFIG.output_trace_dir
-DEFAULT_EXPERIMENTS_ROOT = SITE_CONFIG.experiments_root
+# Backward-compatible module-level constants (deprecated — prefer get_site_config() directly)
+DEFAULT_DATA_ROOT = get_site_config().user_data_root
+DEFAULT_MODEL_PATH = get_site_config().model_storage_path
+DEFAULT_INPUT_TRACE_PATH = get_site_config().input_trace_path
+DEFAULT_INPUT_PROMPT_PATH = get_site_config().input_prompt_path
+DEFAULT_OUTPUT_TRACE_DIR = get_site_config().output_trace_dir
+DEFAULT_EXPERIMENTS_ROOT = get_site_config().experiments_root
 
 EXPERIMENT_REGISTRY = {name: find_spec_path(name) for name in list_spec_names()}
 
@@ -47,7 +46,7 @@ class WeakScalingExpParams:
     model_max_model_len: int = 4096
     model_size: int = 8
     model_storage_path: str = DEFAULT_MODEL_PATH
-    local_stage_path: str = SITE_CONFIG.local_stage_path
+    local_stage_path: str = ""
     deployment_worker_max_ongoing: int = 64
     client_num_runs: int = 1
     client_num_go_procs: int = 16
@@ -57,8 +56,15 @@ class WeakScalingExpParams:
     client_warmup_duration_s: float = 0.0
     client_dest: str = "proxy"
     proxy_type: str = "litellm"
-    proxy_python_path: str = SITE_CONFIG.litellm_python_path
+    proxy_python_path: str = ""
     proxy_num_workers: int = 1
+
+    def __post_init__(self):
+        cfg = get_site_config()
+        if not self.local_stage_path:
+            self.local_stage_path = cfg.local_stage_path
+        if not self.proxy_python_path:
+            self.proxy_python_path = cfg.litellm_python_path
 
 
 def build_weak_scaling_configs(*_args, **_kwargs):

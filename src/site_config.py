@@ -21,6 +21,8 @@ _FIELD_DEFAULTS = OrderedDict(
         ("snapshot_dir", ""),
         ("bench_results_dir", ""),
         ("pbs_mail_user", ""),
+        ("env_script_aurora", ""),
+        ("env_script_litellm", ""),
         ("num_gpus_per_node", 12),
         ("local_stage_path", "/tmp/hf_home"),
     ]
@@ -40,6 +42,8 @@ _PATH_FIELDS = {
     "litellm_python_path",
     "snapshot_dir",
     "bench_results_dir",
+    "env_script_aurora",
+    "env_script_litellm",
     "local_stage_path",
 }
 _CACHE = None
@@ -169,6 +173,8 @@ def _normalize_config(config: SiteConfig) -> SiteConfig:
         "data",
         "bench_results",
     )
+    env_script_aurora = config.env_script_aurora or os.path.join(home_dir, "script", "env_aurora")
+    env_script_litellm = config.env_script_litellm or os.path.join(home_dir, "script", "env_litellm")
 
     return config.with_updates(
         project_root=project_root,
@@ -181,6 +187,8 @@ def _normalize_config(config: SiteConfig) -> SiteConfig:
         litellm_python_path=_coerce_field_value("litellm_python_path", litellm_python_path),
         snapshot_dir=_coerce_field_value("snapshot_dir", snapshot_dir),
         bench_results_dir=_coerce_field_value("bench_results_dir", bench_results_dir),
+        env_script_aurora=_coerce_field_value("env_script_aurora", env_script_aurora),
+        env_script_litellm=_coerce_field_value("env_script_litellm", env_script_litellm),
         local_stage_path=_coerce_field_value("local_stage_path", config.local_stage_path),
     )
 

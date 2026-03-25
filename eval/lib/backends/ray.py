@@ -25,9 +25,6 @@ from .base import (
 )
 
 
-SITE_CONFIG = get_site_config()
-
-
 class RayBackendAdapter(BackendAdapter):
     name = "ray"
     ready_marker = "[Driver] ALL SERVICES READY"
@@ -99,7 +96,7 @@ class RayBackendAdapter(BackendAdapter):
                 port=int(proxy_settings.get("port", 4001)),
                 backend_port=int(proxy_settings.get("backend_port", 8000)),
                 python_path=str(
-                    proxy_settings.get("python_path", SITE_CONFIG.litellm_python_path)
+                    proxy_settings.get("python_path", get_site_config().litellm_python_path)
                 ),
                 num_workers=int(proxy_settings.get("num_workers", 1)),
                 options=dict(proxy_settings.get("options", {})),
@@ -113,7 +110,8 @@ class RayBackendAdapter(BackendAdapter):
         proxy_type = self._proxy_settings(run_plan).get("type", "none")
         env_script = str(launch_settings.get("env_script", "")).strip()
         if not env_script:
-            env_script = "~/script/env_litellm" if proxy_type == "litellm" else "~/script/env_aurora"
+            cfg = get_site_config()
+            env_script = cfg.env_script_litellm if proxy_type == "litellm" else cfg.env_script_aurora
         exports = {}
         if bool(launch_settings.get("null_compute", False)):
             exports["AURORA_NULL_COMPUTE"] = "1"

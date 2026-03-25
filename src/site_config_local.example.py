@@ -5,4 +5,6 @@ SITE_OVERRIDES = {
     "snapshot_dir": "/home/your_user/agpt/data/snapshots",
     "bench_results_dir": "/home/your_user/agpt/data/bench_results",
     # "pbs_mail_user": "your_user@example.com",
+    # "env_script_aurora": "/home/your_user/script/env_aurora",
+    # "env_script_litellm": "/home/your_user/script/env_litellm",
 }

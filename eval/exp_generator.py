@@ -40,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import warnings
+    warnings.warn(
+        "eval/exp_generator.py is deprecated. Use 'python -m eval.cli run materialize' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.experiment or args.experiment == "list":

@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import warnings
+    warnings.warn(
+        "eval/submit_all.py is deprecated. Use 'python -m eval.cli run submit' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     parser = build_parser()
     args = parser.parse_args(argv)
 
