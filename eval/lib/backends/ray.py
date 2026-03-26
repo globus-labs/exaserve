@@ -4,9 +4,9 @@ This adapter bridges the new eval control plane with the existing serving
 infrastructure (scripts/launch_cluster.sh, src/driver.py, src/aurora_serve.py).
 
 Key responsibilities:
-  - build_runtime_manifest: translates the eval-layer RunPlan into the
-    serving-layer ExpConfig YAML that launch_cluster.sh and replay_client.py
-    expect. This is the bridge between the two config schemas.
+  - build_runtime_manifest: translates the eval-layer RunPlan into an
+    EvalManifest YAML that launch_cluster.sh and replay_client.py expect.
+    This is the bridge between the two config schemas.
   - launch: starts `bash scripts/launch_cluster.sh <manifest>` as a child
     process group, monitored by ProcessMonitor for the readiness marker.
   - runtime_env: selects the correct env script (env_aurora vs env_litellm)
@@ -18,16 +18,15 @@ from __future__ import annotations
 import os
 import subprocess
 
-from src.schemas import (
-    DeploymentConfig,
-    ExpConfig,
-    ModelConfig,
-    ProxyConfig,
+from src.schemas import DeploymentConfig, ModelConfig, ProxyConfig
+from src.site_config import get_site_config
+
+from ..manifest import (
+    EvalManifest,
     ReplayClientConfig,
     TraceGeneratorConfig,
     WeakScalingConfig,
 )
-from src.site_config import get_site_config
 
 from ..models import RunPlan
 from .base import (
@@ -57,21 +56,10 @@ class RayBackendAdapter(BackendAdapter):
         proxy_settings = self._proxy_settings(run_plan)
         trace_config = self._build_trace_config(run_plan)
         model_configs = [
-            ModelConfig(
-                model_id=model.model_id,
-                tensor_parallel_size=model.tensor_parallel_size,
-                pipeline_parallel_size=model.pipeline_parallel_size,
-                max_model_len=model.max_model_len,
-                size=model.size,
-                gpu_memory_utilization=model.gpu_memory_utilization,
-                enforce_eager=model.enforce_eager,
-                enable_log_requests=model.enable_log_requests,
-                num_replicas=model.num_replicas,
-                num_cpus_per_replica=model.num_cpus_per_replica,
-            )
+            ModelConfig.from_model_spec(model)
             for model in run_plan.deployment.models
         ]
-        exp_config = ExpConfig(
+        manifest = EvalManifest(
             pbs_result_dir=run_plan.bundle.results_dir,
             pbs_stdout_dir=run_plan.bundle.pbs_stdout_dir,
             pbs_stderr_dir=run_plan.bundle.pbs_stderr_dir,
@@ -117,7 +105,7 @@ class RayBackendAdapter(BackendAdapter):
                 options=dict(proxy_settings.get("options", {})),
             ),
         )
-        exp_config.save_yaml(run_plan.runtime_manifest_path)
+        manifest.save_yaml(run_plan.runtime_manifest_path)
         return run_plan.runtime_manifest_path
 
     def runtime_env(self, run_plan: RunPlan) -> RuntimeEnvSpec:

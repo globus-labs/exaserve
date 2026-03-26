@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field, asdict
-from typing import Optional, List, Union, Dict, Any
+from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 try:
@@ -43,6 +43,22 @@ class ModelConfig: # model configs for the engine
     num_replicas: Optional[int] = None # Deployment - number of replicas total, auto-scale based on tensor parallel size
     num_cpus_per_replica: int = 4 # Deployment - number of CPUs per replica
 
+    @classmethod
+    def from_model_spec(cls, spec) -> "ModelConfig":
+        """Build ModelConfig from an eval-layer ModelSpec (eval/lib/models.py)."""
+        return cls(
+            model_id=spec.model_id,
+            tensor_parallel_size=spec.tensor_parallel_size,
+            pipeline_parallel_size=spec.pipeline_parallel_size,
+            max_model_len=spec.max_model_len,
+            size=spec.size,
+            gpu_memory_utilization=spec.gpu_memory_utilization,
+            enforce_eager=spec.enforce_eager,
+            enable_log_requests=spec.enable_log_requests,
+            num_replicas=spec.num_replicas,
+            num_cpus_per_replica=spec.num_cpus_per_replica,
+        )
+
 @dataclass
 class DeploymentConfig:
     num_nodes: int # TODO: right now just keep num_nodes = pbs_num_nodes, future support smaller num_nodes.
@@ -56,27 +72,6 @@ class DeploymentConfig:
     worker_max_ongoing: int = 32
     num_gpus_per_node: int = field(default_factory=_default_num_gpus_per_node) # machine spec
   
-@dataclass
-class TraceGeneratorConfig:
-    input_trace_path: str
-    input_prompt_path: str
-    duration: float
-    sampling_strategy: str
-    speedup: float
-    output_len: int
-    output_trace_path: str
-    # mode -> weight for distribution; e.g. {"chat": 1, "completion": 0} = all chat
-    modes: Dict[str, int] = field(default_factory=lambda: {"chat": 1, "completion": 0})
-
-@dataclass
-class WeakScalingConfig:
-    input_prompt_path: str
-    duration: float
-    rpn: float # requests per node
-    input_len: int
-    output_len: int
-    output_trace_path: str
-
 @dataclass
 class ProxyConfig:
     """
@@ -103,23 +98,6 @@ class ProxyConfig:
     python_path: str = ""   # Python interpreter for the proxy process (empty = sys.executable)
     num_workers: int = 8    # uvicorn worker count for the proxy (LiteLLM --num_workers)
     options: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ReplayClientConfig:
-    config_path: str = "config.yaml"
-    include_tp: bool = False
-    early_stop: float = 0.0
-    num_runs: int = 1
-    generation_mode: str = "deterministic"  # "deterministic" or "natural"
-    dest: str = "proxy"  # "proxy": local workers → proxy; "direct": MPI round-robin to servers
-    num_nodes: int = 1      # total PBS nodes (= pbs_num_nodes); used to compute actual client count
-    num_go_procs: int = 1   # number of Go processes per replay_client node
-    num_go_workers: int = 4 # dispatch goroutines (N) inside each Go process
-    go_concurrency: int = 2000  # max in-flight requests per Go process
-    warmup_rps: int = 0     # warm-up requests per second (0 = no warmup)
-    warmup_duration_s: float = 0.0  # warm-up duration in seconds
-    sum_only: bool = False  # Go client writes only summary instead of per-request results
 
 
 def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
@@ -255,107 +233,6 @@ def load_deployment_config(path: str) -> DeploymentConfig:
     return validate_deployment_config(_deployment_config_from_dict(data))
 
 
-def _trace_config_from_dict(d: Dict[str, Any]) -> Union["TraceGeneratorConfig", "WeakScalingConfig"]:
-    if "rpn" in d:
-        return WeakScalingConfig(
-            input_prompt_path=str(d.get("input_prompt_path", "")),
-            duration=float(d.get("duration", 0.0)),
-            rpn=float(d.get("rpn", 0.0)),
-            input_len=int(d.get("input_len", 0)),
-            output_len=int(d.get("output_len", 0)),
-            output_trace_path=str(d.get("output_trace_path", "")),
-        )
-    return TraceGeneratorConfig(
-        input_trace_path=str(d.get("input_trace_path", "")),
-        input_prompt_path=str(d.get("input_prompt_path", "")),
-        duration=float(d.get("duration", 0.0)),
-        sampling_strategy=str(d.get("sampling_strategy", "peak")),
-        speedup=float(d.get("speedup", 1.0)),
-        output_len=int(d.get("output_len", 0)),
-        output_trace_path=str(d.get("output_trace_path", "")),
-        modes=dict(d.get("modes", {"chat": 1, "completion": 0})),
-    )
-
-
-def _replay_config_from_dict(d: Dict[str, Any]) -> "ReplayClientConfig":
-    return ReplayClientConfig(
-        config_path=str(d.get("config_path", "config.yaml")),
-        include_tp=bool(d.get("include_tp", False)),
-        early_stop=float(d.get("early_stop", 0.0)),
-        num_runs=int(d.get("num_runs", 1)),
-        generation_mode=str(d.get("generation_mode", "deterministic")),
-        dest=str(d.get("dest", "proxy")),
-        num_nodes=int(d.get("num_nodes", 1)),
-        num_go_procs=int(d.get("num_go_procs", 1)),
-        num_go_workers=int(d.get("num_go_workers", 4)),
-        go_concurrency=int(d.get("go_concurrency", 2000)),
-        warmup_rps=int(d.get("warmup_rps", 0)),
-        warmup_duration_s=float(d.get("warmup_duration_s", 0.0)),
-        sum_only=bool(d.get("sum_only", False)),
-    )
-
-
-@dataclass
-class ExpConfig:
-    # PBS Job Header Config
-    pbs_result_dir: str
-    pbs_stdout_dir: str
-    pbs_stderr_dir: str
-    pbs_num_nodes: int
-    pbs_walltime: str
-    pbs_queue_name: str
-    pbs_job_name: str
-    pbs_working_dir: str
-    # Job Config
-    job_trace_config: Union[TraceGeneratorConfig, WeakScalingConfig]
-    job_replay_client_config: ReplayClientConfig
-    job_seed: int
-    # Model Serving
-    model_deployment_config: DeploymentConfig
-    # Optional proxy layer (defaults to disabled for backward compat)
-    proxy_config: ProxyConfig = field(default_factory=ProxyConfig)
-    
-    
-    def to_yaml_dict(self) -> Dict[str, Any]:
-        """Serialize ExpConfig to a dict that rigorously mirrors its data structure."""
-        return _path_to_str(asdict(self))
-
-    def save_yaml(self, path: str):
-        """Save the config as a YAML file."""
-        yaml = require_yaml()
-        yaml_dict = self.to_yaml_dict()
-        parent = os.path.dirname(os.path.abspath(path))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(path, 'w') as f:
-            yaml.dump(yaml_dict, f, default_flow_style=False)
-
-
-def load_exp_config(path: str) -> ExpConfig:
-    yaml = require_yaml()
-    with open(path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    return ExpConfig(
-        pbs_result_dir=str(data.get("pbs_result_dir", "")),
-        pbs_stdout_dir=str(data.get("pbs_stdout_dir", "")),
-        pbs_stderr_dir=str(data.get("pbs_stderr_dir", "")),
-        pbs_num_nodes=int(data.get("pbs_num_nodes", 1)),
-        pbs_walltime=str(data.get("pbs_walltime", "")),
-        pbs_queue_name=str(data.get("pbs_queue_name", "")),
-        pbs_job_name=str(data.get("pbs_job_name", "")),
-        pbs_working_dir=str(data.get("pbs_working_dir", "")),
-        job_trace_config=_trace_config_from_dict(data.get("job_trace_config", {})),
-        job_replay_client_config=_replay_config_from_dict(
-            data.get("job_replay_client_config", {})
-        ),
-        job_seed=int(data.get("job_seed", 42)),
-        model_deployment_config=validate_deployment_config(
-            _deployment_config_from_dict(data.get("model_deployment_config", {}))
-        ),
-        proxy_config=_proxy_config_from_dict(data.get("proxy_config", {})),
-    )
-
-
 def _path_to_str(obj: Any) -> Any:
     """Recursively convert Path values to str for YAML serialization."""
     if isinstance(obj, dict):
@@ -365,4 +242,20 @@ def _path_to_str(obj: Any) -> Any:
     if isinstance(obj, Path):
         return str(obj)
     return obj
-    
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: eval-only types moved to eval/lib/manifest.py.
+# These re-exports keep existing callers (eval/exp_configs.py,
+# eval/lib/replay_engine.py) working until they are migrated.
+# ---------------------------------------------------------------------------
+try:
+    from eval.lib.manifest import (  # noqa: F401
+        TraceGeneratorConfig,
+        WeakScalingConfig,
+        ReplayClientConfig,
+        EvalManifest as ExpConfig,
+        load_eval_manifest as load_exp_config,
+    )
+except ImportError:  # pragma: no cover - when eval package is not on sys.path
+    pass

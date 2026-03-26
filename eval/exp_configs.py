@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from src.schemas import ExpConfig, TraceGeneratorConfig, WeakScalingConfig
+from eval.lib.manifest import EvalManifest as ExpConfig, TraceGeneratorConfig, WeakScalingConfig  # noqa: F401
 
 try:
     from site_config import get_site_config

@@ -16,7 +16,8 @@ import time
 import uuid
 from dataclasses import asdict
 
-from src.schemas import ExpConfig, TraceGeneratorConfig, WeakScalingConfig, load_exp_config
+from eval.lib.manifest import EvalManifest, TraceGeneratorConfig, WeakScalingConfig, load_eval_manifest
+from src.schemas import load_proxy_config
 
 try:
     import uvloop
@@ -96,12 +97,12 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[low] * (high - rank) + ordered[high] * (rank - low)
 
 
-def _trace_path(exp_config: ExpConfig) -> str:
+def _trace_path(exp_config: EvalManifest) -> str:
     trace_cfg = exp_config.job_trace_config
     return str(trace_cfg.output_trace_path)
 
 
-def _result_dir(exp_config: ExpConfig) -> str:
+def _result_dir(exp_config: EvalManifest) -> str:
     return exp_config.pbs_result_dir
 
 
@@ -329,7 +330,7 @@ def _get_cluster_nodes() -> list[str]:
     return nodes
 
 
-def _port_from_manifest(exp_config: ExpConfig, override_port: int | None) -> int:
+def _port_from_manifest(exp_config: EvalManifest, override_port: int | None) -> int:
     if override_port is not None:
         return override_port
     proxy_cfg = exp_config.proxy_config
@@ -382,7 +383,7 @@ async def replay_from_manifest(
     base_urls_override: str | None = None,
     cpuprofile_dir: str = "",
 ) -> None:
-    exp_config = load_exp_config(config_path)
+    exp_config = load_eval_manifest(config_path)
     exp_config.job_replay_client_config.config_path = config_path
     replay_cfg = exp_config.job_replay_client_config
 
@@ -545,7 +546,7 @@ async def replay_from_manifest(
 
 
 def _save_results(
-    exp_config: ExpConfig,
+    exp_config: EvalManifest,
     requests: list[TraceRequest],
     results,
     all_runs_results,
