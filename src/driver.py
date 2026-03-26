@@ -6,6 +6,8 @@ import time
 import socket
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from typing import Sequence
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -22,14 +24,18 @@ RAY_SERVE_PORT = 8000
 # How long to wait for Ray Serve to become healthy before starting the proxy
 RAY_SERVE_HEALTH_TIMEOUT_S = 1800  # 30 min covers large-scale deployments
 
-# Aurora nodes expose 208 CPUs, and Ray uses the advertised CPU count to derive
-# both maximum worker startup concurrency and the number of prestarted Python
-# workers. Large PP launches only need a handful of CPUs for coordination, so
-# keep the default low to avoid thread explosions while still allowing an
-# override for future tuning.
-RAY_NODE_CPUS = int(os.environ.get("AURORA_RAY_NODE_CPUS", "8"))
 DEBUG_HOLD_ON_FAILURE_S = int(os.environ.get("AURORA_DEBUG_HOLD_ON_FAILURE_S", "0"))
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_RAY_HEAD_PORT = 6379
+DEFAULT_RAY_NODE_CPUS = 8
+DEFAULT_RAY_INTERNAL_STARTUP_LIMIT = 8
+
+
+@dataclass(frozen=True)
+class RayClusterConfig:
+    head_ip: str
+    port: int = DEFAULT_RAY_HEAD_PORT
+    node_cpus: int = DEFAULT_RAY_NODE_CPUS
 
 
 def prepend_pythonpath(env: dict[str, str], path: str) -> None:
@@ -100,42 +106,83 @@ def get_ray_env():
     return env
 
 
-def start_ray_head(ip, port):
+def load_ray_cluster_config(config_path: str) -> RayClusterConfig:
+    from schemas import require_yaml
+
+    yaml = require_yaml()
+    with open(config_path, "r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+
+    cluster_cfg = payload.get("ray_cluster_config", {}) or {}
+    head_ip = str(cluster_cfg.get("head_ip", "")).strip()
+    if not head_ip:
+        raise ValueError(
+            "ray_cluster_config.head_ip is missing from the runtime config. "
+            "launch_cluster.sh must resolve and write it before starting driver.py."
+        )
+
+    port = int(cluster_cfg.get("port", DEFAULT_RAY_HEAD_PORT))
+    if port < 1:
+        raise ValueError(f"ray_cluster_config.port must be >= 1, got {port}")
+
+    node_cpus = int(cluster_cfg.get("node_cpus", DEFAULT_RAY_NODE_CPUS))
+    if node_cpus < 1:
+        raise ValueError(f"ray_cluster_config.node_cpus must be >= 1, got {node_cpus}")
+
+    return RayClusterConfig(head_ip=head_ip, port=port, node_cpus=node_cpus)
+
+
+def get_ray_internal_startup_limit(cluster: RayClusterConfig) -> int:
+    # Keep the advertised CPU resources high for scheduling while limiting
+    # Raylet's eager worker/process fan-out on Aurora.
+    return max(1, min(cluster.node_cpus, DEFAULT_RAY_INTERNAL_STARTUP_LIMIT))
+
+
+def start_ray_head(cluster: RayClusterConfig):
+    startup_limit = get_ray_internal_startup_limit(cluster)
     print(
-        f"[Driver] Starting RAY HEAD on {ip}:{port} "
-        f"with advertised CPUs={RAY_NODE_CPUS}",
+        f"[Driver] Starting RAY HEAD on {cluster.head_ip}:{cluster.port} "
+        f"with advertised CPUs={cluster.node_cpus} "
+        f"(startup/prestart cap={startup_limit})",
         flush=True,
     )
     # --block is CRITICAL: It keeps the subprocess alive.
     cmd = [
-        "ray", "start",
+        sys.executable,
+        "src/ray_start.py",
         "--head",
-        f"--num-cpus={RAY_NODE_CPUS}",
+        f"--node-ip-address={cluster.head_ip}",
+        f"--num-cpus={cluster.node_cpus}",
         "--num-gpus=12",
-        f"--node-ip-address={ip}",
-        f"--port={port}",
-        # "--dashboard-host=0.0.0.0",
+        f"--port={cluster.port}",
         "--disable-usage-stats",
         "--include-dashboard=false",
         "--block",
+        f"--max-startup-concurrency={startup_limit}",
+        f"--prestart-python-workers={startup_limit}",
     ]
     return subprocess.Popen(cmd, env=get_ray_env())
 
 
-def start_ray_worker(head_ip, head_port):
+def start_ray_worker(cluster: RayClusterConfig):
     worker_ip = get_hsn_ip()
+    startup_limit = get_ray_internal_startup_limit(cluster)
     print(
-        f"[Driver] Starting RAY WORKER connecting to {head_ip}:{head_port} "
-        f"from {worker_ip} with advertised CPUs={RAY_NODE_CPUS}",
+        f"[Driver] Starting RAY WORKER connecting to {cluster.head_ip}:{cluster.port} "
+        f"from {worker_ip} with advertised CPUs={cluster.node_cpus} "
+        f"(startup/prestart cap={startup_limit})",
         flush=True,
     )
     cmd = [
-        "ray", "start",
-        f"--address={head_ip}:{head_port}",
+        sys.executable,
+        "src/ray_start.py",
+        f"--address={cluster.head_ip}:{cluster.port}",
         f"--node-ip-address={worker_ip}",
-        f"--num-cpus={RAY_NODE_CPUS}",
+        f"--num-cpus={cluster.node_cpus}",
         "--num-gpus=12",
         "--block",
+        f"--max-startup-concurrency={startup_limit}",
+        f"--prestart-python-workers={startup_limit}",
     ]
     return subprocess.Popen(cmd, env=get_ray_env())
 
@@ -143,31 +190,54 @@ def start_ray_worker(head_ip, head_port):
 def wait_for_ray_serve(
     port: int = RAY_SERVE_PORT,
     timeout: float = RAY_SERVE_HEALTH_TIMEOUT_S,
+    process: subprocess.Popen | None = None,
+    health_paths: Sequence[str] | None = None,
 ) -> bool:
     """
-    Poll http://localhost:{port}/health until 200 OK or timeout.
+    Poll the configured Ray Serve health path(s) until 200 OK or timeout.
 
     Returns True when Ray Serve is healthy, False on timeout.
     """
-    url = f"http://127.0.0.1:{port}/health"
+    paths = list(health_paths or ["/health"])
+    urls = [f"http://127.0.0.1:{port}{path}" for path in paths]
     deadline = time.monotonic() + timeout
     attempt = 0
-    print(f"[Driver] Waiting for Ray Serve to become healthy on port {port}...", flush=True)
+    print(
+        f"[Driver] Waiting for Ray Serve health on {', '.join(paths)} "
+        f"(port {port})...",
+        flush=True,
+    )
     while time.monotonic() < deadline:
         attempt += 1
-        try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                if resp.status == 200:
-                    print(
-                        f"[Driver] Ray Serve healthy after {attempt} poll(s).",
-                        flush=True,
-                    )
-                    return True
-        except (urllib.error.URLError, OSError):
-            pass
+        if process is not None:
+            rc = process.poll()
+            if rc is not None:
+                print(
+                    f"[Driver] WARNING: Ray Serve process exited before health check passed (exit code {rc}).",
+                    flush=True,
+                )
+                return False
+        all_healthy = True
+        for url in urls:
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    if resp.status != 200:
+                        all_healthy = False
+                        break
+            except (urllib.error.URLError, OSError):
+                all_healthy = False
+                break
+        if all_healthy:
+            print(
+                f"[Driver] Ray Serve healthy after {attempt} poll(s): "
+                f"{', '.join(paths)}",
+                flush=True,
+            )
+            return True
         time.sleep(5)
     print(
-        f"[Driver] WARNING: Ray Serve did not become healthy within {timeout}s.",
+        "[Driver] WARNING: Ray Serve did not become healthy within "
+        f"{timeout}s for {', '.join(paths)}.",
         flush=True,
     )
     return False
@@ -252,19 +322,18 @@ def stop_proxy(proxy, proc):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--head-ip", required=True, help="IP Address of the Head Node")
-    parser.add_argument("--port", default="6379", help="Ray GCS Port")
-    parser.add_argument(
-        "--config",
-        default=None,
-        help="Path to deployment config YAML for Aurora Serve (optional). "
-             "If not set, aurora_serve will use its default (config.yaml in cwd).",
-    )
+    parser.add_argument("--config", required=True, help="Path to runtime config YAML")
     args = parser.parse_args()
+    cluster = load_ray_cluster_config(args.config)
 
     rank = get_rank()
     hostname = socket.gethostname()
     print(f"[Driver] Node: {hostname} | Rank: {rank} | Role: {'HEAD' if rank == 0 else 'WORKER'}", flush=True)
+    print(
+        f"[Driver] Cluster config: head_ip={cluster.head_ip} "
+        f"port={cluster.port} node_cpus={cluster.node_cpus}",
+        flush=True,
+    )
 
     ray_process = None
     serve_process = None
@@ -276,7 +345,7 @@ def main():
             # === HEAD NODE LOGIC ===
 
             # 1. Start Ray Head (Background)
-            ray_process = start_ray_head(args.head_ip, args.port)
+            ray_process = start_ray_head(cluster)
 
             # 2. Wait for GCS to initialize (Grace period)
             print("[Driver] Waiting 10s for Ray GCS to stabilize...", flush=True)
@@ -286,25 +355,41 @@ def main():
             #    proxy can be started after Ray Serve is ready, and both run
             #    concurrently for the lifetime of the cluster.
             serve_cmd = [sys.executable, "src/aurora_serve.py"]
-            if args.config:
-                serve_cmd.extend(["--config", args.config])
+            serve_cmd.extend(["--config", args.config])
             serve_env = get_ray_env()
-            serve_env["RAY_ADDRESS"] = f"{args.head_ip}:{args.port}"
+            serve_env["RAY_ADDRESS"] = f"{cluster.head_ip}:{cluster.port}"
             print(f"[Driver] Launching Aurora Serve: {' '.join(serve_cmd)}", flush=True)
             serve_process = subprocess.Popen(serve_cmd, env=serve_env)
 
-            # 4. Load proxy config (if a config file was provided)
-            if args.config:
-                from schemas import load_deployment_config, load_proxy_config
-                proxy_config = load_proxy_config(args.config)
-                deploy_config = load_deployment_config(args.config)
+            proxy_config = None
+            deploy_config = None
+            serve_health_paths = ["/health"]
+            from schemas import load_deployment_config, load_proxy_config
+            from model_paths import get_model_route_name
+            proxy_config = load_proxy_config(args.config)
+            deploy_config = load_deployment_config(args.config)
+            if len(deploy_config.model_configs) > 1:
+                serve_health_paths = [
+                    f"/{get_model_route_name(model_config.model_id)}/health"
+                    for model_config in deploy_config.model_configs
+                ]
 
-                if proxy_config.type != "none":
-                    # Wait for Ray Serve to be healthy before starting the proxy
-                    wait_for_ray_serve(port=RAY_SERVE_PORT)
-                    proxy_backend, proxy_process, _actual_port = start_proxy(
-                        proxy_config, deploy_config, args.config
-                    )
+            # Wait for Ray Serve to be healthy before declaring readiness or
+            # starting the proxy. Without this guard, direct-mode runs can
+            # start replay against a dead endpoint and appear to "succeed".
+            if not wait_for_ray_serve(
+                port=RAY_SERVE_PORT,
+                process=serve_process,
+                health_paths=serve_health_paths,
+            ):
+                raise RuntimeError(
+                    f"[Driver] FATAL: Ray Serve health check timed out on port {RAY_SERVE_PORT}."
+                )
+
+            if proxy_config is not None and proxy_config.type != "none":
+                proxy_backend, proxy_process, _actual_port = start_proxy(
+                    proxy_config, deploy_config, args.config
+                )
 
             # 5. Signal that ALL services (Ray Serve + proxy) are ready.
             #    run_exp.sh watches for this exact line to start the client.
@@ -332,7 +417,7 @@ def main():
 
             # 1. Start Ray Worker (Blocking)
             # This process will stay alive as long as the Raylet is running.
-            ray_process = start_ray_worker(args.head_ip, args.port)
+            ray_process = start_ray_worker(cluster)
             ray_process.wait()  # Block until Ray dies or is killed
 
     except KeyboardInterrupt:

@@ -16,6 +16,7 @@ script rendered by the planner.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -39,6 +40,7 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
         return 0
 
     launched = None
+    base_urls: list[str] = []
     try:
         write_run_state(run_plan, "running", backend=run_plan.backend_name)
         launched = adapter.launch(ctx)
@@ -47,12 +49,25 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
         write_run_state(run_plan, "replaying", base_urls=base_urls)
         exit_code = _run_replay_client(run_plan, base_urls)
         if exit_code == 0:
-            write_run_state(run_plan, "succeeded", base_urls=base_urls, exit_code=exit_code)
+            replay_summary = _validate_replay_results(run_plan)
+            write_run_state(
+                run_plan,
+                "succeeded",
+                base_urls=base_urls,
+                exit_code=exit_code,
+                result_path=replay_summary["result_path"],
+                requests_completed=replay_summary["requests_completed"],
+                requests_scheduled=replay_summary["requests_scheduled"],
+                errors=replay_summary["errors"],
+            )
         else:
             write_run_state(run_plan, "failed", base_urls=base_urls, exit_code=exit_code)
         return exit_code
     except Exception as exc:
-        write_run_state(run_plan, "failed", error=str(exc))
+        payload = {"error": str(exc)}
+        if base_urls:
+            payload["base_urls"] = base_urls
+        write_run_state(run_plan, "failed", **payload)
         raise
     finally:
         if launched is not None:
@@ -172,6 +187,62 @@ def _run_command_with_tee(cmd, *, log_path: str, cwd: str, env: dict[str, str]) 
             log_handle.write(line)
             log_handle.flush()
     return process.wait()
+
+
+def _validate_replay_results(run_plan) -> dict[str, int | str]:
+    result_path = _latest_result_path(run_plan.bundle.results_dir)
+    if result_path is None:
+        raise RuntimeError(
+            f"Replay exited successfully but did not write any result*.json under {run_plan.bundle.results_dir}"
+        )
+
+    with open(result_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    overall = payload.get("overall")
+    if not isinstance(overall, dict):
+        raise RuntimeError(f"Replay result file is missing an 'overall' summary: {result_path}")
+
+    requests_completed = int(overall.get("requests_completed", 0) or 0)
+    requests_scheduled = int(overall.get("requests_scheduled", requests_completed) or requests_completed)
+    errors = int(overall.get("errors", 0) or 0)
+    successful_requests = max(requests_completed - errors, 0)
+    if successful_requests < 1:
+        raise RuntimeError(
+            "Replay completed but all requests failed: "
+            f"successes={successful_requests}, errors={errors}, "
+            f"completed={requests_completed}, scheduled={requests_scheduled}, "
+            f"result_path={result_path}"
+        )
+
+    if errors > 0 or requests_completed < requests_scheduled:
+        print(
+            "Replay completed with partial request failures: "
+            f"successes={successful_requests}, errors={errors}, "
+            f"completed={requests_completed}, scheduled={requests_scheduled}, "
+            f"result_path={result_path}",
+            flush=True,
+        )
+
+    return {
+        "result_path": result_path,
+        "requests_completed": requests_completed,
+        "requests_scheduled": requests_scheduled,
+        "errors": errors,
+    }
+
+
+def _latest_result_path(results_dir: str) -> str | None:
+    try:
+        candidates = [
+            name for name in os.listdir(results_dir)
+            if name.startswith("result") and name.endswith(".json")
+        ]
+    except FileNotFoundError:
+        return None
+    if not candidates:
+        return None
+    return os.path.join(results_dir, sorted(candidates)[-1])
 
 
 def _resolve_run_yaml(target: str) -> str:

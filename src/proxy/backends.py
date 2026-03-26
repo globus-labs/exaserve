@@ -9,6 +9,7 @@ discovery logic is never duplicated.
 import os
 from typing import Optional
 
+from model_paths import get_model_route_name
 from proxy.base import BackendEndpoint
 
 
@@ -54,11 +55,20 @@ def discover_backends(
 
     nodes = _read_nodefile(nodefile)
     model_ids = [mc.model_id for mc in deploy_config.model_configs]
+    use_root_route = len(model_ids) == 1
 
     endpoints: list[BackendEndpoint] = []
     for node in nodes:
         for model_id in model_ids:
-            endpoints.append(BackendEndpoint(host=node, port=backend_port, model_id=model_id))
+            path_prefix = "" if use_root_route else f"/{get_model_route_name(model_id)}"
+            endpoints.append(
+                BackendEndpoint(
+                    host=node,
+                    port=backend_port,
+                    model_id=model_id,
+                    path_prefix=path_prefix,
+                )
+            )
 
     print(
         f"[ProxyBackends] Discovered {len(nodes)} node(s) × {len(model_ids)} model(s) "

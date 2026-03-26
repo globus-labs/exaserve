@@ -9,8 +9,12 @@ Key responsibilities:
     This is the bridge between the two config schemas.
   - launch: starts `bash scripts/launch_cluster.sh <manifest>` as a child
     process group, monitored by ProcessMonitor for the readiness marker.
-  - runtime_env: selects the correct env script (env_aurora vs env_litellm)
-    based on proxy type, and sets AURORA_NULL_COMPUTE for stub experiments.
+  - runtime_env: selects the shell env used for the Ray/vLLM stack and sets
+    launcher exports such as AURORA_NULL_COMPUTE. Ray cluster settings such as
+    head_ip, port, and node_cpus live in the runtime manifest, which is the
+    single source of truth for driver.py. LiteLLM itself is launched as a
+    separate subprocess via proxy_config.python_path, so the backend should
+    stay on the Aurora frameworks env by default.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from site_config import get_site_config
 from ..manifest import (
     EvalManifest,
     ReplayClientConfig,
+    RayClusterConfig,
     TraceGeneratorConfig,
     WeakScalingConfig,
 )
@@ -39,6 +44,48 @@ from .base import (
 )
 
 
+_VENV_SITE_PACKAGES_MARKERS = ("/venv/", "/.venv/")
+_DROP_ENV_KEYS = {
+    "PYTHONHOME",
+    "VIRTUAL_ENV",
+    "CONDA_DEFAULT_ENV",
+    "CONDA_PREFIX",
+    "CONDA_PROMPT_MODIFIER",
+    "_CE_CONDA",
+    "_CE_M",
+}
+
+
+def _sanitize_pythonpath(value: str) -> str:
+    entries: list[str] = []
+    for raw_entry in value.split(os.pathsep):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        if "/site-packages" in entry and any(marker in entry for marker in _VENV_SITE_PACKAGES_MARKERS):
+            continue
+        entries.append(entry)
+    return os.pathsep.join(entries)
+
+
+def _sanitize_launch_env(env: dict[str, str]) -> dict[str, str]:
+    clean_env: dict[str, str] = {}
+    for key, value in env.items():
+        if key.startswith("BASH_FUNC_"):
+            continue
+        if key in _DROP_ENV_KEYS:
+            continue
+        clean_env[key] = value
+
+    pythonpath = _sanitize_pythonpath(clean_env.get("PYTHONPATH", ""))
+    if pythonpath:
+        clean_env["PYTHONPATH"] = pythonpath
+    else:
+        clean_env.pop("PYTHONPATH", None)
+
+    return clean_env
+
+
 class RayBackendAdapter(BackendAdapter):
     name = "ray"
     ready_marker = "[Driver] ALL SERVICES READY"
@@ -51,9 +98,25 @@ class RayBackendAdapter(BackendAdapter):
             proxy_cfg = self._proxy_settings(run_plan)
             if proxy_cfg.get("type", "none") == "none":
                 raise ValueError("client.dest=proxy requires backend.args.ray.proxy.type != 'none'")
+        launch_cfg = self._launch_settings(run_plan)
+        if "ray_node_cpus" in launch_cfg:
+            try:
+                ray_node_cpus = int(launch_cfg["ray_node_cpus"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("backend.args.ray.launch.ray_node_cpus must be an integer") from exc
+            if ray_node_cpus < 1:
+                raise ValueError("backend.args.ray.launch.ray_node_cpus must be >= 1")
+        if "ray_head_port" in launch_cfg:
+            try:
+                ray_head_port = int(launch_cfg["ray_head_port"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("backend.args.ray.launch.ray_head_port must be an integer") from exc
+            if ray_head_port < 1:
+                raise ValueError("backend.args.ray.launch.ray_head_port must be >= 1")
 
     def build_runtime_manifest(self, run_plan: RunPlan) -> str:
         proxy_settings = self._proxy_settings(run_plan)
+        launch_settings = self._launch_settings(run_plan)
         trace_config = self._build_trace_config(run_plan)
         model_configs = [
             ModelConfig.from_model_spec(model)
@@ -94,6 +157,10 @@ class RayBackendAdapter(BackendAdapter):
                 worker_max_ongoing=run_plan.deployment.worker_max_ongoing,
                 num_gpus_per_node=run_plan.deployment.num_gpus_per_node,
             ),
+            ray_cluster_config=RayClusterConfig(
+                port=int(launch_settings.get("ray_head_port", 6379)),
+                node_cpus=int(launch_settings.get("ray_node_cpus", 8)),
+            ),
             proxy_config=ProxyConfig(
                 type=str(proxy_settings.get("type", "none")),
                 port=int(proxy_settings.get("port", 4001)),
@@ -110,11 +177,10 @@ class RayBackendAdapter(BackendAdapter):
 
     def runtime_env(self, run_plan: RunPlan) -> RuntimeEnvSpec:
         launch_settings = self._launch_settings(run_plan)
-        proxy_type = self._proxy_settings(run_plan).get("type", "none")
         env_script = str(launch_settings.get("env_script", "")).strip()
         if not env_script:
             cfg = get_site_config()
-            env_script = cfg.env_script_litellm if proxy_type == "litellm" else cfg.env_script_aurora
+            env_script = cfg.env_script_aurora
         exports = {}
         if bool(launch_settings.get("null_compute", False)):
             exports["AURORA_NULL_COMPUTE"] = "1"
@@ -122,7 +188,7 @@ class RayBackendAdapter(BackendAdapter):
 
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:
         run_plan = run_ctx.run_plan
-        env = os.environ.copy()
+        env = _sanitize_launch_env(os.environ.copy())
         runtime_env = self.runtime_env(run_plan)
         env.update(runtime_env.exports)
         env["PYTHONPATH"] = run_plan.repo_root + os.pathsep + env.get("PYTHONPATH", "")

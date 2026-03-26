@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import sys
@@ -1396,3 +1397,63 @@ def _patch_ray_accelerator_context() -> None:
 
 
 _patch_ray_accelerator_context()
+
+
+def _patch_ray_serve_proxy_future_timeout() -> None:
+    try:
+        import ray.serve._private.proxy_state as proxy_state
+    except Exception:
+        return
+
+    wrap_as_future = getattr(proxy_state, "wrap_as_future", None)
+    if wrap_as_future is None:
+        return
+    if getattr(wrap_as_future, "_aurora_proxy_timeout_patch", False):
+        return
+
+    def _set_future_from_source(result_fut, source_fut) -> None:
+        if result_fut.done():
+            return
+        if source_fut.cancelled():
+            result_fut.cancel()
+            return
+        exc = source_fut.exception()
+        if exc is not None:
+            result_fut.set_exception(exc)
+            return
+        result_fut.set_result(source_fut.result())
+
+    def _set_timeout_if_pending(result_fut, timeout_s: float) -> None:
+        if result_fut.done():
+            return
+        result_fut.set_exception(
+            TimeoutError(f"Future cancelled after timeout {timeout_s}s")
+        )
+
+    def wrap_as_future_safe(ref, timeout_s=None):
+        loop = asyncio.get_running_loop()
+        source_fut = asyncio.wrap_future(ref.future())
+
+        if timeout_s is None:
+            return source_fut
+
+        assert timeout_s >= 0, "Timeout value should be non-negative"
+        result_fut = loop.create_future()
+        source_fut.add_done_callback(
+            lambda completed: _set_future_from_source(result_fut, completed)
+        )
+        timeout_handler = loop.call_later(
+            max(timeout_s, 0),
+            _set_timeout_if_pending,
+            result_fut,
+            timeout_s,
+        )
+        result_fut.add_done_callback(lambda _: timeout_handler.cancel())
+        return result_fut
+
+    wrap_as_future_safe._aurora_proxy_timeout_patch = True
+    proxy_state.wrap_as_future = wrap_as_future_safe
+    _patch_log("Applied Ray Serve proxy timeout future patch")
+
+
+_patch_ray_serve_proxy_future_timeout()

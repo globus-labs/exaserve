@@ -81,13 +81,14 @@ class LiteLLMProxy(ProxyBackend):
         # across them, which is exactly the semantics we want.
         model_list = []
         for ep in backends:
+            api_base = f"http://{ep.host}:{ep.port}{ep.path_prefix}/v1"
             model_list.append({
                 "model_name": ep.model_id,
                 "litellm_params": {
                     # "openai/" prefix tells LiteLLM the backend speaks the
                     # OpenAI API protocol (which Ray Serve does).
                     "model": f"openai/{ep.model_id}",
-                    "api_base": f"http://{ep.host}:{ep.port}/v1",
+                    "api_base": api_base,
                     # Ray Serve doesn't require auth; LiteLLM needs a non-empty value.
                     "api_key": "dummy",
                 },
@@ -171,6 +172,12 @@ class LiteLLMProxy(ProxyBackend):
         env.pop("http_proxy", None)
         env.pop("https_proxy", None)
         env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+
+        # The LiteLLM CLI binds these generic env vars directly to boolean
+        # flags (`--debug`, `--detailed_debug`). Our shell environment may set
+        # DEBUG=release, which Click then rejects before the proxy can start.
+        env.pop("DEBUG", None)
+        env.pop("DETAILED_DEBUG", None)
 
         # Strip Intel oneAPI / Level Zero / SYCL env vars.  These cause
         # uvicorn worker children to segfault after fork because Level Zero

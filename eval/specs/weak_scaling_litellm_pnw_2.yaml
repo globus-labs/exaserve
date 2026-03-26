@@ -21,7 +21,7 @@ deployment:
       max_model_len: 4096
       size: 8
 client:
-  num_runs: 3
+  num_runs: 1
   dest: proxy
   num_go_procs: 16
   num_go_workers: 2
@@ -30,6 +30,8 @@ backend:
   default: ray
   args:
     ray:
+      launch:
+        ray_node_cpus: 64
       proxy:
         type: litellm
         num_workers: 2

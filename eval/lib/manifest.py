@@ -72,6 +72,13 @@ class ReplayClientConfig:
 
 
 @dataclass
+class RayClusterConfig:
+    head_ip: str = ""
+    port: int = 6379
+    node_cpus: int = 8
+
+
+@dataclass
 class EvalManifest:
     """Full experiment manifest written by the eval control plane.
 
@@ -95,6 +102,7 @@ class EvalManifest:
     job_seed: int
     # Model Serving (included so save_runtime_manifest can write the full YAML)
     model_deployment_config: DeploymentConfig
+    ray_cluster_config: RayClusterConfig = field(default_factory=RayClusterConfig)
     # Optional proxy layer (defaults to disabled for backward compat)
     proxy_config: ProxyConfig = field(default_factory=ProxyConfig)
 
@@ -179,6 +187,11 @@ def load_eval_manifest(path: str) -> EvalManifest:
         job_seed=int(data.get("job_seed", 42)),
         model_deployment_config=validate_deployment_config(
             _deployment_config_from_dict(data.get("model_deployment_config", {}))
+        ),
+        ray_cluster_config=RayClusterConfig(
+            head_ip=str(data.get("ray_cluster_config", {}).get("head_ip", "")),
+            port=int(data.get("ray_cluster_config", {}).get("port", 6379)),
+            node_cpus=int(data.get("ray_cluster_config", {}).get("node_cpus", 8)),
         ),
         proxy_config=_proxy_config_from_dict(data.get("proxy_config", {})),
     )

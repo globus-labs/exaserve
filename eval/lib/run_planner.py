@@ -19,9 +19,14 @@ and drive the backend lifecycle.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
 from typing import Any
+
+_MP_CONTEXT = multiprocessing.get_context("forkserver")
 
 from site_config import get_site_config
 
@@ -52,9 +57,17 @@ from .utils import (
 )
 
 
+_DEFAULT_MAX_WORKERS = 8
+
+
 def runs_root(root: str | None = None) -> str:
     base_root = root or os.path.join(get_site_config().experiments_root, "runs")
     return ensure_dir(base_root)
+
+
+def _progress(msg: str) -> None:
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
 
 
 def materialize_run_bundles(
@@ -63,31 +76,91 @@ def materialize_run_bundles(
     backend_name: str | None = None,
     experiments_root: str | None = None,
     trace_root: str | None = None,
+    max_workers: int | None = None,
 ) -> list[RunPlan]:
     spec = load_experiment_spec(spec_path)
     variants = expand_matrix(spec)
-    run_plans = []
-    for variant in variants:
-        run_plan = _materialize_variant(
-            variant,
-            backend_name=backend_name or spec.backend.default,
-            experiments_root=experiments_root,
-            trace_root=trace_root,
-        )
-        run_plans.append(run_plan)
-    return run_plans
+    total = len(variants)
+    resolved_backend = backend_name or spec.backend.default
+    _progress(f"Materializing {total} variant(s) for {spec.name!r} (backend={resolved_backend})")
+
+    if total <= 1:
+        run_plans = []
+        for variant in variants:
+            _progress(f"  [1/{total}] {variant.variant_name} ...")
+            rp = _materialize_variant(
+                variant,
+                backend_name=resolved_backend,
+                experiments_root=experiments_root,
+                trace_root=trace_root,
+            )
+            _progress(f"  [1/{total}] {variant.variant_name} done")
+            run_plans.append(rp)
+        return run_plans
+
+    workers = min(max_workers or _DEFAULT_MAX_WORKERS, total)
+    _progress(f"  using {workers} workers")
+    # Submit all variants; collect results preserving original order.
+    results: list[RunPlan | None] = [None] * total
+    with ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
+        future_to_idx = {
+            pool.submit(
+                _materialize_variant,
+                variant,
+                backend_name=resolved_backend,
+                experiments_root=experiments_root,
+                trace_root=trace_root,
+            ): idx
+            for idx, variant in enumerate(variants)
+        }
+        done_count = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            done_count += 1
+            name = variants[idx].variant_name
+            results[idx] = future.result()  # propagates exceptions
+            _progress(f"  [{done_count}/{total}] {name} done")
+    return results  # type: ignore[return-value]
 
 
 def materialize_traces(
     spec_path: str,
     *,
     trace_root: str | None = None,
+    max_workers: int | None = None,
 ) -> list[TraceArtifact]:
     spec = load_experiment_spec(spec_path)
-    artifacts = []
-    for variant in expand_matrix(spec):
-        artifacts.append(materialize_trace_artifact(variant, store_root=trace_root))
-    return artifacts
+    variants = expand_matrix(spec)
+    total = len(variants)
+    _progress(f"Materializing {total} trace(s) for {spec.name!r}")
+
+    if total <= 1:
+        artifacts = []
+        for variant in variants:
+            _progress(f"  [1/{total}] {variant.variant_name} ...")
+            art = materialize_trace_artifact(variant, store_root=trace_root)
+            _progress(f"  [1/{total}] {variant.variant_name} done")
+            artifacts.append(art)
+        return artifacts
+
+    workers = min(max_workers or _DEFAULT_MAX_WORKERS, total)
+    _progress(f"  using {workers} workers")
+    results: list[TraceArtifact | None] = [None] * total
+    with ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
+        future_to_idx = {
+            pool.submit(
+                materialize_trace_artifact, variant, store_root=trace_root,
+            ): idx
+            for idx, variant in enumerate(variants)
+        }
+        done_count = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            done_count += 1
+            name = variants[idx].variant_name
+            results[idx] = future.result()
+            _progress(f"  [{done_count}/{total}] {name} done")
+    return results  # type: ignore[return-value]
 
 
 def load_run_plan(path: str) -> RunPlan:
@@ -212,7 +285,7 @@ def _materialize_variant(
     spec = variant.spec
     artifact = materialize_trace_artifact(variant, store_root=trace_root)
 
-    run_id = f"{utc_timestamp()}_{slugify(variant.variant_name)}"
+    run_id = f"{slugify(variant.variant_name)}_{utc_timestamp()}"
     root_dir = os.path.join(runs_root(experiments_root), spec.name, run_id)
     bundle = RunBundle(
         root_dir=ensure_dir(root_dir),

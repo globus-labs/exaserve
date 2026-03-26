@@ -13,10 +13,74 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
+sanitize_pythonpath() {
+    local raw_path="${1:-}"
+    local sanitized=""
+    local entry
+
+    IFS=':' read -r -a _py_entries <<< "$raw_path"
+    for entry in "${_py_entries[@]}"; do
+        [ -z "$entry" ] && continue
+        case "$entry" in
+            *"/venv/"*"/site-packages"*|*"/.venv/"*"/site-packages"*)
+                continue
+                ;;
+        esac
+        sanitized="${sanitized:+$sanitized:}$entry"
+    done
+
+    printf '%s\n' "$sanitized"
+}
+
+resolve_frameworks_python() {
+    local current_python
+    current_python="$(command -v python3 2>/dev/null || true)"
+    case "$current_python" in
+        /opt/aurora/*/frameworks/*/bin/python3)
+            printf '%s\n' "$current_python"
+            return
+            ;;
+    esac
+
+    local fallback_python
+    fallback_python="$(ls -1d /opt/aurora/*/frameworks/aurora_frameworks-*/bin/python3 2>/dev/null | sort | tail -n 1)"
+    if [ -n "$fallback_python" ] && [ -x "$fallback_python" ]; then
+        printf '%s\n' "$fallback_python"
+        return
+    fi
+
+    printf '%s\n' "$current_python"
+}
+
+write_ray_cluster_head_ip() {
+    local config_path="$1"
+    local head_ip="$2"
+    "$PYTHON_EXEC" - "$config_path" "$head_ip" <<'PY'
+import sys
+from schemas import require_yaml
+
+config_path, head_ip = sys.argv[1:3]
+yaml = require_yaml()
+with open(config_path, "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+cluster_cfg = dict(data.get("ray_cluster_config", {}) or {})
+cluster_cfg["head_ip"] = head_ip
+data["ray_cluster_config"] = cluster_cfg
+with open(config_path, "w", encoding="utf-8") as handle:
+    yaml.safe_dump(data, handle, default_flow_style=False, sort_keys=False)
+PY
+}
+
 # Optional: prepend a local debug_libs checkout if you need one.
 # export PYTHONPATH="/path/to/debug_libs:$PYTHONPATH"
-export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-PYTHON_EXEC=$(which python3)
+unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M
+SANITIZED_PYTHONPATH="$(sanitize_pythonpath "${PYTHONPATH:-}")"
+export PYTHONPATH="$PROJECT_ROOT/src${SANITIZED_PYTHONPATH:+:$SANITIZED_PYTHONPATH}"
+PYTHON_EXEC="$(resolve_frameworks_python)"
+if [ -z "$PYTHON_EXEC" ] || [ ! -x "$PYTHON_EXEC" ]; then
+    echo "ERROR: Failed to resolve Aurora frameworks python3."
+    exit 1
+fi
 
 DEPLOYMENT_CONFIG_PATH="${1:-config.yaml}"
 if [ ! -f "$DEPLOYMENT_CONFIG_PATH" ]; then
@@ -104,6 +168,7 @@ trap 'finalize_run_logs $?' EXIT
 echo "[System] Project Root: $PROJECT_ROOT"
 echo "[System] Nodefile: $PBS_NODEFILE"
 echo "[System] PYTHONPATH: $PYTHONPATH"
+echo "[System] Backend Python: $PYTHON_EXEC"
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 echo "[System] Persistent run dir: $RUN_LOG_DIR"
 
@@ -128,6 +193,7 @@ if [ -z "$HEAD_IP" ]; then
 fi
 
 echo "[System] Head IP (HSN): $HEAD_IP"
+write_ray_cluster_head_ip "$DEPLOYMENT_CONFIG_PATH" "$HEAD_IP"
 
 # --- 3. Calculate Node Count ---
 NODE_COUNT=$(wc -l < "$UNIQUE_NODES_FILE")
@@ -175,4 +241,4 @@ fi
 export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1}"
 
 mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
-    $PYTHON_EXEC src/driver.py --head-ip $HEAD_IP --port 6379 --config "$DEPLOYMENT_CONFIG_PATH"
+    $PYTHON_EXEC src/driver.py --config "$DEPLOYMENT_CONFIG_PATH"

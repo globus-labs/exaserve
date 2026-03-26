@@ -23,7 +23,7 @@ deployment:
   worker_max_ongoing: 64
 client:
   num_runs: 1
-  dest: direct
+  dest: proxy
   num_go_procs: 16
   num_go_workers: 2
   go_concurrency: 40
@@ -34,6 +34,7 @@ backend:
       launch:
         null_compute: true
       proxy:
-        type: none
+        type: litellm
+        num_workers: 1
 scheduler:
   type: pbs

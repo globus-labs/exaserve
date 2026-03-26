@@ -126,7 +126,8 @@ def test_run_bundle_materialization_and_mock_execute(temp_spec, tmp_path):
     assert state["status"] == "dry-run"
 
 
-def test_ray_adapter_selects_litellm_env(temp_spec, tmp_path):
+def test_ray_adapter_always_uses_aurora_env(temp_spec, tmp_path):
+    """Backend always uses env_aurora; litellm runs as a separate subprocess."""
     prompt_path = tmp_path / "prompts.json"
     spec_path = tmp_path / "ray_spec.yaml"
     _write_prompt_dataset(prompt_path)
@@ -140,7 +141,7 @@ def test_ray_adapter_selects_litellm_env(temp_spec, tmp_path):
     )
     adapter = get_backend_adapter("ray")
     runtime_env = adapter.runtime_env(plans[0])
-    assert runtime_env.env_script.endswith("env_litellm")
+    assert runtime_env.env_script.endswith("env_aurora")
 
 
 def test_cli_validate_and_submit_dry_run(temp_spec, tmp_path):

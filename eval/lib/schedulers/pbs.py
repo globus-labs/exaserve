@@ -46,6 +46,22 @@ def render_pbs_job(
 #PBS -e {stderr_dir}/
 
 cd {code_root}
+unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M
+if [ -n "$PYTHONPATH" ]; then
+    CLEAN_PYTHONPATH=""
+    OLD_IFS="$IFS"
+    IFS=':'
+    for entry in $PYTHONPATH; do
+        case "$entry" in
+            *"/venv/"*"/site-packages"*|*"/.venv/"*"/site-packages"*)
+                continue
+                ;;
+        esac
+        CLEAN_PYTHONPATH="${{CLEAN_PYTHONPATH:+$CLEAN_PYTHONPATH:}}$entry"
+    done
+    IFS="$OLD_IFS"
+    export PYTHONPATH="$CLEAN_PYTHONPATH"
+fi
 source "{env_script}"
-python -m eval.cli run execute "{run_yaml_path}"
+python3 -m eval.cli run execute "{run_yaml_path}"
 """

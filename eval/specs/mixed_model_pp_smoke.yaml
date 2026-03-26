@@ -12,7 +12,7 @@ workload:
   duration: 30.0
   input_len: 512
   output_len: 128
-  rate_per_node: 4.0
+  rate_per_node: 0.25
 deployment:
   model_storage_path: /flare/datasets/model-weights/hub
   models:
@@ -30,15 +30,16 @@ deployment:
   worker_max_ongoing: 64
 client:
   num_runs: 1
-  dest: direct
+  dest: proxy
   num_go_procs: 16
   num_go_workers: 2
-  go_concurrency: 40
+  go_concurrency: 8
 backend:
   default: ray
   args:
     ray:
       proxy:
-        type: none
+        type: litellm
+        num_workers: 1
 scheduler:
   type: pbs
