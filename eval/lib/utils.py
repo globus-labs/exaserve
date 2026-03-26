@@ -1,3 +1,10 @@
+"""Shared utilities for the eval control plane.
+
+Low-level helpers used across multiple modules: YAML/JSON I/O, stable
+content hashing, dataclass serialization, dotted-path field access for
+matrix expansion, path resolution, and slug generation.
+"""
+
 from __future__ import annotations
 
 import copy

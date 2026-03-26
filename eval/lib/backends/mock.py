@@ -1,3 +1,10 @@
+"""Mock backend adapter for testing the eval control plane without a real cluster.
+
+Returns a dummy endpoint (127.0.0.1:65535) and immediately signals ready.
+Used by test_eval_control_plane.py and for dry-run validation of the
+materialize -> execute pipeline.
+"""
+
 from __future__ import annotations
 
 from .base import BackendAdapter, BackendRunContext, LaunchedBackend, ProcessMonitor, RuntimeEnvSpec

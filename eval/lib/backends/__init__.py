@@ -1,3 +1,17 @@
+"""Backend adapter registry.
+
+Backends encapsulate how the inference serving cluster is launched, monitored,
+and torn down. The adapter interface (BackendAdapter in base.py) defines the
+lifecycle: validate -> build_runtime_manifest -> launch -> wait_ready ->
+discover_targets -> stop.
+
+Currently supported:
+  - "ray": launches the real Ray Serve cluster via scripts/launch_cluster.sh.
+  - "mock": no-op adapter for testing the control plane without a real cluster.
+
+Adding a new backend: implement BackendAdapter, register it in _BACKENDS.
+"""
+
 from __future__ import annotations
 
 from .base import BackendAdapter

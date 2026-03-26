@@ -1,3 +1,10 @@
+"""Spec catalog: discovery and resolution of eval/specs/*.yaml files.
+
+Spec files are the single source of truth for experiment definitions.
+This module provides lookup by name (stem of the filename) or by absolute
+path, so callers don't need to know the filesystem layout.
+"""
+
 from __future__ import annotations
 
 import os

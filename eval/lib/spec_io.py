@@ -1,3 +1,20 @@
+"""Spec I/O: loading, validation, and normalization of experiment spec YAML files.
+
+This module is the single entry point for turning a spec YAML into an
+ExperimentSpec dataclass. It performs three phases:
+
+  1. **Parsing** — YAML dict -> typed dataclass fields, with site_config
+     defaults filling in any omitted paths (model storage, prompts, etc.).
+  2. **Validation** — structural checks (required fields, value ranges,
+     supported enum values) that catch user errors early.
+  3. **Normalization** — derived-field sync (e.g., client.num_nodes defaults
+     to deployment.num_nodes when not explicitly set).
+
+Design note: site_config is accessed lazily via get_site_config() rather
+than module-level constants so that tests and non-Aurora environments can
+override it without import-time side effects.
+"""
+
 from __future__ import annotations
 
 import os

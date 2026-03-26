@@ -1,3 +1,18 @@
+"""Ray backend adapter.
+
+This adapter bridges the new eval control plane with the existing serving
+infrastructure (scripts/launch_cluster.sh, src/driver.py, src/aurora_serve.py).
+
+Key responsibilities:
+  - build_runtime_manifest: translates the eval-layer RunPlan into the
+    serving-layer ExpConfig YAML that launch_cluster.sh and replay_client.py
+    expect. This is the bridge between the two config schemas.
+  - launch: starts `bash scripts/launch_cluster.sh <manifest>` as a child
+    process group, monitored by ProcessMonitor for the readiness marker.
+  - runtime_env: selects the correct env script (env_aurora vs env_litellm)
+    based on proxy type, and sets AURORA_NULL_COMPUTE for stub experiments.
+"""
+
 from __future__ import annotations
 
 import os

@@ -1,3 +1,29 @@
+"""Data models for the eval control plane.
+
+All configuration flows through plain dataclasses defined here, with no
+behavior — just data shapes. This keeps the data layer decoupled from I/O,
+validation, and execution logic in sibling modules.
+
+Hierarchy (from spec YAML to execution):
+
+  ExperimentSpec            <- parsed from a spec YAML (via spec_io.py)
+    ├── MatrixSpec          <- defines the combinatorial sweep (expand via matrix.py)
+    ├── TraceSpec           <- what kind of trace to generate
+    ├── WorkloadSpec        <- request shape: duration, token lengths, rate
+    ├── DeploymentSpec      <- cluster layout: nodes, models, storage paths
+    │     └── ModelSpec[]   <- per-model TP/PP/replica config
+    ├── ClientSpec          <- replay client tuning: Go procs, concurrency
+    ├── BackendSpec         <- which backend adapter to use + per-backend args
+    └── SchedulerSpec       <- PBS queue/walltime/project settings
+
+  VariantSpec               <- one concrete point in the matrix sweep
+
+  TraceArtifact             <- content-addressed trace file on disk
+  RunBundle                 <- directory layout for a materialized run
+  RunPlan                   <- full snapshot written to run.yaml (self-contained)
+  ReplayRequest             <- single request row loaded by replay_client.py
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

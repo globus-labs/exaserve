@@ -1,3 +1,15 @@
+"""Matrix expansion: combinatorial sweep over experiment axes.
+
+Given an ExperimentSpec with a MatrixSpec (e.g., axes = [{name: num_nodes,
+values: [1,2,4]}]), expand_matrix() produces one VariantSpec per point in
+the Cartesian product. Each variant gets a deep-copied spec with the axis
+values injected into the targeted dotted paths (e.g., "deployment.num_nodes").
+
+Axes can target any field on the spec via dotted_set(). Fields *not* targeted
+by the matrix (like client.num_nodes, scheduler.nodes) are auto-synced to
+deployment.num_nodes so they stay consistent unless explicitly swept.
+"""
+
 from __future__ import annotations
 
 import itertools

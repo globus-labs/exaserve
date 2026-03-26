@@ -1,3 +1,22 @@
+"""Run planner: materialize experiment specs into executable run bundles.
+
+This is the core materialization layer. Given a spec path, it:
+
+  1. Loads and validates the spec (spec_io).
+  2. Expands the matrix into concrete variants (matrix.py).
+  3. For each variant:
+     a. Generates / reuses a content-addressed trace artifact (trace_store).
+     b. Creates a run bundle directory tree (logs, results, state, meta, runtime).
+     c. Asks the backend adapter to build a runtime manifest and validate.
+     d. Renders a PBS job script that will invoke `eval.cli run execute`.
+     e. Writes the self-contained run.yaml (RunPlan) that captures everything
+        needed to execute the run without re-reading the original spec.
+
+The run.yaml is the contract between materialize-time and execute-time:
+the executor only needs the run.yaml path to reconstruct the full RunPlan
+and drive the backend lifecycle.
+"""
+
 from __future__ import annotations
 
 import os

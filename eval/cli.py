@@ -1,3 +1,19 @@
+"""CLI entry point for the eval control plane.
+
+Usage: python -m eval.cli <area> <command> [args]
+
+Subcommands:
+  spec validate <spec>              — parse and validate a spec file
+  spec list                         — list available spec names in eval/specs/
+  trace materialize <spec>          — generate cached trace artifacts for a spec
+  run materialize <spec>            — create run bundles (traces + PBS jobs + run.yaml)
+  run submit <target>               — qsub the PBS job for a materialized run bundle
+  run execute <run.yaml>            — execute a run inside a PBS job (called by job.pbs)
+
+This CLI replaces the old workflow of:
+  python eval/exp_generator.py -> python eval/submit_all.py -> (PBS runs run_exp.sh)
+"""
+
 from __future__ import annotations
 
 import argparse

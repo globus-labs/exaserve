@@ -1,3 +1,19 @@
+"""Run executor: drive the full lifecycle of a materialized run.
+
+execute_run() is the entry point called inside a PBS job. It:
+
+  1. Loads the RunPlan from the run.yaml written by the planner.
+  2. Delegates to the backend adapter for: launch -> wait_ready -> discover_targets.
+  3. Spawns the replay client (eval/replay_client.py) against the discovered
+     endpoints, optionally via MPI for multi-node client fanout.
+  4. Writes state transitions (running -> replaying -> succeeded/failed) to
+     the run bundle's state file for external monitoring.
+  5. Ensures the backend is stopped in the finally block regardless of outcome.
+
+submit_run() is a convenience wrapper that calls `qsub` on the PBS job
+script rendered by the planner.
+"""
+
 from __future__ import annotations
 
 import os

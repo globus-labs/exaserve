@@ -1,5 +1,11 @@
 """Content-addressable trace store with deduplication.
 
+Traces are expensive to generate (tokenizer loading, prompt truncation),
+so this module caches them by a stable hash of their "identity" — the set
+of spec fields that affect trace content (workload params, deployment
+topology, trace kind). Two specs that differ only in scheduler or client
+settings will share the same cached trace.
+
 Trace generation logic lives in trace_generators.py. This module handles
 caching, identity hashing, and artifact management.
 """

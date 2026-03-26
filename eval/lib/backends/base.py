@@ -1,3 +1,20 @@
+"""Base classes and utilities for backend adapters.
+
+BackendAdapter defines the lifecycle contract that every backend must implement:
+
+  validate()                — check that the RunPlan is valid for this backend.
+  build_runtime_manifest()  — write a backend-specific config (e.g., ExpConfig YAML
+                              for the ray backend) that the serving code reads at launch.
+  runtime_env()             — return env script path + env vars for the PBS job.
+  launch()                  — start the serving cluster, return a LaunchedBackend handle.
+  wait_ready()              — block until the cluster signals readiness.
+  discover_targets()        — return base URLs the replay client should hit.
+  stop()                    — tear down the cluster.
+
+ProcessMonitor is a reusable helper that tails a subprocess's stdout into a
+log file while scanning for a readiness marker string.
+"""
+
 from __future__ import annotations
 
 import abc
