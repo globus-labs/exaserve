@@ -5,22 +5,8 @@ from pathlib import Path
 
 try:
     from .model_paths import iter_unique_model_ids
-    from .site_config import get_site_config
 except ImportError:  # pragma: no cover - script-mode fallback
     from model_paths import iter_unique_model_ids
-    from site_config import get_site_config
-
-
-def _default_model_storage_path() -> str:
-    return get_site_config().model_storage_path
-
-
-def _default_local_stage_path() -> str:
-    return get_site_config().local_stage_path
-
-
-def _default_num_gpus_per_node() -> int:
-    return get_site_config().num_gpus_per_node
 
 
 def require_yaml():
@@ -63,14 +49,11 @@ class ModelConfig: # model configs for the engine
 class DeploymentConfig:
     num_nodes: int # TODO: right now just keep num_nodes = pbs_num_nodes, future support smaller num_nodes.
     model_configs: List[ModelConfig]
-    # NOTE: default_factory is only used when constructing DeploymentConfig programmatically
-    # (e.g., from eval/lib/). Runtime code always loads from YAML with explicit values via
-    # load_deployment_config(), so site_config is never invoked in the serving hot path.
-    model_storage_path: str = field(default_factory=_default_model_storage_path)
-    local_stage_path: str = field(default_factory=_default_local_stage_path)
+    model_storage_path: str = ""
+    local_stage_path: str = ""
     deployment_name: str = "aurora_serve"
     worker_max_ongoing: int = 32
-    num_gpus_per_node: int = field(default_factory=_default_num_gpus_per_node) # machine spec
+    num_gpus_per_node: int = 12  # Aurora default: 12 GPU tiles per node
   
 @dataclass
 class ProxyConfig:
@@ -135,11 +118,11 @@ def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
     return DeploymentConfig(
         num_nodes=int(d.get("num_nodes", 1)),
         model_configs=model_configs,
-        model_storage_path=str(d.get("model_storage_path", _default_model_storage_path())),
-        local_stage_path=str(d.get("local_stage_path", _default_local_stage_path())),
+        model_storage_path=str(d.get("model_storage_path", "")),
+        local_stage_path=str(d.get("local_stage_path", "")),
         deployment_name=str(d.get("deployment_name", "aurora_serve")),
         worker_max_ongoing=int(d.get("worker_max_ongoing", 32)),
-        num_gpus_per_node=int(d.get("num_gpus_per_node", _default_num_gpus_per_node())),
+        num_gpus_per_node=int(d.get("num_gpus_per_node", 12)),
     )
 
 
@@ -242,20 +225,3 @@ def _path_to_str(obj: Any) -> Any:
     if isinstance(obj, Path):
         return str(obj)
     return obj
-
-
-# ---------------------------------------------------------------------------
-# Backward compatibility: eval-only types moved to eval/lib/manifest.py.
-# These re-exports keep existing callers (eval/exp_configs.py,
-# eval/lib/replay_engine.py) working until they are migrated.
-# ---------------------------------------------------------------------------
-try:
-    from eval.lib.manifest import (  # noqa: F401
-        TraceGeneratorConfig,
-        WeakScalingConfig,
-        ReplayClientConfig,
-        EvalManifest as ExpConfig,
-        load_eval_manifest as load_exp_config,
-    )
-except ImportError:  # pragma: no cover - when eval package is not on sys.path
-    pass

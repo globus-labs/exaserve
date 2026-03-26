@@ -182,8 +182,3 @@ def load_eval_manifest(path: str) -> EvalManifest:
         ),
         proxy_config=_proxy_config_from_dict(data.get("proxy_config", {})),
     )
-
-
-# Backward compatibility aliases
-ExpConfig = EvalManifest
-load_exp_config = load_eval_manifest

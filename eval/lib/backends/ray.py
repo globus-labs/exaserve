@@ -19,7 +19,7 @@ import os
 import subprocess
 
 from src.schemas import DeploymentConfig, ModelConfig, ProxyConfig
-from src.site_config import get_site_config
+from site_config import get_site_config
 
 from ..manifest import (
     EvalManifest,

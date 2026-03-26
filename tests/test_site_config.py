@@ -1,4 +1,3 @@
-import importlib
 import os
 import sys
 import tempfile
@@ -7,13 +6,9 @@ from contextlib import contextmanager
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
-SRC_DIR = os.path.join(REPO_ROOT, "src")
-EVAL_DIR = os.path.join(REPO_ROOT, "eval")
-for path in (SRC_DIR, EVAL_DIR):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
-import schemas
 import site_config
 
 
@@ -115,52 +110,6 @@ class SiteConfigTests(unittest.TestCase):
         self.assertEqual(first.model_storage_path, "/tmp/first")
         self.assertEqual(cached.model_storage_path, "/tmp/first")
         self.assertEqual(updated.model_storage_path, "/tmp/second")
-
-    def test_exp_configs_defaults_follow_site_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_home:
-            with patched_site_env(
-                USER="alice",
-                HOME=temp_home,
-                AURORA_MODEL_STORAGE_PATH="/tmp/models",
-                AURORA_LITELLM_PYTHON_PATH="/tmp/litellm-python",
-                AURORA_EXPERIMENTS_ROOT="/tmp/experiments",
-            ):
-                site_config.clear_site_config_cache()
-                exp_configs = importlib.import_module("exp_configs")
-                exp_configs = importlib.reload(exp_configs)
-                params = exp_configs.WeakScalingExpParams(batch_name="demo", num_nodes_list=[1])
-
-        self.assertEqual(exp_configs.DEFAULT_MODEL_PATH, "/tmp/models")
-        self.assertEqual(exp_configs.DEFAULT_EXPERIMENTS_ROOT, "/tmp/experiments")
-        self.assertEqual(params.model_storage_path, "/tmp/models")
-        self.assertEqual(params.proxy_python_path, "/tmp/litellm-python")
-
-    def test_deployment_config_defaults_follow_site_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_home:
-            with patched_site_env(
-                USER="alice",
-                HOME=temp_home,
-                AURORA_MODEL_STORAGE_PATH="/tmp/models",
-                AURORA_NUM_GPUS_PER_NODE="32",
-                AURORA_LOCAL_STAGE_PATH="/tmp/local-stage",
-            ):
-                site_config.clear_site_config_cache()
-                deployment = schemas.DeploymentConfig(
-                    num_nodes=1,
-                    model_configs=[
-                        schemas.ModelConfig(
-                            model_id="demo",
-                            tensor_parallel_size=1,
-                            max_model_len=1024,
-                            size=1,
-                        )
-                    ],
-                )
-
-        self.assertEqual(deployment.model_storage_path, "/tmp/models")
-        self.assertEqual(deployment.num_gpus_per_node, 32)
-        self.assertEqual(deployment.local_stage_path, "/tmp/local-stage")
-
 
 if __name__ == "__main__":
     unittest.main()

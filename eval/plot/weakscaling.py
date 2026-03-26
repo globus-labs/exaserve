@@ -17,9 +17,13 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 import argparse
 
-# Allow importing from the parent eval/ directory
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from exp_configs import EXPERIMENT_REGISTRY, DEFAULT_EXPERIMENTS_ROOT
+# Allow importing from repo root
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from eval.lib.catalog import find_spec_path, list_spec_names
+from site_config import get_site_config
+
+EXPERIMENT_REGISTRY = {name: find_spec_path(name) for name in list_spec_names()}
+DEFAULT_EXPERIMENTS_ROOT = get_site_config().experiments_root
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
