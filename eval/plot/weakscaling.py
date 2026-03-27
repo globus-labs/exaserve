@@ -20,6 +20,7 @@ import argparse
 # Allow importing from repo root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from eval.lib.catalog import find_spec_path, list_spec_names
+from eval.lib.run_planner import resolve_run_group_dir
 from site_config import get_site_config
 
 EXPERIMENT_REGISTRY = {name: find_spec_path(name) for name in list_spec_names()}
@@ -161,8 +162,7 @@ def _format_plot_text(template: str, template_fields: Optional[Dict[str, str]]) 
 def extract_node_count(directory_name: str) -> int:
     """Extract the number of nodes from directory name.
 
-    Handles both legacy (``1_nodes``) and current slugified
-    (``1-nodes_20260327T014056Z``) naming conventions.
+    Handles slugified names such as ``1-nodes``.
     """
     match = re.match(r'(\d+)[-_]nodes', directory_name)
     if match:
@@ -235,7 +235,7 @@ def load_results(
     Load results from all node configurations.
     
     Args:
-        results_folder: Path to the experiment directory (e.g. data/experiments/<exp>).
+        results_folder: Path to a materialized run group directory.
                         Results are expected at <N_nodes>/results/result*.json.
         target_indices: Optional list of indices to aggregate (e.g. [0, 1, 2]).
                         If None, uses the latest result file in each dir.
@@ -686,6 +686,12 @@ def main():
     parser.add_argument("-e", "--experiment", type=str, required=True,
                        help=f"Experiment name from EXPERIMENT_REGISTRY. "
                             f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}.")
+    parser.add_argument(
+        "--run-group",
+        type=str,
+        default="latest",
+        help="Run group to read (e.g. run0). Default: latest.",
+    )
     parser.add_argument("-b", "--backend", type=str, default="ray",
                        help="Backend name for display purposes "
                             "(e.g. 'ray', 'mpi'). Default: ray.")
@@ -716,8 +722,9 @@ def main():
             f"Unknown experiment '{args.experiment}'. "
             f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}"
         )
-    results_folder = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "runs", args.experiment)
+    results_folder = resolve_run_group_dir(args.experiment, run_group=args.run_group)
     print(f"Experiment : {args.experiment}  (backend={args.backend})")
+    print(f"Run group  : {args.run_group}")
     print(f"Results dir: {results_folder}")
 
     # Determine default output filename

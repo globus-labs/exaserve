@@ -170,6 +170,7 @@ class TraceArtifact:
 
 @dataclass
 class RunBundle:
+    group_root_dir: str
     root_dir: str
     run_yaml_path: str
     job_path: str
@@ -179,20 +180,16 @@ class RunBundle:
     results_dir: str
     state_dir: str
     state_path: str
-    meta_dir: str
-    spec_snapshot_path: str
     runtime_dir: str
 
 
-# TODO: Consider slimming RunPlan to store only spec_snapshot_path + variant
-# overrides instead of duplicating full DeploymentSpec/ClientSpec/etc. This would
-# reduce run.yaml size and avoid data staleness, at the cost of requiring the
-# spec snapshot to be resolved at load time.
 @dataclass
 class RunPlan:
     run_id: str
+    run_group_id: str
     created_at: str
     repo_root: str
+    snapshot_root: str
     bundle: RunBundle
     spec_name: str
     variant_name: str

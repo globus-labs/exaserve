@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         "submit-all", help="Submit all pending runs for a spec name"
     )
     run_submit_all.add_argument("spec_name", help="Spec name (matches runs/<spec_name>/)")
+    run_submit_all.add_argument(
+        "--run-group",
+        default="latest",
+        help="Run group to submit (e.g. run0). Default: latest.",
+    )
     run_submit_all.add_argument("--experiments-root", default=None)
     run_submit_all.add_argument("--dry-run", action="store_true")
     run_submit_all.add_argument(
@@ -114,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "submit-all":
             return submit_all(
                 args.spec_name,
+                run_group=args.run_group,
                 experiments_root=args.experiments_root,
                 dry_run=args.dry_run,
                 poll_interval=args.poll_interval,

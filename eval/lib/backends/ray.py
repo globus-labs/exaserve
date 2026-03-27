@@ -129,7 +129,7 @@ class RayBackendAdapter(BackendAdapter):
             pbs_num_nodes=run_plan.scheduler.nodes,
             pbs_walltime=run_plan.scheduler.walltime,
             pbs_queue_name=run_plan.scheduler.queue,
-            pbs_job_name=f"{run_plan.spec_name}_{run_plan.variant_name}",
+            pbs_job_name=f"{run_plan.spec_name}_{run_plan.run_group_id}_{run_plan.variant_name}",
             pbs_working_dir=run_plan.bundle.runtime_dir,
             job_trace_config=trace_config,
             job_replay_client_config=ReplayClientConfig(
@@ -153,7 +153,9 @@ class RayBackendAdapter(BackendAdapter):
                 model_configs=model_configs,
                 model_storage_path=run_plan.deployment.model_storage_path,
                 local_stage_path=run_plan.deployment.local_stage_path,
-                deployment_name=run_plan.spec_name,
+                deployment_name=(
+                    f"{run_plan.spec_name}_{run_plan.run_group_id}_{run_plan.run_id}"
+                ),
                 worker_max_ongoing=run_plan.deployment.worker_max_ongoing,
                 num_gpus_per_node=run_plan.deployment.num_gpus_per_node,
             ),

@@ -27,7 +27,7 @@ from typing import Iterable
 
 from .backends import get_backend_adapter
 from .backends.base import BackendRunContext
-from .run_planner import load_run_plan, runs_root, write_run_state
+from .run_planner import load_run_plan, resolve_run_group_dir, write_run_state
 
 
 def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
@@ -38,7 +38,10 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
 
     if dry_run:
         write_run_state(run_plan, "dry-run")
-        print(f"DRY RUN: would execute {run_plan.run_id} with backend {run_plan.backend_name}")
+        print(
+            f"DRY RUN: would execute {run_plan.run_group_id}/{run_plan.run_id} "
+            f"with backend {run_plan.backend_name}"
+        )
         return 0
 
     launched = None
@@ -274,6 +277,7 @@ _POLL_INTERVAL_S = 120
 def submit_all(
     spec_name: str,
     *,
+    run_group: str = "latest",
     experiments_root: str | None = None,
     dry_run: bool = False,
     poll_interval: int = _POLL_INTERVAL_S,
@@ -284,22 +288,30 @@ def submit_all(
     exists) are skipped.  When a queue is full the function retries every
     *poll_interval* seconds until all runs have been submitted.
     """
-    spec_dir = os.path.join(runs_root(experiments_root), spec_name)
-    if not os.path.isdir(spec_dir):
-        print(f"No runs directory found for spec {spec_name!r}: {spec_dir}")
+    try:
+        group_dir = resolve_run_group_dir(
+            spec_name,
+            run_group=run_group,
+            experiments_root=experiments_root,
+        )
+    except FileNotFoundError as exc:
+        print(str(exc))
         return 1
 
-    pending = _discover_pending_runs(spec_dir)
+    pending = _discover_pending_runs(group_dir)
     if not pending:
-        print(f"No pending runs found under {spec_dir}")
+        print(f"No pending runs found under {group_dir}")
         return 0
 
     total = len(pending)
-    print(f"Found {total} pending run(s) for {spec_name!r}")
+    print(f"Found {total} pending run(s) for {spec_name!r} in {os.path.basename(group_dir)!r}")
 
     if dry_run:
         for run_plan in pending:
-            print(f"  [dry-run] qsub {run_plan.bundle.job_path}  (queue={run_plan.scheduler.queue})")
+            print(
+                f"  [dry-run] qsub {run_plan.bundle.job_path}  "
+                f"({run_plan.run_group_id}/{run_plan.run_id}, queue={run_plan.scheduler.queue})"
+            )
         return 0
 
     remaining = list(pending)
@@ -323,11 +335,17 @@ def submit_all(
             if ok:
                 submitted.append(run_plan.run_id)
                 queue_counts[queue] = current + 1
-                print(f"  [{len(submitted)}/{total}] Submitted {run_plan.run_id}: {msg}")
+                print(
+                    f"  [{len(submitted)}/{total}] Submitted "
+                    f"{run_plan.run_group_id}/{run_plan.run_id}: {msg}"
+                )
             else:
                 # qsub rejected — likely queue full despite our count, retry
                 next_round.append(run_plan)
-                print(f"  [{len(submitted)}/{total}] Deferred  {run_plan.run_id}: {msg}")
+                print(
+                    f"  [{len(submitted)}/{total}] Deferred  "
+                    f"{run_plan.run_group_id}/{run_plan.run_id}: {msg}"
+                )
 
         remaining = next_round
         if remaining:
@@ -346,14 +364,14 @@ def submit_all(
     return 0
 
 
-def _discover_pending_runs(spec_dir: str):
+def _discover_pending_runs(group_dir: str):
     """Return RunPlan objects for runs that are not yet successfully completed."""
     pending = []
-    for entry in sorted(os.listdir(spec_dir)):
-        run_yaml = os.path.join(spec_dir, entry, "run.yaml")
+    for entry in sorted(os.listdir(group_dir)):
+        run_yaml = os.path.join(group_dir, entry, "run.yaml")
         if not os.path.isfile(run_yaml):
             continue
-        if _is_completed(os.path.join(spec_dir, entry)):
+        if _is_completed(os.path.join(group_dir, entry)):
             continue
         pending.append(load_run_plan(run_yaml))
     return pending

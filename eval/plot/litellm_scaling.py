@@ -26,15 +26,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import ScalarFormatter
 
-from weakscaling import (
-    DEFAULT_EXPERIMENTS_ROOT,
-    EXPERIMENT_REGISTRY,
-    _extract_plot_template_fields,
-    _format_plot_text,
-    extract_node_count,
-    parse_indices,
-    parse_node_select_mapping,
-)
+from eval.lib.run_planner import resolve_run_group_dir
+try:
+    from .weakscaling import (
+        EXPERIMENT_REGISTRY,
+        _extract_plot_template_fields,
+        _format_plot_text,
+        extract_node_count,
+        parse_indices,
+        parse_node_select_mapping,
+    )
+except ImportError:  # pragma: no cover - script-mode fallback
+    from weakscaling import (
+        EXPERIMENT_REGISTRY,
+        _extract_plot_template_fields,
+        _format_plot_text,
+        extract_node_count,
+        parse_indices,
+        parse_node_select_mapping,
+    )
 
 
 PLOT_TITLE_TEMPLATE = "LiteLLM Proxy + Ray Serve (EveryNode) + Dummy RayWorkers (Null-Compute)" 
@@ -558,6 +568,12 @@ def main():
         help="Path to save the output plot (default: litellm_scaling_log.png or litellm_scaling_linear.png)",
     )
     parser.add_argument(
+        "--run-group",
+        type=str,
+        default="latest",
+        help="Run group to read (e.g. run0). Default: latest.",
+    )
+    parser.add_argument(
         "--linear",
         action="store_true",
         help="Use linear scale for X and Y axes (default: log scale)",
@@ -614,8 +630,9 @@ def main():
             f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}"
         )
 
-    results_folder = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "runs", args.experiment)
+    results_folder = resolve_run_group_dir(args.experiment, run_group=args.run_group)
     print(f"Experiment : {args.experiment}  (backend={args.backend})")
+    print(f"Run group  : {args.run_group}")
     print(f"Results dir: {results_folder}")
 
     if not args.output_path:
