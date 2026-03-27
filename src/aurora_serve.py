@@ -850,7 +850,7 @@ def deploy_model(
             "num_cpus": model_config.num_cpus_per_replica,
             "runtime_env": build_actor_runtime_env(extra_env_vars),
         },
-        max_ongoing_requests=config.worker_max_ongoing,
+        max_ongoing_requests=config.replica_max_ongoing_requests,
         health_check_period_s=30,
         health_check_timeout_s=10,
     )

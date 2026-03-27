@@ -72,7 +72,6 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
     client_raw = raw.get("client", {})
     backend_raw = raw.get("backend", {})
     scheduler_raw = raw.get("scheduler", {})
-
     trace = TraceSpec(
         kind=str(trace_raw["kind"]),
         input_prompt_path=resolve_path(
@@ -113,7 +112,9 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
             base_dir=base_dir,
         )
         or get_site_config().local_stage_path,
-        worker_max_ongoing=int(deployment_raw.get("worker_max_ongoing", 64)),
+        replica_max_ongoing_requests=int(
+            deployment_raw.get("replica_max_ongoing_requests", 64)
+        ),
         num_gpus_per_node=int(
             deployment_raw.get("num_gpus_per_node", get_site_config().num_gpus_per_node)
         ),

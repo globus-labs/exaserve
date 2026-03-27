@@ -156,7 +156,7 @@ class RayBackendAdapter(BackendAdapter):
                 deployment_name=(
                     f"{run_plan.spec_name}_{run_plan.run_group_id}_{run_plan.run_id}"
                 ),
-                worker_max_ongoing=run_plan.deployment.worker_max_ongoing,
+                replica_max_ongoing_requests=run_plan.deployment.replica_max_ongoing_requests,
                 num_gpus_per_node=run_plan.deployment.num_gpus_per_node,
             ),
             ray_cluster_config=RayClusterConfig(

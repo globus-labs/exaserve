@@ -409,7 +409,7 @@ def load_run_plan(path: str) -> RunPlan:
         models=[ModelSpec.from_dict(model_raw) for model_raw in deployment_raw.get("models", [])],
         model_storage_path=str(deployment_raw["model_storage_path"]),
         local_stage_path=str(deployment_raw["local_stage_path"]),
-        worker_max_ongoing=int(deployment_raw["worker_max_ongoing"]),
+        replica_max_ongoing_requests=int(deployment_raw["replica_max_ongoing_requests"]),
         num_gpus_per_node=int(deployment_raw["num_gpus_per_node"]),
     )
     client = ClientSpec(

@@ -61,6 +61,7 @@ workload:
   output_len: 4
   rate_per_node: 2.0
 deployment:
+  replica_max_ongoing_requests: 7
   models:
     - model_id: test/model
       tensor_parallel_size: 1
@@ -188,6 +189,7 @@ def test_spec_load_and_matrix_expand(temp_spec):
     spec = load_experiment_spec(str(temp_spec))
     variants = expand_matrix(spec)
     assert spec.name == "test_spec"
+    assert spec.deployment.replica_max_ongoing_requests == 7
     assert [variant.variant_name for variant in variants] == ["1_nodes", "2_nodes"]
     assert [variant.spec.deployment.num_nodes for variant in variants] == [1, 2]
     assert [variant.spec.client.num_nodes for variant in variants] == [1, 2]

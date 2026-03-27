@@ -52,7 +52,7 @@ class DeploymentConfig:
     model_storage_path: str = ""
     local_stage_path: str = ""
     deployment_name: str = "aurora_serve"
-    worker_max_ongoing: int = 32
+    replica_max_ongoing_requests: int = 32
     num_gpus_per_node: int = 12  # Aurora default: 12 GPU tiles per node
   
 @dataclass
@@ -121,7 +121,7 @@ def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
         model_storage_path=str(d.get("model_storage_path", "")),
         local_stage_path=str(d.get("local_stage_path", "")),
         deployment_name=str(d.get("deployment_name", "aurora_serve")),
-        worker_max_ongoing=int(d.get("worker_max_ongoing", 32)),
+        replica_max_ongoing_requests=int(d.get("replica_max_ongoing_requests", 32)),
         num_gpus_per_node=int(d.get("num_gpus_per_node", 12)),
     )
 
@@ -134,8 +134,11 @@ def validate_deployment_config(config: DeploymentConfig) -> DeploymentConfig:
         raise ValueError(f"num_nodes must be >= 1, got {config.num_nodes}")
     if config.num_gpus_per_node < 1:
         raise ValueError(f"num_gpus_per_node must be >= 1, got {config.num_gpus_per_node}")
-    if config.worker_max_ongoing < 1:
-        raise ValueError(f"worker_max_ongoing must be >= 1, got {config.worker_max_ongoing}")
+    if config.replica_max_ongoing_requests < 1:
+        raise ValueError(
+            "replica_max_ongoing_requests must be >= 1, "
+            f"got {config.replica_max_ongoing_requests}"
+        )
     if not config.model_configs:
         raise ValueError("model_configs must contain at least one model")
     if not Path(config.local_stage_path).is_absolute():

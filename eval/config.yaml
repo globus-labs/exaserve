@@ -42,7 +42,7 @@ model_deployment_config:
   model_storage_path: /path/to/models
   num_gpus_per_node: 12
   num_nodes: 2
-  worker_max_ongoing: 32
+  replica_max_ongoing_requests: 32
 pbs_job_name: sample_sparse
 pbs_num_nodes: 2
 pbs_queue_name: debug

@@ -1,9 +1,9 @@
-name: weak_scaling_tests
+name: weak_scaling_litellm_pnw_2
 matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [1, 2, 4, 8]
+      values: [1, 2, 4, 8, 16, 32, 64]
       targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
 trace:
@@ -11,7 +11,7 @@ trace:
 workload:
   duration: 5.0
   input_len: 2048
-  output_len: 512
+  output_len: 128
   rate_per_node: 80.0
 deployment:
   models:
@@ -20,10 +20,9 @@ deployment:
       pipeline_parallel_size: 1
       max_model_len: 4096
       size: 8
-  worker_max_ongoing: 64
 client:
-  num_runs: 1
-  dest: direct
+  num_runs: 3
+  dest: proxy
   num_go_procs: 16
   num_go_workers: 2
   go_concurrency: 40
@@ -31,7 +30,10 @@ backend:
   default: ray
   args:
     ray:
+      launch:
+        ray_node_cpus: 64
       proxy:
-        type: none
+        type: litellm
+        num_workers: 2
 scheduler:
   type: pbs

@@ -1,10 +1,13 @@
-name: null_compute
+name: null_compute_litellm
 matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [256, 512, 1024, 2048]
-      targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+      values: [1, 2, 4, 8, 16, 32, 64]
+      targets:
+        - deployment.num_nodes
+        - client.num_nodes
+        - scheduler.nodes
       label_template: "{value}_nodes"
 trace:
   kind: weak_scaling
@@ -20,10 +23,10 @@ deployment:
       pipeline_parallel_size: 1
       max_model_len: 4096
       size: 8
-  worker_max_ongoing: 64
+  replica_max_ongoing_requests: 64
 client:
   num_runs: 3
-  dest: direct
+  dest: proxy
   num_go_procs: 16
   num_go_workers: 2
   go_concurrency: 40
@@ -34,6 +37,7 @@ backend:
       launch:
         null_compute: true
       proxy:
-        type: none
+        type: litellm
+        num_workers: 1
 scheduler:
   type: pbs

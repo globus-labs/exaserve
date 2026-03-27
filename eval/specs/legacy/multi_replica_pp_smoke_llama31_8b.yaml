@@ -1,4 +1,4 @@
-name: mixed_model_pp_smoke
+name: multi_replica_pp_smoke_llama31_8b
 matrix:
   name_template: "{num_nodes}_nodes"
   axes:
@@ -12,7 +12,7 @@ workload:
   duration: 30.0
   input_len: 512
   output_len: 128
-  rate_per_node: 0.25
+  rate_per_node: 8.0
 deployment:
   model_storage_path: /flare/datasets/model-weights/hub
   models:
@@ -21,25 +21,18 @@ deployment:
       pipeline_parallel_size: 2
       max_model_len: 4096
       size: 8
-      num_replicas: 1
-    - model_id: facebook/opt-125m
-      tensor_parallel_size: 4
-      pipeline_parallel_size: 1
-      max_model_len: 2048
-      size: 1
-  worker_max_ongoing: 64
+  replica_max_ongoing_requests: 64
 client:
   num_runs: 1
-  dest: proxy
+  dest: direct
   num_go_procs: 16
   num_go_workers: 2
-  go_concurrency: 8
+  go_concurrency: 40
 backend:
   default: ray
   args:
     ray:
       proxy:
-        type: litellm
-        num_workers: 1
+        type: none
 scheduler:
   type: pbs

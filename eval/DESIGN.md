@@ -248,7 +248,7 @@ deployment:
       gpu_memory_utilization: 0.90
   model_storage_path: <path>     # Optional. Defaults from site_config.
   local_stage_path: <path>       # Optional. Defaults from site_config.
-  worker_max_ongoing: 64
+  replica_max_ongoing_requests: 64
 
 client:
   num_runs: 3

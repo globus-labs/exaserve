@@ -101,7 +101,7 @@ class DeploymentSpec:
     models: list[ModelSpec]
     model_storage_path: str = ""
     local_stage_path: str = ""
-    worker_max_ongoing: int = 64
+    replica_max_ongoing_requests: int = 64
     num_gpus_per_node: int = 0
 
 
