@@ -16,16 +16,18 @@ script rendered by the planner.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Iterable
 
 from .backends import get_backend_adapter
 from .backends.base import BackendRunContext
-from .run_planner import load_run_plan, write_run_state
+from .run_planner import load_run_plan, runs_root, write_run_state
 
 
 def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
@@ -253,3 +255,172 @@ def _resolve_run_yaml(target: str) -> str:
     if os.path.isfile(target):
         return os.path.abspath(target)
     raise FileNotFoundError(f"Could not resolve run.yaml from {target}")
+
+
+# ---------------------------------------------------------------------------
+# submit_all: batch-submit all pending runs for a spec
+# ---------------------------------------------------------------------------
+
+# Max jobs (running + queued) the scheduler accepts per queue.
+_QUEUE_SLOT_LIMITS: dict[str, int | None] = {
+    "debug": 2,           # 1 running + 1 queued
+    "debug-scaling": 2,   # 1 running + 1 queued
+    "prod": None,         # 1 running + unlimited queued
+}
+_DEFAULT_QUEUE_SLOTS = 2  # conservative fallback for unknown queues
+_POLL_INTERVAL_S = 120
+
+
+def submit_all(
+    spec_name: str,
+    *,
+    experiments_root: str | None = None,
+    dry_run: bool = False,
+    poll_interval: int = _POLL_INTERVAL_S,
+) -> int:
+    """Submit all pending runs for *spec_name*, respecting per-queue limits.
+
+    Runs that already succeeded (status ``succeeded`` **and** a result file
+    exists) are skipped.  When a queue is full the function retries every
+    *poll_interval* seconds until all runs have been submitted.
+    """
+    spec_dir = os.path.join(runs_root(experiments_root), spec_name)
+    if not os.path.isdir(spec_dir):
+        print(f"No runs directory found for spec {spec_name!r}: {spec_dir}")
+        return 1
+
+    pending = _discover_pending_runs(spec_dir)
+    if not pending:
+        print(f"No pending runs found under {spec_dir}")
+        return 0
+
+    total = len(pending)
+    print(f"Found {total} pending run(s) for {spec_name!r}")
+
+    if dry_run:
+        for run_plan in pending:
+            print(f"  [dry-run] qsub {run_plan.bundle.job_path}  (queue={run_plan.scheduler.queue})")
+        return 0
+
+    remaining = list(pending)
+    submitted: list[str] = []
+    failed: dict[str, str] = {}
+
+    while remaining:
+        queue_counts = _count_queued_jobs()
+        next_round: list = []
+
+        for run_plan in remaining:
+            queue = run_plan.scheduler.queue
+            limit = _QUEUE_SLOT_LIMITS.get(queue, _DEFAULT_QUEUE_SLOTS)
+            current = queue_counts.get(queue, 0)
+
+            if limit is not None and current >= limit:
+                next_round.append(run_plan)
+                continue
+
+            ok, msg = _try_qsub(run_plan)
+            if ok:
+                submitted.append(run_plan.run_id)
+                queue_counts[queue] = current + 1
+                print(f"  [{len(submitted)}/{total}] Submitted {run_plan.run_id}: {msg}")
+            else:
+                # qsub rejected — likely queue full despite our count, retry
+                next_round.append(run_plan)
+                print(f"  [{len(submitted)}/{total}] Deferred  {run_plan.run_id}: {msg}")
+
+        remaining = next_round
+        if remaining:
+            print(
+                f"  {len(remaining)} run(s) waiting for queue slots, "
+                f"retrying in {poll_interval}s ..."
+            )
+            time.sleep(poll_interval)
+
+    print(f"\nAll {len(submitted)}/{total} run(s) submitted.")
+    if failed:
+        print("Permanent failures:")
+        for rid, err in failed.items():
+            print(f"  {rid}: {err}")
+        return 1
+    return 0
+
+
+def _discover_pending_runs(spec_dir: str):
+    """Return RunPlan objects for runs that are not yet successfully completed."""
+    pending = []
+    for entry in sorted(os.listdir(spec_dir)):
+        run_yaml = os.path.join(spec_dir, entry, "run.yaml")
+        if not os.path.isfile(run_yaml):
+            continue
+        if _is_completed(os.path.join(spec_dir, entry)):
+            continue
+        pending.append(load_run_plan(run_yaml))
+    return pending
+
+
+def _is_completed(run_dir: str) -> bool:
+    """A run is completed if its status is 'succeeded' and results exist."""
+    state_path = os.path.join(run_dir, "state", "status.json")
+    if not os.path.isfile(state_path):
+        return False
+    try:
+        with open(state_path, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return False
+    if state.get("status") != "succeeded":
+        return False
+    results_dir = os.path.join(run_dir, "results")
+    try:
+        return any(
+            name.startswith("result") and name.endswith(".json")
+            for name in os.listdir(results_dir)
+        )
+    except FileNotFoundError:
+        return False
+
+
+def _count_queued_jobs() -> dict[str, int]:
+    """Count the current user's running + queued PBS jobs per queue."""
+    user = getpass.getuser()
+    try:
+        result = subprocess.run(
+            ["qstat", "-u", user],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    counts: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        # PBS table: Job_Id  Username  Queue  Jobname  SessID  NDS  TSK  Mem  Time  S  Elap
+        # We need the queue (col index 2) and state (col index 9 typically).
+        # Simpler: just match lines with our username and a known state letter.
+        if user not in line:
+            continue
+        # Find the single-letter state column: R, Q, H, E, B, etc.
+        state = None
+        queue = None
+        for i, part in enumerate(parts):
+            if part in ("R", "Q", "H", "B", "E", "W", "S"):
+                state = part
+                # Queue is earlier in the line — in standard PBS output it's column 2
+                if i >= 3:
+                    queue = parts[2]
+                break
+        if state in ("R", "Q", "H", "B") and queue:
+            counts[queue] = counts.get(queue, 0) + 1
+    return counts
+
+
+def _try_qsub(run_plan) -> tuple[bool, str]:
+    """Attempt qsub; return (success, message)."""
+    result = subprocess.run(
+        ["qsub", run_plan.bundle.job_path],
+        capture_output=True, text=True, check=False,
+    )
+    msg = (result.stdout.strip() or result.stderr.strip())
+    return result.returncode == 0, msg

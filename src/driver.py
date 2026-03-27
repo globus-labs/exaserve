@@ -1,12 +1,14 @@
 import argparse
+import collections
 import os
 import subprocess
 import sys
+import threading
 import time
 import socket
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -21,7 +23,11 @@ os.environ["TMPDIR"] = "/tmp"
 # Ray Serve HTTP proxy port -- must match aurora_serve.py serve.start() config
 RAY_SERVE_PORT = 8000
 
-# How long to wait for Ray Serve to become healthy before starting the proxy
+# Ray is not truly ready until aurora_serve.py prints its cluster-wide ready marker.
+AURORA_SERVE_READY_MARKER = "CLUSTER FULLY READY"
+AURORA_SERVE_READY_TIMEOUT_S = 1800  # 30 min covers large-scale deployments
+
+# After the marker, also confirm the HTTP endpoints respond before starting the proxy.
 RAY_SERVE_HEALTH_TIMEOUT_S = 1800  # 30 min covers large-scale deployments
 
 DEBUG_HOLD_ON_FAILURE_S = int(os.environ.get("AURORA_DEBUG_HOLD_ON_FAILURE_S", "0"))
@@ -36,6 +42,54 @@ class RayClusterConfig:
     head_ip: str
     port: int = DEFAULT_RAY_HEAD_PORT
     node_cpus: int = DEFAULT_RAY_NODE_CPUS
+
+
+@dataclass
+class ProcessOutputRelay:
+    process: subprocess.Popen[str]
+    ready_marker: str
+    label: str
+    ready_event: threading.Event = field(init=False)
+    recent_lines: collections.deque[str] = field(init=False)
+    _thread: threading.Thread | None = None
+
+    def __post_init__(self) -> None:
+        self.ready_event = threading.Event()
+        self.recent_lines = collections.deque(maxlen=40)
+
+    def start(self) -> "ProcessOutputRelay":
+        if self.process.stdout is None:
+            return self
+
+        def reader() -> None:
+            assert self.process.stdout is not None
+            for line in self.process.stdout:
+                print(line, end="", flush=True)
+                stripped = line.rstrip()
+                self.recent_lines.append(stripped)
+                if self.ready_marker and self.ready_marker in line:
+                    self.ready_event.set()
+
+        self._thread = threading.Thread(target=reader, daemon=True)
+        self._thread.start()
+        return self
+
+    def wait_for_ready(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.ready_event.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic()))):
+                return True
+            if self.process.poll() is not None:
+                return False
+        return self.ready_event.is_set()
+
+    def close(self) -> None:
+        if self.process.stdout is None:
+            return
+        try:
+            self.process.stdout.close()
+        except Exception:
+            pass
 
 
 def prepend_pythonpath(env: dict[str, str], path: str) -> None:
@@ -243,6 +297,37 @@ def wait_for_ray_serve(
     return False
 
 
+def wait_for_process_ready_marker(
+    relay: ProcessOutputRelay,
+    *,
+    timeout: float,
+) -> bool:
+    print(
+        f"[Driver] Waiting for {relay.label} readiness marker: {relay.ready_marker}",
+        flush=True,
+    )
+    if relay.wait_for_ready(timeout):
+        print(
+            f"[Driver] {relay.label} readiness marker observed.",
+            flush=True,
+        )
+        return True
+
+    rc = relay.process.poll()
+    if rc is not None:
+        print(
+            f"[Driver] WARNING: {relay.label} exited before readiness marker was observed "
+            f"(exit code {rc}).",
+            flush=True,
+        )
+    else:
+        print(
+            f"[Driver] WARNING: Timed out waiting {timeout}s for {relay.label} readiness marker.",
+            flush=True,
+        )
+    return False
+
+
 def start_proxy(proxy_config, deploy_config, config_path: str):
     """
     Start the configured proxy backend (if type != 'none').
@@ -337,6 +422,7 @@ def main():
 
     ray_process = None
     serve_process = None
+    serve_output = None
     proxy_backend = None
     proxy_process = None
 
@@ -359,7 +445,19 @@ def main():
             serve_env = get_ray_env()
             serve_env["RAY_ADDRESS"] = f"{cluster.head_ip}:{cluster.port}"
             print(f"[Driver] Launching Aurora Serve: {' '.join(serve_cmd)}", flush=True)
-            serve_process = subprocess.Popen(serve_cmd, env=serve_env)
+            serve_process = subprocess.Popen(
+                serve_cmd,
+                env=serve_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            serve_output = ProcessOutputRelay(
+                process=serve_process,
+                ready_marker=AURORA_SERVE_READY_MARKER,
+                label="Aurora Serve",
+            ).start()
 
             proxy_config = None
             deploy_config = None
@@ -374,9 +472,21 @@ def main():
                     for model_config in deploy_config.model_configs
                 ]
 
-            # Wait for Ray Serve to be healthy before declaring readiness or
-            # starting the proxy. Without this guard, direct-mode runs can
-            # start replay against a dead endpoint and appear to "succeed".
+            # Ray is only ready once aurora_serve.py reports its cluster-wide
+            # readiness marker. The per-route /health endpoints can return 200
+            # earlier while replicas are still coming up elsewhere in the cluster.
+            if serve_output is None or not wait_for_process_ready_marker(
+                serve_output,
+                timeout=AURORA_SERVE_READY_TIMEOUT_S,
+            ):
+                tail = "\n".join(serve_output.recent_lines) if serve_output else ""
+                raise RuntimeError(
+                    "[Driver] FATAL: Aurora Serve never reported full cluster readiness."
+                    + (f"\n{tail}" if tail else "")
+                )
+
+            # After the explicit cluster-ready marker, confirm the public HTTP
+            # routes respond before starting the proxy.
             if not wait_for_ray_serve(
                 port=RAY_SERVE_PORT,
                 process=serve_process,
@@ -438,6 +548,8 @@ def main():
             except subprocess.TimeoutExpired:
                 serve_process.kill()
                 serve_process.wait()
+        if serve_output is not None:
+            serve_output.close()
 
         # Cleanup ensures we don't leave zombie processes
         if ray_process and ray_process.poll() is None:

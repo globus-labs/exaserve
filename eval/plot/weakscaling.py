@@ -159,8 +159,12 @@ def _format_plot_text(template: str, template_fields: Optional[Dict[str, str]]) 
 
 
 def extract_node_count(directory_name: str) -> int:
-    """Extract the number of nodes from directory name (e.g., '1_nodes' -> 1)."""
-    match = re.match(r'(\d+)_nodes', directory_name)
+    """Extract the number of nodes from directory name.
+
+    Handles both legacy (``1_nodes``) and current slugified
+    (``1-nodes_20260327T014056Z``) naming conventions.
+    """
+    match = re.match(r'(\d+)[-_]nodes', directory_name)
     if match:
         return int(match.group(1))
     return 0
@@ -683,7 +687,7 @@ def main():
                        help=f"Experiment name from EXPERIMENT_REGISTRY. "
                             f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}.")
     parser.add_argument("-b", "--backend", type=str, default="ray",
-                       help="Backend name used to resolve the experiment's batch_name "
+                       help="Backend name for display purposes "
                             "(e.g. 'ray', 'mpi'). Default: ray.")
     parser.add_argument("-o", "--output_path", type=str, default=None,
                        help="Path to save the output plot (default: weak_scaling_log.png or weak_scaling_linear.png)")
@@ -712,11 +716,9 @@ def main():
             f"Unknown experiment '{args.experiment}'. "
             f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}"
         )
-    params = EXPERIMENT_REGISTRY[args.experiment]
-    batch_name = params.batch_name.format(backend=args.backend)
-    results_folder = os.path.join(DEFAULT_EXPERIMENTS_ROOT, batch_name)
+    results_folder = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "runs", args.experiment)
     print(f"Experiment : {args.experiment}  (backend={args.backend})")
-    print(f"Batch name : {batch_name}")
+    print(f"Results dir: {results_folder}")
 
     # Determine default output filename
     if not args.output_path:

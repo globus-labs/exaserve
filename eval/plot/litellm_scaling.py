@@ -548,7 +548,7 @@ def main():
         "--backend",
         type=str,
         default="ray",
-        help="Backend name used to resolve the experiment batch_name. Default: ray.",
+        help="Backend name for display purposes. Default: ray.",
     )
     parser.add_argument(
         "-o",
@@ -614,11 +614,9 @@ def main():
             f"Available: {', '.join(EXPERIMENT_REGISTRY.keys())}"
         )
 
-    params = EXPERIMENT_REGISTRY[args.experiment]
-    batch_name = params.batch_name.format(backend=args.backend)
-    results_folder = os.path.join(DEFAULT_EXPERIMENTS_ROOT, batch_name)
+    results_folder = os.path.join(DEFAULT_EXPERIMENTS_ROOT, "runs", args.experiment)
     print(f"Experiment : {args.experiment}  (backend={args.backend})")
-    print(f"Batch name : {batch_name}")
+    print(f"Results dir: {results_folder}")
 
     if not args.output_path:
         suffix = "linear" if args.linear else "log"

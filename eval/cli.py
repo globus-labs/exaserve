@@ -8,6 +8,7 @@ Subcommands:
   trace materialize <spec>          — generate cached trace artifacts for a spec
   run materialize <spec>            — create run bundles (traces + PBS jobs + run.yaml)
   run submit <target>               — qsub the PBS job for a materialized run bundle
+  run submit-all <spec_name>       — submit all pending runs for a spec, respecting queue limits
   run execute <run.yaml>            — execute a run inside a PBS job (called by job.pbs)
 
 This CLI replaces the old workflow of:
@@ -20,12 +21,12 @@ import argparse
 
 try:
     from .lib.catalog import find_spec_path, list_spec_names
-    from .lib.run_executor import execute_run, submit_run
+    from .lib.run_executor import execute_run, submit_all, submit_run
     from .lib.run_planner import materialize_run_bundles, materialize_traces
     from .lib.spec_io import load_experiment_spec
 except ImportError:  # pragma: no cover - script-mode fallback
     from eval.lib.catalog import find_spec_path, list_spec_names
-    from eval.lib.run_executor import execute_run, submit_run
+    from eval.lib.run_executor import execute_run, submit_all, submit_run
     from eval.lib.run_planner import materialize_run_bundles, materialize_traces
     from eval.lib.spec_io import load_experiment_spec
 
@@ -57,6 +58,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_submit = run_subparsers.add_parser("submit", help="Submit a run bundle or run.yaml")
     run_submit.add_argument("target")
     run_submit.add_argument("--dry-run", action="store_true")
+
+    run_submit_all = run_subparsers.add_parser(
+        "submit-all", help="Submit all pending runs for a spec name"
+    )
+    run_submit_all.add_argument("spec_name", help="Spec name (matches runs/<spec_name>/)")
+    run_submit_all.add_argument("--experiments-root", default=None)
+    run_submit_all.add_argument("--dry-run", action="store_true")
+    run_submit_all.add_argument(
+        "--poll-interval", type=int, default=120,
+        help="Seconds between retry attempts when queues are full (default: 120)",
+    )
 
     run_execute = run_subparsers.add_parser("execute", help="Execute a materialized run.yaml")
     run_execute.add_argument("run_yaml")
@@ -99,6 +111,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "submit":
             return submit_run(args.target, dry_run=args.dry_run)
+        if args.command == "submit-all":
+            return submit_all(
+                args.spec_name,
+                experiments_root=args.experiments_root,
+                dry_run=args.dry_run,
+                poll_interval=args.poll_interval,
+            )
         if args.command == "execute":
             return execute_run(args.run_yaml, dry_run=args.dry_run)
 

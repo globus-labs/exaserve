@@ -63,9 +63,9 @@ class ReplayClientConfig:
     generation_mode: str = "deterministic"  # "deterministic" or "natural"
     dest: str = "proxy"  # "proxy": local workers -> proxy; "direct": MPI round-robin to servers
     num_nodes: int = 1      # total PBS nodes (= pbs_num_nodes); used to compute actual client count
-    num_go_procs: int = 1   # number of Go processes per replay_client node
-    num_go_workers: int = 4 # dispatch goroutines (N) inside each Go process
-    go_concurrency: int = 2000  # max in-flight requests per Go process
+    num_go_procs: int = 16   # number of Go processes per replay_client node
+    num_go_workers: int = 2 # dispatch goroutines (N) inside each Go process
+    go_concurrency: int = 40  # max in-flight requests per Go process
     warmup_rps: int = 0     # warm-up requests per second (0 = no warmup)
     warmup_duration_s: float = 0.0  # warm-up duration in seconds
     sum_only: bool = False  # Go client writes only summary instead of per-request results
