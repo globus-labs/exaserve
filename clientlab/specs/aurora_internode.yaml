@@ -1,0 +1,36 @@
+study:
+  name: aurora-internode
+  suite: aurora_internode
+  repeats: 1
+matrix:
+  axes:
+    - name: max_active_requests
+      path: client.max_active_requests
+      values: [16, 32, 64]
+client:
+  duration_s: 3.0
+  rate: 120.0
+  prompt_words: 64
+  output_tokens: 32
+  num_go_workers: 2
+  num_go_procs: 1
+  max_active_requests: 32
+  queue_capacity: 0
+  enable_httptrace: true
+  phase_trace_sample_rate: 0.05
+target:
+  type: synthetic
+  mode: queue_box
+  port: 18400
+  synthetic_nodes: 1
+faults:
+  service_time:
+    distribution: fixed
+    value_ms: 10
+  max_inflight: 16
+  max_queue: 64
+collectors:
+  port_monitor: true
+  netstats: true
+execution:
+  mode: pbs_interactive

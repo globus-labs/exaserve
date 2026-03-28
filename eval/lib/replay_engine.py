@@ -167,7 +167,11 @@ def _spawn_go_procs(
             generation_mode,
             "--timeout",
             str(TIMEOUT_S),
-            "--concurrency",
+            "--max-active-requests",
+            str(concurrency),
+            "--queue-capacity",
+            "0",
+            "--max-conns-per-host",
             str(concurrency),
             "--num-go-workers",
             str(num_go_workers),
@@ -218,9 +222,10 @@ def _read_go_results(result_path: str, request_map: dict[str, TraceRequest]):
                 continue
             record = json.loads(line)
             if record.get("__type__") == "summary":
-                return record, record.get("last_fire_time", 0.0), record.get("adjusted_run_t0")
+                last_fire_time = record.get("last_request_start_at", record.get("last_fire_time", 0.0))
+                return record, last_fire_time, record.get("adjusted_run_t0")
             if record.get("__type__") == "dispatch_done":
-                last_fire_time = record.get("last_fire_time", last_fire_time)
+                last_fire_time = record.get("last_request_start_at", record.get("last_fire_time", last_fire_time))
                 if "adjusted_run_t0" in record:
                     adjusted_run_t0 = record["adjusted_run_t0"]
                 continue

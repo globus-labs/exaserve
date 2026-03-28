@@ -1,4 +1,4 @@
-name: weak_scaling_litellm_pnw_2
+name: weakscaling_litellm
 matrix:
   name_template: "{num_nodes}_nodes"
   axes:
@@ -14,6 +14,7 @@ workload:
   output_len: 128
   rate_per_node: 80.0
 deployment:
+  replica_max_ongoing_requests: 64
   models:
     - model_id: meta-llama/Meta-Llama-3-8B-Instruct
       tensor_parallel_size: 1
