@@ -637,7 +637,9 @@ def main():
 
     if not args.output_path:
         suffix = "linear" if args.linear else "log"
-        args.output_path = f"litellm_scaling_{suffix}.png"
+        output_dir = Path(__file__).parent / "output"
+        output_dir.mkdir(exist_ok=True)
+        args.output_path = str(output_dir / f"litellm_scaling_{suffix}.png")
 
     node_select_map = None
     if args.node_list and args.select:

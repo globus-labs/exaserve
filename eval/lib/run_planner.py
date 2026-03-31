@@ -169,6 +169,23 @@ def _warn_dirty_repo(repo_root: str, dirty_files: list[str]) -> None:
         _progress(f"  dirty: {path}")
 
 
+def _build_go_client(snapshot_root: str) -> None:
+    go_client_dir = os.path.join(snapshot_root, "eval", "go_client")
+    if not os.path.isdir(go_client_dir):
+        return
+    result = subprocess.run(
+        ["make", "build"],
+        cwd=go_client_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to build go_client in snapshot:\n{result.stderr.strip()}"
+        )
+    _progress("  go_client built successfully")
+
+
 def _ensure_repo_snapshot(repo_root: str, commit_sha: str) -> str:
     snapshot_parent = ensure_dir(get_site_config().snapshot_dir)
     snapshot_root = os.path.join(snapshot_parent, commit_sha)
@@ -208,6 +225,8 @@ def _ensure_repo_snapshot(repo_root: str, commit_sha: str) -> str:
             f"Failed to extract git snapshot for {commit_sha}: "
             f"{extract.stderr.decode('utf-8', errors='replace').strip()}"
         )
+
+    _build_go_client(temp_root)
 
     dump_json_file(
         os.path.join(temp_root, "snapshot_meta.json"),

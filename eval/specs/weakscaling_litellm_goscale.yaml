@@ -1,4 +1,4 @@
-name: weakscaling_litellm
+name: weakscaling_litellm_goscale
 matrix:
   name_template: "{num_nodes}_nodes"
   axes:
