@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     trace_materialize = trace_subparsers.add_parser("materialize", help="Materialize traces for a spec")
     trace_materialize.add_argument("spec")
     trace_materialize.add_argument("--trace-root", default=None)
+    trace_materialize.add_argument("--force", action="store_true", help="Regenerate traces even if cached")
 
     run_parser = subparsers.add_parser("run", help="Run bundle commands")
     run_subparsers = run_parser.add_subparsers(dest="command", required=True)
@@ -54,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_materialize.add_argument("--backend", default=None)
     run_materialize.add_argument("--experiments-root", default=None)
     run_materialize.add_argument("--trace-root", default=None)
+    run_materialize.add_argument("--force-trace", action="store_true", help="Regenerate traces even if cached")
 
     run_submit = run_subparsers.add_parser("submit", help="Submit a run bundle or run.yaml")
     run_submit.add_argument("target")
@@ -97,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.area == "trace":
         spec_path = find_spec_path(args.spec)
-        artifacts = materialize_traces(spec_path, trace_root=args.trace_root)
+        artifacts = materialize_traces(spec_path, trace_root=args.trace_root, force=args.force)
         for artifact in artifacts:
             print(artifact.trace_path)
         return 0
@@ -110,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
                 backend_name=args.backend,
                 experiments_root=args.experiments_root,
                 trace_root=args.trace_root,
+                force_trace=args.force_trace,
             )
             for plan in plans:
                 print(plan.bundle.run_yaml_path)

@@ -284,6 +284,7 @@ def materialize_run_bundles(
     trace_root: str | None = None,
     max_workers: int | None = None,
     repo_root: str | None = None,
+    force_trace: bool = False,
 ) -> list[RunPlan]:
     spec = load_experiment_spec(spec_path)
     variants = expand_matrix(spec)
@@ -322,6 +323,7 @@ def materialize_run_bundles(
                 group_spec_path=group_spec_path,
                 snapshot_root=snapshot_root,
                 trace_root=trace_root,
+                force_trace=force_trace,
             )
             _progress(f"  [1/{total}] {variant.variant_name} done")
             run_plans.append(rp)
@@ -342,6 +344,7 @@ def materialize_run_bundles(
                 group_spec_path=group_spec_path,
                 snapshot_root=snapshot_root,
                 trace_root=trace_root,
+                force_trace=force_trace,
             ): idx
             for idx, variant in enumerate(variants)
         }
@@ -360,6 +363,7 @@ def materialize_traces(
     *,
     trace_root: str | None = None,
     max_workers: int | None = None,
+    force: bool = False,
 ) -> list[TraceArtifact]:
     spec = load_experiment_spec(spec_path)
     variants = expand_matrix(spec)
@@ -370,7 +374,7 @@ def materialize_traces(
         artifacts = []
         for variant in variants:
             _progress(f"  [1/{total}] {variant.variant_name} ...")
-            art = materialize_trace_artifact(variant, store_root=trace_root)
+            art = materialize_trace_artifact(variant, store_root=trace_root, force=force)
             _progress(f"  [1/{total}] {variant.variant_name} done")
             artifacts.append(art)
         return artifacts
@@ -380,7 +384,7 @@ def materialize_traces(
     results: list[TraceArtifact | None] = [None] * total
     with ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
         future_to_idx = {
-            pool.submit(materialize_trace_artifact, variant, store_root=trace_root): idx
+            pool.submit(materialize_trace_artifact, variant, store_root=trace_root, force=force): idx
             for idx, variant in enumerate(variants)
         }
         done_count = 0
@@ -515,9 +519,10 @@ def _materialize_variant(
     group_spec_path: str,
     snapshot_root: str,
     trace_root: str | None,
+    force_trace: bool = False,
 ) -> RunPlan:
     spec = variant.spec
-    artifact = materialize_trace_artifact(variant, store_root=trace_root)
+    artifact = materialize_trace_artifact(variant, store_root=trace_root, force=force_trace)
     run_id = slugify(variant.variant_name)
     root_dir = os.path.join(group_root_dir, run_id)
     bundle = RunBundle(

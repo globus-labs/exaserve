@@ -65,13 +65,14 @@ def materialize_trace_artifact(
     variant: VariantSpec,
     *,
     store_root: str | None = None,
+    force: bool = False,
 ) -> TraceArtifact:
     spec = variant.spec
     trace_id = stable_hash(_trace_identity(spec), length=16)
     artifact_dir = ensure_dir(os.path.join(trace_store_root(store_root), trace_id))
     trace_path = os.path.join(artifact_dir, "trace.jsonl")
     metadata_path = os.path.join(artifact_dir, "metadata.json")
-    if not os.path.exists(trace_path):
+    if force or not os.path.exists(trace_path):
         rows = generate_rows(spec)
         write_trace(trace_path, spec, rows)
         dump_json_file(
