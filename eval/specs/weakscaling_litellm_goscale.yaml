@@ -3,7 +3,8 @@ matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [1, 2, 4, 8, 16, 32, 64]
+      # values: [1, 2, 4, 8, 16, 32, 64]
+      values: [1, 16, 32, 64]
       targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
   derived:

@@ -21,7 +21,12 @@ from src.model_paths import get_model_storage_path
 
 from .models import ExperimentSpec
 
-TRACE_GENERATOR_VERSION = 1
+TRACE_GENERATOR_VERSION = 2
+
+# Chat templates (e.g. Llama-3 Instruct) prepend/append special tokens around
+# the user message.  Reserve this many tokens so input + output + template
+# overhead stays within max_model_len.
+_CHAT_TEMPLATE_MARGIN: int = 16
 
 
 def generate_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
@@ -83,49 +88,49 @@ def load_prompt_bank(path: str) -> list[str]:
     return prompts
 
 
-def _maybe_local_model_path(model_id: str, storage_path: str) -> str | None:
-    flat_path = get_model_storage_path(model_id, storage_path)
-    if flat_path.is_dir():
-        return str(flat_path)
-    hub_name = "models--" + model_id.replace("/", "--")
-    for root in (Path(storage_path), Path(storage_path) / "hub"):
-        cache_dir = root / hub_name / "snapshots"
-        if cache_dir.is_dir():
-            snapshots = sorted(path for path in cache_dir.iterdir() if path.is_dir())
-            if snapshots:
-                return str(snapshots[0])
+def _model_search_roots(storage_path: str) -> list[Path]:
+    """Return candidate root directories where models may live, in priority order."""
+    roots: list[Path] = []
+    if storage_path:
+        roots.append(Path(storage_path))
+    home_models = Path.home() / "agpt" / "models"
+    if home_models.is_dir():
+        roots.append(home_models)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        roots.append(Path(hf_home))
+    return roots
+
+
+def _find_local_model_path(model_id: str, search_roots: list[Path]) -> str | None:
+    for root in search_roots:
+        flat_path = get_model_storage_path(model_id, str(root))
+        if flat_path.is_dir():
+            return str(flat_path)
+        hub_name = "models--" + model_id.replace("/", "--")
+        for sub in (root, root / "hub"):
+            cache_dir = sub / hub_name / "snapshots"
+            if cache_dir.is_dir():
+                snapshots = sorted(p for p in cache_dir.iterdir() if p.is_dir())
+                if snapshots:
+                    return str(snapshots[0])
     return None
 
 
 def build_tokenizer_map(spec: ExperimentSpec) -> dict[str, Any]:
-    tokenizer_paths = {}
-    for model in spec.deployment.models:
-        tokenizer_path = _maybe_local_model_path(
-            model.model_id,
-            spec.deployment.model_storage_path,
-        )
-        if tokenizer_path:
-            tokenizer_paths[model.model_id] = tokenizer_path
+    from transformers import AutoTokenizer
 
-    if not tokenizer_paths:
-        return {}
-
-    try:
-        from transformers import AutoTokenizer
-    except ImportError:
-        return {}
+    search_roots = _model_search_roots(spec.deployment.model_storage_path)
 
     tokenizers = {}
-    for model_id, tokenizer_path in tokenizer_paths.items():
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_path,
-                trust_remote_code=True,
-            )
-            tokenizer.model_max_length = 100_000_000
-            tokenizers[model_id] = tokenizer
-        except Exception:
-            continue
+    for model in spec.deployment.models:
+        source = _find_local_model_path(model.model_id, search_roots) or model.model_id
+        tokenizer = AutoTokenizer.from_pretrained(
+            source,
+            trust_remote_code=True,
+        )
+        tokenizer.model_max_length = 100_000_000
+        tokenizers[model.model_id] = tokenizer
     return tokenizers
 
 
@@ -136,18 +141,7 @@ def _truncate_prompt(
     model_id: str,
     tokenizers: dict[str, Any],
 ) -> tuple[str, int]:
-    tokenizer = tokenizers.get(model_id)
-    if tokenizer is None:
-        words = text.split()
-        if not words:
-            words = ["aurora"] * max(1, target_len)
-        trimmed = words[:hard_limit]
-        if len(trimmed) < target_len:
-            repeats = (target_len // len(trimmed)) + 1
-            trimmed = (trimmed * repeats)[:target_len]
-        prompt = " ".join(trimmed)
-        return prompt, len(trimmed)
-
+    tokenizer = tokenizers[model_id]
     tokens = tokenizer.encode(text, add_special_tokens=False)
     if len(tokens) > hard_limit:
         tokens = tokens[:hard_limit]
@@ -183,6 +177,9 @@ def generate_weak_scaling_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
     tp_by_model = {
         model.model_id: model.tensor_parallel_size for model in spec.deployment.models
     }
+    max_model_len_by_model = {
+        model.model_id: model.max_model_len for model in spec.deployment.models
+    }
     total_qps = spec.deployment.num_nodes * spec.workload.rate_per_node
     total_requests = int(total_qps * spec.workload.duration)
     inter_arrival = (1.0 / total_qps) if total_qps > 0 else 0.0
@@ -191,16 +188,23 @@ def generate_weak_scaling_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
         rows = []
         for index in range(start, end):
             model_id = model_ids[index % len(model_ids)]
+            max_input = max(
+                1,
+                max_model_len_by_model[model_id]
+                - spec.workload.output_len
+                - _CHAT_TEMPLATE_MARGIN,
+            )
+            capped_input_len = min(spec.workload.input_len, max_input)
             prompt_seed = spec.workload.seed + index
             prompt_text = _choose_prompt(
                 prompt_bank,
                 prompt_seed,
-                spec.workload.input_len,
+                capped_input_len,
             )
             prompt_text, input_len = _truncate_prompt(
                 prompt_text,
-                spec.workload.input_len,
-                spec.workload.input_len,
+                capped_input_len,
+                capped_input_len,
                 model_id,
                 tokenizers,
             )
@@ -341,7 +345,9 @@ def generate_azure_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
         model_id = rng.choices(model_ids, weights=weights, k=1)[0]
         output_len = max(1, row["output_tokens"])
         available_input = max(
-            spec.deployment.models[model_ids.index(model_id)].max_model_len - output_len - 10,
+            spec.deployment.models[model_ids.index(model_id)].max_model_len
+            - output_len
+            - _CHAT_TEMPLATE_MARGIN,
             1,
         )
         final_input_len = min(max(1, row["input_tokens"]), available_input)
