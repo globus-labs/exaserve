@@ -26,6 +26,7 @@ from site_config import get_site_config
 from .models import (
     BackendSpec,
     ClientSpec,
+    DerivedField,
     DeploymentSpec,
     ExperimentSpec,
     MatrixAxis,
@@ -55,9 +56,18 @@ def _matrix_from_dict(data: dict[str, Any]) -> MatrixSpec:
                 label_template=str(raw_axis.get("label_template", "{value}")),
             )
         )
+    derived = []
+    for raw_derived in data.get("derived", []):
+        derived.append(
+            DerivedField(
+                path=str(raw_derived["path"]),
+                expr=str(raw_derived["expr"]),
+            )
+        )
     return MatrixSpec(
         axes=axes,
         name_template=str(data.get("name_template", "")),
+        derived=derived,
     )
 
 
@@ -224,6 +234,16 @@ def validate_experiment_spec(spec: ExperimentSpec) -> None:
             raise ValueError(f"matrix axis '{axis.name}' must have at least one value")
         if not axis.targets:
             raise ValueError(f"matrix axis '{axis.name}' must target at least one field")
+    axis_names = {axis.name for axis in spec.matrix.axes}
+    for derived in spec.matrix.derived:
+        if not derived.path:
+            raise ValueError("matrix derived field must specify a path")
+        if not derived.expr:
+            raise ValueError(f"matrix derived field '{derived.path}' must specify an expr")
+        try:
+            compile(derived.expr, f"<derived:{derived.path}>", "eval")
+        except SyntaxError as exc:
+            raise ValueError(f"matrix derived field '{derived.path}' has invalid expr: {exc}") from exc
 
 
 def save_run_snapshot(path: str, spec: ExperimentSpec) -> None:

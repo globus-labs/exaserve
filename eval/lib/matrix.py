@@ -8,15 +8,36 @@ values injected into the targeted dotted paths (e.g., "deployment.num_nodes").
 Axes can target any field on the spec via dotted_set(). Fields *not* targeted
 by the matrix (like client.num_nodes, scheduler.nodes) are auto-synced to
 deployment.num_nodes so they stay consistent unless explicitly swept.
+
+Derived fields (matrix.derived) are evaluated after all axis values are set
+for each combination. Expressions can reference any axis name and use basic
+math builtins (min, max, abs, round, int, float, plus the math module).
 """
 
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import replace
 
 from .models import ExperimentSpec, VariantSpec
 from .utils import deep_copy, dotted_set, format_template, slugify
+
+_DERIVED_BUILTINS = {
+    "min": min,
+    "max": max,
+    "abs": abs,
+    "round": round,
+    "int": int,
+    "float": float,
+    "math": math,
+}
+
+
+def _eval_derived(expr: str, axis_values: dict) -> object:
+    namespace = dict(_DERIVED_BUILTINS)
+    namespace.update(axis_values)
+    return eval(expr, {"__builtins__": {}}, namespace)  # noqa: S307
 
 
 def expand_matrix(spec: ExperimentSpec) -> list[VariantSpec]:
@@ -34,10 +55,15 @@ def expand_matrix(spec: ExperimentSpec) -> list[VariantSpec]:
             for target in axis.targets:
                 dotted_set(spec_copy, target, value)
 
+        for derived in spec.matrix.derived:
+            derived_value = _eval_derived(derived.expr, values)
+            dotted_set(spec_copy, derived.path, derived_value)
+
         targeted_fields = {t for axis in spec.matrix.axes for t in axis.targets}
-        if "client.num_nodes" not in targeted_fields:
+        derived_fields = {d.path for d in spec.matrix.derived}
+        if "client.num_nodes" not in targeted_fields and "client.num_nodes" not in derived_fields:
             spec_copy.client.num_nodes = spec_copy.deployment.num_nodes
-        if "scheduler.nodes" not in targeted_fields:
+        if "scheduler.nodes" not in targeted_fields and "scheduler.nodes" not in derived_fields:
             spec_copy.scheduler.nodes = spec_copy.deployment.num_nodes
 
         if spec.matrix.name_template:

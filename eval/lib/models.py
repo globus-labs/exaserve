@@ -31,6 +31,12 @@ from typing import Any
 
 
 @dataclass
+class DerivedField:
+    path: str
+    expr: str
+
+
+@dataclass
 class MatrixAxis:
     name: str
     values: list[Any]
@@ -42,6 +48,7 @@ class MatrixAxis:
 class MatrixSpec:
     axes: list[MatrixAxis] = field(default_factory=list)
     name_template: str = ""
+    derived: list[DerivedField] = field(default_factory=list)
 
 
 @dataclass

@@ -195,6 +195,65 @@ def test_spec_load_and_matrix_expand(temp_spec):
     assert [variant.spec.client.num_nodes for variant in variants] == [1, 2]
 
 
+def test_matrix_derived_fields(tmp_path, monkeypatch):
+    prompt_path = tmp_path / "prompts.json"
+    _write_prompt_dataset(prompt_path)
+    spec_path = tmp_path / "derived_spec.yaml"
+    spec_path.write_text(
+        f"""
+name: test_derived
+matrix:
+  name_template: "{{num_nodes}}_nodes"
+  axes:
+    - name: num_nodes
+      values: [1, 4, 16]
+      targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+  derived:
+    - path: client.go_concurrency
+      expr: "num_nodes * 100"
+    - path: client.num_go_procs
+      expr: "min(num_nodes * 4, 32)"
+trace:
+  kind: weak_scaling
+  input_prompt_path: {prompt_path}
+workload:
+  duration: 1.0
+  input_len: 8
+  output_len: 4
+  rate_per_node: 2.0
+deployment:
+  replica_max_ongoing_requests: 7
+  models:
+    - model_id: test/model
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 64
+      size: 1
+client:
+  num_runs: 1
+  dest: direct
+  num_go_procs: 1
+  num_go_workers: 1
+  go_concurrency: 4
+backend:
+  default: mock
+  args:
+    mock: {{}}
+scheduler:
+  type: pbs
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("eval.lib.trace_generators.build_tokenizer_map", lambda _spec: {})
+    spec = load_experiment_spec(str(spec_path))
+    variants = expand_matrix(spec)
+    assert len(variants) == 3
+    assert [v.spec.client.go_concurrency for v in variants] == [100, 400, 1600]
+    assert [v.spec.client.num_go_procs for v in variants] == [4, 16, 32]
+    assert [v.spec.deployment.num_nodes for v in variants] == [1, 4, 16]
+
+
 def test_trace_artifacts_are_reused(temp_spec, tmp_path):
     artifacts_one = materialize_traces(str(temp_spec), trace_root=str(tmp_path / "traces"))
     artifacts_two = materialize_traces(str(temp_spec), trace_root=str(tmp_path / "traces"))
