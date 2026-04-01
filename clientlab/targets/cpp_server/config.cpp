@@ -67,6 +67,7 @@ ServerConfig load_config(const std::string& path) {
     if (client) {
         cfg.model = yy_str(client, "model", "stub-model");
         cfg.prompt_words = yy_int(client, "prompt_words", 32);
+        cfg.client_max_active = yy_int(client, "max_active_requests", 0);
     }
 
     yyjson_val* faults = yyjson_obj_get(root, "faults");

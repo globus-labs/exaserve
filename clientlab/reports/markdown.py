@@ -27,15 +27,15 @@ def render_report(study_manifest, points, envelope):
         ]
     )
     for point in points:
-        summary = point["summary"]
+        summary = point.get("summary", {})
         lines.append(
             "| {point_id} | {requested_rps:.2f} | {achieved_rps:.2f} | {diagnosis} | {queue_fraction:.3f} | {safe_budget} |".format(
-                point_id=point["point_id"],
-                requested_rps=summary["requested_rps"],
-                achieved_rps=summary["achieved_rps"],
-                diagnosis=summary["diagnosis"],
-                queue_fraction=summary["queue_fraction"],
-                safe_budget=summary["safe_active_budget_estimate"],
+                point_id=point.get("point_id", "?"),
+                requested_rps=float(summary.get("requested_rps", 0)),
+                achieved_rps=float(summary.get("achieved_rps", 0)),
+                diagnosis=summary.get("diagnosis", "error"),
+                queue_fraction=float(summary.get("queue_fraction", 0)),
+                safe_budget=summary.get("safe_active_budget_estimate", 0),
             )
         )
     lines.extend(["", "## Key Questions", ""])
@@ -44,26 +44,27 @@ def render_report(study_manifest, points, envelope):
 
 
 def render_key_questions(points):
-    if not points:
+    valid_points = [p for p in points if p.get("summary", {}).get("diagnosis") != "error"]
+    if not valid_points:
         return ["No completed points were available."]
-    by_active = sorted(points, key=lambda item: (item["run_config"]["client"]["max_active_requests"], item["summary"]["requested_rps"]))
+    by_active = sorted(valid_points, key=lambda item: (item["run_config"]["client"]["max_active_requests"], item["summary"].get("requested_rps", 0)))
     first = by_active[0]
     last = by_active[-1]
-    delta_rps = last["summary"]["achieved_rps"] - first["summary"]["achieved_rps"]
+    delta_rps = last["summary"].get("achieved_rps", 0) - first["summary"].get("achieved_rps", 0)
     concurrency_answer = (
         f"- What changed when concurrency increased? Achieved RPS changed by `{delta_rps:.2f}` "
         f"between active budgets `{first['run_config']['client']['max_active_requests']}` and "
         f"`{last['run_config']['client']['max_active_requests']}`, while queue fraction moved from "
-        f"`{first['summary']['queue_fraction']:.3f}` to `{last['summary']['queue_fraction']:.3f}`."
+        f"`{first['summary'].get('queue_fraction', 0):.3f}` to `{last['summary'].get('queue_fraction', 0):.3f}`."
     )
     bottleneck_answer = (
         f"- Was the client stalled by its own queue, transport, the server, or the network? "
-        f"The strongest observed diagnosis in the completed study was `{last['summary']['diagnosis']}`."
+        f"The strongest observed diagnosis in the completed study was `{last['summary'].get('diagnosis', '?')}`."
     )
     safe_budget_answer = (
         f"- What active-request and connection budget is safe for this regime? "
         f"A conservative estimate from the completed points is "
-        f"`{last['summary']['safe_active_budget_estimate']}` active requests."
+        f"`{last['summary'].get('safe_active_budget_estimate', 0)}` active requests."
     )
     return [concurrency_answer, bottleneck_answer, safe_budget_answer]
 

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 DIAGNOSES = {
     "client_dispatch_bound",
     "client_queue_bound",
+    "concurrency_saturated",
     "transport_conn_bound",
     "connection_churn_bound",
     "server_capacity_bound",
@@ -14,6 +15,8 @@ DIAGNOSES = {
     "network_packet_bound",
     "network_bandwidth_bound",
     "mixed",
+    "healthy",
+    "error",
     "inconclusive",
 }
 
@@ -70,6 +73,13 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
     target_rejections = int(target_metrics.get("aggregate", {}).get("rejections", 0))
     target_error_rate = float(target_metrics.get("aggregate", {}).get("error_fraction", 0.0))
 
+    # Expected RPS based on Little's Law: C / T when service_time > 0.
+    service_time_s = float(run_config["faults"].get("service_time", {}).get("value_ms", 0.0)) / 1000.0
+    if service_time_s > 0 and configured_active > 0:
+        expected_rps = configured_active / service_time_s
+    else:
+        expected_rps = requested_rps
+
     diagnosis = "inconclusive"
     reasons = []
     if netstats_summary:
@@ -88,6 +98,24 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
     if diagnosis == "inconclusive" and queue_fraction >= 0.25 and max_queue_depth > 0:
         diagnosis = "client_queue_bound"
         reasons.append("A significant fraction of slot hold time was spent waiting in the client queue.")
+    # Check concurrency_saturated and healthy BEFORE transport/churn diagnoses.
+    # When achieved ≈ expected (Little's Law ceiling), the system is working correctly
+    # even if max_active == configured_active — that's expected, not a bottleneck.
+    if diagnosis == "inconclusive" and max_active >= configured_active and requested_rps > expected_rps * 1.1 and achieved_rps >= expected_rps * 0.85:
+        diagnosis = "concurrency_saturated"
+        reasons.append(
+            f"Arrival rate ({requested_rps:.0f} req/s) exceeds concurrency ceiling "
+            f"({expected_rps:.0f} req/s = {configured_active} slots / {service_time_s:.3f}s). "
+            f"Achieved {achieved_rps:.0f} req/s — concurrency is the limiting factor, client is healthy."
+        )
+    # Healthy: achieved is near the effective ceiling (min of rate limit and concurrency ceiling).
+    effective_ceiling = min(expected_rps, requested_rps) if expected_rps > 0 else requested_rps
+    if diagnosis == "inconclusive" and effective_ceiling > 0 and achieved_rps >= effective_ceiling * 0.85:
+        diagnosis = "healthy"
+        reasons.append(
+            f"Achieved {achieved_rps:.0f} req/s is within 15% of effective ceiling "
+            f"({effective_ceiling:.0f} req/s). No dominant bottleneck."
+        )
     if diagnosis == "inconclusive" and connect_mean > 0 and configured_active > 0 and max_active >= configured_active and achieved_rps < requested_rps * 0.9:
         diagnosis = "transport_conn_bound"
         reasons.append("Configured active request slots saturated while throughput stayed below target.")
@@ -107,6 +135,7 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
         "diagnosis": diagnosis,
         "reasons": reasons or ["No dominant bottleneck crossed the configured heuristics."],
         "requested_rps": requested_rps,
+        "expected_rps": expected_rps,
         "achieved_rps": achieved_rps,
         "configured_duration_s": configured_duration_s,
         "measured_dispatch_s": measured_dispatch_s,

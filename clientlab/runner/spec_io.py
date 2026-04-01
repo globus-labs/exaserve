@@ -216,5 +216,12 @@ def build_point_id(point):
     fragments = [study_name]
     for key in sorted(axis_values):
         fragments.append(f"{key}-{axis_values[key]}")
-    fragments.append(f"repeat-{int(point.get('_repeat', 0))}")
-    return stable_hash({"fragments": fragments}, length=10)
+    repeat = int(point.get("_repeat", 0))
+    fragments.append(f"repeat-{repeat}")
+    suffix = stable_hash({"fragments": fragments}, length=6)
+    # Build human-readable prefix from axis values.
+    parts = [f"{k}={v}" for k, v in sorted(axis_values.items())]
+    if repeat > 0:
+        parts.append(f"r{repeat}")
+    prefix = "_".join(parts) if parts else "base"
+    return f"{prefix}_{suffix}"

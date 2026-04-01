@@ -1,57 +1,38 @@
 #include "handler.hpp"
-#include <cerrno>
-#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <string>
-#include <sys/socket.h>
-#include <unistd.h>
 
-static constexpr size_t MAX_HEADER_SIZE = 8192;
-
-bool read_request(int fd, ParsedRequest& req, double recv_timeout_s) {
+bool parse_headers(const char* buf, size_t len, ParsedRequest& req, size_t& header_end_offset) {
     req = ParsedRequest{};
-    char buf[MAX_HEADER_SIZE];
-    size_t total = 0;
-    const char* header_end = nullptr;
+    header_end_offset = 0;
 
-    // Set recv timeout if configured.
-    if (recv_timeout_s > 0.0) {
-        struct timeval tv;
-        tv.tv_sec = static_cast<long>(recv_timeout_s);
-        tv.tv_usec = static_cast<long>((recv_timeout_s - tv.tv_sec) * 1e6);
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
+    // Need at least "G / H\r\n\r\n" worth of data.
+    if (len < 4) return false;
 
-    while (total < MAX_HEADER_SIZE) {
-        ssize_t n = recv(fd, buf + total, MAX_HEADER_SIZE - total, 0);
-        if (n <= 0) return false;
-        total += static_cast<size_t>(n);
-        buf[total] = '\0';
-        header_end = strstr(buf, "\r\n\r\n");
-        if (header_end) break;
-    }
-    if (!header_end) return false;
+    // Search for end of headers.
+    const char* end = static_cast<const char*>(memmem(buf, len, "\r\n\r\n", 4));
+    if (!end) return false;
+    header_end_offset = static_cast<size_t>(end - buf) + 4;
 
-    // Parse request line: "METHOD /path HTTP/1.1\r\n"
-    if (strncmp(buf, "GET ", 4) == 0) {
+    // Parse request line.
+    if (len >= 4 && strncmp(buf, "GET ", 4) == 0) {
         req.method = ParsedRequest::GET;
         const char* path_start = buf + 4;
-        const char* path_end = strchr(path_start, ' ');
+        const char* path_end = static_cast<const char*>(memchr(path_start, ' ', len - 4));
         if (path_end) req.path.assign(path_start, path_end);
-    } else if (strncmp(buf, "POST ", 5) == 0) {
+    } else if (len >= 5 && strncmp(buf, "POST ", 5) == 0) {
         req.method = ParsedRequest::POST;
         const char* path_start = buf + 5;
-        const char* path_end = strchr(path_start, ' ');
+        const char* path_end = static_cast<const char*>(memchr(path_start, ' ', len - 5));
         if (path_end) req.path.assign(path_start, path_end);
     } else {
         req.method = ParsedRequest::UNKNOWN;
-        return true;
     }
 
-    // Parse Content-Length.
+    // Parse Content-Length (case-insensitive).
     const char* cl = strcasestr(buf, "Content-Length:");
-    if (cl) {
+    if (cl && cl < end) {
         cl += 15;
         while (*cl == ' ') cl++;
         req.content_length = atoi(cl);
@@ -60,7 +41,7 @@ bool read_request(int fd, ParsedRequest& req, double recv_timeout_s) {
     // Parse Connection header for keep-alive.
     req.keep_alive = true;
     const char* conn = strcasestr(buf, "Connection:");
-    if (conn) {
+    if (conn && conn < end) {
         conn += 11;
         while (*conn == ' ') conn++;
         if (strncasecmp(conn, "close", 5) == 0) {
@@ -68,21 +49,10 @@ bool read_request(int fd, ParsedRequest& req, double recv_timeout_s) {
         }
     }
 
-    // Drain request body if present.
-    if (req.content_length > 0) {
-        size_t headers_len = static_cast<size_t>(header_end - buf) + 4;
-        size_t body_already = total - headers_len;
-        size_t remaining = static_cast<size_t>(req.content_length) - body_already;
-        char drain[4096];
-        while (remaining > 0) {
-            ssize_t n = recv(fd, drain, std::min(remaining, sizeof(drain)), 0);
-            if (n <= 0) return false;
-            remaining -= static_cast<size_t>(n);
-        }
-    }
-
     return true;
 }
+
+// ---- Response building (unchanged) ----
 
 static std::string format_response(int status_code, const char* status_text,
                                    const std::string& body, bool conn_close) {
@@ -180,25 +150,12 @@ ResponseSet build_responses(const ServerConfig& cfg) {
     rs.reject = format_response(cfg.faults.reject_status, "Too Many Requests", reject_body, false);
     rs.reject_close = format_response(cfg.faults.reject_status, "Too Many Requests", reject_body, true);
 
+    std::string not_found_body = R"({"error":"not found"})";
+    rs.not_found = format_response(404, "Not Found", not_found_body, false);
+
     return rs;
 }
 
 std::string build_metrics_response(const std::string& metrics_json) {
     return format_response(200, "OK", metrics_json, false);
-}
-
-std::string build_metrics_response_close(const std::string& metrics_json) {
-    return format_response(200, "OK", metrics_json, true);
-}
-
-bool write_response(int fd, const std::string& response) {
-    const char* data = response.data();
-    size_t remaining = response.size();
-    while (remaining > 0) {
-        ssize_t n = send(fd, data, remaining, MSG_NOSIGNAL);
-        if (n <= 0) return false;
-        data += n;
-        remaining -= static_cast<size_t>(n);
-    }
-    return true;
 }

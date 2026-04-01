@@ -9,9 +9,10 @@ struct ParsedRequest {
     bool keep_alive = true;
 };
 
-// Read and parse one HTTP/1.1 request from fd.
-// Returns false on connection close / read error.
-bool read_request(int fd, ParsedRequest& req, double recv_timeout_s);
+// Parse HTTP headers from a buffer. Returns true if headers are complete
+// (\r\n\r\n found). Fills req with method, path, content_length, keep_alive.
+// header_end_offset is set to the byte offset past the \r\n\r\n.
+bool parse_headers(const char* buf, size_t len, ParsedRequest& req, size_t& header_end_offset);
 
 // Pre-built complete HTTP response buffers (status line + headers + body).
 struct ResponseSet {
@@ -30,13 +31,12 @@ struct ResponseSet {
     std::string error_close;
     std::string reject;
     std::string reject_close;
+
+    // 404
+    std::string not_found;
 };
 
 ResponseSet build_responses(const ServerConfig& cfg);
 
 // Build /metrics JSON body at query time (not pre-computed).
 std::string build_metrics_response(const std::string& metrics_json);
-std::string build_metrics_response_close(const std::string& metrics_json);
-
-// Write a complete response buffer to fd. Returns false on write error.
-bool write_response(int fd, const std::string& response);

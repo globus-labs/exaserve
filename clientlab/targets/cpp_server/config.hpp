@@ -28,6 +28,7 @@ struct ServerConfig {
     int response_tokens = 32;
     std::string model = "stub-model";
     int prompt_words = 32;
+    int client_max_active = 0;  // from client.max_active_requests; used to size thread pool
     FaultConfig faults;
 };
 

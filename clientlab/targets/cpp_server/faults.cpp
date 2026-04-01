@@ -1,52 +1,58 @@
 #include "faults.hpp"
 #include <algorithm>
 #include <cmath>
-#include <thread>
 
-// ---- CapacityGate ----
+// ---- AsyncCapacityGate ----
 
-CapacityGate::CapacityGate(int max_inflight, int max_queue)
+AsyncCapacityGate::AsyncCapacityGate(int max_inflight, int max_queue)
     : enabled_(max_inflight > 0),
       service_slots_(max_inflight),
       capacity_slots_(max_inflight > 0 ? max_inflight + max_queue : 0) {}
 
-bool CapacityGate::try_admit() {
-    if (!enabled_) return true;
+AsyncCapacityGate::AdmitResult AsyncCapacityGate::try_admit() {
+    if (!enabled_) return ADMITTED;
     std::lock_guard<std::mutex> lock(mu_);
-    if (capacity_slots_ <= 0) return false;
+    if (capacity_slots_ <= 0) return REJECTED;
     capacity_slots_--;
-    return true;
+    if (service_slots_ > 0) {
+        service_slots_--;
+        return ADMITTED;
+    }
+    return QUEUED;
 }
 
-double CapacityGate::acquire_service() {
-    if (!enabled_) return 0.0;
-    auto start = std::chrono::steady_clock::now();
-    std::unique_lock<std::mutex> lock(mu_);
-    cv_.wait(lock, [this] { return service_slots_ > 0; });
-    service_slots_--;
-    lock.unlock();
-    auto end = std::chrono::steady_clock::now();
-    return std::chrono::duration<double>(end - start).count();
+void AsyncCapacityGate::enqueue_waiter(int worker_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    waiter_queue_.push_back(worker_id);
 }
 
-void CapacityGate::release() {
-    if (!enabled_) return;
+int AsyncCapacityGate::release() {
+    if (!enabled_) return -1;
     std::lock_guard<std::mutex> lock(mu_);
     service_slots_++;
     capacity_slots_++;
-    cv_.notify_one();
+    if (!waiter_queue_.empty()) {
+        // Immediately grant the service slot to the next waiter.
+        service_slots_--;
+        int wid = waiter_queue_.front();
+        waiter_queue_.pop_front();
+        return wid;
+    }
+    return -1;
 }
 
 // ---- FaultInjector ----
 
-thread_local std::mt19937 FaultInjector::rng_;
-thread_local bool FaultInjector::rng_seeded_ = false;
-
 FaultInjector::FaultInjector(const FaultConfig& cfg) : cfg_(cfg) {}
+
+void FaultInjector::seed_rng(unsigned seed) {
+    rng_.seed(seed);
+    rng_seeded_ = true;
+}
 
 std::mt19937& FaultInjector::get_rng() {
     if (!rng_seeded_) {
-        rng_.seed(42 + static_cast<unsigned>(std::hash<std::thread::id>{}(std::this_thread::get_id())));
+        rng_.seed(42);
         rng_seeded_ = true;
     }
     return rng_;

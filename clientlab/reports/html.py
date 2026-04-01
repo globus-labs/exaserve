@@ -44,16 +44,16 @@ def render_report_html(study_manifest, points, envelope, plot_paths):
     parts.append("<h2>Point Summaries</h2>")
     parts.append("<table><thead><tr><th>Point</th><th>Requested RPS</th><th>Achieved RPS</th><th>Diagnosis</th><th>Queue Fraction</th><th>Safe Active Budget</th></tr></thead><tbody>")
     for point in points:
-        summary = point["summary"]
+        summary = point.get("summary", {})
         parts.append(
             "<tr><td><code>%s</code></td><td>%.2f</td><td>%.2f</td><td>%s</td><td>%.3f</td><td>%s</td></tr>"
             % (
-                escape(point["point_id"]),
-                float(summary["requested_rps"]),
-                float(summary["achieved_rps"]),
-                escape(summary["diagnosis"]),
-                float(summary["queue_fraction"]),
-                escape(str(summary["safe_active_budget_estimate"])),
+                escape(point.get("point_id", "?")),
+                float(summary.get("requested_rps", 0)),
+                float(summary.get("achieved_rps", 0)),
+                escape(summary.get("diagnosis", "error")),
+                float(summary.get("queue_fraction", 0)),
+                escape(str(summary.get("safe_active_budget_estimate", 0))),
             )
         )
     parts.append("</tbody></table>")

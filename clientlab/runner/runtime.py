@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import build_opener, urlopen, ProxyHandler
 
 from clientlab.analysis.diagnostics import build_operating_envelope, compare_point_summaries, summarize_point, write_json
 from clientlab.collectors.netstats import NetstatsProcess
@@ -70,10 +70,37 @@ def run_study(spec_ref, output_dir=None, force_local=False, force_pbs=False):
     }
     dump_json_file(study_dir / "study_manifest.json", manifest)
 
-    for point in points:
+    total = len(points)
+    print(f"[clientlab] Study '{spec['study']['name']}' — {total} points", flush=True)
+
+    for idx, point in enumerate(points, 1):
+        axis_str = ", ".join(f"{k}={v}" for k, v in point.get("_axis_values", {}).items())
+        print(f"[clientlab] [{idx}/{total}] Running point: {axis_str}", flush=True)
         point_dir = study_dir / "points" / point["_point_id"]
         ensure_dir(point_dir)
-        point_results.append(run_point(point, point_dir))
+        try:
+            result = run_point(point, point_dir)
+            expected = result["summary"].get("expected_rps", 0)
+            achieved = result["summary"].get("achieved_rps", 0)
+            diag = result["summary"].get("diagnosis", "?")
+            print(f"[clientlab] [{idx}/{total}] Done — expected={expected:.1f} achieved={achieved:.1f} rps, diagnosis={diag}", flush=True)
+        except Exception as exc:
+            print(f"[clientlab] [{idx}/{total}] FAILED: {exc}", flush=True)
+            result = {
+                "point_id": point["_point_id"],
+                "axis_values": point.get("_axis_values", {}),
+                "run_config": sanitize_runtime_point(point),
+                "artifacts": {"point_dir": str(point_dir)},
+                "summary": {
+                    "diagnosis": "error",
+                    "reasons": [str(exc)],
+                    "requested_rps": float(point.get("client", {}).get("rate", 0)),
+                    "expected_rps": 0.0,
+                    "achieved_rps": 0.0,
+                    "success_fraction": 0.0,
+                },
+            }
+        point_results.append(result)
 
     envelope = build_operating_envelope([result["summary"] for result in point_results])
     results_index = {
@@ -151,12 +178,19 @@ def run_point(point, point_dir):
 
     try:
         trace_path = point_dir / "trace.jsonl"
+        t0 = time.monotonic()
         trace_rows = generate_trace_rows(run_config)
+        t1 = time.monotonic()
         write_trace(trace_path, trace_rows)
+        t2 = time.monotonic()
+        print(f"[clientlab]   Trace: {len(trace_rows)-1} requests (generate={t1-t0:.2f}s, write={t2-t1:.2f}s)", flush=True)
+        duration = float(run_config["client"]["duration_s"])
+        print(f"[clientlab]   Dispatching (duration={duration}s)...", flush=True)
         go_outputs = run_go_dispatch(trace_rows, run_config, point_dir, base_urls)
         target_metrics = fetch_target_metrics(base_urls) if run_config["collectors"].get("target_metrics") else {}
     finally:
         stop_targets(target_handles)
+        time.sleep(1)  # Allow kernel to reclaim thread resources before next point.
         port_payload = port_collector.stop() if port_collector else {"samples": []}
         if netstats_proc is not None:
             _stdout, _stderr = netstats_proc.stop()
@@ -329,9 +363,15 @@ def run_go_dispatch(trace_rows, run_config, point_dir, base_urls):
             process.stdin.flush()
             process.stdin.close()
 
+        timeout_s = max(float(run_config["client"]["duration_s"]) + 120.0, 180.0)
         for entry in processes:
             process = entry["process"]
-            process.wait(timeout=max(float(run_config["client"]["duration_s"]) + 120.0, 180.0))
+            try:
+                process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                print(f"[clientlab]   WARNING: go_dispatch {entry['prefix']} timed out after {timeout_s:.0f}s, killing", flush=True)
+                process.kill()
+                process.wait(timeout=10)
             remaining_stdout = process.stdout.read() if process.stdout else ""
             remaining_stderr = process.stderr.read() if process.stderr else ""
             if remaining_stdout:
@@ -341,13 +381,22 @@ def run_go_dispatch(trace_rows, run_config, point_dir, base_urls):
             stdout_log.flush()
             stderr_log.flush()
             if process.returncode != 0:
-                raise RuntimeError(f"go_dispatch {entry['prefix']} exited with {process.returncode}")
+                print(f"[clientlab]   WARNING: go_dispatch {entry['prefix']} exited with code {process.returncode}", flush=True)
     finally:
         stdout_log.close()
         stderr_log.close()
 
-    merged_metrics = merge_metrics_json([json.loads(Path(entry["metrics_path"]).read_text(encoding="utf-8")) for entry in processes])
-    merged_results = merge_summary_results([load_summary_result(Path(entry["result_path"])) for entry in processes])
+    metrics_list = []
+    for entry in processes:
+        p = Path(entry["metrics_path"])
+        if p.exists():
+            metrics_list.append(json.loads(p.read_text(encoding="utf-8")))
+    merged_metrics = merge_metrics_json(metrics_list) if metrics_list else {}
+    result_list = []
+    for entry in processes:
+        p = Path(entry["result_path"])
+        result_list.append(load_summary_result(p))
+    merged_results = merge_summary_results(result_list) if result_list else {"requests_completed": 0, "errors": 0}
     merged_metrics["requests_succeeded"] = merged_results["requests_completed"]
     merged_metrics["requests_failed"] = merged_results["errors"]
     dump_json_file(point_dir / "client_metrics.json", merged_metrics)
@@ -519,32 +568,46 @@ def launch_local_synthetic_targets(run_config, point_dir):
     host = str(run_config["target"].get("host", "127.0.0.1"))
     base_port = int(run_config["target"].get("port", 18100))
     server_cmd_prefix = [ensure_cpp_server()]
-    for idx in range(count):
-        target_config = copy.deepcopy(run_config)
-        target_config["target"]["host"] = host
-        target_config["target"]["port"] = base_port + idx
-        config_path = point_dir / f"target_{idx}.json"
-        config_path.write_text(json.dumps(target_config, indent=2), encoding="utf-8")
-        stdout_log = (point_dir / f"target_{idx}.stdout.log").open("w", encoding="utf-8")
-        stderr_log = (point_dir / f"target_{idx}.stderr.log").open("w", encoding="utf-8")
-        proc = subprocess.Popen(
-            server_cmd_prefix + ["--config", str(config_path)],
-            stdout=stdout_log,
-            stderr=stderr_log,
-            universal_newlines=True,
-        )
-        base_url = f"http://{host}:{base_port + idx}"
-        wait_for_health(base_url)
-        handles.append(
-            {
-                "base_url": base_url,
-                "process": proc,
-                "stdout_log": stdout_log,
-                "stderr_log": stderr_log,
-                "remote": False,
-            }
-        )
-    return handles
+    try:
+        for idx in range(count):
+            target_config = copy.deepcopy(run_config)
+            target_config["target"]["host"] = host
+            target_config["target"]["port"] = base_port + idx
+            config_path = point_dir / f"target_{idx}.json"
+            config_path.write_text(json.dumps(target_config, indent=2), encoding="utf-8")
+            stdout_log = (point_dir / f"target_{idx}.stdout.log").open("w", encoding="utf-8")
+            stderr_log = (point_dir / f"target_{idx}.stderr.log").open("w", encoding="utf-8")
+            proc = None
+            handle = None
+            try:
+                proc = subprocess.Popen(
+                    server_cmd_prefix + ["--config", str(config_path)],
+                    stdout=stdout_log,
+                    stderr=stderr_log,
+                    universal_newlines=True,
+                )
+                base_url = f"http://{host}:{base_port + idx}"
+                handle = {
+                    "base_url": base_url,
+                    "process": proc,
+                    "stdout_log": stdout_log,
+                    "stderr_log": stderr_log,
+                    "remote": False,
+                }
+                handles.append(handle)
+                wait_for_health(base_url)
+            except Exception:
+                if handle is None:
+                    if proc and proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    stdout_log.close()
+                    stderr_log.close()
+                raise
+        return handles
+    except Exception:
+        stop_targets(handles)
+        raise
 
 
 def launch_pbs_synthetic_targets(run_config, point_dir):
@@ -558,34 +621,38 @@ def launch_pbs_synthetic_targets(run_config, point_dir):
     server_cmd = shlex.quote(ensure_cpp_server())
     handles = []
     base_port = int(run_config["target"].get("port", 18100))
-    for idx, node in enumerate(nodes[client_nodes : client_nodes + synthetic_nodes]):
-        target_config = copy.deepcopy(run_config)
-        target_config["target"]["host"] = "0.0.0.0"
-        target_config["target"]["port"] = base_port + idx
-        config_path = point_dir / f"target_{idx}.json"
-        config_path.write_text(json.dumps(target_config, indent=2), encoding="utf-8")
-        stdout_path = point_dir / f"target_{idx}.stdout.log"
-        stderr_path = point_dir / f"target_{idx}.stderr.log"
-        setup = f"source {shlex.quote(env_script)} && " if env_script else ""
-        remote_cmd = (
-            f"cd {shlex.quote(repo_root)} && "
-            f"{setup}"
-            f"nohup {server_cmd} "
-            f"--config {shlex.quote(str(config_path))} "
-            f"> {shlex.quote(str(stdout_path))} 2> {shlex.quote(str(stderr_path))} < /dev/null & echo $!"
-        )
-        pid = subprocess.check_output(["ssh", node, "bash", "-lc", remote_cmd], universal_newlines=True).strip()
-        base_url = f"http://{resolve_hsn_host(node)}:{base_port + idx}"
-        wait_for_health(base_url, timeout_s=30.0)
-        handles.append({"base_url": base_url, "node": node, "pid": pid, "remote": True})
-    return handles
+    try:
+        for idx, node in enumerate(nodes[client_nodes : client_nodes + synthetic_nodes]):
+            target_config = copy.deepcopy(run_config)
+            target_config["target"]["host"] = "0.0.0.0"
+            target_config["target"]["port"] = base_port + idx
+            config_path = point_dir / f"target_{idx}.json"
+            config_path.write_text(json.dumps(target_config, indent=2), encoding="utf-8")
+            stdout_path = point_dir / f"target_{idx}.stdout.log"
+            stderr_path = point_dir / f"target_{idx}.stderr.log"
+            setup = f"source {shlex.quote(env_script)} && " if env_script else ""
+            remote_cmd = (
+                f"cd {shlex.quote(repo_root)} && "
+                f"{setup}"
+                f"nohup {server_cmd} "
+                f"--config {shlex.quote(str(config_path))} "
+                f"> {shlex.quote(str(stdout_path))} 2> {shlex.quote(str(stderr_path))} < /dev/null & echo $!"
+            )
+            pid = subprocess.check_output(["ssh", node, "bash", "-lc", remote_cmd], universal_newlines=True).strip()
+            base_url = f"http://{resolve_hsn_host(node)}:{base_port + idx}"
+            handles.append({"base_url": base_url, "node": node, "pid": pid, "remote": True})
+            wait_for_health(base_url, timeout_s=30.0)
+        return handles
+    except Exception:
+        stop_targets(handles)
+        raise
 
 
 def stop_targets(handles):
     for handle in handles:
         if handle.get("remote"):
             subprocess.run(
-                ["ssh", handle["node"], f"kill {handle['pid']}"],
+                ["ssh", handle["node"], f"kill -9 {handle['pid']}"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True,
@@ -593,12 +660,18 @@ def stop_targets(handles):
         else:
             process = handle.get("process")
             if process and process.poll() is None:
-                process.terminate()
+                process.kill()
                 try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
                     process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            # Ensure no synthetic_server lingers from this point.
+            if process and process.poll() is None:
+                import signal
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
             if handle.get("stdout_log"):
                 handle["stdout_log"].close()
             if handle.get("stderr_log"):
@@ -619,7 +692,7 @@ def fetch_target_metrics(base_urls):
     }
     for base_url in base_urls:
         try:
-            with urlopen(f"{base_url}/metrics", timeout=3.0) as response:
+            with build_opener(ProxyHandler({})).open(f"{base_url}/metrics", timeout=3.0) as response:
                 payload = json.loads(response.read())
         except URLError:
             payload = {"error": "unreachable", "base_url": base_url}
@@ -639,11 +712,13 @@ def fetch_target_metrics(base_urls):
 
 
 def wait_for_health(base_url, timeout_s=15.0):
+    # Bypass any http_proxy that module load frameworks may set on compute nodes.
+    opener = build_opener(ProxyHandler({}))
     deadline = time.monotonic() + timeout_s
     last_error = None
     while time.monotonic() < deadline:
         try:
-            with urlopen(f"{base_url}/health", timeout=1.0) as response:
+            with opener.open(f"{base_url}/health", timeout=1.0) as response:
                 if response.status == 200:
                     return
         except Exception as exc:  # pragma: no cover - exercised in runtime

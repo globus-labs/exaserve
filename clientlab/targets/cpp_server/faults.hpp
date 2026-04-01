@@ -1,31 +1,37 @@
 #pragma once
 #include "config.hpp"
 #include <chrono>
-#include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <random>
 
-class CapacityGate {
+// Non-blocking capacity gate for the reactor pattern.
+// Replaces the old blocking CapacityGate that used condition_variable::wait().
+class AsyncCapacityGate {
 public:
-    explicit CapacityGate(int max_inflight, int max_queue);
+    enum AdmitResult { ADMITTED, QUEUED, REJECTED };
 
-    // Non-blocking admission check. Returns false if total capacity exceeded (→ 429).
-    bool try_admit();
+    explicit AsyncCapacityGate(int max_inflight, int max_queue);
 
-    // Blocks until a service slot is available. Returns queue wait in seconds.
-    double acquire_service();
+    // Non-blocking. Returns ADMITTED (service slot acquired), QUEUED (admitted
+    // but no service slot — caller should park), or REJECTED (429).
+    AdmitResult try_admit();
 
-    // Release both service and capacity slots.
-    void release();
+    // Called when a connection enters WAITING_GATE.
+    void enqueue_waiter(int worker_id);
+
+    // Release one service + capacity slot. Returns the worker_id of a
+    // waiting connection that should now proceed, or -1 if none.
+    int release();
 
     bool enabled() const { return enabled_; }
 
 private:
     bool enabled_;
     std::mutex mu_;
-    std::condition_variable cv_;
     int service_slots_;
     int capacity_slots_;
+    std::deque<int> waiter_queue_;  // worker_ids waiting for service slots
 };
 
 class FaultInjector {
@@ -41,10 +47,12 @@ public:
     // Should this request be an injected error? Uses request_index for burst logic.
     bool should_inject_error(uint64_t request_index);
 
+    // Seed the RNG with a specific value (used per-worker in reactor).
+    void seed_rng(unsigned seed);
+
 private:
     FaultConfig cfg_;
-    // Thread-local RNG is used; this seed is for reference.
-    static thread_local std::mt19937 rng_;
-    static thread_local bool rng_seeded_;
+    std::mt19937 rng_;
+    bool rng_seeded_ = false;
     std::mt19937& get_rng();
 };

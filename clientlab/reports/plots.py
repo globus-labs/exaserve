@@ -24,6 +24,9 @@ def _safe_float(value):
 
 
 def _point_label(point):
+    axis_values = point.get("axis_values", {})
+    if axis_values:
+        return " ".join("%s=%s" % (k, v) for k, v in sorted(axis_values.items()))
     run_config = point.get("run_config", {})
     client_cfg = run_config.get("client", {})
     active = client_cfg.get("max_active_requests")
@@ -63,12 +66,13 @@ def _svg_escape(value):
 
 
 def render_line_plot_svg(title, labels, series_map, y_label):
+    max_label_len = max((len(str(l)) for l in labels), default=0)
     width = 960
-    height = 420
     margin_left = 68
     margin_right = 24
     margin_top = 42
-    margin_bottom = 86
+    margin_bottom = max(86, 40 + max_label_len * 5)
+    height = 420 - 86 + margin_bottom
     plot_width = width - margin_left - margin_right
     plot_height = height - margin_top - margin_bottom
 
@@ -131,9 +135,10 @@ def render_line_plot_svg(title, labels, series_map, y_label):
             '<line x1="%.2f" y1="%d" x2="%.2f" y2="%d" stroke="#d1d5db" stroke-width="1" />'
             % (x, margin_top, x, margin_top + plot_height)
         )
+        label_y = margin_top + plot_height + 14
         lines.append(
-            '<text x="%.2f" y="%d" font-size="10" font-family="monospace" text-anchor="end" transform="rotate(-30 %.2f,%d)">%s</text>'
-            % (x + 2, height - 18, x + 2, height - 18, _svg_escape(label))
+            '<text x="%.2f" y="%d" font-size="10" font-family="monospace" text-anchor="end" transform="rotate(-45 %.2f,%d)">%s</text>'
+            % (x + 2, label_y, x + 2, label_y, _svg_escape(label))
         )
 
     for series_idx, name in enumerate(sorted(series_map)):
@@ -169,14 +174,16 @@ def generate_plots(study_dir, points):
     plot_dir = Path(study_dir) / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    ordered_points = sorted(
-        points,
-        key=lambda point: (
+    def _sort_key(point):
+        axis_values = point.get("axis_values", {})
+        if axis_values:
+            return tuple(_safe_float(v) for _, v in sorted(axis_values.items()))
+        return (
             int(point.get("run_config", {}).get("client", {}).get("max_active_requests", 0)),
             float(point.get("summary", {}).get("requested_rps", 0.0)),
-            point.get("point_id", ""),
-        ),
-    )
+        )
+
+    ordered_points = sorted(points, key=_sort_key)
     labels = [_point_label(point) for point in ordered_points]
     plots = {}
 
