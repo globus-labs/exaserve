@@ -59,7 +59,7 @@ Specs use a versioned schema with these top-level sections:
 
 ## Synthetic Target
 
-The built-in synthetic target is `python3 -m clientlab.targets.synthetic_server --config <json>`.
+The built-in synthetic target is `clientlab/targets/cpp_server/bin/synthetic_server --config <json>` (C++, built automatically via `build.sh`).
 
 It exposes:
 

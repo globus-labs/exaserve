@@ -383,6 +383,30 @@ def ensure_go_binary():
     return str(go_bin.resolve())
 
 
+def ensure_cpp_server():
+    cpp_dir = Path(__file__).resolve().parents[1] / "targets" / "cpp_server"
+    cpp_bin = cpp_dir / "bin" / "synthetic_server"
+    build_script = cpp_dir / "build.sh"
+    sources = list(cpp_dir.glob("*.cpp")) + list(cpp_dir.glob("*.hpp")) + [build_script]
+    needs_build = not (cpp_bin.is_file() and os.access(str(cpp_bin), os.X_OK))
+    if not needs_build:
+        bin_mtime = cpp_bin.stat().st_mtime
+        needs_build = any(source.is_file() and source.stat().st_mtime > bin_mtime for source in sources)
+    if not needs_build:
+        return str(cpp_bin.resolve())
+    build = subprocess.run(
+        ["bash", str(build_script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(f"Failed to build cpp synthetic_server:\n{build.stdout}\n{build.stderr}")
+    if not cpp_bin.is_file():
+        raise RuntimeError("cpp synthetic_server build completed but binary was not found")
+    return str(cpp_bin.resolve())
+
+
 def load_summary_result(path):
     if not path.exists():
         return {"requests_completed": 0, "requests_scheduled": 0, "errors": 0, "p50_s": 0.0, "p99_s": 0.0}
@@ -494,7 +518,7 @@ def launch_local_synthetic_targets(run_config, point_dir):
     count = int(run_config["target"].get("synthetic_nodes", 1))
     host = str(run_config["target"].get("host", "127.0.0.1"))
     base_port = int(run_config["target"].get("port", 18100))
-    python_bin = str(run_config["execution"].get("python") or sys.executable)
+    server_cmd_prefix = [ensure_cpp_server()]
     for idx in range(count):
         target_config = copy.deepcopy(run_config)
         target_config["target"]["host"] = host
@@ -504,7 +528,7 @@ def launch_local_synthetic_targets(run_config, point_dir):
         stdout_log = (point_dir / f"target_{idx}.stdout.log").open("w", encoding="utf-8")
         stderr_log = (point_dir / f"target_{idx}.stderr.log").open("w", encoding="utf-8")
         proc = subprocess.Popen(
-            [python_bin, "-m", "clientlab.targets.synthetic_server", "--config", str(config_path)],
+            server_cmd_prefix + ["--config", str(config_path)],
             stdout=stdout_log,
             stderr=stderr_log,
             universal_newlines=True,
@@ -531,7 +555,7 @@ def launch_pbs_synthetic_targets(run_config, point_dir):
         raise RuntimeError("PBS allocation does not provide enough nodes for the requested synthetic target count")
     repo_root = str(Path(__file__).resolve().parents[2])
     env_script = str(run_config["execution"].get("env_script", "")).strip()
-    python_bin = str(run_config["execution"].get("python") or sys.executable)
+    server_cmd = shlex.quote(ensure_cpp_server())
     handles = []
     base_port = int(run_config["target"].get("port", 18100))
     for idx, node in enumerate(nodes[client_nodes : client_nodes + synthetic_nodes]):
@@ -546,7 +570,7 @@ def launch_pbs_synthetic_targets(run_config, point_dir):
         remote_cmd = (
             f"cd {shlex.quote(repo_root)} && "
             f"{setup}"
-            f"nohup {shlex.quote(python_bin)} -m clientlab.targets.synthetic_server "
+            f"nohup {server_cmd} "
             f"--config {shlex.quote(str(config_path))} "
             f"> {shlex.quote(str(stdout_path))} 2> {shlex.quote(str(stderr_path))} < /dev/null & echo $!"
         )

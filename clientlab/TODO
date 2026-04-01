@@ -1,0 +1,29 @@
+## ClientLab Future Suites
+
+Not urgent — understand existing suites first before adding complexity.
+
+### Streaming responses
+- Synthetic server currently returns instant JSON; real inference uses SSE streaming
+- Need a streaming mode that trickles tokens over time
+- Changes goroutine lifetime, connection hold time, memory pressure
+
+### Variable / long-tail service times
+- Real LLM output lengths vary wildly (10 tokens vs 4096)
+- Creates head-of-line blocking and uneven connection drain
+- Add a suite with heavy-tailed distribution (e.g., lognormal with high variance)
+
+### Longer-duration soak test
+- Current tests are 2-3 seconds; connection pool behavior evolves over minutes
+- Idle timeouts, pool rebalancing, file descriptor growth
+- Add a multi-minute run to observe steady-state drift
+
+### Bursty arrival patterns
+- All current specs use constant rate
+- Add spike/ramp patterns to study semaphore and queue behavior under transient overload
+
+### Timeout and partial failure
+- Current specs test fast 429 rejections but not slow responses or hangs
+- Add scenarios: server-side delays exceeding client timeout, half-read bodies
+
+### Resource scaling observation
+- Track goroutine count, memory, file descriptor consumption as a function of concurrency and duration

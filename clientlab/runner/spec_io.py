@@ -100,7 +100,7 @@ def resolve_spec_path(spec_ref):
     if candidate.is_file():
         return str(candidate.resolve())
     specs_dir = Path(__file__).resolve().parents[1] / "specs"
-    for suffix in (".json", ".yaml"):
+    for suffix in (".yaml", ".json"):
         builtin = specs_dir / f"{spec_ref}{suffix}"
         if builtin.is_file():
             return str(builtin)
