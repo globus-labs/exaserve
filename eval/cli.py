@@ -80,6 +80,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_execute = run_subparsers.add_parser("execute", help="Execute a materialized run.yaml")
     run_execute.add_argument("run_yaml")
     run_execute.add_argument("--dry-run", action="store_true")
+
+    # derive-params: compute client config from Phase 0 saturation results
+    derive_parser = subparsers.add_parser(
+        "derive-params",
+        help="Derive client parameters from Phase 0 saturation results",
+    )
+    derive_parser.add_argument("result_dir", help="Path to run variant dir containing results/saturation_output.json")
+    derive_parser.add_argument("--headroom", type=float, default=0.7, help="Fraction of saturation rate to use as target (default: 0.7)")
+
     return parser
 
 
@@ -130,8 +139,66 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "execute":
             return execute_run(args.run_yaml, dry_run=args.dry_run)
 
+    if args.area == "derive-params":
+        return _derive_params(args.result_dir, args.headroom)
+
     parser.error(f"Unsupported command: {args.area} {getattr(args, 'command', '')}")
     return 2
+
+
+def _derive_params(result_dir: str, headroom: float) -> int:
+    """Derive client config from Phase 0 saturation output."""
+    import json
+    import math
+    from pathlib import Path
+
+    sat_path = Path(result_dir) / "results" / "saturation_output.json"
+    if not sat_path.exists():
+        # Try direct path (if result_dir already points to results/)
+        sat_path = Path(result_dir) / "saturation_output.json"
+    if not sat_path.exists():
+        print(f"ERROR: saturation_output.json not found in {result_dir}", flush=True)
+        return 1
+
+    sat_output = json.loads(sat_path.read_text(encoding="utf-8"))
+    sat_rate = sat_output.get("saturation_rate", 0)
+    if sat_rate <= 0:
+        print("ERROR: saturation_rate is 0 — no saturation point found", flush=True)
+        return 1
+
+    steps = sat_output.get("steps", [])
+    healthy_steps = [s for s in steps if s.get("healthy")]
+    if not healthy_steps:
+        print("ERROR: no healthy steps found in saturation output", flush=True)
+        return 1
+
+    best = healthy_steps[-1]
+    p99_latency = float(best.get("p99_latency_s", 0))
+    p99_ttft = float(best.get("p99_ttft_s", 0))
+    achieved_rps = float(best.get("achieved_rate", 0))
+
+    rate_per_node = sat_rate * headroom
+    latency_for_sizing = p99_latency if p99_latency > 0 else 0.1  # fallback
+    concurrency_needed = rate_per_node * latency_for_sizing
+    safe_per_proc = 1200  # from clientlab findings
+
+    num_go_procs = max(1, math.ceil(concurrency_needed / safe_per_proc))
+    go_concurrency = max(16, math.ceil(concurrency_needed / num_go_procs))
+
+    print("# Derived client parameters from Phase 0 saturation results")
+    print(f"# Source: {sat_path}")
+    print(f"# Saturation rate: {sat_rate} rps")
+    print(f"# Best healthy step: achieved={achieved_rps:.1f} rps, p99={p99_latency*1000:.1f}ms" +
+          (f", p99_ttft={p99_ttft*1000:.1f}ms" if p99_ttft > 0 else ""))
+    print(f"# Headroom: {headroom:.0%}")
+    print()
+    print(f"rate_per_node: {rate_per_node:.1f}")
+    print(f"num_go_procs: {num_go_procs}")
+    print(f"go_concurrency: {go_concurrency}")
+    print(f"num_go_workers: 4")
+    print()
+    print("# Paste into your weak-scaling spec under 'client:' and 'workload:'")
+    return 0
 
 
 if __name__ == "__main__":

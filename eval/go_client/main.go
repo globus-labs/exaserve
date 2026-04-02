@@ -70,7 +70,9 @@ type resultRecord struct {
 	DequeuedAt             float64 `json:"dequeued_at,omitempty"`
 	RequestStartAt         float64 `json:"request_start_at,omitempty"`
 	HeadersAt              float64 `json:"headers_at,omitempty"`
+	FirstTokenAt           float64 `json:"first_token_at,omitempty"`
 	BodyDoneAt             float64 `json:"body_done_at,omitempty"`
+	TTFT                   float64 `json:"ttft_s,omitempty"`
 }
 
 type dispatchDoneMeta struct {
@@ -108,6 +110,7 @@ type chatPayloadDeterministic struct {
 	MinTokens   int           `json:"min_tokens"`
 	Temperature float64       `json:"temperature"`
 	IgnoreEOS   bool          `json:"ignore_eos"`
+	Stream      bool          `json:"stream,omitempty"`
 	TP          *int          `json:"tensor_parallel_size,omitempty"`
 }
 
@@ -116,6 +119,7 @@ type chatPayloadNatural struct {
 	Messages    []chatMessage `json:"messages"`
 	MaxTokens   int           `json:"max_tokens"`
 	Temperature float64       `json:"temperature"`
+	Stream      bool          `json:"stream,omitempty"`
 	TP          *int          `json:"tensor_parallel_size,omitempty"`
 }
 
@@ -126,6 +130,7 @@ type completionPayloadDeterministic struct {
 	MinTokens   int     `json:"min_tokens"`
 	Temperature float64 `json:"temperature"`
 	IgnoreEOS   bool    `json:"ignore_eos"`
+	Stream      bool    `json:"stream,omitempty"`
 	TP          *int    `json:"tensor_parallel_size,omitempty"`
 }
 
@@ -134,6 +139,7 @@ type completionPayloadNatural struct {
 	Prompt      string  `json:"prompt"`
 	MaxTokens   int     `json:"max_tokens"`
 	Temperature float64 `json:"temperature"`
+	Stream      bool    `json:"stream,omitempty"`
 	TP          *int    `json:"tensor_parallel_size,omitempty"`
 }
 
@@ -155,10 +161,11 @@ type workItem struct {
 	resultIndex     int
 	samplePhases    bool
 	enableConnTrace bool
+	stream          bool
 	collector       *metricsCollector // optional per-item collector (saturation mode)
 }
 
-func buildPayload(req traceRequest, generationMode string, includeTP bool) ([]byte, string, error) {
+func buildPayload(req traceRequest, generationMode string, includeTP bool, stream bool) ([]byte, string, error) {
 	var tp *int
 	if includeTP {
 		value := req.TensorParallelSz
@@ -183,6 +190,7 @@ func buildPayload(req traceRequest, generationMode string, includeTP bool) ([]by
 				MinTokens:   req.OutputLen,
 				Temperature: 0.7,
 				IgnoreEOS:   true,
+				Stream:      stream,
 				TP:          tp,
 			}
 		} else {
@@ -191,6 +199,7 @@ func buildPayload(req traceRequest, generationMode string, includeTP bool) ([]by
 				Messages:    msgs,
 				MaxTokens:   req.OutputLen,
 				Temperature: 0.7,
+				Stream:      stream,
 				TP:          tp,
 			}
 		}
@@ -204,6 +213,7 @@ func buildPayload(req traceRequest, generationMode string, includeTP bool) ([]by
 				MinTokens:   req.OutputLen,
 				Temperature: 0.7,
 				IgnoreEOS:   true,
+				Stream:      stream,
 				TP:          tp,
 			}
 		} else {
@@ -212,6 +222,7 @@ func buildPayload(req traceRequest, generationMode string, includeTP bool) ([]by
 				Prompt:      req.Prompt,
 				MaxTokens:   req.OutputLen,
 				Temperature: 0.7,
+				Stream:      stream,
 				TP:          tp,
 			}
 		}
@@ -266,6 +277,7 @@ func run() int {
 	workerID := flag.String("worker-id", "", "Worker identifier for log prefixes")
 	warmupRPS := flag.Int("warmup-rps", 0, "Warm-up requests per second (0 = no warmup)")
 	warmupDuration := flag.Float64("warmup-duration", 0, "Warm-up duration in seconds")
+	streamMode := flag.Bool("stream", false, "Enable streaming responses for TTFT measurement")
 	cpuprofileFlag := flag.String("cpuprofile", "", "Write CPU profile to this file")
 
 	// Mode selection
@@ -290,6 +302,8 @@ func run() int {
 	satOutputFile := flag.String("sat-output", "saturation_output.json", "Saturation results output path")
 	satVerify := flag.Bool("sat-verify", true, "Run step-up verification after binary search")
 	satTargetRate := flag.Int("sat-target-rate", 0, "Single-step target rate (saturation-step mode)")
+	satStream := flag.Bool("sat-stream", false, "Enable streaming responses in saturation mode for TTFT measurement")
+	satMaxP99TTFT := flag.Float64("sat-max-p99-ttft", 0.0, "SLO: max acceptable p99 TTFT in seconds (0=disabled)")
 
 	flag.Parse()
 
@@ -356,6 +370,8 @@ func run() int {
 			StepUpEnd:       *satStepUpEnd,
 			StepUpIncrement: *satStepUpIncrement,
 			Verify:          *satVerify,
+			MaxP99TTFT:      *satMaxP99TTFT,
+			Stream:          *satStream,
 			OutputFile:      *satOutputFile,
 		}
 		if err := cfg.Validate(); err != nil {
@@ -420,7 +436,7 @@ func run() int {
 		resolvedMaxConns = resolvedMaxActive
 	}
 
-	traceRequests, err := loadRequests(*traceFile, *generationMode, *includeTP)
+	traceRequests, err := loadRequests(*traceFile, *generationMode, *includeTP, *streamMode)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		return 1
@@ -606,6 +622,7 @@ func run() int {
 					resultIndex:     resultIdx,
 					samplePhases:    samplePhases,
 					enableConnTrace: *enableHTTPTrace,
+					stream:          *streamMode,
 				}
 
 				workCh <- item
@@ -768,6 +785,63 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 	defer resp.Body.Close()
 
 	rec.StatusCode = resp.StatusCode
+
+	if item.stream && resp.StatusCode == http.StatusOK {
+		// Streaming path: parse SSE events, extract TTFT and usage.
+		sse := parseSSEStream(resp.Body, requestStart)
+		bodyDone := time.Now()
+		rec.BodyDoneAt = float64(bodyDone.UnixNano()) / 1e9
+		rec.EndTime = rec.BodyDoneAt
+		rec.Latency = rec.EndTime - rec.EnqueuedAt
+
+		if !sse.FirstTokenAt.IsZero() {
+			rec.FirstTokenAt = float64(sse.FirstTokenAt.UnixNano()) / 1e9
+			rec.TTFT = sse.TTFT.Seconds()
+			if collector != nil {
+				collector.ObserveTTFT(sse.TTFT)
+			}
+		}
+
+		if collector != nil {
+			collector.ObserveBodyRead(bodyDone.Sub(headersAt))
+			collector.ObserveSlotHold(durationBetween(rec.EnqueuedAt, rec.BodyDoneAt))
+		}
+		if sampledTrace != nil {
+			sampledTrace.BodyDoneAt = rec.BodyDoneAt
+			sampledTrace.BodyReadS = durationBetween(rec.HeadersAt, rec.BodyDoneAt).Seconds()
+			sampledTrace.SlotHoldS = durationBetween(rec.EnqueuedAt, rec.BodyDoneAt).Seconds()
+			sampledTrace.StatusCode = rec.StatusCode
+			sampledTrace.FirstTokenAt = rec.FirstTokenAt
+			sampledTrace.TTFTS = rec.TTFT
+		}
+
+		if sse.Err != nil {
+			rec.Error = fmt.Sprintf("SSE read error: %v", sse.Err)
+			rec.ErrorClass = "body_read"
+			if sampledTrace != nil {
+				sampledTrace.ErrorClass = rec.ErrorClass
+			}
+			if collector != nil {
+				collector.RecordCompletion(item.target, rec, sampledTrace)
+			}
+			return rec
+		}
+
+		rec.Success = true
+		if sse.Usage != nil {
+			rec.ActualPromptTokens = sse.Usage.PromptTokens
+			rec.ActualCompletionTokens = sse.Usage.CompletionTokens
+		}
+		if sampledTrace != nil {
+			sampledTrace.Success = true
+		}
+		if collector != nil {
+			collector.RecordCompletion(item.target, rec, sampledTrace)
+		}
+		return rec
+	}
+
+	// Non-streaming path: read full body at once.
 	respBody, readErr := io.ReadAll(resp.Body)
 	bodyDone := time.Now()
 	rec.BodyDoneAt = float64(bodyDone.UnixNano()) / 1e9
@@ -927,7 +1001,7 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 	return nil
 }
 
-func loadRequests(traceFile string, generationMode string, includeTP bool) ([]preparedRequest, error) {
+func loadRequests(traceFile string, generationMode string, includeTP bool, stream bool) ([]preparedRequest, error) {
 	input, err := os.Open(traceFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open trace file %s: %w", traceFile, err)
@@ -946,7 +1020,7 @@ func loadRequests(traceFile string, generationMode string, includeTP bool) ([]pr
 		if err := json.Unmarshal(line, &req); err != nil {
 			return nil, fmt.Errorf("malformed trace line: %w", err)
 		}
-		body, endpoint, err := buildPayload(req, generationMode, includeTP)
+		body, endpoint, err := buildPayload(req, generationMode, includeTP, stream)
 		if err != nil {
 			return nil, fmt.Errorf("payload build error for %s: %w", req.ReqID, err)
 		}

@@ -149,6 +149,8 @@ type phaseTraceRecord struct {
 	NewConnection    bool    `json:"new_connection"`
 	HTTPTraceEnabled bool    `json:"httptrace_enabled"`
 	StatusCode       int     `json:"status_code,omitempty"`
+	FirstTokenAt     float64 `json:"first_token_at,omitempty"`
+	TTFTS            float64 `json:"ttft_s,omitempty"`
 	Success          bool    `json:"success"`
 	ErrorClass       string  `json:"error_class,omitempty"`
 }
@@ -193,6 +195,7 @@ type metricsCollector struct {
 	bodyReadHist      *durationHistogram
 	slotHoldHist      *durationHistogram
 	connectHist       *durationHistogram
+	ttftHist          *durationHistogram
 
 	mu           sync.Mutex
 	statusCounts map[string]uint64
@@ -215,6 +218,7 @@ func newMetricsCollector(workerID string, maxActive int, queueCapacity int, maxC
 		bodyReadHist:      newDurationHistogram(defaultHistogramBounds),
 		slotHoldHist:      newDurationHistogram(defaultHistogramBounds),
 		connectHist:       newDurationHistogram(defaultHistogramBounds),
+		ttftHist:          newDurationHistogram(defaultHistogramBounds),
 		statusCounts:      make(map[string]uint64),
 		errorCounts:       make(map[string]uint64),
 		perTarget:         make(map[string]*perTargetMetrics),
@@ -288,6 +292,10 @@ func (c *metricsCollector) ObserveSlotHold(d time.Duration) {
 
 func (c *metricsCollector) ObserveConnect(d time.Duration) {
 	c.connectHist.Observe(d)
+}
+
+func (c *metricsCollector) ObserveTTFT(d time.Duration) {
+	c.ttftHist.Observe(d)
 }
 
 func (c *metricsCollector) recordConnection(target string, state httpTraceState) {
@@ -414,6 +422,7 @@ func (c *metricsCollector) Snapshot(runT0 float64, requestsLoaded int, requestsS
 			"body_read":       c.bodyReadHist.Snapshot(),
 			"slot_hold":       c.slotHoldHist.Snapshot(),
 			"connect":         c.connectHist.Snapshot(),
+			"ttft":            c.ttftHist.Snapshot(),
 		},
 		PerTarget: perTarget,
 	}

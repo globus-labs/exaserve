@@ -18,7 +18,7 @@ type SynthGenerator struct {
 	counter  atomic.Uint64
 }
 
-func NewSynthGenerator(model string, promptWords, outputTokens int) *SynthGenerator {
+func NewSynthGenerator(model string, promptWords, outputTokens int, stream bool) *SynthGenerator {
 	prompt := strings.Repeat("word ", promptWords)
 	payload := chatPayloadDeterministic{
 		Model:       model,
@@ -27,6 +27,7 @@ func NewSynthGenerator(model string, promptWords, outputTokens int) *SynthGenera
 		MinTokens:   outputTokens,
 		Temperature: 0.7,
 		IgnoreEOS:   true,
+		Stream:      stream,
 	}
 	body, _ := json.Marshal(payload)
 	return &SynthGenerator{

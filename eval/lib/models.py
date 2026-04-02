@@ -49,6 +49,7 @@ class MatrixSpec:
     axes: list[MatrixAxis] = field(default_factory=list)
     name_template: str = ""
     derived: list[DerivedField] = field(default_factory=list)
+    combine: str = "cartesian"  # "cartesian" (default) or "zip"
 
 
 @dataclass
@@ -63,6 +64,7 @@ class ModelSpec:
     gpu_memory_utilization: float = 0.90
     enforce_eager: bool = True
     enable_log_requests: bool = True
+    max_num_seqs: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ModelSpec":
@@ -79,6 +81,9 @@ class ModelSpec:
             gpu_memory_utilization=float(data.get("gpu_memory_utilization", 0.90)),
             enforce_eager=bool(data.get("enforce_eager", True)),
             enable_log_requests=bool(data.get("enable_log_requests", True)),
+            max_num_seqs=(
+                None if data.get("max_num_seqs") is None else int(data["max_num_seqs"])
+            ),
         )
 
 
@@ -113,6 +118,49 @@ class DeploymentSpec:
 
 
 @dataclass
+class SaturationSpec:
+    enabled: bool = False
+    search_mode: str = "binary"
+    initial_rate: int = 100
+    max_rate: int = 0
+    step_duration_s: float = 10.0
+    warmup_duration_s: float = 3.0
+    cooldown_pause_s: float = 2.0
+    tolerance: float = 0.05
+    max_error_rate: float = 0.01
+    plateau_ratio: float = 0.95
+    max_p99_ttft: float = 0.0
+    verify: bool = True
+    step_up_start: int = 0
+    step_up_end: int = 0
+    step_up_increment: int = 0
+    stream: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SaturationSpec":
+        if not data:
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            search_mode=str(data.get("search_mode", "binary")),
+            initial_rate=int(data.get("initial_rate", 100)),
+            max_rate=int(data.get("max_rate", 0)),
+            step_duration_s=float(data.get("step_duration_s", 10.0)),
+            warmup_duration_s=float(data.get("warmup_duration_s", 3.0)),
+            cooldown_pause_s=float(data.get("cooldown_pause_s", 2.0)),
+            tolerance=float(data.get("tolerance", 0.05)),
+            max_error_rate=float(data.get("max_error_rate", 0.01)),
+            plateau_ratio=float(data.get("plateau_ratio", 0.95)),
+            max_p99_ttft=float(data.get("max_p99_ttft", 0.0)),
+            verify=bool(data.get("verify", True)),
+            step_up_start=int(data.get("step_up_start", 0)),
+            step_up_end=int(data.get("step_up_end", 0)),
+            step_up_increment=int(data.get("step_up_increment", 0)),
+            stream=bool(data.get("stream", False)),
+        )
+
+
+@dataclass
 class ClientSpec:
     num_runs: int = 1
     include_tp: bool = False
@@ -125,6 +173,8 @@ class ClientSpec:
     warmup_rps: int = 0
     warmup_duration_s: float = 0.0
     sum_only: bool = False
+    stream: bool = False
+    saturation: SaturationSpec = field(default_factory=SaturationSpec)
 
 
 @dataclass

@@ -204,9 +204,13 @@ def _validate_replay_results(run_plan) -> dict[str, int | str]:
     with open(result_path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
 
+    # Saturation results are flat dicts with __type__=summary; replay results nest under "overall".
     overall = payload.get("overall")
     if not isinstance(overall, dict):
-        raise RuntimeError(f"Replay result file is missing an 'overall' summary: {result_path}")
+        if payload.get("__type__") == "summary" or payload.get("saturation_rate") is not None:
+            overall = payload  # saturation result: flat dict is the summary
+        else:
+            raise RuntimeError(f"Replay result file is missing an 'overall' summary: {result_path}")
 
     requests_completed = int(overall.get("requests_completed", 0) or 0)
     requests_scheduled = int(overall.get("requests_scheduled", requests_completed) or requests_completed)

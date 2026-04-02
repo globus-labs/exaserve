@@ -415,6 +415,7 @@ class VLLMWorker:
         gpu_memory_utilization: float = 0.9,
         max_model_len: int = 4096,
         enforce_eager: bool = True,
+        max_num_seqs: int = None,
     ):
         init_start = time.time()
         pid = os.getpid()
@@ -492,6 +493,8 @@ class VLLMWorker:
             max_model_len=max_model_len,
             enforce_eager=enforce_eager,
         )
+        if max_num_seqs is not None:
+            engine_kwargs["max_num_seqs"] = max_num_seqs
         if pipeline_parallel_size > 1:
             engine_kwargs["pipeline_parallel_size"] = pipeline_parallel_size
             engine_kwargs["distributed_executor_backend"] = "ray"
@@ -871,6 +874,7 @@ def deploy_model(
         gpu_memory_utilization=model_config.gpu_memory_utilization,
         max_model_len=model_config.max_model_len,
         enforce_eager=model_config.enforce_eager,
+        max_num_seqs=model_config.max_num_seqs,
     )
 
     return deployment, model_id

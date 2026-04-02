@@ -32,6 +32,7 @@ from .models import (
     MatrixAxis,
     MatrixSpec,
     ModelSpec,
+    SaturationSpec,
     SchedulerSpec,
     TraceSpec,
     WorkloadSpec,
@@ -64,10 +65,14 @@ def _matrix_from_dict(data: dict[str, Any]) -> MatrixSpec:
                 expr=str(raw_derived["expr"]),
             )
         )
+    combine = str(data.get("combine", "cartesian"))
+    if combine not in ("cartesian", "zip"):
+        raise ValueError(f"matrix.combine must be 'cartesian' or 'zip', got {combine!r}")
     return MatrixSpec(
         axes=axes,
         name_template=str(data.get("name_template", "")),
         derived=derived,
+        combine=combine,
     )
 
 
@@ -141,6 +146,8 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         warmup_rps=int(client_raw.get("warmup_rps", 0)),
         warmup_duration_s=float(client_raw.get("warmup_duration_s", 0.0)),
         sum_only=bool(client_raw.get("sum_only", False)),
+        stream=bool(client_raw.get("stream", False)),
+        saturation=SaturationSpec.from_dict(client_raw.get("saturation", {})),
     )
     backend = BackendSpec(
         default=str(backend_raw.get("default", "ray")),

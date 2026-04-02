@@ -41,6 +41,10 @@ type SaturationConfig struct {
 	// SLO thresholds
 	MaxErrorRate float64 // max fraction of errors
 	PlateauRatio float64 // min achieved/target ratio
+	MaxP99TTFT   float64 // max acceptable p99 TTFT in seconds (0 = disabled)
+
+	// Streaming
+	Stream bool // enable streaming responses for TTFT measurement
 
 	// Step-up parameters
 	StepUpStart     int
@@ -268,7 +272,7 @@ func newSaturationFinder(cfg SaturationConfig) *saturationFinder {
 
 	return &saturationFinder{
 		cfg:       cfg,
-		gen:       NewSynthGenerator(cfg.Model, cfg.PromptWords, cfg.OutputTokens),
+		gen:       NewSynthGenerator(cfg.Model, cfg.PromptWords, cfg.OutputTokens, cfg.Stream),
 		clients:   clients,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -531,6 +535,7 @@ func (sf *saturationFinder) runStep(targetRate int) *StepResult {
 					resultIndex:     0,
 					samplePhases:    samplePhases,
 					enableConnTrace: sf.cfg.EnableHTTPTrace,
+					stream:          sf.cfg.Stream,
 					collector:       collector,
 				}
 				workCh <- item
@@ -562,6 +567,12 @@ func (sf *saturationFinder) evaluateHealth(r *StepResult) {
 			r.FailReasons = append(r.FailReasons,
 				fmt.Sprintf("plateau: achieved/target=%.4f < %.4f", ratio, sf.cfg.PlateauRatio))
 		}
+	}
+
+	if sf.cfg.MaxP99TTFT > 0 && r.P99TTFT > sf.cfg.MaxP99TTFT {
+		r.Healthy = false
+		r.FailReasons = append(r.FailReasons,
+			fmt.Sprintf("ttft: p99=%.4fs > %.4fs", r.P99TTFT, sf.cfg.MaxP99TTFT))
 	}
 }
 

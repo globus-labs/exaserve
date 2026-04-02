@@ -26,6 +26,7 @@ class ModelConfig: # model configs for the engine
     gpu_memory_utilization: float = 0.90 # EngineArgs
     enforce_eager: bool = True # EngineArgs
     enable_log_requests: bool = True # EngineArgs
+    max_num_seqs: Optional[int] = None # EngineArgs - max concurrent sequences in vLLM scheduler (None = vLLM default)
     num_replicas: Optional[int] = None # Deployment - number of replicas total, auto-scale based on tensor parallel size
     num_cpus_per_replica: int = 4 # Deployment - number of CPUs per replica
 
@@ -41,6 +42,7 @@ class ModelConfig: # model configs for the engine
             gpu_memory_utilization=spec.gpu_memory_utilization,
             enforce_eager=spec.enforce_eager,
             enable_log_requests=spec.enable_log_requests,
+            max_num_seqs=getattr(spec, "max_num_seqs", None),
             num_replicas=spec.num_replicas,
             num_cpus_per_replica=spec.num_cpus_per_replica,
         )
@@ -104,6 +106,7 @@ def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
         gpu_memory_utilization=float(d.get("gpu_memory_utilization", 0.90)),
         enforce_eager=bool(d.get("enforce_eager", True)),
         enable_log_requests=bool(d.get("enable_log_requests", True)),
+        max_num_seqs=int(d["max_num_seqs"]) if d.get("max_num_seqs") is not None else None,
         num_replicas=num_replicas,
         num_cpus_per_replica=int(d.get("num_cpus_per_replica", 4)),
     )

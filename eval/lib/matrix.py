@@ -46,8 +46,21 @@ def expand_matrix(spec: ExperimentSpec) -> list[VariantSpec]:
 
     axis_names = [axis.name for axis in spec.matrix.axes]
     axis_values = [axis.values for axis in spec.matrix.axes]
+
+    combine = getattr(spec.matrix, "combine", "cartesian")
+    if combine == "zip":
+        lengths = [len(v) for v in axis_values]
+        if len(set(lengths)) != 1:
+            raise ValueError(
+                f"matrix combine=zip requires all axes to have equal-length values lists, "
+                f"got lengths {dict(zip(axis_names, lengths))}"
+            )
+        combinations = zip(*axis_values)
+    else:
+        combinations = itertools.product(*axis_values)
+
     variants = []
-    for combination in itertools.product(*axis_values):
+    for combination in combinations:
         values = dict(zip(axis_names, combination))
         spec_copy = deep_copy(spec)
         for axis in spec_copy.matrix.axes:

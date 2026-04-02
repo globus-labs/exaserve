@@ -40,6 +40,7 @@ class TraceGeneratorConfig:
     speedup: float
     output_len: int
     output_trace_path: str
+    input_len: int = 0
     # mode -> weight for distribution; e.g. {"chat": 1, "completion": 0} = all chat
     modes: Dict[str, int] = field(default_factory=lambda: {"chat": 1, "completion": 0})
 
@@ -69,6 +70,8 @@ class ReplayClientConfig:
     warmup_rps: int = 0     # warm-up requests per second (0 = no warmup)
     warmup_duration_s: float = 0.0  # warm-up duration in seconds
     sum_only: bool = False  # Go client writes only summary instead of per-request results
+    stream: bool = False    # Enable SSE streaming for TTFT measurement
+    saturation: dict = field(default_factory=dict)  # SaturationSpec as dict (empty = disabled)
 
 
 @dataclass
@@ -139,6 +142,7 @@ def _trace_config_from_dict(d: Dict[str, Any]) -> Union[TraceGeneratorConfig, We
         speedup=float(d.get("speedup", 1.0)),
         output_len=int(d.get("output_len", 0)),
         output_trace_path=str(d.get("output_trace_path", "")),
+        input_len=int(d.get("input_len", 0)),
         modes=dict(d.get("modes", {"chat": 1, "completion": 0})),
     )
 
@@ -158,6 +162,8 @@ def _replay_config_from_dict(d: Dict[str, Any]) -> ReplayClientConfig:
         warmup_rps=int(d.get("warmup_rps", 0)),
         warmup_duration_s=float(d.get("warmup_duration_s", 0.0)),
         sum_only=bool(d.get("sum_only", False)),
+        stream=bool(d.get("stream", False)),
+        saturation=dict(d.get("saturation", {})),
     )
 
 

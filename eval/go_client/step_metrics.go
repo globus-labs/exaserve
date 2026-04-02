@@ -11,6 +11,9 @@ type StepResult struct {
 	P50Latency   float64  `json:"p50_latency_s"`
 	P99Latency   float64  `json:"p99_latency_s"`
 	MeanLatency  float64  `json:"mean_latency_s"`
+	P50TTFT      float64  `json:"p50_ttft_s,omitempty"`
+	P99TTFT      float64  `json:"p99_ttft_s,omitempty"`
+	MeanTTFT     float64  `json:"mean_ttft_s,omitempty"`
 	NewConns     uint64   `json:"new_connections"`
 	ReusedConns  uint64   `json:"reused_connections"`
 	MaxActive    int64    `json:"max_observed_active"`
@@ -49,8 +52,9 @@ func SnapshotStepResult(mc *metricsCollector, targetRate int, measureStartNs int
 	}
 
 	tthSnap := mc.timeToHeadersHist.Snapshot()
+	ttftSnap := mc.ttftHist.Snapshot()
 
-	return &StepResult{
+	result := &StepResult{
 		TargetRate:   targetRate,
 		AchievedRate: achievedRate,
 		Duration:     duration,
@@ -65,6 +69,13 @@ func SnapshotStepResult(mc *metricsCollector, targetRate int, measureStartNs int
 		MaxActive:    mc.maxObservedActive.Load(),
 		Healthy:      true, // caller evaluates SLO
 	}
+	// Populate TTFT fields only when streaming data is available.
+	if ttftSnap.Count > 0 {
+		result.P50TTFT = PercentileFromHistogram(&ttftSnap, 0.50)
+		result.P99TTFT = PercentileFromHistogram(&ttftSnap, 0.99)
+		result.MeanTTFT = histogramMeanS(&ttftSnap)
+	}
+	return result
 }
 
 // PercentileFromHistogram estimates a percentile from a bucket-based histogram

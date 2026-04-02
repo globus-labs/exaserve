@@ -148,6 +148,7 @@ def _spawn_go_procs(
     num_go_procs: int = 1,
     warmup_rps: int = 0,
     warmup_duration_s: float = 0.0,
+    stream: bool = False,
     cpuprofile_dir: str = "",
 ):
     request_map = {request.req_id: request for request in rank_requests}
@@ -191,6 +192,8 @@ def _spawn_go_procs(
             cmd.append("--sum-only")
         if include_tp:
             cmd.append("--include-tp")
+        if stream:
+            cmd.append("--stream")
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -377,6 +380,119 @@ def _load_trace_requests(trace_path: str) -> list[TraceRequest]:
     return requests
 
 
+def _resolve_saturation_request_shape(exp_config: EvalManifest, sat_cfg: dict) -> dict[str, int | str]:
+    deployment_models = exp_config.model_deployment_config.model_configs
+    trace_cfg = exp_config.job_trace_config
+    return {
+        "model": str(sat_cfg.get("model") or (deployment_models[0].model_id if deployment_models else "stub-model")),
+        # Saturation uses a synthetic prompt, so use the configured workload input/output
+        # lengths as the closest available request-shape proxy.
+        "prompt_words": int(getattr(trace_cfg, "input_len", 0) or 32),
+        "output_tokens": int(getattr(trace_cfg, "output_len", 0) or 16),
+    }
+
+
+def _build_sat_go_cmd(go_bin, base_urls, replay_cfg, sat_cfg, exp_config, mode, output_path, target_rate=None):
+    """Build the Go client command for saturation or saturation-step mode."""
+    sat_shape = _resolve_saturation_request_shape(exp_config, sat_cfg)
+    cmd = [
+        go_bin,
+        "--mode", mode,
+        "--base-urls", ",".join(base_urls),
+        "--max-active-requests", str(replay_cfg.go_concurrency),
+        "--num-go-workers", str(replay_cfg.num_go_workers),
+        "--timeout", "3600",
+        "--sat-model", str(sat_shape["model"]),
+        "--sat-prompt-words", str(sat_shape["prompt_words"]),
+        "--sat-output-tokens", str(sat_shape["output_tokens"]),
+        "--sat-search-mode", str(sat_cfg.get("search_mode", "binary")),
+        "--sat-initial-rate", str(sat_cfg.get("initial_rate", 100)),
+        "--sat-max-rate", str(sat_cfg.get("max_rate", 0)),
+        "--sat-step-duration", str(sat_cfg.get("step_duration_s", 10.0)),
+        "--sat-warmup-duration", str(sat_cfg.get("warmup_duration_s", 3.0)),
+        "--sat-cooldown-pause", str(sat_cfg.get("cooldown_pause_s", 2.0)),
+        "--sat-tolerance", str(sat_cfg.get("tolerance", 0.05)),
+        "--sat-max-error-rate", str(sat_cfg.get("max_error_rate", 0.01)),
+        "--sat-plateau-ratio", str(sat_cfg.get("plateau_ratio", 0.95)),
+        "--sat-output", str(output_path),
+    ]
+    if sat_cfg.get("verify") is False:
+        cmd.append("--sat-verify=false")
+    if sat_cfg.get("stream"):
+        cmd.append("--sat-stream")
+    max_ttft = float(sat_cfg.get("max_p99_ttft", 0.0))
+    if max_ttft > 0:
+        cmd.extend(["--sat-max-p99-ttft", str(max_ttft)])
+    if mode == "saturation-step" and target_rate is not None:
+        cmd.extend(["--sat-target-rate", str(target_rate)])
+    # step-up params
+    for key, flag in [("step_up_start", "--sat-step-up-start"), ("step_up_end", "--sat-step-up-end"), ("step_up_increment", "--sat-step-up-increment")]:
+        val = int(sat_cfg.get(key, 0))
+        if val > 0:
+            cmd.extend([flag, str(val)])
+    return cmd
+
+
+def _run_saturation_from_manifest(go_bin, base_urls, replay_cfg, sat_cfg, exp_config, output_path, num_go_procs, go_concurrency):
+    """Run saturation finder from the eval pipeline (single-proc or multi-proc)."""
+    print(f"[replay_engine] Saturation mode: num_go_procs={num_go_procs}", flush=True)
+
+    if num_go_procs <= 1:
+        # Single-proc: Go handles entire search autonomously.
+        cmd = _build_sat_go_cmd(go_bin, base_urls, replay_cfg, sat_cfg, exp_config, "saturation", output_path)
+        print(f"[replay_engine] cmd: {' '.join(cmd)}", flush=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        line = proc.stdout.readline().strip()
+        if line != "GO_CLI_READY":
+            proc.kill()
+            proc.wait()
+            raise RuntimeError(f"saturation process failed readiness: {line!r}")
+        proc.stdin = None  # no T0 protocol
+
+        max_steps = 30
+        step_time = float(sat_cfg.get("step_duration_s", 10)) + float(sat_cfg.get("warmup_duration_s", 3)) + float(sat_cfg.get("cooldown_pause_s", 2))
+        timeout_s = max(max_steps * step_time + 120.0, 300.0)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError(f"saturation process timed out after {timeout_s:.0f}s")
+
+        if proc.returncode != 0:
+            print(f"[replay_engine] stderr: {stderr}", flush=True)
+            raise RuntimeError(f"saturation process exited with {proc.returncode}")
+
+        if not pathlib.Path(output_path).exists():
+            raise RuntimeError(f"saturation output missing: {output_path}")
+        print(f"[replay_engine] Saturation output written to {output_path}", flush=True)
+
+        # Write a minimal result file for compatibility with _validate_replay_results.
+        sat_output = json.load(open(output_path))
+        result_path = pathlib.Path(output_path).parent / "result0.json"
+        sat_rate = sat_output.get("saturation_rate", 0)
+        steps = sat_output.get("steps", [])
+        healthy = [s for s in steps if s.get("healthy")]
+        best = healthy[-1] if healthy else {}
+        summary = {
+            "__type__": "summary",
+            "requests_completed": int(best.get("completed", 0)),
+            "requests_scheduled": int(best.get("completed", 0)) + int(best.get("failed", 0)),
+            "errors": int(best.get("failed", 0)),
+            "p50_s": float(best.get("p50_latency_s", 0)),
+            "p99_s": float(best.get("p99_latency_s", 0)),
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "saturation_rate": sat_rate,
+            "saturation_mode": sat_output.get("mode", "binary"),
+        }
+        with open(result_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[replay_engine] Result summary written to {result_path}", flush=True)
+    else:
+        raise NotImplementedError("Multi-proc saturation in eval pipeline not yet implemented — use clientlab for multi-proc saturation")
+
+
 async def replay_from_manifest(
     config_path: str,
     *,
@@ -418,10 +534,25 @@ async def replay_from_manifest(
         cluster_nodes = []
         base_urls = [f"http://0.0.0.0:{port}"]
 
-    requests = _load_trace_requests(trace_path)
     go_bin = _find_go_binary()
     if go_bin is None:
         raise RuntimeError("go_dispatch binary not found; build eval/go_client/bin/go_dispatch first")
+
+    # Saturation mode: skip trace loading, run saturation finder instead.
+    sat_cfg = getattr(replay_cfg, "saturation", {}) or {}
+    if isinstance(sat_cfg, dict) and sat_cfg.get("enabled"):
+        if is_root:
+            result_dir = pathlib.Path(exp_config.pbs_working_dir) / "results" if exp_config.pbs_working_dir else pathlib.Path("results")
+            result_dir.mkdir(parents=True, exist_ok=True)
+            sat_output_path = result_dir / "saturation_output.json"
+            _run_saturation_from_manifest(
+                go_bin, base_urls, replay_cfg, sat_cfg, exp_config,
+                sat_output_path, num_go_procs, go_concurrency,
+            )
+        _mpi_barrier(comm)
+        return
+
+    requests = _load_trace_requests(trace_path)
     rank_requests = requests[rank::mpi_size]
     target_responses = int(len(requests) * early_stop) if early_stop and early_stop > 0 else None
 
@@ -465,6 +596,7 @@ async def replay_from_manifest(
                 num_go_procs,
                 run_warmup_rps,
                 run_warmup_duration,
+                replay_cfg.stream,
                 cpuprofile_dir,
             )
             _mpi_barrier(comm)

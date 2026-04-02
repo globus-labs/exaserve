@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import asdict
 
 from src.schemas import DeploymentConfig, ModelConfig, ProxyConfig
 from site_config import get_site_config
@@ -146,6 +147,8 @@ class RayBackendAdapter(BackendAdapter):
                 warmup_rps=run_plan.client.warmup_rps,
                 warmup_duration_s=run_plan.client.warmup_duration_s,
                 sum_only=run_plan.client.sum_only,
+                stream=run_plan.client.stream,
+                saturation=asdict(run_plan.client.saturation) if hasattr(run_plan.client, "saturation") else {},
             ),
             job_seed=run_plan.workload.seed,
             model_deployment_config=DeploymentConfig(
@@ -293,5 +296,6 @@ class RayBackendAdapter(BackendAdapter):
             speedup=run_plan.workload.speedup,
             output_len=run_plan.workload.output_len,
             output_trace_path=run_plan.trace_artifact.trace_path,
+            input_len=run_plan.workload.input_len,
             modes=dict(run_plan.workload.modes),
         )
