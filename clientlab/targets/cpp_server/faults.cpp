@@ -29,15 +29,14 @@ void AsyncCapacityGate::enqueue_waiter(int worker_id) {
 int AsyncCapacityGate::release() {
     if (!enabled_) return -1;
     std::lock_guard<std::mutex> lock(mu_);
-    service_slots_++;
-    capacity_slots_++;
     if (!waiter_queue_.empty()) {
-        // Immediately grant the service slot to the next waiter.
-        service_slots_--;
+        // Transfer the freed service slot directly to the next waiter.
         int wid = waiter_queue_.front();
         waiter_queue_.pop_front();
         return wid;
     }
+    service_slots_++;
+    capacity_slots_++;
     return -1;
 }
 

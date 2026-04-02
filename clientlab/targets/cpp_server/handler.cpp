@@ -1,7 +1,37 @@
 #include "handler.hpp"
+#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <string>
+
+static char ascii_lower(char ch) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+}
+
+static const char* find_case_insensitive(const char* begin, const char* end, const char* needle) {
+    size_t needle_len = std::strlen(needle);
+    if (needle_len == 0 || static_cast<size_t>(end - begin) < needle_len) return nullptr;
+    for (const char* cur = begin; cur + needle_len <= end; ++cur) {
+        bool match = true;
+        for (size_t i = 0; i < needle_len; ++i) {
+            if (ascii_lower(cur[i]) != ascii_lower(needle[i])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return cur;
+    }
+    return nullptr;
+}
+
+static bool has_case_insensitive_prefix(const char* begin, const char* end, const char* prefix) {
+    size_t prefix_len = std::strlen(prefix);
+    if (static_cast<size_t>(end - begin) < prefix_len) return false;
+    for (size_t i = 0; i < prefix_len; ++i) {
+        if (ascii_lower(begin[i]) != ascii_lower(prefix[i])) return false;
+    }
+    return true;
+}
 
 bool parse_headers(const char* buf, size_t len, ParsedRequest& req, size_t& header_end_offset) {
     req = ParsedRequest{};
@@ -31,20 +61,25 @@ bool parse_headers(const char* buf, size_t len, ParsedRequest& req, size_t& head
     }
 
     // Parse Content-Length (case-insensitive).
-    const char* cl = strcasestr(buf, "Content-Length:");
+    const char* cl = find_case_insensitive(buf, end, "Content-Length:");
     if (cl && cl < end) {
         cl += 15;
-        while (*cl == ' ') cl++;
-        req.content_length = atoi(cl);
+        while (cl < end && (*cl == ' ' || *cl == '\t')) cl++;
+        int content_length = 0;
+        while (cl < end && *cl >= '0' && *cl <= '9') {
+            content_length = (content_length * 10) + (*cl - '0');
+            cl++;
+        }
+        req.content_length = content_length;
     }
 
     // Parse Connection header for keep-alive.
     req.keep_alive = true;
-    const char* conn = strcasestr(buf, "Connection:");
+    const char* conn = find_case_insensitive(buf, end, "Connection:");
     if (conn && conn < end) {
         conn += 11;
-        while (*conn == ' ') conn++;
-        if (strncasecmp(conn, "close", 5) == 0) {
+        while (conn < end && (*conn == ' ' || *conn == '\t')) conn++;
+        if (has_case_insensitive_prefix(conn, end, "close")) {
             req.keep_alive = false;
         }
     }

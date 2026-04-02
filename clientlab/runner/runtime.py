@@ -381,7 +381,7 @@ def run_go_dispatch(trace_rows, run_config, point_dir, base_urls):
             stdout_log.flush()
             stderr_log.flush()
             if process.returncode != 0:
-                print(f"[clientlab]   WARNING: go_dispatch {entry['prefix']} exited with code {process.returncode}", flush=True)
+                raise RuntimeError(f"go_dispatch {entry['prefix']} exited with {process.returncode}")
     finally:
         stdout_log.close()
         stderr_log.close()
