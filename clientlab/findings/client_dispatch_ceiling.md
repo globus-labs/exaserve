@@ -254,7 +254,108 @@ process is far lower (~10K rps at most), so this ceiling is unlikely to be a pra
 concern. The scaling question matters more for understanding system limits than for
 operational planning.
 
+---
+
+# Profiling: What Causes the Plateau
+
+The scaling analysis above hypothesized two possible causes: (1) kernel TCP stack
+contention on the loopback path, or (2) CPU over-subscription from dispatcher
+spin-wait threads. A controlled experiment disambiguates them.
+
+## Experiment Design
+
+Three configs on the same node (x4304c6s6b0n0, 204 cores), all with service_time=0,
+15M requests, rate=1M, max_active=80:
+
+| Config | Procs | Workers/proc | Spin-wait threads | Purpose |
+|--------|------:|------------:|-----------------:|---------|
+| A | 1 | 4 | 4 | Baseline |
+| B | 12 | 4 | 48 | Plateau (reproduces regression) |
+| C | 12 | 1 | 12 | Same parallelism, fewer spin-wait |
+
+Profiling: `mpstat -P ALL 1` (CPU breakdown), `vmstat 1` (context switches), phase
+trace sampling at 1%.
+
+**Key comparison:** if C >> B, spin-wait is the bottleneck. If B ~ C, kernel TCP is.
+
+## Results
+
+| Config | rps | %usr | %sys | %idle | ctx_sw/s | tth mean | tth p99 |
+|--------|-------:|-----:|-----:|------:|---------:|---------:|--------:|
+| A (1p/4w) | 131,972 | 5.6 | 1.5 | 92.9 | 711K | 0.293 ms | 4.702 ms |
+| B (12p/4w) | 538,893 | 25.7 | 44.0 | 30.3 | 2,020K | 1.329 ms | 4.764 ms |
+| C (12p/1w) | 555,774 | 25.2 | 43.7 | 31.2 | 1,733K | 1.000 ms | 3.810 ms |
+
+## Analysis
+
+### 1. The bottleneck is the kernel, not spin-wait
+
+B and C perform nearly identically: 539K vs 556K rps (3% difference). Reducing
+spin-wait threads from 48 to 12 barely helps. **CPU over-subscription from spin-wait
+is NOT the primary cause.**
+
+### 2. Kernel syscall overhead dominates
+
+At 12 procs, %sys=44% — the kernel consumes nearly twice as much CPU as userspace
+(%usr=26%). At 1 proc, kernel is negligible (%sys=1.5%). The jump from 1.5% to 44%
+as we go from 1 to 12 procs is the smoking gun.
+
+The kernel CPU time comes from:
+- `sendmsg()`/`recvmsg()` syscalls for every HTTP request/response on loopback
+- TCP connection management (keep-alive pool, socket buffer allocation)
+- `epoll_wait()` / `epoll_ctl()` on both client (Go runtime) and server sides
+- Socket lock contention in the kernel TCP stack (all procs hit the same listener)
+- Context switches: 711K/s → 2M/s (3x increase)
+
+### 3. Loopback TCP is the specific bottleneck
+
+At 539K rps, each request involves at minimum:
+- Client: `connect()` or connection reuse check, `write()` (request), `read()` (response)
+- Kernel: loopback packet copy, TCP state machine, socket buffer management
+- Server: `epoll_wait()` wakeup, `read()`, `write()`
+
+That's ~6+ syscalls per request = ~3.2M syscalls/s. On 204 cores, 44% sys = ~90
+core-equivalents consumed by kernel. Each syscall averages ~28us of kernel time
+(90 cores / 3.2M syscalls × 1e6), which is consistent with known overhead for
+TCP socket operations under contention.
+
+### 4. tth inflation confirms kernel path
+
+time_to_headers grows from 0.293ms (1 proc) to 1.329ms (12 procs, 4 workers) and
+1.000ms (12 procs, 1 worker). Since tth spans the full syscall path (Go client.Do →
+kernel send → server recv/process/send → kernel recv → Go read), the 4.5x inflation
+maps directly to the kernel being saturated.
+
+Config C's tth is 25% lower than B (1.000 vs 1.329ms) despite similar throughput,
+suggesting the extra spin-wait threads add modest scheduling pressure but are not
+the primary constraint.
+
+### 5. Why ~550K rps is the wall
+
+At 550K rps with 44% sys, the kernel is processing ~3.2M syscalls/s using 90 of 204
+cores for kernel work. Adding more Go processes would push more syscalls into an
+already-saturated kernel, increasing per-syscall latency and yielding diminishing
+(then negative) returns — exactly the regression seen at 16 procs in the scaling
+sweep.
+
+## Conclusion
+
+The multi-process dispatch plateau at ~550-625K rps is caused by **kernel TCP stack
+saturation on the loopback path**, not by Go-side CPU over-subscription. The kernel
+consumes 44% of total CPU (90 core-equivalents) servicing socket syscalls at this
+rate. This is a fundamental limit of running high-frequency HTTP over localhost TCP
+on this hardware.
+
+Potential bypass paths (not needed for real deployments):
+- Unix domain sockets (skip TCP stack entirely)
+- io_uring (batch syscalls, reduce context switches)
+- Shared-memory IPC (eliminate kernel networking entirely)
+
+None of these are worth pursuing since real inference workloads with 100ms+ service
+times need <10K rps per process, well within the 150K/proc ceiling.
+
 ## Raw Data
 
 - Single-proc sweep: `/home/wenyiw/agpt/data/bench_results/clientlab/client-dispatch-ceiling_20260401T235004Z/`
 - Multi-proc sweep: `/home/wenyiw/agpt/data/bench_results/clientlab/client-dispatch-scaling_20260402T013700Z/`
+- Profiling experiment: `/home/wenyiw/agpt/data/bench_results/clientlab/dispatch_profiling_20260402T024400Z/`
