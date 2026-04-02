@@ -155,6 +155,7 @@ type workItem struct {
 	resultIndex     int
 	samplePhases    bool
 	enableConnTrace bool
+	collector       *metricsCollector // optional per-item collector (saturation mode)
 }
 
 func buildPayload(req traceRequest, generationMode string, includeTP bool) ([]byte, string, error) {
@@ -266,6 +267,30 @@ func run() int {
 	warmupRPS := flag.Int("warmup-rps", 0, "Warm-up requests per second (0 = no warmup)")
 	warmupDuration := flag.Float64("warmup-duration", 0, "Warm-up duration in seconds")
 	cpuprofileFlag := flag.String("cpuprofile", "", "Write CPU profile to this file")
+
+	// Mode selection
+	mode := flag.String("mode", "replay", "Operating mode: replay (default), saturation, or saturation-step")
+
+	// Saturation mode flags
+	satModel := flag.String("sat-model", "stub-model", "Model name for synthetic requests")
+	satPromptWords := flag.Int("sat-prompt-words", 32, "Prompt word count for synthetic requests")
+	satOutputTokens := flag.Int("sat-output-tokens", 16, "Max output tokens for synthetic requests")
+	satInitialRate := flag.Int("sat-initial-rate", 100, "Binary search: starting low bound (rps)")
+	satMaxRate := flag.Int("sat-max-rate", 0, "Binary search: upper bound hint (0=auto-detect)")
+	satStepDuration := flag.Float64("sat-step-duration", 10.0, "Measurement window per step (seconds)")
+	satWarmupDuration := flag.Float64("sat-warmup-duration", 3.0, "Warmup before measurement (seconds)")
+	satCooldownPause := flag.Float64("sat-cooldown-pause", 2.0, "Pause between steps (seconds)")
+	satTolerance := flag.Float64("sat-tolerance", 0.05, "Convergence threshold (fraction)")
+	satMaxErrorRate := flag.Float64("sat-max-error-rate", 0.01, "SLO: max error rate")
+	satPlateauRatio := flag.Float64("sat-plateau-ratio", 0.95, "SLO: min achieved/target ratio")
+	satSearchMode := flag.String("sat-search-mode", "binary", "Search mode: binary or step-up")
+	satStepUpStart := flag.Int("sat-step-up-start", 0, "Step-up: starting rps")
+	satStepUpEnd := flag.Int("sat-step-up-end", 0, "Step-up: ending rps")
+	satStepUpIncrement := flag.Int("sat-step-up-increment", 0, "Step-up: rps increment per step")
+	satOutputFile := flag.String("sat-output", "saturation_output.json", "Saturation results output path")
+	satVerify := flag.Bool("sat-verify", true, "Run step-up verification after binary search")
+	satTargetRate := flag.Int("sat-target-rate", 0, "Single-step target rate (saturation-step mode)")
+
 	flag.Parse()
 
 	if *cpuprofileFlag != "" {
@@ -283,6 +308,67 @@ func run() int {
 			pprof.StopCPUProfile()
 			profileFile.Close()
 		}()
+	}
+
+	// Saturation mode dispatch — early return before replay validation.
+	if *mode == "saturation" || *mode == "saturation-step" {
+		if *baseURLsFlag == "" {
+			fmt.Fprintln(os.Stderr, "ERROR: --base-urls is required")
+			flag.Usage()
+			return 1
+		}
+		resolvedActive, err := resolveMaxActiveRequests(*maxActiveRequests, *legacyConcurrency)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			return 1
+		}
+		if resolvedActive < 1 {
+			fmt.Fprintln(os.Stderr, "ERROR: max active requests must be >= 1")
+			return 1
+		}
+		resolvedConns := *maxConnsPerHost
+		if resolvedConns <= 0 {
+			resolvedConns = resolvedActive
+		}
+
+		runtime.GOMAXPROCS(runtime.NumCPU())
+
+		cfg := SaturationConfig{
+			BaseURLs:        normalizeBaseURLs(*baseURLsFlag),
+			Model:           *satModel,
+			PromptWords:     *satPromptWords,
+			OutputTokens:    *satOutputTokens,
+			MaxActive:       resolvedActive,
+			MaxConnsPerHost: resolvedConns,
+			NumGoWorkers:    *numGoWorkers,
+			TimeoutSec:      *timeoutSec,
+			EnableHTTPTrace: *enableHTTPTrace,
+			SearchMode:      *satSearchMode,
+			InitialRate:     *satInitialRate,
+			MaxRate:         *satMaxRate,
+			StepDuration:    *satStepDuration,
+			WarmupDuration:  *satWarmupDuration,
+			CooldownPause:   *satCooldownPause,
+			Tolerance:       *satTolerance,
+			MaxErrorRate:    *satMaxErrorRate,
+			PlateauRatio:    *satPlateauRatio,
+			StepUpStart:     *satStepUpStart,
+			StepUpEnd:       *satStepUpEnd,
+			StepUpIncrement: *satStepUpIncrement,
+			Verify:          *satVerify,
+			OutputFile:      *satOutputFile,
+		}
+
+		fmt.Println("GO_CLI_READY")
+
+		if *mode == "saturation-step" {
+			if *satTargetRate <= 0 {
+				fmt.Fprintln(os.Stderr, "ERROR: --sat-target-rate is required for saturation-step mode")
+				return 1
+			}
+			return runSaturationStep(cfg, *satTargetRate)
+		}
+		return runSaturation(cfg)
 	}
 
 	if *baseURLsFlag == "" || *traceFile == "" || *resultFile == "" {

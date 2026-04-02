@@ -1,0 +1,44 @@
+study:
+  name: saturation-smoke
+  suite: client_microbench
+  description: "Validate saturation finder against ceiling study on same node"
+
+client:
+  max_active_requests: 80
+  num_go_workers: 4
+  num_go_procs: 1
+  prompt_words: 32
+  output_tokens: 16
+  model: stub-model
+  enable_httptrace: true
+  sum_only: true
+  saturation:
+    enabled: true
+    search_mode: binary
+    initial_rate: 1000
+    max_rate: 0
+    step_duration_s: 10.0
+    warmup_duration_s: 3.0
+    cooldown_pause_s: 1.0
+    tolerance: 0.05
+    max_error_rate: 0.01
+    plateau_ratio: 0.95
+    verify: true
+
+target:
+  type: synthetic
+  mode: echo_fast
+  port: 18800
+  response_tokens: 16
+
+faults:
+  service_time:
+    distribution: fixed
+    value_ms: 0.0
+
+collectors:
+  port_monitor: true
+  target_metrics: true
+
+execution:
+  mode: local

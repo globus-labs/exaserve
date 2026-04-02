@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from urllib.error import URLError
 from urllib.request import build_opener, urlopen, ProxyHandler
 
-from clientlab.analysis.diagnostics import build_operating_envelope, compare_point_summaries, summarize_point, write_json
+from clientlab.analysis.diagnostics import build_operating_envelope, compare_point_summaries, summarize_point, summarize_saturation, write_json
 from clientlab.collectors.netstats import NetstatsProcess
 from clientlab.collectors.ports import PortCollector, write_port_metrics
 from clientlab.reports.html import render_report_html, write_html_report
@@ -176,18 +176,25 @@ def run_point(point, point_dir):
             interfaces=str(run_config["collectors"].get("netstats_interfaces", "")),
         )
 
+    sat_enabled = run_config["client"].get("saturation", {}).get("enabled", False)
+
     try:
-        trace_path = point_dir / "trace.jsonl"
-        t0 = time.monotonic()
-        trace_rows = generate_trace_rows(run_config)
-        t1 = time.monotonic()
-        write_trace(trace_path, trace_rows)
-        t2 = time.monotonic()
-        print(f"[clientlab]   Trace: {len(trace_rows)-1} requests (generate={t1-t0:.2f}s, write={t2-t1:.2f}s)", flush=True)
-        duration = float(run_config["client"]["duration_s"])
-        print(f"[clientlab]   Dispatching (duration={duration}s)...", flush=True)
-        go_outputs = run_go_dispatch(trace_rows, run_config, point_dir, base_urls)
-        target_metrics = fetch_target_metrics(base_urls) if run_config["collectors"].get("target_metrics") else {}
+        if sat_enabled:
+            print("[clientlab]   Saturation mode enabled", flush=True)
+            go_outputs = run_saturation_dispatch(run_config, point_dir, base_urls)
+            target_metrics = fetch_target_metrics(base_urls) if run_config["collectors"].get("target_metrics") else {}
+        else:
+            trace_path = point_dir / "trace.jsonl"
+            t0 = time.monotonic()
+            trace_rows = generate_trace_rows(run_config)
+            t1 = time.monotonic()
+            write_trace(trace_path, trace_rows)
+            t2 = time.monotonic()
+            print(f"[clientlab]   Trace: {len(trace_rows)-1} requests (generate={t1-t0:.2f}s, write={t2-t1:.2f}s)", flush=True)
+            duration = float(run_config["client"]["duration_s"])
+            print(f"[clientlab]   Dispatching (duration={duration}s)...", flush=True)
+            go_outputs = run_go_dispatch(trace_rows, run_config, point_dir, base_urls)
+            target_metrics = fetch_target_metrics(base_urls) if run_config["collectors"].get("target_metrics") else {}
     finally:
         stop_targets(target_handles)
         time.sleep(1)  # Allow kernel to reclaim thread resources before next point.
@@ -203,13 +210,22 @@ def run_point(point, point_dir):
     write_port_metrics(point_dir / "port_metrics.json", port_payload)
     write_json(point_dir / "target_metrics.json", target_metrics)
 
-    summary = summarize_point(
-        run_config=run_config,
-        client_metrics=go_outputs["client_metrics"],
-        target_metrics=target_metrics,
-        port_metrics=port_payload,
-        netstats_summary=summarize_netstats(point_dir / "netstats.jsonl"),
-    )
+    if sat_enabled:
+        summary = summarize_saturation(
+            run_config=run_config,
+            saturation_output=go_outputs.get("saturation_output", {}),
+            target_metrics=target_metrics,
+            port_metrics=port_payload,
+            netstats_summary=summarize_netstats(point_dir / "netstats.jsonl"),
+        )
+    else:
+        summary = summarize_point(
+            run_config=run_config,
+            client_metrics=go_outputs["client_metrics"],
+            target_metrics=target_metrics,
+            port_metrics=port_payload,
+            netstats_summary=summarize_netstats(point_dir / "netstats.jsonl"),
+        )
     write_json(point_dir / "derived_features.json", summary)
     write_json(point_dir / "diagnosis.json", summary)
     return {
@@ -406,6 +422,307 @@ def run_go_dispatch(trace_rows, run_config, point_dir, base_urls):
         "result_summary": merged_results,
         "run_t0": run_t0,
     }
+
+
+def run_saturation_dispatch(run_config, point_dir, base_urls):
+    """Run saturation finder. Returns dict with saturation_output and client_metrics."""
+    go_bin = ensure_go_binary()
+    num_go_procs = int(run_config["client"].get("num_go_procs", 1))
+    sat_cfg = run_config["client"]["saturation"]
+
+    if num_go_procs <= 1:
+        return _run_saturation_single(go_bin, run_config, point_dir, base_urls, sat_cfg)
+    return _run_saturation_multi(go_bin, run_config, point_dir, base_urls, sat_cfg, num_go_procs)
+
+
+def _build_sat_cmd(go_bin, run_config, base_urls, sat_cfg, mode, output_path, target_rate=None):
+    """Build the Go CLI command for saturation or saturation-step mode."""
+    cmd = [
+        go_bin,
+        "--mode", mode,
+        "--base-urls", ",".join(base_urls),
+        "--max-active-requests", str(run_config["client"]["max_active_requests"]),
+        "--max-conns-per-host", str(run_config["client"].get("max_conns_per_host", 0)),
+        "--num-go-workers", str(run_config["client"].get("num_go_workers", 2)),
+        "--timeout", str(run_config["client"].get("timeout_s", 3600.0)),
+        "--sat-model", str(sat_cfg.get("model", run_config["client"].get("model", "stub-model"))),
+        "--sat-prompt-words", str(run_config["client"].get("prompt_words", 32)),
+        "--sat-output-tokens", str(run_config["client"].get("output_tokens", 16)),
+        "--sat-search-mode", str(sat_cfg.get("search_mode", "binary")),
+        "--sat-initial-rate", str(sat_cfg.get("initial_rate", 100)),
+        "--sat-max-rate", str(sat_cfg.get("max_rate", 0)),
+        "--sat-step-duration", str(sat_cfg.get("step_duration_s", 10.0)),
+        "--sat-warmup-duration", str(sat_cfg.get("warmup_duration_s", 3.0)),
+        "--sat-cooldown-pause", str(sat_cfg.get("cooldown_pause_s", 2.0)),
+        "--sat-tolerance", str(sat_cfg.get("tolerance", 0.05)),
+        "--sat-max-error-rate", str(sat_cfg.get("max_error_rate", 0.01)),
+        "--sat-plateau-ratio", str(sat_cfg.get("plateau_ratio", 0.95)),
+        "--sat-step-up-start", str(sat_cfg.get("step_up_start", 0)),
+        "--sat-step-up-end", str(sat_cfg.get("step_up_end", 0)),
+        "--sat-step-up-increment", str(sat_cfg.get("step_up_increment", 0)),
+        "--sat-output", str(output_path),
+    ]
+    if sat_cfg.get("verify", True):
+        cmd.append("--sat-verify")
+    else:
+        cmd.extend(["--sat-verify=false"])
+    if run_config["client"].get("enable_httptrace", True):
+        cmd.append("--enable-httptrace")
+    if target_rate is not None:
+        cmd.extend(["--sat-target-rate", str(target_rate)])
+    return cmd
+
+
+def _run_saturation_single(go_bin, run_config, point_dir, base_urls, sat_cfg):
+    """Single-process saturation: Go handles entire search."""
+    output_path = point_dir / "saturation_output.json"
+    cmd = _build_sat_cmd(go_bin, run_config, base_urls, sat_cfg, "saturation", output_path)
+
+    stdout_log = (point_dir / "stdout.log").open("w", encoding="utf-8")
+    stderr_log = (point_dir / "stderr.log").open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,
+        )
+        line = proc.stdout.readline().strip()
+        stdout_log.write(f"[p0] {line}\n")
+        stdout_log.flush()
+        if line != "GO_CLI_READY":
+            raise RuntimeError(f"go_dispatch saturation mode failed readiness: {line!r}")
+        proc.stdin.close()
+
+        # Generous timeout: search may run many steps.
+        max_steps = 30
+        step_time = float(sat_cfg.get("step_duration_s", 10)) + float(sat_cfg.get("warmup_duration_s", 3)) + float(sat_cfg.get("cooldown_pause_s", 2))
+        timeout_s = max(max_steps * step_time + 120.0, 300.0)
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            print(f"[clientlab]   WARNING: saturation process timed out after {timeout_s:.0f}s", flush=True)
+            proc.kill()
+            proc.wait(timeout=10)
+
+        remaining_stdout = proc.stdout.read() if proc.stdout else ""
+        remaining_stderr = proc.stderr.read() if proc.stderr else ""
+        if remaining_stdout:
+            stdout_log.write(prefix_output("p0", remaining_stdout))
+        if remaining_stderr:
+            stderr_log.write(prefix_output("p0", remaining_stderr))
+        stdout_log.flush()
+        stderr_log.flush()
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"go_dispatch saturation exited with {proc.returncode}")
+    finally:
+        stdout_log.close()
+        stderr_log.close()
+
+    saturation_output = {}
+    if output_path.exists():
+        saturation_output = json.loads(output_path.read_text(encoding="utf-8"))
+    return {"saturation_output": saturation_output, "client_metrics": {}, "result_summary": {}}
+
+
+def _run_saturation_multi(go_bin, run_config, point_dir, base_urls, sat_cfg, num_go_procs):
+    """Multi-process saturation: Python orchestrates binary search, launching N Go procs per step."""
+    search_mode = sat_cfg.get("search_mode", "binary")
+    tolerance = float(sat_cfg.get("tolerance", 0.05))
+    max_error_rate = float(sat_cfg.get("max_error_rate", 0.01))
+    plateau_ratio = float(sat_cfg.get("plateau_ratio", 0.95))
+
+    lo = int(sat_cfg.get("initial_rate", 100))
+    hi = int(sat_cfg.get("max_rate", 0))
+
+    all_steps = []
+    verification_steps = []
+    saturation_rate = 0
+
+    stdout_log = (point_dir / "stdout.log").open("w", encoding="utf-8")
+    stderr_log = (point_dir / "stderr.log").open("w", encoding="utf-8")
+
+    try:
+        if search_mode == "binary":
+            # Phase 1: Ceiling probe
+            if hi <= 0:
+                rate = lo
+                last_healthy = 0
+                while True:
+                    result = _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_go_procs, rate, len(all_steps), stdout_log, stderr_log)
+                    healthy = _evaluate_merged_health(result, max_error_rate, plateau_ratio)
+                    result["healthy"] = healthy
+                    all_steps.append(result)
+                    print(f"[clientlab]   probe {rate} rps → achieved={result.get('achieved_rate', 0):.1f} healthy={healthy}", flush=True)
+                    if not healthy:
+                        hi = rate
+                        lo = last_healthy if last_healthy > 0 else rate // 2
+                        break
+                    last_healthy = rate
+                    rate *= 2
+                if hi <= 0:
+                    saturation_rate = last_healthy
+
+            # Phase 2: Binary search
+            if hi > 0:
+                while float(hi - lo) / float(max(hi, 1)) > tolerance:
+                    mid = (lo + hi) // 2
+                    if mid == lo:
+                        break
+                    result = _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_go_procs, mid, len(all_steps), stdout_log, stderr_log)
+                    healthy = _evaluate_merged_health(result, max_error_rate, plateau_ratio)
+                    result["healthy"] = healthy
+                    all_steps.append(result)
+                    print(f"[clientlab]   search [{lo}, {hi}] → {mid} rps: achieved={result.get('achieved_rate', 0):.1f} healthy={healthy}", flush=True)
+                    if healthy:
+                        lo = mid
+                    else:
+                        hi = mid
+                saturation_rate = lo
+
+            # Phase 3: Verification
+            if saturation_rate > 0 and sat_cfg.get("verify", True):
+                v_start = int(saturation_rate * 0.7)
+                v_end = int(saturation_rate * 1.3)
+                v_inc = max(1, int(saturation_rate * 0.05))
+                for rate in range(max(1, v_start), v_end + 1, v_inc):
+                    result = _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_go_procs, rate, len(all_steps) + len(verification_steps), stdout_log, stderr_log)
+                    healthy = _evaluate_merged_health(result, max_error_rate, plateau_ratio)
+                    result["healthy"] = healthy
+                    verification_steps.append(result)
+                    print(f"[clientlab]   verify {rate} rps: achieved={result.get('achieved_rate', 0):.1f} healthy={healthy}", flush=True)
+
+        elif search_mode == "step-up":
+            start = int(sat_cfg.get("step_up_start", 0))
+            end = int(sat_cfg.get("step_up_end", 0))
+            inc = int(sat_cfg.get("step_up_increment", 0))
+            for rate in range(start, end + 1, max(1, inc)):
+                result = _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_go_procs, rate, len(all_steps), stdout_log, stderr_log)
+                healthy = _evaluate_merged_health(result, max_error_rate, plateau_ratio)
+                result["healthy"] = healthy
+                all_steps.append(result)
+                print(f"[clientlab]   step-up {rate} rps: achieved={result.get('achieved_rate', 0):.1f} healthy={healthy}", flush=True)
+            for i in range(len(all_steps) - 1, -1, -1):
+                if all_steps[i].get("healthy"):
+                    saturation_rate = all_steps[i]["target_rate"]
+                    break
+    finally:
+        stdout_log.close()
+        stderr_log.close()
+
+    saturation_output = {
+        "mode": search_mode,
+        "saturation_rate": saturation_rate,
+        "tolerance": tolerance,
+        "slo": {"max_error_rate": max_error_rate, "plateau_ratio": plateau_ratio},
+        "steps": all_steps,
+    }
+    if verification_steps:
+        saturation_output["verification_steps"] = verification_steps
+    output_path = point_dir / "saturation_output.json"
+    dump_json_file(output_path, saturation_output)
+    return {"saturation_output": saturation_output, "client_metrics": {}, "result_summary": {}}
+
+
+def _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_procs, total_rate, step_idx, stdout_log, stderr_log):
+    """Launch N Go processes at total_rate/N each, merge results."""
+    per_proc_rate = max(1, total_rate // num_procs)
+    remainder = total_rate - per_proc_rate * num_procs
+
+    processes = []
+    try:
+        for proc_idx in range(num_procs):
+            my_rate = per_proc_rate + (1 if proc_idx < remainder else 0)
+            output_path = point_dir / f"step_{step_idx}_p{proc_idx}.json"
+            cmd = _build_sat_cmd(go_bin, run_config, base_urls, sat_cfg, "saturation-step", output_path, target_rate=my_rate)
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                bufsize=1,
+            )
+            processes.append({"process": proc, "output_path": output_path, "prefix": f"s{step_idx}_p{proc_idx}", "rate": my_rate})
+
+        # Wait for readiness
+        for entry in processes:
+            line = entry["process"].stdout.readline().strip()
+            stdout_log.write(f"[{entry['prefix']}] {line}\n")
+            stdout_log.flush()
+            if line != "GO_CLI_READY":
+                raise RuntimeError(f"saturation-step {entry['prefix']} failed readiness: {line!r}")
+            entry["process"].stdin.close()
+
+        # Wait for completion
+        step_time = float(sat_cfg.get("step_duration_s", 10)) + float(sat_cfg.get("warmup_duration_s", 3)) + float(sat_cfg.get("cooldown_pause_s", 2))
+        timeout_s = max(step_time + 60.0, 120.0)
+        for entry in processes:
+            try:
+                entry["process"].wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                entry["process"].kill()
+                entry["process"].wait(timeout=10)
+            remaining_stdout = entry["process"].stdout.read() if entry["process"].stdout else ""
+            remaining_stderr = entry["process"].stderr.read() if entry["process"].stderr else ""
+            if remaining_stdout:
+                stdout_log.write(prefix_output(entry["prefix"], remaining_stdout))
+            if remaining_stderr:
+                stderr_log.write(prefix_output(entry["prefix"], remaining_stderr))
+            stdout_log.flush()
+            stderr_log.flush()
+            if entry["process"].returncode != 0:
+                raise RuntimeError(f"saturation-step {entry['prefix']} exited with {entry['process'].returncode}")
+    except Exception:
+        for entry in processes:
+            if entry["process"].poll() is None:
+                entry["process"].kill()
+                entry["process"].wait(timeout=5)
+        raise
+
+    # Merge step results
+    step_results = []
+    for entry in processes:
+        p = Path(entry["output_path"])
+        if p.exists():
+            step_results.append(json.loads(p.read_text(encoding="utf-8")))
+    return _merge_step_results(step_results, total_rate)
+
+
+def _merge_step_results(step_results, total_target_rate):
+    """Merge N per-process StepResult dicts into one."""
+    if not step_results:
+        return {"target_rate": total_target_rate, "completed": 0, "failed": 0, "achieved_rate": 0, "error_rate": 0, "duration_s": 0, "healthy": False}
+    merged = {
+        "target_rate": total_target_rate,
+        "completed": sum(int(r.get("completed", 0)) for r in step_results),
+        "failed": sum(int(r.get("failed", 0)) for r in step_results),
+        "duration_s": max(float(r.get("duration_s", 0)) for r in step_results),
+        "p50_latency_s": max(float(r.get("p50_latency_s", 0)) for r in step_results),
+        "p99_latency_s": max(float(r.get("p99_latency_s", 0)) for r in step_results),
+        "mean_latency_s": sum(float(r.get("mean_latency_s", 0)) for r in step_results) / len(step_results),
+        "new_connections": sum(int(r.get("new_connections", 0)) for r in step_results),
+        "reused_connections": sum(int(r.get("reused_connections", 0)) for r in step_results),
+        "max_observed_active": max(int(r.get("max_observed_active", 0)) for r in step_results),
+    }
+    total = merged["completed"] + merged["failed"]
+    merged["error_rate"] = merged["failed"] / total if total > 0 else 0.0
+    merged["achieved_rate"] = merged["completed"] / merged["duration_s"] if merged["duration_s"] > 0 else 0.0
+    return merged
+
+
+def _evaluate_merged_health(result, max_error_rate, plateau_ratio):
+    """Evaluate SLO health on a merged step result."""
+    if result.get("error_rate", 0) > max_error_rate:
+        return False
+    target = result.get("target_rate", 0)
+    achieved = result.get("achieved_rate", 0)
+    if target > 0 and achieved / target < plateau_ratio:
+        return False
+    return True
 
 
 def ensure_go_binary():

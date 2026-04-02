@@ -18,6 +18,7 @@ DIAGNOSES = {
     "healthy",
     "error",
     "inconclusive",
+    "saturation_found",
 }
 
 
@@ -202,6 +203,51 @@ def compare_point_summaries(points_a, points_b):
             }
         )
     return {"rows": rows}
+
+
+def summarize_saturation(run_config, saturation_output, target_metrics, port_metrics, netstats_summary=None):
+    """Summarize saturation finder results into a diagnosis dict compatible with reporting."""
+    sat_rate = int(saturation_output.get("saturation_rate", 0))
+    steps = saturation_output.get("steps", [])
+    verification = saturation_output.get("verification_steps", [])
+    slo = saturation_output.get("slo", {})
+
+    healthy_steps = [s for s in steps if s.get("healthy")]
+    best_step = healthy_steps[-1] if healthy_steps else {}
+
+    achieved_rps = float(best_step.get("achieved_rate", 0))
+    error_rate = float(best_step.get("error_rate", 0))
+    p99 = float(best_step.get("p99_latency_s", 0))
+    p50 = float(best_step.get("p50_latency_s", 0))
+    mean_lat = float(best_step.get("mean_latency_s", 0))
+
+    diagnosis = "saturation_found" if sat_rate > 0 else "inconclusive"
+    mode = saturation_output.get("mode", "binary")
+    reasons = []
+    if sat_rate > 0:
+        reasons.append(f"Saturation point: {sat_rate} rps via {mode} search ({len(steps)} steps).")
+    else:
+        reasons.append("Saturation finder did not converge to a saturation point.")
+
+    return {
+        "diagnosis": diagnosis,
+        "reasons": reasons,
+        "saturation_rate": sat_rate,
+        "search_mode": mode,
+        "search_steps": len(steps),
+        "verification_steps_count": len(verification),
+        "slo_max_error_rate": float(slo.get("max_error_rate", 0)),
+        "slo_plateau_ratio": float(slo.get("plateau_ratio", 0)),
+        "requested_rps": float(sat_rate),
+        "expected_rps": float(sat_rate),
+        "achieved_rps": achieved_rps,
+        "success_fraction": 1.0 - error_rate,
+        "p50_latency_s": p50,
+        "p99_latency_s": p99,
+        "mean_latency_s": mean_lat,
+        "configured_active": int(run_config["client"].get("max_active_requests", 0)),
+        "network": netstats_summary or {},
+    }
 
 
 def write_json(path, payload):

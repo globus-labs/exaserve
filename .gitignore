@@ -8,6 +8,7 @@ data_local/
 CLAUDE.md
 *.png
 eval/go_client/bin/
+eval/go_client/go_dispatch
 clientlab/targets/cpp_server/bin/
 .claude/
 *.log

@@ -35,6 +35,22 @@ DEFAULT_SPEC = {
         "enable_httptrace": True,
         "phase_trace_sample_rate": 0.0,
         "sum_only": True,
+        "saturation": {
+            "enabled": False,
+            "search_mode": "binary",
+            "initial_rate": 100,
+            "max_rate": 0,
+            "step_duration_s": 10.0,
+            "warmup_duration_s": 3.0,
+            "cooldown_pause_s": 2.0,
+            "tolerance": 0.05,
+            "max_error_rate": 0.01,
+            "plateau_ratio": 0.95,
+            "verify": True,
+            "step_up_start": 0,
+            "step_up_end": 0,
+            "step_up_increment": 0,
+        },
     },
     "target": {
         "type": "synthetic",
@@ -92,6 +108,7 @@ EXPECTED_POINT_ARTIFACTS = [
     "profiles/",
     "derived_features.json",
     "diagnosis.json",
+    "saturation_output.json",
 ]
 
 
@@ -134,14 +151,25 @@ def validate_spec(spec):
             raise ValueError(f"ClientLab spec missing mapping section: {key}")
     if int(spec["study"].get("repeats", 1)) < 1:
         raise ValueError("study.repeats must be >= 1")
-    if float(spec["client"].get("duration_s", 0)) <= 0:
-        raise ValueError("client.duration_s must be > 0")
-    if float(spec["client"].get("rate", 0)) <= 0:
-        raise ValueError("client.rate must be > 0")
+    sat_enabled = spec["client"].get("saturation", {}).get("enabled", False)
+    if not sat_enabled:
+        if float(spec["client"].get("duration_s", 0)) <= 0:
+            raise ValueError("client.duration_s must be > 0")
+        if float(spec["client"].get("rate", 0)) <= 0:
+            raise ValueError("client.rate must be > 0")
     if int(spec["client"].get("max_active_requests", 0)) < 1:
         raise ValueError("client.max_active_requests must be >= 1")
     if float(spec["client"].get("phase_trace_sample_rate", 0.0)) < 0 or float(spec["client"].get("phase_trace_sample_rate", 0.0)) > 1:
         raise ValueError("client.phase_trace_sample_rate must be in [0, 1]")
+    if sat_enabled:
+        sat = spec["client"]["saturation"]
+        if sat.get("search_mode") not in {"binary", "step-up"}:
+            raise ValueError("client.saturation.search_mode must be 'binary' or 'step-up'")
+        if float(sat.get("step_duration_s", 0)) <= 0:
+            raise ValueError("client.saturation.step_duration_s must be > 0")
+        tol = float(sat.get("tolerance", 0))
+        if tol <= 0 or tol >= 1:
+            raise ValueError("client.saturation.tolerance must be in (0, 1)")
     if spec["target"].get("type") not in {"synthetic", "proxy", "external"}:
         raise ValueError("target.type must be synthetic, proxy, or external")
     if spec["execution"].get("mode") not in {"local", "pbs_interactive"}:

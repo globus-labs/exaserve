@@ -28,6 +28,19 @@ Not urgent — understand existing suites first before adding complexity.
 ### Resource scaling observation
 - Track goroutine count, memory, file descriptor consumption as a function of concurrency and duration
 
+## Saturation Finder Single-Proc Throughput Gap
+
+The saturation finder's single-proc ceiling (~80K rps) reaches only ~65% of the
+trace-based replay ceiling (~130K rps) on the same node with identical maxActive=80.
+Switching from a shared http.Transport to per-scheduler transports closed the gap
+from 53% to 65%, but ~35% remains unexplained. Multi-proc mode is less affected
+(~89% of ceiling) since per-proc rates stay below the single-proc bottleneck.
+
+- Needs CPU profiling (pprof) comparing saturation dispatch vs replay dispatch
+  under saturation to identify the remaining bottleneck
+- Candidates: dispatch loop structure, synthetic request generation, goroutine
+  scheduling differences — but unverified
+
 ## Dynamic Client for Production Throughput Testing
 
 Separate from clientlab's fixed-knob measurement suites. Goal: point at a set of
