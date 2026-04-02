@@ -358,6 +358,10 @@ func run() int {
 			Verify:          *satVerify,
 			OutputFile:      *satOutputFile,
 		}
+		if err := cfg.Validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "[sat] ERROR: %v\n", err)
+			return 1
+		}
 
 		fmt.Println("GO_CLI_READY")
 

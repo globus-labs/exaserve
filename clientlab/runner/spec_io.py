@@ -167,9 +167,31 @@ def validate_spec(spec):
             raise ValueError("client.saturation.search_mode must be 'binary' or 'step-up'")
         if float(sat.get("step_duration_s", 0)) <= 0:
             raise ValueError("client.saturation.step_duration_s must be > 0")
+        if float(sat.get("warmup_duration_s", 0)) < 0:
+            raise ValueError("client.saturation.warmup_duration_s must be >= 0")
+        if float(sat.get("cooldown_pause_s", 0)) < 0:
+            raise ValueError("client.saturation.cooldown_pause_s must be >= 0")
         tol = float(sat.get("tolerance", 0))
         if tol <= 0 or tol >= 1:
             raise ValueError("client.saturation.tolerance must be in (0, 1)")
+        if int(sat.get("initial_rate", 0)) <= 0:
+            raise ValueError("client.saturation.initial_rate must be > 0")
+        if int(sat.get("max_rate", 0)) < 0:
+            raise ValueError("client.saturation.max_rate must be >= 0")
+        max_error_rate = float(sat.get("max_error_rate", 0))
+        if max_error_rate < 0 or max_error_rate > 1:
+            raise ValueError("client.saturation.max_error_rate must be in [0, 1]")
+        plateau_ratio = float(sat.get("plateau_ratio", 0))
+        if plateau_ratio <= 0 or plateau_ratio > 1:
+            raise ValueError("client.saturation.plateau_ratio must be in (0, 1]")
+        if sat.get("search_mode") == "step-up":
+            start = int(sat.get("step_up_start", 0))
+            end = int(sat.get("step_up_end", 0))
+            increment = int(sat.get("step_up_increment", 0))
+            if start <= 0 or end <= 0 or increment <= 0:
+                raise ValueError("client.saturation.step-up requires positive step_up_start, step_up_end, and step_up_increment")
+            if end < start:
+                raise ValueError("client.saturation.step_up_end must be >= step_up_start")
     if spec["target"].get("type") not in {"synthetic", "proxy", "external"}:
         raise ValueError("target.type must be synthetic, proxy, or external")
     if spec["execution"].get("mode") not in {"local", "pbs_interactive"}:

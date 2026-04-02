@@ -211,6 +211,12 @@ def run_point(point, point_dir):
     write_json(point_dir / "target_metrics.json", target_metrics)
 
     if sat_enabled:
+        # Write stub artifact files so downstream consumers don't hit missing paths.
+        # Saturation mode doesn't produce per-request metrics or phase traces.
+        if not (point_dir / "client_metrics.json").exists():
+            write_json(point_dir / "client_metrics.json", {})
+        if not (point_dir / "phase_trace.jsonl").exists():
+            (point_dir / "phase_trace.jsonl").write_text("", encoding="utf-8")
         summary = summarize_saturation(
             run_config=run_config,
             saturation_output=go_outputs.get("saturation_output", {}),
@@ -503,9 +509,17 @@ def _run_saturation_single(go_bin, run_config, point_dir, base_urls, sat_cfg):
         try:
             proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            print(f"[clientlab]   WARNING: saturation process timed out after {timeout_s:.0f}s", flush=True)
             proc.kill()
             proc.wait(timeout=10)
+            remaining_stdout = proc.stdout.read() if proc.stdout else ""
+            remaining_stderr = proc.stderr.read() if proc.stderr else ""
+            if remaining_stdout:
+                stdout_log.write(prefix_output("p0", remaining_stdout))
+            if remaining_stderr:
+                stderr_log.write(prefix_output("p0", remaining_stderr))
+            stdout_log.flush()
+            stderr_log.flush()
+            raise RuntimeError(f"saturation process timed out after {timeout_s:.0f}s")
 
         remaining_stdout = proc.stdout.read() if proc.stdout else ""
         remaining_stderr = proc.stderr.read() if proc.stderr else ""
@@ -522,9 +536,11 @@ def _run_saturation_single(go_bin, run_config, point_dir, base_urls, sat_cfg):
         stdout_log.close()
         stderr_log.close()
 
-    saturation_output = {}
-    if output_path.exists():
-        saturation_output = json.loads(output_path.read_text(encoding="utf-8"))
+    if not output_path.exists():
+        raise RuntimeError(f"saturation output file missing: {output_path} — Go process may have crashed before writing results")
+    saturation_output = json.loads(output_path.read_text(encoding="utf-8"))
+    if not saturation_output.get("steps"):
+        raise RuntimeError(f"saturation output has no steps — output: {saturation_output}")
     return {"saturation_output": saturation_output, "client_metrics": {}, "result_summary": {}}
 
 
@@ -629,13 +645,17 @@ def _run_saturation_multi(go_bin, run_config, point_dir, base_urls, sat_cfg, num
 
 def _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_procs, total_rate, step_idx, stdout_log, stderr_log):
     """Launch N Go processes at total_rate/N each, merge results."""
-    per_proc_rate = max(1, total_rate // num_procs)
-    remainder = total_rate - per_proc_rate * num_procs
+    if total_rate <= 0:
+        return _merge_step_results([], total_rate)
+    per_proc_rate = total_rate // num_procs
+    remainder = total_rate % num_procs
 
     processes = []
     try:
         for proc_idx in range(num_procs):
             my_rate = per_proc_rate + (1 if proc_idx < remainder else 0)
+            if my_rate <= 0:
+                continue
             output_path = point_dir / f"step_{step_idx}_p{proc_idx}.json"
             cmd = _build_sat_cmd(go_bin, run_config, base_urls, sat_cfg, "saturation-step", output_path, target_rate=my_rate)
             proc = subprocess.Popen(
@@ -666,6 +686,7 @@ def _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_procs
             except subprocess.TimeoutExpired:
                 entry["process"].kill()
                 entry["process"].wait(timeout=10)
+                raise RuntimeError(f"saturation-step {entry['prefix']} timed out after {timeout_s:.0f}s (target_rate={entry['rate']})")
             remaining_stdout = entry["process"].stdout.read() if entry["process"].stdout else ""
             remaining_stderr = entry["process"].stderr.read() if entry["process"].stderr else ""
             if remaining_stdout:
@@ -685,10 +706,17 @@ def _run_multi_step(go_bin, run_config, base_urls, sat_cfg, point_dir, num_procs
 
     # Merge step results
     step_results = []
+    missing = []
     for entry in processes:
         p = Path(entry["output_path"])
         if p.exists():
             step_results.append(json.loads(p.read_text(encoding="utf-8")))
+        else:
+            missing.append(entry["prefix"])
+    if missing:
+        raise RuntimeError(f"saturation-step output files missing for: {missing} — Go processes may have crashed")
+    if not step_results:
+        raise RuntimeError("no saturation-step results collected — all processes failed to produce output")
     return _merge_step_results(step_results, total_rate)
 
 

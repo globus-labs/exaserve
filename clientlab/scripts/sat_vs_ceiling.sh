@@ -79,7 +79,7 @@ num_requests = int(os.environ["NUM_REQUESTS"])
 rate = int(os.environ["RATE"])
 duration = int(os.environ["DURATION"])
 trace_dir = os.environ["TRACE_DIR"]
-body = json.dumps({"model": "stub-model", "messages": [{"role": "user", "content": " ".join(["word"] * 32)}], "max_tokens": 16})
+prompt = " ".join(["word"] * 32)
 header = {"schema_version": "trace.v1", "total_requests": num_requests, "rate": rate, "duration_s": duration}
 # Full trace
 with open(os.path.join(trace_dir, "trace_full.jsonl"), "w") as f:
@@ -87,8 +87,7 @@ with open(os.path.join(trace_dir, "trace_full.jsonl"), "w") as f:
     dt = 1.0 / rate
     for i in range(num_requests):
         f.write(json.dumps({"req_id": uuid.uuid4().hex, "timestamp": i * dt, "model": "stub-model",
-            "prompt_words": 32, "output_tokens": 16, "input_len": 32, "output_len": 16,
-            "mode": "chat", "endpoint": "/v1/chat/completions", "body": body}) + "\n")
+            "prompt": prompt, "input_len": 32, "output_len": 16, "mode": "chat"}) + "\n")
 print(f"  Generated {num_requests} requests")
 # Partition for 12 procs
 for nprocs in [1, 12]:

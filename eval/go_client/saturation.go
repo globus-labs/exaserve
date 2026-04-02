@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -51,6 +52,58 @@ type SaturationConfig struct {
 	OutputFile string
 }
 
+func (cfg SaturationConfig) Validate() error {
+	if len(cfg.BaseURLs) == 0 {
+		return errors.New("at least one base URL is required")
+	}
+	if cfg.MaxActive < 1 {
+		return errors.New("max active requests must be >= 1")
+	}
+	if cfg.NumGoWorkers < 1 {
+		return errors.New("num go workers must be >= 1")
+	}
+	if cfg.TimeoutSec <= 0 {
+		return errors.New("timeout must be > 0")
+	}
+	if cfg.StepDuration <= 0 {
+		return errors.New("step duration must be > 0")
+	}
+	if cfg.WarmupDuration < 0 {
+		return errors.New("warmup duration must be >= 0")
+	}
+	if cfg.CooldownPause < 0 {
+		return errors.New("cooldown pause must be >= 0")
+	}
+	if cfg.Tolerance <= 0 || cfg.Tolerance >= 1 {
+		return errors.New("tolerance must be in (0, 1)")
+	}
+	if cfg.MaxErrorRate < 0 || cfg.MaxErrorRate > 1 {
+		return errors.New("max error rate must be in [0, 1]")
+	}
+	if cfg.PlateauRatio <= 0 || cfg.PlateauRatio > 1 {
+		return errors.New("plateau ratio must be in (0, 1]")
+	}
+	switch cfg.SearchMode {
+	case "binary":
+		if cfg.InitialRate <= 0 {
+			return errors.New("initial rate must be > 0")
+		}
+		if cfg.MaxRate < 0 {
+			return errors.New("max rate must be >= 0")
+		}
+	case "step-up":
+		if cfg.StepUpStart <= 0 || cfg.StepUpEnd <= 0 || cfg.StepUpIncrement <= 0 {
+			return errors.New("step-up requires positive start, end, and increment")
+		}
+		if cfg.StepUpEnd < cfg.StepUpStart {
+			return errors.New("step-up end must be >= start")
+		}
+	default:
+		return fmt.Errorf("unknown search mode %q", cfg.SearchMode)
+	}
+	return nil
+}
+
 // SaturationOutput is the JSON structure written to the output file.
 type SaturationOutput struct {
 	Mode              string        `json:"mode"`
@@ -67,15 +120,19 @@ type sloConfig struct {
 }
 
 type saturationFinder struct {
-	cfg     SaturationConfig
-	gen     *SynthGenerator
-	clients []*http.Client // per-scheduler clients with separate transports
-	ctx     context.Context
-	cancel  context.CancelFunc
+	cfg       SaturationConfig
+	gen       *SynthGenerator
+	clients   []*http.Client // per-scheduler clients with separate transports
+	ctx       context.Context
+	cancel    context.CancelFunc
 	logPrefix string
 }
 
 func runSaturation(cfg SaturationConfig) int {
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "[sat] ERROR: %v\n", err)
+		return 1
+	}
 	sf := newSaturationFinder(cfg)
 	defer sf.cancel()
 
@@ -92,7 +149,12 @@ func runSaturation(cfg SaturationConfig) int {
 			verificationSteps = sf.stepUpVerify(saturationRate)
 		}
 	case "step-up":
-		steps = sf.stepUp()
+		var err error
+		steps, err = sf.stepUp()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s ERROR: %v\n", sf.logPrefix, err)
+			return 1
+		}
 		// Find the last healthy step as the saturation point
 		for i := len(steps) - 1; i >= 0; i-- {
 			if steps[i].Healthy {
@@ -127,6 +189,10 @@ func runSaturation(cfg SaturationConfig) int {
 }
 
 func runSaturationStep(cfg SaturationConfig, targetRate int) int {
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "[sat] ERROR: %v\n", err)
+		return 1
+	}
 	sf := newSaturationFinder(cfg)
 	defer sf.cancel()
 
@@ -169,6 +235,10 @@ func newSaturationFinder(cfg SaturationConfig) *saturationFinder {
 		maxConns = cfg.MaxActive
 	}
 	perClientIdle := ceilDiv(cfg.MaxActive, numSchedulers)
+	perClientConns := ceilDiv(maxConns, numSchedulers)
+	if perClientConns < 1 {
+		perClientConns = 1
+	}
 
 	// Per-scheduler transports avoid mutex contention in http.Transport's
 	// connection pool, matching the replay mode's approach.
@@ -188,7 +258,7 @@ func newSaturationFinder(cfg SaturationConfig) *saturationFinder {
 			ForceAttemptHTTP2:     false,
 		}
 		if maxConns > 0 {
-			t.MaxConnsPerHost = maxConns
+			t.MaxConnsPerHost = perClientConns
 		}
 		clients[i] = &http.Client{
 			Transport: t,
@@ -197,11 +267,11 @@ func newSaturationFinder(cfg SaturationConfig) *saturationFinder {
 	}
 
 	return &saturationFinder{
-		cfg:     cfg,
-		gen:     NewSynthGenerator(cfg.Model, cfg.PromptWords, cfg.OutputTokens),
-		clients: clients,
-		ctx:     ctx,
-		cancel:  cancel,
+		cfg:       cfg,
+		gen:       NewSynthGenerator(cfg.Model, cfg.PromptWords, cfg.OutputTokens),
+		clients:   clients,
+		ctx:       ctx,
+		cancel:    cancel,
 		logPrefix: "[sat]",
 	}
 }
@@ -275,13 +345,12 @@ func (sf *saturationFinder) binarySearch() ([]*StepResult, int) {
 }
 
 // stepUp runs a linear sweep of rates.
-func (sf *saturationFinder) stepUp() []*StepResult {
+func (sf *saturationFinder) stepUp() ([]*StepResult, error) {
 	start := sf.cfg.StepUpStart
 	end := sf.cfg.StepUpEnd
 	inc := sf.cfg.StepUpIncrement
 	if start <= 0 || end <= 0 || inc <= 0 {
-		fmt.Fprintf(os.Stderr, "%s ERROR: step-up requires --sat-step-up-start, --sat-step-up-end, --sat-step-up-increment\n", sf.logPrefix)
-		return nil
+		return nil, errors.New("step-up requires --sat-step-up-start, --sat-step-up-end, --sat-step-up-increment")
 	}
 
 	var steps []*StepResult
@@ -295,7 +364,7 @@ func (sf *saturationFinder) stepUp() []*StepResult {
 		fmt.Fprintf(os.Stderr, "%s   step-up %d rps: achieved=%.1f healthy=%v\n",
 			sf.logPrefix, rate, result.AchievedRate, result.Healthy)
 	}
-	return steps
+	return steps, nil
 }
 
 // stepUpVerify runs fine-grained steps around the found saturation point.

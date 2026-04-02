@@ -176,11 +176,13 @@ def build_operating_envelope(point_summaries):
     if not stable_points:
         return {"max_stable_rps": 0.0, "safe_active_budget": 0, "notes": ["No stable points met the default envelope criteria."]}
     best = max(stable_points, key=lambda item: item["achieved_rps"])
+    best_queue_fraction = float(best.get("queue_fraction", 0.0))
+    safe_budget = int(best.get("safe_active_budget_estimate") or best.get("configured_active") or 0)
     return {
         "max_stable_rps": best["achieved_rps"],
-        "safe_active_budget": best["safe_active_budget_estimate"],
+        "safe_active_budget": safe_budget,
         "notes": [
-            f"Selected point with diagnosis={best['diagnosis']} and queue_fraction={best['queue_fraction']:.3f}.",
+            f"Selected point with diagnosis={best['diagnosis']} and queue_fraction={best_queue_fraction:.3f}.",
         ],
     }
 
@@ -220,6 +222,19 @@ def summarize_saturation(run_config, saturation_output, target_metrics, port_met
     p99 = float(best_step.get("p99_latency_s", 0))
     p50 = float(best_step.get("p50_latency_s", 0))
     mean_lat = float(best_step.get("mean_latency_s", 0))
+    completed = float(best_step.get("completed", 0))
+    failed = float(best_step.get("failed", 0))
+    total = completed + failed
+    new_connections = float(best_step.get("new_connections", 0))
+    reused_connections = float(best_step.get("reused_connections", 0))
+    configured_active = int(run_config["client"].get("max_active_requests", 0))
+    configured_queue = int(run_config["client"].get("queue_capacity", 0))
+    max_active = int(best_step.get("max_observed_active", 0) or configured_active)
+    safe_budget = max(max_active, 1) if configured_active > 0 or max_active > 0 else 0
+
+    target_queue_peak = int(target_metrics.get("aggregate", {}).get("max_queue_depth", 0))
+    target_rejections = int(target_metrics.get("aggregate", {}).get("rejections", 0))
+    target_error_rate = float(target_metrics.get("aggregate", {}).get("error_fraction", 0.0))
 
     diagnosis = "saturation_found" if sat_rate > 0 else "inconclusive"
     mode = saturation_output.get("mode", "binary")
@@ -242,10 +257,20 @@ def summarize_saturation(run_config, saturation_output, target_metrics, port_met
         "expected_rps": float(sat_rate),
         "achieved_rps": achieved_rps,
         "success_fraction": 1.0 - error_rate,
+        "queue_fraction": 0.0,
         "p50_latency_s": p50,
         "p99_latency_s": p99,
         "mean_latency_s": mean_lat,
-        "configured_active": int(run_config["client"].get("max_active_requests", 0)),
+        "connection_churn_ratio": new_connections / max(total, 1.0),
+        "reuse_ratio": reused_connections / max(total, 1.0),
+        "max_queue_depth": 0,
+        "max_active": max_active,
+        "configured_active": configured_active,
+        "configured_queue": configured_queue,
+        "safe_active_budget_estimate": safe_budget,
+        "target_queue_peak": target_queue_peak,
+        "target_rejections": target_rejections,
+        "target_error_fraction": target_error_rate,
         "network": netstats_summary or {},
     }
 
