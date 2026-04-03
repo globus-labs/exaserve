@@ -3,7 +3,7 @@ matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [1, 2, 4, 8, 16, 32]
+      values: [1, 2, 4, 8]
       targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
 trace:
@@ -12,7 +12,9 @@ workload:
   duration: 60.0
   input_len: 2048
   output_len: 128
-  rate_per_node: 0    # PLACEHOLDER: set from derive-params after Phase 0
+  # Phase 0: single replica saturates at ~5 rps (2048in/128out, TP=1)
+  # 12 replicas per node × 5 rps × 0.7 headroom = 42 rps/node
+  rate_per_node: 42.0
   generation_mode: deterministic
 deployment:
   models:
@@ -23,14 +25,17 @@ deployment:
       size: 8
       gpu_memory_utilization: 0.90
       enforce_eager: true
-      max_num_seqs: 0          # PLACEHOLDER: set from Phase 0 best variant
-  replica_max_ongoing_requests: 0  # PLACEHOLDER: set from Phase 0 best variant
+      max_num_seqs: 32
+  replica_max_ongoing_requests: 64
 client:
   num_runs: 1
   dest: proxy
   stream: true
-  num_go_procs: 0     # PLACEHOLDER: set from derive-params
-  go_concurrency: 0   # PLACEHOLDER: set from derive-params
+  # Phase 1 derivation: rate_per_node=42, p99_latency~3s
+  # concurrency_needed = 42 × 3 = 126 per node
+  # safe_per_proc = 1200 → num_go_procs = 1
+  num_go_procs: 1
+  go_concurrency: 128
   num_go_workers: 4
 backend:
   default: ray

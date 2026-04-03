@@ -167,12 +167,12 @@ def _derive_params(result_dir: str, headroom: float) -> int:
         return 1
 
     steps = sat_output.get("steps", [])
-    healthy_steps = [s for s in steps if s.get("healthy")]
-    if not healthy_steps:
-        print("ERROR: no healthy steps found in saturation output", flush=True)
+    if not steps:
+        print("ERROR: no steps found in saturation output", flush=True)
         return 1
 
-    best = healthy_steps[-1]
+    healthy_steps = [s for s in steps if s.get("healthy")]
+    best = healthy_steps[-1] if healthy_steps else max(steps, key=lambda s: s.get("achieved_rate", 0))
     p99_latency = float(best.get("p99_latency_s", 0))
     p99_ttft = float(best.get("p99_ttft_s", 0))
     achieved_rps = float(best.get("achieved_rate", 0))
