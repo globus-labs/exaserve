@@ -12,9 +12,9 @@ workload:
   duration: 60.0
   input_len: 2048
   output_len: 128
-  # Phase 0: single replica saturates at ~5 rps (2048in/128out, TP=1)
-  # 12 replicas per node × 5 rps × 0.7 headroom = 42 rps/node
-  rate_per_node: 42.0
+  # Burst test: 1 node saturates at 231 rps (12 replicas, go_concurrency=192)
+  # 231 × 0.7 headroom = 162 rps/node
+  rate_per_node: 162.0
   generation_mode: deterministic
 deployment:
   models:
@@ -31,11 +31,10 @@ client:
   num_runs: 1
   dest: proxy
   stream: true
-  # Phase 1 derivation: rate_per_node=42, p99_latency~3s
-  # concurrency_needed = 42 × 3 = 126 per node
-  # safe_per_proc = 1200 → num_go_procs = 1
+  # Burst test: need go_concurrency >= 192 to saturate vLLM batch scheduler
+  # At 162 rps with ~1s avg latency: concurrency ≈ 162, fits in 1 proc
   num_go_procs: 1
-  go_concurrency: 128
+  go_concurrency: 192
   num_go_workers: 4
 backend:
   default: ray
