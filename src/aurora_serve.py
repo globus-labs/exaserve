@@ -514,6 +514,34 @@ class VLLMWorker:
     async def health_check(self):
         return JSONResponse({"status": "healthy", "model": self.model_id})
 
+    @app.get("/stats")
+    async def stats(self):
+        """Per-replica scheduler stats for debugging throughput."""
+        pid = os.getpid()
+        if self.null_compute:
+            return JSONResponse({"pid": pid, "model": self.model_id, "null_compute": True})
+        try:
+            scheduler = self.engine.engine.scheduler[0]
+            waiting = len(scheduler.waiting)
+            running = len(scheduler.running)
+            swapped = len(scheduler.swapped)
+            num_unfinished = self.engine.engine.get_num_unfinished_requests()
+            block_manager = scheduler.block_manager
+            gpu_cache_usage = block_manager.gpu_allocator.get_usage() if hasattr(block_manager, "gpu_allocator") else None
+            return JSONResponse({
+                "pid": pid,
+                "model": self.model_id,
+                "scheduler": {
+                    "waiting": waiting,
+                    "running": running,
+                    "swapped": swapped,
+                    "num_unfinished": num_unfinished,
+                },
+                "gpu_cache_usage": gpu_cache_usage,
+            })
+        except Exception as e:
+            return JSONResponse({"pid": pid, "model": self.model_id, "error": str(e)})
+
     @app.get("/v1/models")
     async def list_models(self):
         return JSONResponse(
