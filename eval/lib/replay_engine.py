@@ -478,13 +478,16 @@ def _run_saturation_from_manifest(go_bin, base_urls, replay_cfg, sat_cfg, exp_co
         result_path = pathlib.Path(output_path).parent / "result0.json"
         sat_rate = sat_output.get("saturation_rate", 0)
         steps = sat_output.get("steps", [])
-        healthy = [s for s in steps if s.get("healthy")]
-        best = healthy[-1] if healthy else {}
+        # Use best step by achieved rate (not just healthy ones — all may be unhealthy
+        # when the server is slow and plateau ratio is never met).
+        best = max(steps, key=lambda s: s.get("achieved_rate", 0)) if steps else {}
+        completed = int(best.get("completed", 0))
+        failed = int(best.get("failed", 0))
         summary = {
             "__type__": "summary",
-            "requests_completed": int(best.get("completed", 0)),
-            "requests_scheduled": int(best.get("completed", 0)) + int(best.get("failed", 0)),
-            "errors": int(best.get("failed", 0)),
+            "requests_completed": completed + failed,
+            "requests_scheduled": completed + failed,
+            "errors": failed,
             "p50_s": float(best.get("p50_latency_s", 0)),
             "p99_s": float(best.get("p99_latency_s", 0)),
             "total_input_tokens": 0,

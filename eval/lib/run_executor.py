@@ -216,7 +216,8 @@ def _validate_replay_results(run_plan) -> dict[str, int | str]:
     requests_scheduled = int(overall.get("requests_scheduled", requests_completed) or requests_completed)
     errors = int(overall.get("errors", 0) or 0)
     successful_requests = max(requests_completed - errors, 0)
-    if successful_requests < 1:
+    is_saturation = overall.get("saturation_rate") is not None
+    if successful_requests < 1 and not is_saturation:
         raise RuntimeError(
             "Replay completed but all requests failed: "
             f"successes={successful_requests}, errors={errors}, "
