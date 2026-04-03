@@ -115,6 +115,7 @@ class DeploymentSpec:
     local_stage_path: str = ""
     replica_max_ongoing_requests: int = 64
     num_gpus_per_node: int = 0
+    collect_stats: bool = False
 
 
 @dataclass

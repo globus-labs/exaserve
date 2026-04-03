@@ -161,6 +161,7 @@ class RayBackendAdapter(BackendAdapter):
                 ),
                 replica_max_ongoing_requests=run_plan.deployment.replica_max_ongoing_requests,
                 num_gpus_per_node=run_plan.deployment.num_gpus_per_node,
+                collect_stats=getattr(run_plan.deployment, "collect_stats", False),
             ),
             ray_cluster_config=RayClusterConfig(
                 port=int(launch_settings.get("ray_head_port", 6379)),

@@ -133,6 +133,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         num_gpus_per_node=int(
             deployment_raw.get("num_gpus_per_node", get_site_config().num_gpus_per_node)
         ),
+        collect_stats=bool(deployment_raw.get("collect_stats", False)),
     )
     client = ClientSpec(
         num_runs=int(client_raw.get("num_runs", 1)),

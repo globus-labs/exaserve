@@ -393,6 +393,48 @@ def init_ray_cluster(
 app = FastAPI()
 
 
+class CollectingStatLogger:
+    """Buffers vLLM scheduler and per-request stats for post-run collection.
+
+    Registered alongside vLLM's default LoggingStatLogger so stats are
+    captured without affecting normal logging behavior.
+    """
+
+    def __init__(self):
+        self.scheduler_snapshots = []
+        self.finished_requests = []
+
+    def record(self, scheduler_stats=None, iteration_stats=None, **kwargs):
+        if scheduler_stats is not None:
+            self.scheduler_snapshots.append({
+                "timestamp": time.time(),
+                "running": getattr(scheduler_stats, "num_running_reqs", 0),
+                "waiting": getattr(scheduler_stats, "num_waiting_reqs", 0),
+                "kv_cache_usage": getattr(scheduler_stats, "kv_cache_usage", 0.0),
+            })
+        if iteration_stats is not None:
+            for req in getattr(iteration_stats, "finished_requests", []):
+                self.finished_requests.append({
+                    "e2e_latency": getattr(req, "e2e_latency", 0.0),
+                    "queued_time": getattr(req, "queued_time", 0.0),
+                    "prefill_time": getattr(req, "prefill_time", 0.0),
+                    "inference_time": getattr(req, "inference_time", 0.0),
+                    "decode_time": getattr(req, "decode_time", 0.0),
+                    "num_prompt_tokens": getattr(req, "num_prompt_tokens", 0),
+                    "num_generation_tokens": getattr(req, "num_generation_tokens", 0),
+                    "num_cached_tokens": getattr(req, "num_cached_tokens", 0),
+                })
+
+    def log(self):
+        pass
+
+    def to_dict(self):
+        return {
+            "scheduler_snapshots": self.scheduler_snapshots,
+            "finished_requests": self.finished_requests,
+        }
+
+
 @serve.deployment
 @serve.ingress(app)
 class VLLMWorker:
@@ -416,11 +458,14 @@ class VLLMWorker:
         max_model_len: int = 4096,
         enforce_eager: bool = True,
         max_num_seqs: int = None,
+        collect_stats: bool = False,
     ):
         init_start = time.time()
         pid = os.getpid()
         self.model_id = model_id
         self.null_compute = null_compute
+        self.stats_collector = None
+        self._collect_stats = collect_stats
 
         gpu_ids = [int(gpu_id) for gpu_id in ray.get_gpu_ids()]
         device_id = gpu_ids[0] if gpu_ids else 0
@@ -506,6 +551,20 @@ class VLLMWorker:
         engine_start = time.time()
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         print_red(f"[VLLMWorker pid={pid}] Engine creation: {time.time() - engine_start:.2f}s")
+
+        if self._collect_stats:
+            try:
+                self.stats_collector = CollectingStatLogger()
+                if hasattr(self.engine, "logger_manager") and self.engine.logger_manager is not None:
+                    self.engine.logger_manager.stat_loggers.append(self.stats_collector)
+                    print(f"[VLLMWorker pid={pid}] Stats collection enabled", flush=True)
+                else:
+                    print(f"[VLLMWorker pid={pid}] WARNING: logger_manager not available, stats collection disabled", flush=True)
+                    self.stats_collector = None
+            except Exception as e:
+                print(f"[VLLMWorker pid={pid}] WARNING: failed to register stats collector: {e}", flush=True)
+                self.stats_collector = None
+
         print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {time.time() - init_start:.2f}s ★")
 
     # ---- HTTP endpoints ------------------------------------------------------
@@ -541,6 +600,27 @@ class VLLMWorker:
             })
         except Exception as e:
             return JSONResponse({"pid": pid, "model": self.model_id, "error": str(e)})
+
+    def collect_stats(self) -> dict:
+        """Return buffered stats. Called via ray.get(actor_handle.collect_stats.remote())."""
+        pid = os.getpid()
+        if self.stats_collector is None:
+            return {"pid": pid, "model": self.model_id, "error": "stats collection not enabled"}
+        data = self.stats_collector.to_dict()
+        data["pid"] = pid
+        data["model"] = self.model_id
+        reqs = data["finished_requests"]
+        snaps = data["scheduler_snapshots"]
+        data["summary"] = {
+            "total_requests": len(reqs),
+            "mean_batch_size": sum(s["running"] for s in snaps) / max(len(snaps), 1),
+            "max_batch_size": max((s["running"] for s in snaps), default=0),
+            "mean_e2e_latency": sum(r["e2e_latency"] for r in reqs) / max(len(reqs), 1),
+            "mean_queued_time": sum(r["queued_time"] for r in reqs) / max(len(reqs), 1),
+            "mean_prefill_time": sum(r["prefill_time"] for r in reqs) / max(len(reqs), 1),
+            "kv_cache_peak": max((s["kv_cache_usage"] for s in snaps), default=0),
+        }
+        return data
 
     @app.get("/v1/models")
     async def list_models(self):
@@ -903,6 +983,7 @@ def deploy_model(
         max_model_len=model_config.max_model_len,
         enforce_eager=model_config.enforce_eager,
         max_num_seqs=model_config.max_num_seqs,
+        collect_stats=getattr(config, "collect_stats", False),
     )
 
     return deployment, model_id

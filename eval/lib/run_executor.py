@@ -54,6 +54,13 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
         write_run_state(run_plan, "replaying", base_urls=base_urls)
         exit_code = _run_replay_client(run_plan, base_urls)
         if exit_code == 0:
+            # Collect per-replica vLLM stats before tearing down the cluster.
+            if getattr(run_plan.deployment, "collect_stats", False):
+                try:
+                    from .server_stats import collect_server_stats
+                    collect_server_stats(run_plan.bundle.results_dir)
+                except Exception as e:
+                    print(f"[run_executor] WARNING: server stats collection failed: {e}", flush=True)
             replay_summary = _validate_replay_results(run_plan)
             write_run_state(
                 run_plan,

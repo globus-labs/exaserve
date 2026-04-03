@@ -56,6 +56,7 @@ class DeploymentConfig:
     deployment_name: str = "aurora_serve"
     replica_max_ongoing_requests: int = 32
     num_gpus_per_node: int = 12  # Aurora default: 12 GPU tiles per node
+    collect_stats: bool = False  # Enable per-replica vLLM stats collection
   
 @dataclass
 class ProxyConfig:
@@ -126,6 +127,7 @@ def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
         deployment_name=str(d.get("deployment_name", "aurora_serve")),
         replica_max_ongoing_requests=int(d.get("replica_max_ongoing_requests", 32)),
         num_gpus_per_node=int(d.get("num_gpus_per_node", 12)),
+        collect_stats=bool(d.get("collect_stats", False)),
     )
 
 
