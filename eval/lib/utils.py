@@ -122,13 +122,19 @@ def dotted_set(data: Any, dotted_path: str, value: Any) -> None:
     parts = dotted_path.split(".")
     current = data
     for part in parts[:-1]:
-        if not hasattr(current, part):
+        if part.isdigit():
+            current = current[int(part)]
+        elif hasattr(current, part):
+            current = getattr(current, part)
+        else:
             raise KeyError(f"Unknown field path: {dotted_path}")
-        current = getattr(current, part)
     final_part = parts[-1]
-    if not hasattr(current, final_part):
+    if final_part.isdigit():
+        current[int(final_part)] = value
+    elif hasattr(current, final_part):
+        setattr(current, final_part, value)
+    else:
         raise KeyError(f"Unknown field path: {dotted_path}")
-    setattr(current, final_part, value)
 
 
 def format_template(template: str, values: dict[str, Any]) -> str:

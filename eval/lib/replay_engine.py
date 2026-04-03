@@ -441,27 +441,33 @@ def _run_saturation_from_manifest(go_bin, base_urls, replay_cfg, sat_cfg, exp_co
         # Single-proc: Go handles entire search autonomously.
         cmd = _build_sat_go_cmd(go_bin, base_urls, replay_cfg, sat_cfg, exp_config, "saturation", output_path)
         print(f"[replay_engine] cmd: {' '.join(cmd)}", flush=True)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+
+        # Stream stderr to a log file so we can see progress even on timeout.
+        sat_log_path = pathlib.Path(output_path).parent / "saturation_stderr.log"
+        sat_log = open(sat_log_path, "w", encoding="utf-8")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sat_log, universal_newlines=True)
         line = proc.stdout.readline().strip()
         if line != "GO_CLI_READY":
             proc.kill()
             proc.wait()
+            sat_log.close()
             raise RuntimeError(f"saturation process failed readiness: {line!r}")
-        proc.stdin = None  # no T0 protocol
 
         max_steps = 30
         step_time = float(sat_cfg.get("step_duration_s", 10)) + float(sat_cfg.get("warmup_duration_s", 3)) + float(sat_cfg.get("cooldown_pause_s", 2))
         timeout_s = max(max_steps * step_time + 120.0, 300.0)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
+            proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
-            raise RuntimeError(f"saturation process timed out after {timeout_s:.0f}s")
+            proc.wait()
+            sat_log.close()
+            raise RuntimeError(f"saturation process timed out after {timeout_s:.0f}s — check {sat_log_path}")
+        sat_log.close()
 
         if proc.returncode != 0:
-            print(f"[replay_engine] stderr: {stderr}", flush=True)
-            raise RuntimeError(f"saturation process exited with {proc.returncode}")
+            print(f"[replay_engine] saturation stderr log: {sat_log_path}", flush=True)
+            raise RuntimeError(f"saturation process exited with {proc.returncode} — check {sat_log_path}")
 
         if not pathlib.Path(output_path).exists():
             raise RuntimeError(f"saturation output missing: {output_path}")
