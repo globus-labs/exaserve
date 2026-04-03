@@ -396,13 +396,22 @@ app = FastAPI()
 class CollectingStatLogger:
     """Buffers vLLM scheduler and per-request stats for post-run collection.
 
-    Registered alongside vLLM's default LoggingStatLogger so stats are
-    captured without affecting normal logging behavior.
+    Conforms to vLLM v1 StatLoggerBase interface:
+      __init__(vllm_config, engine_index)
+      record(scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx=0)
+      log()
+
+    Passed as a class to AsyncLLMEngine.from_engine_args(stat_loggers=[CollectingStatLogger]).
+    vLLM instantiates it; retrieve the instance via the class-level registry.
     """
 
-    def __init__(self):
+    # Class-level registry: pid → instance (one per replica process).
+    _instances = {}
+
+    def __init__(self, vllm_config=None, engine_index=0):
         self.scheduler_snapshots = []
         self.finished_requests = []
+        CollectingStatLogger._instances[os.getpid()] = self
 
     def record(self, scheduler_stats=None, iteration_stats=None, **kwargs):
         if scheduler_stats is not None:
@@ -428,11 +437,21 @@ class CollectingStatLogger:
     def log(self):
         pass
 
+    def log_engine_initialized(self):
+        pass
+
+    def record_sleep_state(self, is_awake=0, level=0):
+        pass
+
     def to_dict(self):
         return {
             "scheduler_snapshots": self.scheduler_snapshots,
             "finished_requests": self.finished_requests,
         }
+
+    @classmethod
+    def get_instance(cls):
+        return cls._instances.get(os.getpid())
 
 
 @serve.deployment
@@ -549,21 +568,18 @@ class VLLMWorker:
 
         print(f"[VLLMWorker pid={pid}] Creating vLLM engine for {model_id}...", flush=True)
         engine_start = time.time()
-        self.engine = AsyncLLMEngine.from_engine_args(engine_args)
+        extra_engine_kwargs = {}
+        if self._collect_stats:
+            extra_engine_kwargs["stat_loggers"] = [CollectingStatLogger]
+        self.engine = AsyncLLMEngine.from_engine_args(engine_args, **extra_engine_kwargs)
         print_red(f"[VLLMWorker pid={pid}] Engine creation: {time.time() - engine_start:.2f}s")
 
         if self._collect_stats:
-            try:
-                self.stats_collector = CollectingStatLogger()
-                if hasattr(self.engine, "logger_manager") and self.engine.logger_manager is not None:
-                    self.engine.logger_manager.stat_loggers.append(self.stats_collector)
-                    print(f"[VLLMWorker pid={pid}] Stats collection enabled", flush=True)
-                else:
-                    print(f"[VLLMWorker pid={pid}] WARNING: logger_manager not available, stats collection disabled", flush=True)
-                    self.stats_collector = None
-            except Exception as e:
-                print(f"[VLLMWorker pid={pid}] WARNING: failed to register stats collector: {e}", flush=True)
-                self.stats_collector = None
+            self.stats_collector = CollectingStatLogger.get_instance()
+            if self.stats_collector is not None:
+                print(f"[VLLMWorker pid={pid}] Stats collection enabled", flush=True)
+            else:
+                print(f"[VLLMWorker pid={pid}] WARNING: CollectingStatLogger not instantiated by engine", flush=True)
 
         print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {time.time() - init_start:.2f}s ★")
 
@@ -575,31 +591,19 @@ class VLLMWorker:
 
     @app.get("/stats")
     async def stats(self):
-        """Per-replica scheduler stats for debugging throughput."""
+        """Per-replica live stats from CollectingStatLogger (if enabled) or basic info."""
         pid = os.getpid()
         if self.null_compute:
             return JSONResponse({"pid": pid, "model": self.model_id, "null_compute": True})
-        try:
-            scheduler = self.engine.engine.scheduler[0]
-            waiting = len(scheduler.waiting)
-            running = len(scheduler.running)
-            swapped = len(scheduler.swapped)
-            num_unfinished = self.engine.engine.get_num_unfinished_requests()
-            block_manager = scheduler.block_manager
-            gpu_cache_usage = block_manager.gpu_allocator.get_usage() if hasattr(block_manager, "gpu_allocator") else None
-            return JSONResponse({
-                "pid": pid,
-                "model": self.model_id,
-                "scheduler": {
-                    "waiting": waiting,
-                    "running": running,
-                    "swapped": swapped,
-                    "num_unfinished": num_unfinished,
-                },
-                "gpu_cache_usage": gpu_cache_usage,
-            })
-        except Exception as e:
-            return JSONResponse({"pid": pid, "model": self.model_id, "error": str(e)})
+        result = {"pid": pid, "model": self.model_id}
+        collector = CollectingStatLogger.get_instance()
+        if collector is not None:
+            snaps = collector.scheduler_snapshots
+            reqs = collector.finished_requests
+            result["latest_scheduler"] = snaps[-1] if snaps else None
+            result["total_finished_requests"] = len(reqs)
+            result["scheduler_snapshot_count"] = len(snaps)
+        return JSONResponse(result)
 
     def collect_stats(self) -> dict:
         """Return buffered stats. Called via ray.get(actor_handle.collect_stats.remote())."""
