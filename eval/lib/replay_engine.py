@@ -548,7 +548,7 @@ async def replay_from_manifest(
     sat_cfg = getattr(replay_cfg, "saturation", {}) or {}
     if isinstance(sat_cfg, dict) and sat_cfg.get("enabled"):
         if is_root:
-            result_dir = pathlib.Path(exp_config.pbs_working_dir) / "results" if exp_config.pbs_working_dir else pathlib.Path("results")
+            result_dir = pathlib.Path(exp_config.pbs_result_dir) if exp_config.pbs_result_dir else pathlib.Path(exp_config.pbs_working_dir) / "results"
             result_dir.mkdir(parents=True, exist_ok=True)
             sat_output_path = result_dir / "saturation_output.json"
             _run_saturation_from_manifest(
