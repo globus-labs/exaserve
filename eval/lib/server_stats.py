@@ -53,12 +53,13 @@ def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
                     "error": str(e),
                 }
 
-    # Write per-replica files
+    # Write per-replica files. Use replica_id (globally unique) instead of PID
+    # since PIDs can collide across nodes.
     results_path = Path(results_dir)
     results_path.mkdir(parents=True, exist_ok=True)
     for replica_id, stats in all_stats.items():
-        pid = stats.get("pid", "unknown")
-        path = results_path / f"replica_stats_pid{pid}.json"
+        safe_id = str(replica_id).replace("/", "_").replace(":", "_")
+        path = results_path / f"replica_stats_{safe_id}.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(stats, f, indent=2)
 
