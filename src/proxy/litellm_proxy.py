@@ -204,8 +204,9 @@ class LiteLLMProxy(ProxyBackend):
             env["LD_LIBRARY_PATH"] = ":".join(clean)
 
         print(f"[LiteLLMProxy] Starting: {' '.join(cmd)}", flush=True)
-        proc = subprocess.Popen(cmd, env=env)
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(f"[LiteLLMProxy] Process started (pid={proc.pid}, port={actual_port})", flush=True)
+        self._num_workers = num_workers
         return proc, actual_port
 
     def health_check(
@@ -216,15 +217,64 @@ class LiteLLMProxy(ProxyBackend):
         process: subprocess.Popen | None = None,
     ) -> bool:
         """
-        Poll GET http://{host}:{port}/health until 200 or timeout.
+        Wait for all LiteLLM workers to print their readiness marker, then
+        do a final HTTP health check. Each worker prints "Thank you for using
+        LiteLLM!" when ready — we count N occurrences for N workers, then
+        wait a 10s grace period.
 
-        Returns False immediately if the proxy process has already exited.
+        Falls back to HTTP polling if stdout reading fails.
         """
-        url = f"http://{host}:{port}/health/liveliness"
+        num_workers = getattr(self, "_num_workers", 1)
+        ready_marker = "Thank you for using LiteLLM!"
+        workers_ready = 0
         deadline = time.monotonic() + timeout
+
+        # Phase 1: read stdout lines until we see N readiness markers.
+        if process is not None and process.stdout is not None:
+            import selectors
+            sel = selectors.DefaultSelector()
+            sel.register(process.stdout, selectors.EVENT_READ)
+            while time.monotonic() < deadline and workers_ready < num_workers:
+                if process.poll() is not None:
+                    print(
+                        f"[LiteLLMProxy] Process exited with code {process.returncode} "
+                        f"before all workers ready ({workers_ready}/{num_workers}).",
+                        flush=True,
+                    )
+                    return False
+                events = sel.select(timeout=5.0)
+                for key, _ in events:
+                    line = key.fileobj.readline()
+                    if not line:
+                        continue
+                    decoded = line.decode("utf-8", errors="replace").rstrip()
+                    print(f"[LiteLLMProxy] {decoded}", flush=True)
+                    if ready_marker in decoded:
+                        workers_ready += 1
+                        print(f"[LiteLLMProxy] Worker {workers_ready}/{num_workers} ready", flush=True)
+            sel.unregister(process.stdout)
+            sel.close()
+
+            if workers_ready >= num_workers:
+                print(f"[LiteLLMProxy] All {num_workers} workers ready, waiting 10s grace period...", flush=True)
+                time.sleep(10)
+                # Start a background thread to drain remaining stdout so the process doesn't block.
+                import threading
+                def _drain(proc):
+                    try:
+                        for line in proc.stdout:
+                            pass  # discard
+                    except Exception:
+                        pass
+                threading.Thread(target=_drain, args=(process,), daemon=True).start()
+            else:
+                print(f"[LiteLLMProxy] WARNING: only {workers_ready}/{num_workers} workers ready before timeout, proceeding with HTTP check", flush=True)
+
+        # Phase 2: final HTTP health check.
+        url = f"http://{host}:{port}/health/liveliness"
+        deadline = time.monotonic() + min(timeout, 60.0)
         attempt = 0
         while time.monotonic() < deadline:
-            # Fast-fail if the process crashed
             if process is not None and process.poll() is not None:
                 print(
                     f"[LiteLLMProxy] Process exited with code {process.returncode} "
