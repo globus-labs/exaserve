@@ -170,7 +170,7 @@ class ClientSpec:
     num_nodes: int = 1
     num_go_procs: int = 1
     num_go_workers: int = 4
-    go_concurrency: int = 2000
+    go_concurrency: int = 0  # 0 = auto-derive from ephemeral port range in Go client
     warmup_rps: int = 0
     warmup_duration_s: float = 0.0
     sum_only: bool = False

@@ -3,7 +3,7 @@ matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [16]
+      values: [1]
       targets: [deployment.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
   derived:
@@ -35,7 +35,6 @@ client:
   dest: direct
   stream: false
   num_go_procs: 1
-  go_concurrency: 2048
   num_go_workers: 4
 backend:
   default: ray

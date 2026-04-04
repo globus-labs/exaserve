@@ -143,7 +143,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         num_nodes=int(client_raw.get("num_nodes", deployment.num_nodes)),
         num_go_procs=int(client_raw.get("num_go_procs", 1)),
         num_go_workers=int(client_raw.get("num_go_workers", 4)),
-        go_concurrency=int(client_raw.get("go_concurrency", 2000)),
+        go_concurrency=int(client_raw.get("go_concurrency", 0)),
         warmup_rps=int(client_raw.get("warmup_rps", 0)),
         warmup_duration_s=float(client_raw.get("warmup_duration_s", 0.0)),
         sum_only=bool(client_raw.get("sum_only", False)),

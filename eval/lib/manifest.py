@@ -66,7 +66,7 @@ class ReplayClientConfig:
     num_nodes: int = 1      # total PBS nodes (= pbs_num_nodes); used to compute actual client count
     num_go_procs: int = 16   # number of Go processes per replay_client node
     num_go_workers: int = 2 # dispatch goroutines (N) inside each Go process
-    go_concurrency: int = 40  # max in-flight requests per Go process
+    go_concurrency: int = 0  # 0 = auto-derive from ephemeral port range in Go client
     warmup_rps: int = 0     # warm-up requests per second (0 = no warmup)
     warmup_duration_s: float = 0.0  # warm-up duration in seconds
     sum_only: bool = False  # Go client writes only summary instead of per-request results
@@ -158,7 +158,7 @@ def _replay_config_from_dict(d: Dict[str, Any]) -> ReplayClientConfig:
         num_nodes=int(d.get("num_nodes", 1)),
         num_go_procs=int(d.get("num_go_procs", 1)),
         num_go_workers=int(d.get("num_go_workers", 4)),
-        go_concurrency=int(d.get("go_concurrency", 2000)),
+        go_concurrency=int(d.get("go_concurrency", 0)),
         warmup_rps=int(d.get("warmup_rps", 0)),
         warmup_duration_s=float(d.get("warmup_duration_s", 0.0)),
         sum_only=bool(d.get("sum_only", False)),
