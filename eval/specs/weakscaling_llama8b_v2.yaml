@@ -4,13 +4,13 @@ matrix:
   axes:
     - name: num_nodes
       values: [16]
-      targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+      targets: [deployment.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
 trace:
   kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 2048
+  input_len: 1800
   output_len: 128
   # Phase 0: 25 rps/node saturation × 0.7 headroom = 17.5
   rate_per_node: 17.5
@@ -28,6 +28,7 @@ deployment:
   replica_max_ongoing_requests: 128
 client:
   num_runs: 1
+  num_nodes: 1
   dest: direct
   stream: false
   num_go_procs: 1
