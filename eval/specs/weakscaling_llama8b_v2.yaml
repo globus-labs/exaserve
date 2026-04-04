@@ -3,7 +3,7 @@ matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [16, 32]
+      values: [16]
       targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
 trace:
@@ -28,7 +28,7 @@ deployment:
   replica_max_ongoing_requests: 128
 client:
   num_runs: 1
-  dest: proxy
+  dest: direct
   stream: false
   num_go_procs: 1
   go_concurrency: 1024
