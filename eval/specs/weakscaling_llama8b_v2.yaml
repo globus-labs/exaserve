@@ -6,6 +6,9 @@ matrix:
       values: [16]
       targets: [deployment.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
+  derived:
+    - path: client.num_nodes
+      expr: "1"
 trace:
   kind: weak_scaling
 workload:
