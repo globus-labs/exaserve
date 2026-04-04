@@ -146,38 +146,51 @@ fixed by increasing `max_ongoing_requests` or reducing `go_concurrency` per rank
 
 ## 16-Node: Three-Way Comparison (Proxy vs Centralized-Direct vs Distributed-Direct)
 
-| | Via Proxy | Centralized Direct | Distributed Direct (MPI) |
-|---|----------|-------------------|------------------------|
-| Client location | 1 node | 1 node | 16 nodes |
-| Routing | →LiteLLM→backends | →backends | →local backend |
-| Achieved RPS | 186.5 | 204.6 | 256.1 |
-| Errors | 4 | 0 | 0 |
-| Dispatch time | 84.6s | 78.1s | 60.0s |
-| P50 latency | 4888ms | 4773ms | 6360ms |
-| P99 latency | 10384ms | 6090ms | 8208ms |
-| Efficiency | 67% | 73% | 91% |
+### go_concurrency matters
 
-### Breakdown of the 280→186 rps gap (via proxy)
+The initial centralized direct test used `go_concurrency=1024`, achieving only 204.6
+rps (73%). A follow-up with `go_concurrency=2048` recovered to 255.0 rps (91%) — 
+matching the distributed MPI result. The bottleneck at conc=1024 was concurrency
+starvation: with 16 remote backends and ~5s avg latency, the client needs
+`280 × 5 = 1400` concurrent slots to sustain 280 rps. 1024 wasn't enough.
 
-1. **Proxy overhead: 18 rps** (186→205). LiteLLM's internal routing adds ~10% cost.
-2. **Single-node client bottleneck: 51 rps** (205→256). One Go process dispatching
-   to 16 remote backends over HSN is network-limited — TCP round-trip to remote
-   nodes inflates per-request `client.Do()` latency compared to localhost.
-3. **Ray Serve routing: 24 rps** (256→280). Power-of-two-choices across 192 replicas
-   has some inefficiency (stale queue_len cache, routing decisions).
+| | Via Proxy | Centralized Direct | Centralized Direct | Distributed Direct |
+|---|----------|-------------------|-------------------|-------------------|
+| | (2w, conc=1024) | (conc=1024) | (conc=2048) | (MPI, conc=1024) |
+| Client location | 1 node | 1 node | 1 node | 16 nodes |
+| Routing | →LiteLLM→backends | →backends | →backends | →local backend |
+| Achieved RPS | 186.5 | 204.6 | **255.0** | 256.1 |
+| Errors | 4 | 0 | 0 | 0 |
+| Dispatch time | 84.6s | 78.1s | **60.0s** | 60.0s |
+| P50 latency | 4888ms | 4773ms | 5861ms | 6360ms |
+| P99 latency | 10384ms | 6090ms | 7710ms | 8208ms |
+| Efficiency | 67% | 73% | **91%** | 91% |
+
+Note: The proxy result (186.5 rps) also used `go_concurrency=1024` and may improve
+with higher concurrency. This comparison is not fully apples-to-apples for the proxy
+path — a re-run with conc=2048 is needed to isolate true proxy overhead.
+
+### Analysis
+
+With sufficient `go_concurrency` (2048), a single centralized Go process on one
+node can drive 16 remote backends at 91% efficiency — matching distributed MPI.
+The earlier 73% result was a client configuration issue, not a fundamental network
+or architecture limitation.
+
+**The proxy path (186.5 rps) needs re-testing with go_concurrency=2048.** The gap
+between proxy (186.5) and centralized direct (204.6) at conc=1024 was 18 rps.
+But since concurrency starvation affected both, the true proxy overhead may be
+smaller than measured.
 
 ### Conclusions
 
-The weak-scaling bottleneck at 16+ nodes is NOT a single component but a cascading
-effect of three layers:
-
-- **For production benchmarks**: Use `dest=direct` with MPI distribution (distributed
-  client). Each node drives its own local backend. Achieves 91% efficiency.
-- **For centralized operation**: Expect ~73% efficiency at 16 nodes due to the
-  single client node's network throughput limit.
-- **Proxy adds a further ~10% loss** on top of the centralized client bottleneck.
-  At 8 nodes (~140 rps), the proxy overhead is within noise. Beyond 16 nodes, it
-  compounds with the client bottleneck.
+1. **go_concurrency must be sized for the workload**: At 16 nodes with ~5s latency,
+   need `target_rps × avg_latency` ≈ 1400 concurrent slots minimum. 2048 provides
+   sufficient headroom.
+2. **Centralized client scales to 16 nodes at 91%** when properly configured.
+3. **Proxy overhead is still unknown** at proper concurrency — needs re-run.
+4. **Distributed MPI is not required for 16-node scaling** — it's a concurrency
+   sizing issue, not an architecture limitation.
 
 ## Raw data
 
