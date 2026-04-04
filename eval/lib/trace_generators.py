@@ -149,7 +149,14 @@ def _truncate_prompt(
         while len(tokens) < target_len and tokens:
             tokens = (tokens + tokens)[:target_len]
     prompt = tokenizer.decode(tokens, skip_special_tokens=True)
-    return prompt, len(tokens)
+    # Re-encode to verify: decode→encode round-trip can change token count.
+    # Iteratively trim until the re-encoded count fits within hard_limit.
+    verified_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+    while len(verified_tokens) > hard_limit:
+        verified_tokens = verified_tokens[:hard_limit]
+        prompt = tokenizer.decode(verified_tokens, skip_special_tokens=True)
+        verified_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+    return prompt, len(verified_tokens)
 
 
 def _synthetic_prompt(seed: int, target_len: int) -> str:
