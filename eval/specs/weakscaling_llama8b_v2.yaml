@@ -29,7 +29,7 @@ deployment:
 client:
   num_runs: 1
   dest: proxy
-  stream: true
+  stream: false
   num_go_procs: 1
   go_concurrency: 1024
   num_go_workers: 4
