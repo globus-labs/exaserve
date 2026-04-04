@@ -35,7 +35,7 @@ client:
   dest: direct
   stream: false
   num_go_procs: 1
-  go_concurrency: 1024
+  go_concurrency: 2048
   num_go_workers: 4
 backend:
   default: ray
