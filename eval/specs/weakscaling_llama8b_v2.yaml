@@ -3,7 +3,7 @@ matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [1, 2, 4, 8]
+      values: [1, 2, 4, 8, 16, 32, 64]
       targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
 trace:
@@ -12,9 +12,8 @@ workload:
   duration: 60.0
   input_len: 2048
   output_len: 128
-  # Burst test: 1 node saturates at 231 rps (12 replicas, go_concurrency=192)
-  # 231 × 0.7 headroom = 162 rps/node
-  rate_per_node: 162.0
+  # Phase 0: 25 rps/node saturation × 0.7 headroom = 17.5
+  rate_per_node: 17.5
   generation_mode: deterministic
 deployment:
   models:
@@ -25,16 +24,14 @@ deployment:
       size: 8
       gpu_memory_utilization: 0.90
       enforce_eager: true
-      max_num_seqs: 32
-  replica_max_ongoing_requests: 64
+      max_num_seqs: 64
+  replica_max_ongoing_requests: 128
 client:
   num_runs: 1
   dest: proxy
   stream: true
-  # Burst test: need go_concurrency >= 192 to saturate vLLM batch scheduler
-  # At 162 rps with ~1s avg latency: concurrency ≈ 162, fits in 1 proc
   num_go_procs: 1
-  go_concurrency: 192
+  go_concurrency: 1024
   num_go_workers: 4
 backend:
   default: ray
