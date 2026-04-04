@@ -144,8 +144,44 @@ fixed by increasing `max_ongoing_requests` or reducing `go_concurrency` per rank
    distribution. The proxy is useful for development but becomes a bottleneck
    beyond 8 nodes.
 
+## 16-Node: Three-Way Comparison (Proxy vs Centralized-Direct vs Distributed-Direct)
+
+| | Via Proxy | Centralized Direct | Distributed Direct (MPI) |
+|---|----------|-------------------|------------------------|
+| Client location | 1 node | 1 node | 16 nodes |
+| Routing | →LiteLLM→backends | →backends | →local backend |
+| Achieved RPS | 186.5 | 204.6 | 256.1 |
+| Errors | 4 | 0 | 0 |
+| Dispatch time | 84.6s | 78.1s | 60.0s |
+| P50 latency | 4888ms | 4773ms | 6360ms |
+| P99 latency | 10384ms | 6090ms | 8208ms |
+| Efficiency | 67% | 73% | 91% |
+
+### Breakdown of the 280→186 rps gap (via proxy)
+
+1. **Proxy overhead: 18 rps** (186→205). LiteLLM's internal routing adds ~10% cost.
+2. **Single-node client bottleneck: 51 rps** (205→256). One Go process dispatching
+   to 16 remote backends over HSN is network-limited — TCP round-trip to remote
+   nodes inflates per-request `client.Do()` latency compared to localhost.
+3. **Ray Serve routing: 24 rps** (256→280). Power-of-two-choices across 192 replicas
+   has some inefficiency (stale queue_len cache, routing decisions).
+
+### Conclusions
+
+The weak-scaling bottleneck at 16+ nodes is NOT a single component but a cascading
+effect of three layers:
+
+- **For production benchmarks**: Use `dest=direct` with MPI distribution (distributed
+  client). Each node drives its own local backend. Achieves 91% efficiency.
+- **For centralized operation**: Expect ~73% efficiency at 16 nodes due to the
+  single client node's network throughput limit.
+- **Proxy adds a further ~10% loss** on top of the centralized client bottleneck.
+  At 8 nodes (~140 rps), the proxy overhead is within noise. Beyond 16 nodes, it
+  compounds with the client bottleneck.
+
 ## Raw data
 
 - 1-node profiles: `bench_results/clientlab/profile_1n_proxy/`, `profile_1n_direct/`
-- 16-node proxy: `runs/weakscaling_llama8b_v2/run2/16-nodes/`
-- 16-node direct: `runs/weakscaling_llama8b_v2/run8/16-nodes/`
+- 16-node proxy (2w): `runs/weakscaling_llama8b_v2/run2/16-nodes/`
+- 16-node distributed direct (MPI): `runs/weakscaling_llama8b_v2/run11/16-nodes/`
+- 16-node centralized direct: `runs/weakscaling_llama8b_v2/run12/16-nodes/`
