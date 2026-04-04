@@ -1,11 +1,11 @@
 name: server_char_llama8b
 matrix:
-  name_template: "mor{max_ongoing}"
+  name_template: "mns{max_num_seqs}"
   axes:
-    - name: max_ongoing
-      values: [64, 96, 128, 256, 512]
-      targets: [deployment.replica_max_ongoing_requests]
-      label_template: "mor{value}"
+    - name: max_num_seqs
+      values: [8, 16, 32, 128, 256]
+      targets: [deployment.models.0.max_num_seqs]
+      label_template: "mns{value}"
 trace:
   kind: weak_scaling
 workload:
@@ -15,7 +15,7 @@ workload:
   rate_per_node: 1000.0
 deployment:
   num_nodes: 1
-  collect_stats: true
+  replica_max_ongoing_requests: 128
   models:
     - model_id: meta-llama/Meta-Llama-3-8B-Instruct
       tensor_parallel_size: 1
@@ -24,7 +24,6 @@ deployment:
       size: 8
       gpu_memory_utilization: 0.90
       enforce_eager: true
-      max_num_seqs: 64
 client:
   saturation:
     enabled: true
