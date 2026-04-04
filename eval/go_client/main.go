@@ -262,10 +262,10 @@ func run() int {
 	generationMode := flag.String("generation-mode", "deterministic", "deterministic or natural")
 	includeTP := flag.Bool("include-tp", false, "Include tensor_parallel_size in payloads")
 	timeoutSec := flag.Float64("timeout", 3600.0, "Per-request timeout in seconds")
-	maxActiveRequests := flag.Int("max-active-requests", 0, "Maximum active in-flight HTTP requests")
+	maxActiveRequests := flag.Int("max-active-requests", 0, "Maximum active in-flight HTTP requests (0 = auto-derive from ephemeral port range)")
 	legacyConcurrency := flag.Int("concurrency", 0, "Deprecated alias for --max-active-requests")
 	queueCapacity := flag.Int("queue-capacity", 0, "Buffered queue capacity beyond active requests")
-	maxConnsPerHost := flag.Int("max-conns-per-host", 0, "Maximum transport connections per host (0 = derive from active requests)")
+	maxConnsPerHost := flag.Int("max-conns-per-host", 0, "Maximum transport connections per host (0 = unlimited)")
 	metricsFile := flag.String("metrics-file", "", "Optional JSON metrics output path")
 	phaseTraceFile := flag.String("phase-trace-file", "", "Optional JSONL sampled phase trace output path")
 	phaseTraceSampleRate := flag.Float64("phase-trace-sample-rate", 0.0, "Probability [0,1] for writing a per-request phase trace")
@@ -432,9 +432,9 @@ func run() int {
 		return 1
 	}
 	resolvedMaxConns := *maxConnsPerHost
-	if resolvedMaxConns <= 0 {
-		resolvedMaxConns = resolvedMaxActive
-	}
+	// MaxConnsPerHost=0 means unlimited in Go's http.Transport.
+	// We let the system hit its natural limits (ephemeral ports, fd limit).
+	// If port exhaustion occurs, classifyRequestError reports "port_exhaustion".
 
 	traceRequests, err := loadRequests(*traceFile, *generationMode, *includeTP, *streamMode)
 	if err != nil {
@@ -1048,6 +1048,18 @@ func normalizeBaseURLs(raw string) []string {
 	return result
 }
 
+func getEphemeralPortCount() int {
+	data, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		return 28232 // typical default: 60999-32768+1
+	}
+	var lo, hi int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d %d", &lo, &hi); err != nil {
+		return 28232
+	}
+	return hi - lo + 1
+}
+
 func resolveMaxActiveRequests(maxActive int, legacy int) (int, error) {
 	if maxActive > 0 && legacy > 0 && maxActive != legacy {
 		return 0, errors.New("--max-active-requests and --concurrency disagree")
@@ -1058,7 +1070,13 @@ func resolveMaxActiveRequests(maxActive int, legacy int) (int, error) {
 	if legacy > 0 {
 		return legacy, nil
 	}
-	return 0, errors.New("--max-active-requests is required")
+	// Auto-derive: use ephemeral port range minus safety margin.
+	ports := getEphemeralPortCount()
+	derived := ports - 1024
+	if derived < 1024 {
+		derived = 1024
+	}
+	return derived, nil
 }
 
 func readRunT0() (float64, error) {
@@ -1110,6 +1128,14 @@ func classifyRequestError(reqErr error, ctxErr error) string {
 	}
 	if errors.Is(reqErr, context.DeadlineExceeded) {
 		return "timeout"
+	}
+	// Check for port/fd exhaustion before generic network errors.
+	if errors.Is(reqErr, syscall.EADDRNOTAVAIL) || errors.Is(reqErr, syscall.EMFILE) || errors.Is(reqErr, syscall.ENFILE) {
+		return "port_exhaustion"
+	}
+	errMsg := reqErr.Error()
+	if strings.Contains(errMsg, "address already in use") || strings.Contains(errMsg, "too many open files") {
+		return "port_exhaustion"
 	}
 	var netErr net.Error
 	if errors.As(reqErr, &netErr) {
