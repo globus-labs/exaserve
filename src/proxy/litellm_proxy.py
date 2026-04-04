@@ -230,7 +230,7 @@ class LiteLLMProxy(ProxyBackend):
         Reads from the log file (not a pipe) to avoid blocking.
         """
         num_workers = getattr(self, "_num_workers", 1)
-        ready_marker = "Thank you for using LiteLLM!"
+        ready_marker = "Application startup complete."
         workers_ready = 0
         deadline = time.monotonic() + timeout
 
