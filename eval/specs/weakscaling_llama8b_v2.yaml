@@ -3,7 +3,7 @@ matrix:
   name_template: "{num_nodes}_nodes"
   axes:
     - name: num_nodes
-      values: [16]
+      values: [1]
       targets: [deployment.num_nodes, scheduler.nodes]
       label_template: "{value}_nodes"
 trace:
