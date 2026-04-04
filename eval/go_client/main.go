@@ -262,13 +262,10 @@ func run() int {
 	generationMode := flag.String("generation-mode", "deterministic", "deterministic or natural")
 	includeTP := flag.Bool("include-tp", false, "Include tensor_parallel_size in payloads")
 	timeoutSec := flag.Float64("timeout", 3600.0, "Per-request timeout in seconds")
-	// Connection management is fully automatic: derived from ephemeral port range,
-	// unlimited MaxConnsPerHost. Port exhaustion is detected and reported as "port_exhaustion".
-	// These flags are hidden but still parsed to produce clear errors for old configs.
-	maxActiveRequests := flag.Int("max-active-requests", 0, "DEPRECATED: auto-derived from ephemeral port range. Non-zero values are ignored.")
-	legacyConcurrency := flag.Int("concurrency", 0, "DEPRECATED: auto-derived from ephemeral port range. Non-zero values are ignored.")
+	maxActiveRequests := flag.Int("max-active-requests", 0, "Max in-flight HTTP requests (0 = auto-derive from ephemeral port range)")
+	legacyConcurrency := flag.Int("concurrency", 0, "Deprecated alias for --max-active-requests")
 	queueCapacity := flag.Int("queue-capacity", 0, "Buffered queue capacity beyond active requests")
-	maxConnsPerHost := flag.Int("max-conns-per-host", 0, "DEPRECATED: unlimited by default. Non-zero values are ignored.")
+	maxConnsPerHost := flag.Int("max-conns-per-host", 0, "Max transport connections per host (0 = unlimited)")
 	metricsFile := flag.String("metrics-file", "", "Optional JSON metrics output path")
 	phaseTraceFile := flag.String("phase-trace-file", "", "Optional JSONL sampled phase trace output path")
 	phaseTraceSampleRate := flag.Float64("phase-trace-sample-rate", 0.0, "Probability [0,1] for writing a per-request phase trace")
@@ -343,7 +340,7 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "ERROR: max active requests must be >= 1")
 			return 1
 		}
-		resolvedConns := 0 // unlimited
+		resolvedConns := *maxConnsPerHost // 0 = unlimited
 
 		runtime.GOMAXPROCS(runtime.NumCPU())
 
@@ -431,10 +428,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "ERROR: --base-urls did not contain any valid URL")
 		return 1
 	}
-	if *maxConnsPerHost > 0 {
-		fmt.Fprintf(os.Stderr, "WARNING: --max-conns-per-host is deprecated and ignored. Connections are unlimited.\n")
-	}
-	resolvedMaxConns := 0 // unlimited
+	resolvedMaxConns := *maxConnsPerHost // 0 = unlimited (default)
 
 	traceRequests, err := loadRequests(*traceFile, *generationMode, *includeTP, *streamMode)
 	if err != nil {
@@ -1061,10 +1055,16 @@ func getEphemeralPortCount() int {
 }
 
 func resolveMaxActiveRequests(maxActive int, legacy int) (int, error) {
-	if maxActive > 0 || legacy > 0 {
-		fmt.Fprintf(os.Stderr, "WARNING: --max-active-requests and --concurrency are deprecated and ignored. "+
-			"Connection management is now automatic (derived from ephemeral port range).\n")
+	if maxActive > 0 && legacy > 0 && maxActive != legacy {
+		return 0, errors.New("--max-active-requests and --concurrency disagree")
 	}
+	if maxActive > 0 {
+		return maxActive, nil
+	}
+	if legacy > 0 {
+		return legacy, nil
+	}
+	// Auto-derive: use ephemeral port range minus safety margin.
 	ports := getEphemeralPortCount()
 	derived := ports - 1024
 	if derived < 1024 {
