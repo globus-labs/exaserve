@@ -354,8 +354,83 @@ Potential bypass paths (not needed for real deployments):
 None of these are worth pursuing since real inference workloads with 100ms+ service
 times need <10K rps per process, well within the 150K/proc ceiling.
 
+## Auto-Derived Concurrency Validation (2026-04-05)
+
+After removing `go_concurrency` as a required user parameter, validated that
+auto-derived settings (`max_active_requests=0` → derives from ephemeral port range,
+capped at 10240) produce no regression.
+
+### Single-proc: no regression
+
+Client safe zone (8 points, 2D sweep of concurrency × service_time):
+
+| Config | Previous | Auto-derived | Delta |
+|--------|----------|-------------|-------|
+| active=2048, svc=0ms | 10000.0 | 10000.0 | 0% |
+| active=2048, svc=100ms | 9804.0 | 9803.8 | 0% |
+| active=8192, svc=1000ms | 6891.6 | 6990.8 | +1.4% |
+| active=8192, svc=2000ms | 3532.9 | 3534.6 | 0% |
+
+Phase 0 saturation (Llama-3-8B, 1 node): 25 rps (exact match).
+
+Dispatch ceiling (auto-derived, service_time=0): ~105K rps on test node.
+With explicit max_active=10240 on same node: ~102K rps. With max_active=80: ~88K rps.
+All consistent — node was ~57% of the original ceiling node's capacity.
+
+### Multi-proc: port exhaustion at high auto-derived concurrency
+
+With auto-derived `max_active=10240` per proc, multi-proc fails:
+- 4 procs × 10240 = 40960 total connections → exceeds ephemeral port range (28232)
+- TIME_WAIT socket accumulation compounds the issue
+
+With explicit `max_active=80` per proc (the known-good config):
+
+| Procs | Achieved RPS | Errors | Per-proc active |
+|-------|-------------|--------|----------------|
+| 1 | 89,611 | 0 | 80 |
+| 2 | 227,805 | 0 | 80 |
+| 4 | 394,782 | 0 | 80 |
+| 8 | 445,408 | 0 | 80 |
+| 12 | 483,449 | 0 | 80 |
+
+With `10240 // nprocs` per proc (auto-derived, reduced):
+
+| Procs | Achieved RPS | Errors | Per-proc active |
+|-------|-------------|--------|----------------|
+| 1 | 98,260 | 0 | 10240 |
+| 2 | 230,580 | 0 | 5120 |
+| 4 | 254,977 | 0 | 2560 |
+| 8 | 274,402 | 0 | 1280 |
+| 12 | 312,181 | 0 | 853 |
+
+Higher per-proc concurrency **hurts** multi-proc throughput with fast servers:
+connection churn overhead outweighs parallelism gains. At 4+ procs, max_active=80
+outperforms max_active=2560 by 35%.
+
+### Resolution
+
+- **Single-proc**: auto-derive (10240 cap) works for all workloads.
+- **Multi-proc**: spec must set `max_active_requests` explicitly. For fast servers
+  (clientlab), 80 per proc is optimal. For real inference, use
+  `ceil(target_rps × avg_latency / num_go_procs)`.
+
+### Connection management design
+
+`go_concurrency` controls three things simultaneously:
+- `outstandingSlots` channel capacity (goroutine concurrency)
+- `MaxConnsPerHost` on http.Transport (TCP connection cap per host)
+- `MaxIdleConnsPerHost` (idle connection pool size)
+
+When `MaxConnsPerHost` limit is reached, goroutines block in a FIFO queue inside
+the transport until a connection frees up. Setting `MaxConnsPerHost = max_active`
+ensures goroutines never wait for connections — each active goroutine has its own.
+
+Port exhaustion (`EADDRNOTAVAIL`, `EMFILE`) is now detected and reported as
+error class `"port_exhaustion"` in per-request results.
+
 ## Raw Data
 
 - Single-proc sweep: `/home/wenyiw/agpt/data/bench_results/clientlab/client-dispatch-ceiling_20260401T235004Z/`
 - Multi-proc sweep: `/home/wenyiw/agpt/data/bench_results/clientlab/client-dispatch-scaling_20260402T013700Z/`
 - Profiling experiment: `/home/wenyiw/agpt/data/bench_results/clientlab/dispatch_profiling_20260402T024400Z/`
+- Safe zone re-run: `/home/wenyiw/agpt/data/bench_results/clientlab/client-safe-zone_20260405T000211Z/`
