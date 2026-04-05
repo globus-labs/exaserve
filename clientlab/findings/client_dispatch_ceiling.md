@@ -414,6 +414,46 @@ outperforms max_active=2560 by 35%.
   (clientlab), 80 per proc is optimal. For real inference, use
   `ceil(target_rps × avg_latency / num_go_procs)`.
 
+### Deep investigation: why high max_active degrades multi-proc (2026-04-05)
+
+Ran 1M requests at 100K rps (service_time=0) with full metrics (httptrace, phase
+traces at 1% sampling). Results in `conc_investigation_20260405T163321Z/`.
+
+**Single-proc: connections are reused, tail latency is the issue**
+
+| max_active | reuse% | tth p50 | tth p99 | tth mean |
+|-----------|--------|---------|---------|----------|
+| 80 | 100% | 96μs | 4.4ms | 300μs |
+| 320 | 100% | 70μs | 5.7ms | 420μs |
+| 1280 | 99.98% | 73μs | 20.7ms | 1.8ms |
+| 5120 | 99.6% | 88μs | 160ms | 12.1ms |
+| 10240 | 99.4% | 100μs | 376ms | 32.3ms |
+
+Connection reuse is 99%+ at all levels — **connection churn is NOT the cause**.
+The p50 is flat (~80-100μs). The p99 grows exponentially — this is goroutine
+scheduling contention in the Go runtime. With 10240 goroutines competing for
+CPU, some goroutines wait 100-300ms before processing their HTTP response.
+
+**Multi-proc: TIME_WAIT from rare new connections exhausts ports**
+
+| per_proc | total | port_exhaustion errors | error |
+|----------|-------|----------------------|-------|
+| 80 | 960 | 0 | — |
+| 320 | 3840 | 0 | — |
+| 1280 | 15360 | 60,042 | EADDRNOTAVAIL |
+| 2267 | 27204 | 112,951 | EADDRNOTAVAIL |
+
+Even though 99.4% of requests reuse connections, the 0.6% that create new ones
+close them after use → TIME_WAIT (60s hold). With 12 procs × 0.6% × high request
+rate, TIME_WAIT sockets accumulate and exhaust the ephemeral port range (28232).
+
+**Root cause chain:**
+1. High max_active → many goroutines → Go scheduling contention
+2. Scheduling delays → goroutines slow to return connections to idle pool
+3. Idle pool miss → transport creates new connection (0.6% of requests)
+4. New connection closes → TIME_WAIT socket (60s hold)
+5. Multi-proc: 12 procs × small TIME_WAIT rate → port exhaustion
+
 ### Connection management design
 
 `go_concurrency` controls three things simultaneously:
