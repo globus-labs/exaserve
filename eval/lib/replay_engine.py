@@ -151,6 +151,18 @@ def _spawn_go_procs(
     stream: bool = False,
     cpuprofile_dir: str = "",
 ):
+    # When concurrency=0 (auto-derive), the Go client derives from the ephemeral
+    # port range. But with multiple Go procs sharing the same port range, each proc
+    # must use a fraction to avoid port exhaustion.
+    if concurrency == 0 and num_go_procs > 1:
+        try:
+            with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+                lo, hi = map(int, f.read().split())
+            port_budget = (hi - lo + 1 - 1024) // num_go_procs
+            concurrency = max(80, min(port_budget, 10240))
+        except Exception:
+            concurrency = max(80, 10240 // num_go_procs)
+
     request_map = {request.req_id: request for request in rank_requests}
     partitions = [rank_requests[index::max(1, num_go_procs)] for index in range(max(1, num_go_procs))]
     processes = []
