@@ -414,45 +414,56 @@ outperforms max_active=2560 by 35%.
   (clientlab), 80 per proc is optimal. For real inference, use
   `ceil(target_rps × avg_latency / num_go_procs)`.
 
-### Deep investigation: why high max_active degrades multi-proc (2026-04-05)
+### Deep investigation: concurrency, TIME_WAIT, and multi-proc (2026-04-05)
 
-Ran 1M requests at 100K rps (service_time=0) with full metrics (httptrace, phase
-traces at 1% sampling). Results in `conc_investigation_20260405T163321Z/`.
+**Initial contaminated run** (no cooldown between tests): showed port exhaustion
+at multi-proc 1280/proc and single-proc 27K. Results in
+`conc_investigation_20260405T163321Z/`.
 
-**Single-proc: connections are reused, tail latency is the issue**
+**Clean run** (70s cooldown between tests): 0 errors at ALL concurrency levels.
+Results in `conc_clean_20260405T*/`.
 
-| max_active | reuse% | tth p50 | tth p99 | tth mean |
-|-----------|--------|---------|---------|----------|
-| 80 | 100% | 96μs | 4.4ms | 300μs |
-| 320 | 100% | 70μs | 5.7ms | 420μs |
-| 1280 | 99.98% | 73μs | 20.7ms | 1.8ms |
-| 5120 | 99.6% | 88μs | 160ms | 12.1ms |
-| 10240 | 99.4% | 100μs | 376ms | 32.3ms |
+**Single-proc (clean, 1M req at 100K rps, service_time=0):**
 
-Connection reuse is 99%+ at all levels — **connection churn is NOT the cause**.
-The p50 is flat (~80-100μs). The p99 grows exponentially — this is goroutine
-scheduling contention in the Go runtime. With 10240 goroutines competing for
-CPU, some goroutines wait 100-300ms before processing their HTTP response.
+| max_active | RPS | Errors | TIME_WAIT after |
+|-----------|-----|--------|-----------------|
+| 80 | 90,660 | 0 | 80 |
+| 1280 | 99,999 | 0 | 1,275 |
+| 10240 | 98,482 | 0 | 10,124 |
+| 27000 | 85,264 | 0 | 27,000 |
 
-**Multi-proc: TIME_WAIT from rare new connections exhausts ports**
+**12-proc (clean):**
 
-| per_proc | total | port_exhaustion errors | error |
-|----------|-------|----------------------|-------|
-| 80 | 960 | 0 | — |
-| 320 | 3840 | 0 | — |
-| 1280 | 15360 | 60,042 | EADDRNOTAVAIL |
-| 2267 | 27204 | 112,951 | EADDRNOTAVAIL |
+| per_proc | total | RPS | Errors | TIME_WAIT after |
+|----------|-------|-----|--------|-----------------|
+| 80 | 960 | 99,965 | 0 | 960 |
+| 320 | 3840 | 100,000 | 0 | 3,712 |
+| 1280 | 15360 | 100,000 | 0 | 13,624 |
+| 2267 | 27204 | 99,054 | 0 | 22,348 |
 
-Even though 99.4% of requests reuse connections, the 0.6% that create new ones
-close them after use → TIME_WAIT (60s hold). With 12 procs × 0.6% × high request
-rate, TIME_WAIT sockets accumulate and exhaust the ephemeral port range (28232).
+**Key findings:**
 
-**Root cause chain:**
-1. High max_active → many goroutines → Go scheduling contention
-2. Scheduling delays → goroutines slow to return connections to idle pool
-3. Idle pool miss → transport creates new connection (0.6% of requests)
-4. New connection closes → TIME_WAIT socket (60s hold)
-5. Multi-proc: 12 procs × small TIME_WAIT rate → port exhaustion
+1. **Zero errors at all concurrency levels when starting from clean TIME_WAIT state.**
+   Both single-proc at 27K and 12-proc at 27K total work fine.
+
+2. **TIME_WAIT count ≈ max_active (not request count).** Go's http.Transport creates
+   exactly max_active connections at startup, reuses them for all requests, then
+   they all enter TIME_WAIT on process exit. No connection churn during the run.
+
+3. **Previous port exhaustion was from TIME_WAIT contamination between tests.**
+   Running tests back-to-back without 70s cooldown meant TIME_WAIT sockets from
+   test N consumed the port range for test N+1.
+
+4. **Production eval is safe.** Each PBS job starts fresh — no TIME_WAIT from
+   previous runs. The auto-derived 10240 cap is safe for both single and multi-proc.
+
+5. **Throughput: single-proc degrades at 27K (85K vs 100K at 1280)** from goroutine
+   scheduling overhead. 12-proc shows no throughput degradation up to 2267/proc.
+
+6. **Tail latency still grows with concurrency** (from earlier phase trace data):
+   tth p99 = 4ms at 80, 376ms at 10240. This is goroutine scheduling contention,
+   not connection management. Does not cause errors or throughput loss at the
+   aggregate level.
 
 ### Connection management design
 
