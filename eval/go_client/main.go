@@ -84,18 +84,20 @@ type dispatchDoneMeta struct {
 }
 
 type summaryRecord struct {
-	Type               string  `json:"__type__"`
-	RequestsCompleted  int     `json:"requests_completed"`
-	RequestsScheduled  int     `json:"requests_scheduled"`
-	Errors             int     `json:"errors"`
-	P50S               float64 `json:"p50_s"`
-	P99S               float64 `json:"p99_s"`
-	TotalInputTokens   int64   `json:"total_input_tokens"`
-	TotalOutputTokens  int64   `json:"total_output_tokens"`
-	LastFireTime       float64 `json:"last_fire_time"`
-	LastRequestStartAt float64 `json:"last_request_start_at"`
-	LastBodyDoneAt     float64 `json:"last_body_done_at"`
-	AdjustedRunT0      float64 `json:"adjusted_run_t0"`
+	Type               string            `json:"__type__"`
+	RequestsCompleted  int               `json:"requests_completed"`
+	RequestsScheduled  int               `json:"requests_scheduled"`
+	Errors             int               `json:"errors"`
+	ErrorCounts        map[string]int    `json:"error_counts,omitempty"`
+	ErrorSamples       map[string]string `json:"error_samples,omitempty"`
+	P50S               float64           `json:"p50_s"`
+	P99S               float64           `json:"p99_s"`
+	TotalInputTokens   int64             `json:"total_input_tokens"`
+	TotalOutputTokens  int64             `json:"total_output_tokens"`
+	LastFireTime       float64           `json:"last_fire_time"`
+	LastRequestStartAt float64           `json:"last_request_start_at"`
+	LastBodyDoneAt     float64           `json:"last_body_done_at"`
+	AdjustedRunT0      float64           `json:"adjusted_run_t0"`
 }
 
 type chatMessage struct {
@@ -924,6 +926,8 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 			completed, errorsCount              int
 			totalInputTokens, totalOutputTokens int64
 		)
+		errorCounts := make(map[string]int)
+		errorSamples := make(map[string]string)
 		for _, results := range workerResults {
 			for _, rec := range results {
 				if !recordPopulated(rec) {
@@ -944,6 +948,18 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 					}
 				} else {
 					errorsCount++
+					cls := rec.ErrorClass
+					if cls == "" {
+						cls = "unknown"
+					}
+					errorCounts[cls]++
+					if _, exists := errorSamples[cls]; !exists {
+						msg := rec.Error
+						if len(msg) > 300 {
+							msg = msg[:300]
+						}
+						errorSamples[cls] = msg
+					}
 				}
 			}
 		}
@@ -953,6 +969,8 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 			RequestsCompleted:  completed,
 			RequestsScheduled:  totalResults,
 			Errors:             errorsCount,
+			ErrorCounts:        errorCounts,
+			ErrorSamples:       errorSamples,
 			P50S:               percentile(successLatencies, 0.50),
 			P99S:               percentile(successLatencies, 0.99),
 			TotalInputTokens:   totalInputTokens,
