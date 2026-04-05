@@ -407,12 +407,55 @@ Higher per-proc concurrency **hurts** multi-proc throughput with fast servers:
 connection churn overhead outweighs parallelism gains. At 4+ procs, max_active=80
 outperforms max_active=2560 by 35%.
 
+### CORRECTION: previous results were contaminated (2026-04-05, later runs)
+
+Earlier multi-proc results showing port exhaustion at per_proc=1280 (60K errors) and
+per_proc=2267 (113K errors) were **contaminated by TIME_WAIT from prior tests running
+back-to-back**. The contaminated run is in `conc_investigation_20260405T163321Z/`.
+
+Clean runs (70s cooldown, TIME_WAIT=0 before each test) in `conc_clean_20260405T*/`:
+
+| per_proc | total (12 procs) | RPS | Errors | TIME_WAIT after |
+|----------|-----------------|-----|--------|-----------------|
+| 80 | 960 | 99,965 | 0 | 960 |
+| 320 | 3840 | 100,000 | 0 | 3,712 |
+| 1280 | 15360 | 100,000 | 0 | 13,624 |
+| 2267 | 27204 | 99,054 | 0 | 22,348 |
+
+**All levels: 0 errors from clean state.** TIME_WAIT count ≈ max_active (connections
+created once at startup, reused, TIME_WAIT on process exit).
+
+### Ceiling test with auto-derived budget (clean, 70s cooldown)
+
+| per_proc | total (12 procs) | RPS | Errors |
+|----------|-----------------|-----|--------|
+| 80 | 960 | **479K** | 0 |
+| 2267 | 27204 | **307K** | 0 |
+
+Higher per-proc concurrency (2267 vs 80) costs 36% throughput from goroutine
+scheduling overhead with fast servers. For real inference (seconds-long latency),
+this overhead is negligible.
+
+### Go runtime crash at extreme concurrency
+
+12 procs × 10240 per_proc = 122K goroutines: `pthread_create failed: Resource
+temporarily unavailable`. Go creates OS threads for goroutines blocked in syscalls.
+122K goroutines doing concurrent HTTP requests exhaust the system thread limit.
+This is why the orchestrator must divide the budget, not let each proc auto-derive
+the full amount independently.
+
 ### Resolution
 
-- **Single-proc**: auto-derive (10240 cap) works for all workloads.
-- **Multi-proc**: spec must set `max_active_requests` explicitly. For fast servers
-  (clientlab), 80 per proc is optimal. For real inference, use
-  `ceil(target_rps × avg_latency / num_go_procs)`.
+- **Default**: `max_active=max_conns=0`. Auto-derived as 80% of ephemeral port
+  range (~22K on Aurora). For multi-proc, replay_engine.py divides by num_go_procs.
+- **Single-proc**: auto-derive works for all workloads. 0 errors at 22K.
+- **Multi-proc**: auto-derive divides total budget across procs. At 12 procs:
+  ~1880/proc. Safe (0 errors) but ~36% slower than 80/proc for fast servers.
+  For real inference, the throughput difference is negligible.
+- **Override**: pass `--max-active-requests` explicitly for extreme throughput
+  benchmarks (e.g., 80/proc for clientlab ceiling tests).
+- **Diagnostics**: Go client now reports `dispatch_health`, `dispatch_lag_p99_s`,
+  `dispatch_warnings`, `error_counts`, and `error_samples` in the summary JSON.
 
 ### Deep investigation: concurrency, TIME_WAIT, and multi-proc (2026-04-05)
 
