@@ -1070,16 +1070,14 @@ func resolveMaxActiveRequests(maxActive int, legacy int) (int, error) {
 	if legacy > 0 {
 		return legacy, nil
 	}
-	// Auto-derive: use ephemeral port range minus safety margin, capped at 10240.
-	// Above ~10K concurrent connections, Go's http.Transport connection management
-	// overhead degrades throughput (measured: 108K rps at 27K vs 150K at 10K).
+	// Auto-derive: use ephemeral port range minus safety margin.
+	// Single-proc: full budget (~27K on Aurora). Validated 0 errors, ~85K rps.
+	// Multi-proc: the orchestrator (replay_engine.py) divides this by num_go_procs
+	// before passing --max-active-requests to each proc.
 	ports := getEphemeralPortCount()
 	derived := ports - 1024
 	if derived < 1024 {
 		derived = 1024
-	}
-	if derived > 10240 {
-		derived = 10240
 	}
 	return derived, nil
 }

@@ -161,9 +161,9 @@ def _spawn_go_procs(
         try:
             with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
                 lo, hi = map(int, f.read().split())
-            total_budget = min(hi - lo + 1 - 1024, 10240)
+            total_budget = hi - lo + 1 - 1024
         except Exception:
-            total_budget = 10240
+            total_budget = 27208  # typical Aurora default
         concurrency = max(80, total_budget // num_go_procs)
 
     request_map = {request.req_id: request for request in rank_requests}
