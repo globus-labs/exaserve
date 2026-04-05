@@ -154,10 +154,17 @@ def _spawn_go_procs(
     # When concurrency=0 (auto-derive), the Go client derives from the ephemeral
     # port range. But with multiple Go procs sharing the same port range, each proc
     # must use a fraction to avoid port exhaustion.
-    # For multi-proc, leave concurrency=0 so each Go process auto-derives
-    # independently (10240 cap). This works for real inference where each proc
-    # targets a subset of backends. For fast-server benchmarks (clientlab),
-    # the spec should set max_active_requests explicitly.
+    # For multi-proc, divide the total budget across procs so we don't exceed
+    # system thread/port limits. Each Go process auto-derives 10240 independently,
+    # but 12 × 10240 = 122K goroutines crashes the Go runtime (pthread_create fails).
+    if concurrency == 0 and num_go_procs > 1:
+        try:
+            with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+                lo, hi = map(int, f.read().split())
+            total_budget = min(hi - lo + 1 - 1024, 10240)
+        except Exception:
+            total_budget = 10240
+        concurrency = max(80, total_budget // num_go_procs)
 
     request_map = {request.req_id: request for request in rank_requests}
     partitions = [rank_requests[index::max(1, num_go_procs)] for index in range(max(1, num_go_procs))]
