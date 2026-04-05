@@ -1070,11 +1070,16 @@ func resolveMaxActiveRequests(maxActive int, legacy int) (int, error) {
 	if legacy > 0 {
 		return legacy, nil
 	}
-	// Auto-derive: use ephemeral port range minus safety margin.
+	// Auto-derive: use ephemeral port range minus safety margin, capped at 10240.
+	// Above ~10K concurrent connections, Go's http.Transport connection management
+	// overhead degrades throughput (measured: 108K rps at 27K vs 150K at 10K).
 	ports := getEphemeralPortCount()
 	derived := ports - 1024
 	if derived < 1024 {
 		derived = 1024
+	}
+	if derived > 10240 {
+		derived = 10240
 	}
 	return derived, nil
 }
