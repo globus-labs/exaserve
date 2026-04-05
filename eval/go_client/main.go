@@ -98,6 +98,12 @@ type summaryRecord struct {
 	LastRequestStartAt float64           `json:"last_request_start_at"`
 	LastBodyDoneAt     float64           `json:"last_body_done_at"`
 	AdjustedRunT0      float64           `json:"adjusted_run_t0"`
+	DispatchHealth     string            `json:"dispatch_health,omitempty"`
+	DispatchWarnings   []string          `json:"dispatch_warnings,omitempty"`
+	DispatchLagP99S    float64           `json:"dispatch_lag_p99_s,omitempty"`
+	MaxObservedActive  int64             `json:"max_observed_active,omitempty"`
+	NewConnections     uint64            `json:"new_connections,omitempty"`
+	ReusedConnections  uint64            `json:"reused_connections,omitempty"`
 }
 
 type chatMessage struct {
@@ -655,7 +661,7 @@ func run() int {
 		lastFireTime = runT0
 	}
 
-	if err := writeResults(*resultFile, *sumOnly, workerResults, lastFireTime, lastRequestStartAt, lastBodyDoneAt, runT0, logPrefix); err != nil {
+	if err := writeResults(*resultFile, *sumOnly, workerResults, lastFireTime, lastRequestStartAt, lastBodyDoneAt, runT0, logPrefix, collector); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		return 1
 	}
@@ -903,7 +909,7 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 	return rec
 }
 
-func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecord, lastFireTime float64, lastRequestStartAt float64, lastBodyDoneAt float64, runT0 float64, logPrefix string) error {
+func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecord, lastFireTime float64, lastRequestStartAt float64, lastBodyDoneAt float64, runT0 float64, logPrefix string, collector *metricsCollector) error {
 	totalResults := 0
 	for _, results := range workerResults {
 		for _, rec := range results {
@@ -980,18 +986,60 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 			LastBodyDoneAt:     lastBodyDoneAt,
 			AdjustedRunT0:      runT0,
 		}
+
+		// Populate dispatch health from metrics collector.
+		if collector != nil {
+			lagSnap := collector.dispatchLagHist.Snapshot()
+			lagP99 := PercentileFromHistogram(&lagSnap, 0.99)
+			summary.DispatchLagP99S = lagP99
+			summary.MaxObservedActive = collector.maxObservedActive.Load()
+			summary.NewConnections = collector.newConnections.Load()
+			summary.ReusedConnections = collector.reusedConnections.Load()
+
+			var warnings []string
+			health := "healthy"
+
+			if lagP99 > 1.0 {
+				health = "degraded"
+				warnings = append(warnings, fmt.Sprintf(
+					"dispatch_lag_p99=%.1fs: dispatcher fell behind schedule — server or proxy cannot absorb the target rate", lagP99))
+			}
+
+			if errorsCount > 0 {
+				if _, ok := errorCounts["port_exhaustion"]; ok {
+					health = "port_exhaustion"
+					warnings = append(warnings, fmt.Sprintf(
+						"port_exhaustion: %d requests failed — increase headroom or reduce max_active_requests", errorCounts["port_exhaustion"]))
+				}
+			}
+
+			totalConns := summary.NewConnections + summary.ReusedConnections
+			if totalConns > 0 && summary.NewConnections > totalConns/2 {
+				warnings = append(warnings, fmt.Sprintf(
+					"low_connection_reuse: %d/%d new connections (%.0f%%) — connection pool may be undersized or server is closing connections",
+					summary.NewConnections, totalConns, float64(summary.NewConnections)/float64(totalConns)*100))
+			}
+
+			summary.DispatchHealth = health
+			summary.DispatchWarnings = warnings
+		}
+
 		if err := encoder.Encode(summary); err != nil {
 			return fmt.Errorf("failed to encode summary: %w", err)
 		}
 		fmt.Fprintf(
 			os.Stderr,
-			"%s Summary: completed=%d errors=%d p50=%.3fs p99=%.3fs\n",
+			"%s Summary: completed=%d errors=%d p50=%.3fs p99=%.3fs dispatch_health=%s\n",
 			logPrefix,
 			completed,
 			errorsCount,
 			summary.P50S,
 			summary.P99S,
+			summary.DispatchHealth,
 		)
+		for _, w := range summary.DispatchWarnings {
+			fmt.Fprintf(os.Stderr, "%s WARNING: %s\n", logPrefix, w)
+		}
 		return nil
 	}
 
@@ -1088,12 +1136,12 @@ func resolveMaxActiveRequests(maxActive int, legacy int) (int, error) {
 	if legacy > 0 {
 		return legacy, nil
 	}
-	// Auto-derive: use ephemeral port range minus safety margin.
-	// Single-proc: full budget (~27K on Aurora). Validated 0 errors, ~85K rps.
-	// Multi-proc: the orchestrator (replay_engine.py) divides this by num_go_procs
-	// before passing --max-active-requests to each proc.
+	// Auto-derive: 80% of ephemeral port range for safety headroom.
+	// Validated: 0 errors at full port range with clean TIME_WAIT state.
+	// The 20% headroom guards against transient TIME_WAIT accumulation.
+	// Multi-proc: replay_engine.py divides total budget by num_go_procs.
 	ports := getEphemeralPortCount()
-	derived := ports - 1024
+	derived := int(float64(ports) * 0.8)
 	if derived < 1024 {
 		derived = 1024
 	}

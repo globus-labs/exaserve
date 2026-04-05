@@ -158,12 +158,13 @@ def _spawn_go_procs(
     # system thread/port limits. Each Go process auto-derives 10240 independently,
     # but 12 × 10240 = 122K goroutines crashes the Go runtime (pthread_create fails).
     if concurrency == 0 and num_go_procs > 1:
+        # Divide 80% of ephemeral port range across procs for safety headroom.
         try:
             with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
                 lo, hi = map(int, f.read().split())
-            total_budget = hi - lo + 1 - 1024
+            total_budget = int((hi - lo + 1) * 0.8)
         except Exception:
-            total_budget = 27208  # typical Aurora default
+            total_budget = 22586  # 28232 * 0.8
         concurrency = max(80, total_budget // num_go_procs)
 
     request_map = {request.req_id: request for request in rank_requests}
