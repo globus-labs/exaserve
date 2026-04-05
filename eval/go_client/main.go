@@ -340,7 +340,10 @@ func run() int {
 			fmt.Fprintln(os.Stderr, "ERROR: max active requests must be >= 1")
 			return 1
 		}
-		resolvedConns := *maxConnsPerHost // 0 = unlimited
+		resolvedConns := *maxConnsPerHost
+		if resolvedConns <= 0 {
+			resolvedConns = resolvedActive
+		}
 
 		runtime.GOMAXPROCS(runtime.NumCPU())
 
@@ -428,7 +431,10 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "ERROR: --base-urls did not contain any valid URL")
 		return 1
 	}
-	resolvedMaxConns := *maxConnsPerHost // 0 = unlimited (default)
+	resolvedMaxConns := *maxConnsPerHost
+	if resolvedMaxConns <= 0 {
+		resolvedMaxConns = resolvedMaxActive
+	}
 
 	traceRequests, err := loadRequests(*traceFile, *generationMode, *includeTP, *streamMode)
 	if err != nil {
