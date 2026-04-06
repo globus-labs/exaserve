@@ -47,6 +47,7 @@ echo "TIME_WAIT after:  $(ss -s 2>/dev/null | grep -o 'timewait [0-9]*')"
 
 echo ""
 echo "=== Per-proc results ==="
+export OUTDIR="$OUTDIR"
 python3 << 'PYEOF'
 import json, os
 

@@ -232,13 +232,13 @@ class LiteLLMProxy(ProxyBackend):
         num_workers = getattr(self, "_num_workers", 1)
         ready_marker = "Application startup complete."
         workers_ready = 0
-        deadline = time.monotonic() + timeout
+        overall_deadline = time.monotonic() + timeout
 
         # Phase 1: tail-read the log file for readiness markers.
         log_path = getattr(self, "_litellm_log_path", None)
         if log_path and os.path.exists(log_path):
             read_pos = 0
-            while time.monotonic() < deadline and workers_ready < num_workers:
+            while time.monotonic() < overall_deadline and workers_ready < num_workers:
                 if process is not None and process.poll() is not None:
                     print(
                         f"[LiteLLMProxy] Process exited with code {process.returncode} "
@@ -265,9 +265,8 @@ class LiteLLMProxy(ProxyBackend):
 
         # Phase 2: final HTTP health check.
         url = f"http://{host}:{port}/health/liveliness"
-        deadline = time.monotonic() + min(timeout, 60.0)
         attempt = 0
-        while time.monotonic() < deadline:
+        while time.monotonic() < overall_deadline:
             if process is not None and process.poll() is not None:
                 print(
                     f"[LiteLLMProxy] Process exited with code {process.returncode} "

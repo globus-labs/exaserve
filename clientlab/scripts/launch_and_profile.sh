@@ -62,6 +62,7 @@ bash clientlab/scripts/profile_bottleneck.sh "http://127.0.0.1:$DIRECT_PORT" "$T
 # Compare
 echo ""
 echo "=== Comparison ==="
+export OUTDIR="$OUTDIR"
 python3 << 'PYEOF'
 import json, statistics, os
 

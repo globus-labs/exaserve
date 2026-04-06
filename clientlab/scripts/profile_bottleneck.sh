@@ -29,7 +29,15 @@ echo "  Output: $OUTDIR"
 # Health check
 python3 -c "
 from urllib.request import build_opener, ProxyHandler
-build_opener(ProxyHandler({})).open('${SERVER_URL}/health', timeout=5)
+opener = build_opener(ProxyHandler({}))
+for path in ('/health', '/health/liveliness'):
+    try:
+        opener.open('${SERVER_URL}' + path, timeout=5)
+        break
+    except Exception:
+        pass
+else:
+    raise SystemExit(1)
 " 2>/dev/null || { echo "FATAL: server not healthy"; exit 1; }
 echo "  Server healthy"
 
