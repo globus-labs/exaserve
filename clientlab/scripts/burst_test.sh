@@ -69,14 +69,17 @@ echo ""
 printf "%-12s %12s %10s %10s %10s %10s %10s\n" "concurrency" "achieved_rps" "completed" "failed" "p50_lat_ms" "p99_lat_ms" "p50_ttft_ms"
 printf "%s\n" "--------------------------------------------------------------------------------------------"
 
-for CONC in 1 4 12 24 48 96 192; do
+for CONC in 4 12 24 48 96 192; do
+    # Target rate = concurrency / expected_latency. With ~3s latency, max achievable
+    # is conc/3 rps. Set target to 2x that so the server is fully loaded.
+    TARGET=$((CONC * 2 / 3 + 10))
     $CLIENT_BIN \
         --mode saturation-step \
         --base-urls "$SERVER_URL" \
         --max-active-requests $CONC \
         --num-go-workers 4 \
         --sat-stream \
-        --sat-target-rate 500 \
+        --sat-target-rate $TARGET \
         --sat-step-duration 15 \
         --sat-warmup-duration 5 \
         --sat-cooldown-pause 1 \
@@ -87,7 +90,7 @@ for CONC in 1 4 12 24 48 96 192; do
 import json
 r = json.load(open('$OUTDIR/burst_conc${CONC}.json'))
 print(f'{$CONC:<12d} {r[\"achieved_rate\"]:>12.1f} {r[\"completed\"]:>10d} {r[\"failed\"]:>10d} {r[\"p50_latency_s\"]*1000:>10.0f} {r[\"p99_latency_s\"]*1000:>10.0f} {r.get(\"p50_ttft_s\",0)*1000:>10.0f}')
-"
+" 2>/dev/null || echo "  (failed to parse result for conc=$CONC)"
 done
 
 # Stop stats poller
