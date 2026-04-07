@@ -1457,3 +1457,28 @@ def _patch_ray_serve_proxy_future_timeout() -> None:
 
 
 _patch_ray_serve_proxy_future_timeout()
+
+
+def _patch_ray_serve_proxy_startup_timeout() -> None:
+    """Increase HTTP_PROXY_TIMEOUT from 60s to 600s for large-scale deployments.
+
+    At 128 nodes Ray Serve needs to start ~128 EveryNode proxy actors and
+    ~1536 vLLM replicas.  The default 60 s timeout is too short — the
+    ServeController kills proxy actors that haven't become healthy yet,
+    causing a cascade of ActorDiedError.
+    """
+    try:
+        import ray.serve._private.constants as constants
+    except Exception:
+        return
+    old = getattr(constants, "HTTP_PROXY_TIMEOUT", None)
+    if old is None:
+        return
+    new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "600"))
+    constants.HTTP_PROXY_TIMEOUT = new_timeout
+    _patch_log(
+        f"Increased HTTP_PROXY_TIMEOUT from {old}s to {new_timeout}s"
+    )
+
+
+_patch_ray_serve_proxy_startup_timeout()
