@@ -17,6 +17,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math/rand"
 	"net"
@@ -581,7 +582,6 @@ func run() int {
 				<-sleepTimer.C
 			}
 
-			var localURLIdx uint64
 			for resultIdx, req := range partition {
 				if ctx.Err() != nil {
 					break
@@ -618,8 +618,7 @@ func run() int {
 					return
 				}
 
-				target := baseURLs[localURLIdx%uint64(len(baseURLs))]
-				localURLIdx++
+				target := baseURLs[fnvHash(req.ReqID)%uint64(len(baseURLs))]
 				samplePhases := *phaseTraceFile != "" && *phaseTraceSampleRate > 0 && rand.Float64() <= *phaseTraceSampleRate
 				item := workItem{
 					req:             req,
@@ -1100,6 +1099,12 @@ func loadRequests(traceFile string, generationMode string, includeTP bool, strea
 		return nil, fmt.Errorf("reading trace file: %w", err)
 	}
 	return requests, nil
+}
+
+func fnvHash(s string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
 }
 
 func normalizeBaseURLs(raw string) []string {
