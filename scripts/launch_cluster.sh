@@ -76,6 +76,9 @@ PY
 unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M
 SANITIZED_PYTHONPATH="$(sanitize_pythonpath "${PYTHONPATH:-}")"
 export PYTHONPATH="$PROJECT_ROOT/src${SANITIZED_PYTHONPATH:+:$SANITIZED_PYTHONPATH}"
+
+# Ensure user-local binaries (e.g. haproxy built from source) are reachable.
+export PATH="$HOME/bin:$PATH"
 PYTHON_EXEC="$(resolve_frameworks_python)"
 if [ -z "$PYTHON_EXEC" ] || [ ! -x "$PYTHON_EXEC" ]; then
     echo "ERROR: Failed to resolve Aurora frameworks python3."
@@ -222,12 +225,20 @@ unset ONEAPI_DEVICE_SELECTOR
 # per-worker gRPC/server thread fan-out can exhaust the node's process/thread
 # budget before model init completes, so clamp the Ray internals to a smaller
 # footprint for this launcher.
-export RAY_num_server_call_thread="${RAY_num_server_call_thread:-1}"
+# Ray internal thread counts. The defaults below are conservative (1 thread)
+# to avoid thread exhaustion during PP launches with many workers. For serving
+# throughput benchmarks, increase RAY_num_server_call_thread (e.g. 4-8) to
+# allow the HTTP proxy to handle more concurrent requests per node.
+export RAY_num_server_call_thread="${RAY_num_server_call_thread:-4}"
 export RAY_core_worker_num_server_call_thread="${RAY_core_worker_num_server_call_thread:-1}"
 export RAY_num_grpc_internal_threads="${RAY_num_grpc_internal_threads:-1}"
 export RAY_worker_num_grpc_internal_threads="${RAY_worker_num_grpc_internal_threads:-1}"
 export RAY_task_events_report_interval_ms="${RAY_task_events_report_interval_ms:-0}"
 export RAY_enable_metrics_collection="${RAY_enable_metrics_collection:-0}"
+
+# Ray Serve throughput optimizations (available in Ray 2.53+).
+# Enables separate thread for user code and separate event loop for the router.
+export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 

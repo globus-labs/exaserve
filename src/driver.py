@@ -150,6 +150,10 @@ def get_ray_env():
     # round trips in a large cluster.
     env["RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S"] = "300.0"
 
+    # Throughput optimizations: separate thread for user code and separate
+    # event loop for the router. Available in Ray 2.53+.
+    env.setdefault("RAY_SERVE_THROUGHPUT_OPTIMIZED", "1")
+
     # Ray's Intel GPU integration rewrites ONEAPI_DEVICE_SELECTOR to a
     # "level_zero:..." list, but Triton's SYCL probe crashes on Aurora when
     # that value is present. Keep the selector unset and rely on

@@ -157,16 +157,35 @@ argument than "Ray has no built-in LB" (which is inaccurate).
 All components needed to replicate Anyscale's setup are open-source. No proprietary packages
 required.
 
-### Available in stable Ray (2.54.1, PyPI)
+### Aurora environment (verified 2026-04-07)
 
-- `ray.serve.llm` (OpenAiIngress + LLMServer two-deployment pattern)
+Aurora uses a **custom-built Ray 2.53.0** for XPU support. Cannot install upstream
+nightly/PyPI wheels — they won't work with Intel GPUs.
+
+| Component | In Ray 2.53? | Notes |
+|-----------|-------------|-------|
+| `ray.llm` (OpenAiIngress, LLMServer, build_openai_app) | Partially | boto3 available in raybaseline venv, but `OpenAiIngress` imports `vllm.entrypoints.openai.protocol` which doesn't exist in Aurora's vLLM 0.15.0. **Not usable.** |
+| `ray.serve.llm` (deprecated shim) | Yes | Redirects to `ray.llm` |
+| `RAY_SERVE_THROUGHPUT_OPTIMIZED` | **Yes** | Enables separate thread/loop optimizations |
+| `ProxyActorInterface` (pluggable proxy abstract class) | Yes | Mentions HAProxy in docstring, no implementation |
+| `RAY_SERVE_ENABLE_HA_PROXY` | **No** | Not in 2.53 — this is 2.55+ only |
+| HAProxy bypass (internal replica ~30000 ports) | **No** | Replicas don't start internal HTTP servers in 2.53 |
+| gRPC inter-deployment (`RAY_SERVE_USE_GRPC_BY_DEFAULT`) | **No** | Not in 2.53 |
+
+**Consequence**: On Aurora (Ray 2.53.0 + vLLM 0.15.0), the best available setup is:
+- Single-deployment VLLMWorker pattern (ray.serve.llm two-deployment is blocked by vLLM API mismatch)
+- HAProxy → multiple EveryNode proxies (port 8000 on N nodes) to distribute the bottleneck
+- `RAY_SERVE_THROUGHPUT_OPTIMIZED=1` for available optimizations
+- `RAY_num_server_call_thread=4` (increased from 1)
+
+### Available in upstream stable Ray (2.54.1, PyPI)
+
+- `ray.serve.llm` / `ray.llm` (OpenAiIngress + LLMServer two-deployment pattern)
   - Install: `pip install "ray[llm]"`
   - Available since Ray 2.44
-  - Canonical import: `ray.llm.*` (old `ray.serve.llm.*` still works, deprecated)
-  - Source: `python/ray/llm/` in ray-project/ray repo
   - No `anyscale` package dependency
 
-### Merged to ray-project/ray master, NOT in any stable release
+### Merged to upstream ray-project/ray master, NOT in any stable release
 
 - HAProxy bypass (direct routing to internal replica HTTP servers on ~30000 ports)
   - Env var: `RAY_SERVE_ENABLE_HA_PROXY`
@@ -174,12 +193,8 @@ required.
   - ServeController notifies HAProxy of replica addresses dynamically
 - gRPC inter-deployment transport (replaces Ray Core actor RPC with protobuf + point-to-point)
   - Env var: `RAY_SERVE_USE_GRPC_BY_DEFAULT`
-- Combined throughput optimization bundle
-  - Env var: `RAY_SERVE_THROUGHPUT_OPTIMIZED`
 - Additional tuning knobs
   - `RAY_SERVE_HAPROXY_TCP_NODELAY` (PR #61468)
-  - `RAY_SERVE_RUN_USER_CODE_IN_SEPARATE_THREAD`
-  - `RAY_SERVE_RUN_ROUTER_IN_SEPARATE_LOOP`
 - Documented in: GitHub issue [#61212](https://github.com/ray-project/ray/issues/61212)
   (upcoming 2.55 changes), [#59618](https://github.com/ray-project/ray/issues/59618) (env var catalog)
 
@@ -191,17 +206,6 @@ required.
 - Zero-downtime incremental rollouts
 - Custom metric dashboards, log search, tracing, alerting
 - Managed infrastructure
-
-### How to install pre-release Ray
-
-```bash
-# Option 1: Nightly wheels
-pip install -U "ray[serve,llm]" --pre --extra-index-url https://s3-us-west-2.amazonaws.com/ray-wheels/latest/
-
-# Option 2: Build from source
-git clone https://github.com/ray-project/ray.git
-cd ray && python setup.py install
-```
 
 ## References
 
