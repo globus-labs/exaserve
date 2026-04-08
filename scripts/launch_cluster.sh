@@ -236,9 +236,59 @@ export RAY_worker_num_grpc_internal_threads="${RAY_worker_num_grpc_internal_thre
 export RAY_task_events_report_interval_ms="${RAY_task_events_report_interval_ms:-0}"
 export RAY_enable_metrics_collection="${RAY_enable_metrics_collection:-0}"
 
+# GCS stability at 256+ nodes: increase timeouts and thread counts so the
+# head node's GCS server can handle registration storms from many Raylets.
+export RAY_gcs_server_num_threads="${RAY_gcs_server_num_threads:-8}"
+export RAY_gcs_server_request_timeout_seconds="${RAY_gcs_server_request_timeout_seconds:-60}"
+export RAY_raylet_client_num_connect_attempts="${RAY_raylet_client_num_connect_attempts:-20}"
+export RAY_raylet_client_connect_timeout_milliseconds="${RAY_raylet_client_connect_timeout_milliseconds:-30000}"
+
 # Ray Serve throughput optimizations (available in Ray 2.53+).
 # Enables separate thread for user code and separate event loop for the router.
 export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
+
+# Patch Ray Serve proxy timeouts in ALL Python processes (including the
+# ServeController Ray actor which runs as a separate process).
+# Install a .pth file in the user site-packages directory. Python's site
+# module executes .pth lines starting with "import" at interpreter startup,
+# and the user site-packages is always loaded before any user code.
+USER_SITE=$($PYTHON_EXEC -m site --user-site 2>/dev/null || echo "")
+if [ -n "$USER_SITE" ]; then
+    mkdir -p "$USER_SITE"
+    # Write sitecustomize.py in user site-packages. Python loads this at
+    # startup in EVERY process. The previous src/sitecustomize.py only patched
+    # constants.py; we also need to patch client.py and proxy_state.py which
+    # import constants by name (creating local copies that survive monkey-patching
+    # the constants module).
+    #
+    # Strategy: hook builtins.__import__ with recursion guard, patch any module
+    # that has our target constants.
+    cat > "$USER_SITE/sitecustomize.py" <<'PYEOF'
+import builtins as _b
+_orig = _b.__import__
+_in_hook = False
+def _aurora_import(name, *args, **kwargs):
+    global _in_hook
+    if _in_hook:
+        return _orig(name, *args, **kwargs)
+    _in_hook = True
+    try:
+        mod = _orig(name, *args, **kwargs)
+        if hasattr(mod, 'HTTP_PROXY_TIMEOUT') and getattr(mod, 'HTTP_PROXY_TIMEOUT') == 60:
+            mod.HTTP_PROXY_TIMEOUT = 600
+        if hasattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') == 10.0:
+            mod.PROXY_HEALTH_CHECK_TIMEOUT_S = 60.0
+        if hasattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
+            mod.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 10
+        return mod
+    finally:
+        _in_hook = False
+_b.__import__ = _aurora_import
+PYEOF
+    echo "[System] Installed sitecustomize.py proxy timeout patch in $USER_SITE"
+else
+    echo "[System] WARNING: Could not determine user site-packages for proxy timeout patch"
+fi
 
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 

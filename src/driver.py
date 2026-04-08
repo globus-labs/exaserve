@@ -438,8 +438,12 @@ def main():
             ray_process = start_ray_head(cluster)
 
             # 2. Wait for GCS to initialize (Grace period)
-            print("[Driver] Waiting 10s for Ray GCS to stabilize...", flush=True)
-            time.sleep(10)
+            # At 512+ nodes, the GCS needs more time to register all Raylets.
+            nodefile = os.environ.get("PBS_NODEFILE", "")
+            node_count = sum(1 for _ in open(nodefile)) if nodefile and os.path.isfile(nodefile) else 1
+            gcs_wait = 30 if node_count > 128 else 10
+            print(f"[Driver] Waiting {gcs_wait}s for Ray GCS to stabilize...", flush=True)
+            time.sleep(gcs_wait)
 
             # 3. Launch Aurora Serve as a non-blocking subprocess so that the
             #    proxy can be started after Ray Serve is ready, and both run

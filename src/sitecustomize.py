@@ -1476,8 +1476,18 @@ def _patch_ray_serve_proxy_startup_timeout() -> None:
         return
     new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "600"))
     constants.HTTP_PROXY_TIMEOUT = new_timeout
+    constants.PROXY_HEALTH_CHECK_TIMEOUT_S = 60.0
+    constants.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 10
+    # Also patch modules that imported the constant by name
+    import sys as _sys
+    for _mod_name in list(_sys.modules):
+        if "ray.serve" in _mod_name:
+            _mod = _sys.modules[_mod_name]
+            if hasattr(_mod, "HTTP_PROXY_TIMEOUT"):
+                _mod.HTTP_PROXY_TIMEOUT = new_timeout
     _patch_log(
-        f"Increased HTTP_PROXY_TIMEOUT from {old}s to {new_timeout}s"
+        f"Patched HTTP_PROXY_TIMEOUT={new_timeout}s, "
+        f"HEALTH_CHECK_TIMEOUT=60s, UNHEALTHY_THRESHOLD=10"
     )
 
 

@@ -44,6 +44,35 @@ from replica_planner import (
 )
 
 
+def _patch_ray_serve_proxy_constants() -> None:
+    """Worker setup hook: patch Ray Serve proxy timeout constants.
+
+    Called by Ray in every worker process at startup (via runtime_env
+    worker_process_setup_hook). This ensures the ServeController actor
+    uses relaxed health-check thresholds, preventing the ProxyActor
+    death cascade at 128+ nodes.
+    """
+    import sys
+    _patches = {
+        "HTTP_PROXY_TIMEOUT": 600,
+        "PROXY_HEALTH_CHECK_TIMEOUT_S": 60.0,
+        "PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 10,
+    }
+    for mod_name in list(sys.modules):
+        if "ray.serve" in mod_name:
+            mod = sys.modules[mod_name]
+            for attr, val in _patches.items():
+                if hasattr(mod, attr):
+                    setattr(mod, attr, val)
+    # Also import and patch directly in case not yet loaded
+    try:
+        from ray.serve._private import constants
+        for attr, val in _patches.items():
+            setattr(constants, attr, val)
+    except Exception:
+        pass
+
+
 def get_hsn_ip():
     """
     Connects to a dummy internal IP to force the OS to pick the
@@ -370,6 +399,9 @@ def init_ray_cluster(
                 address=address,
                 namespace=namespace,
                 include_dashboard=include_dashboard,
+                runtime_env=ray.runtime_env.RuntimeEnv(
+                    worker_process_setup_hook=_patch_ray_serve_proxy_constants,
+                ),
             )
             return
         except Exception as exc:
@@ -1141,6 +1173,33 @@ if __name__ == "__main__":
         flush=True,
     )
     init_ray_cluster(ray_address, namespace="serve", include_dashboard=False)
+
+    # Increase proxy startup timeout before serve.start() spawns ProxyActors.
+    # At 128 nodes the default 60s is too short — the ServeController kills
+    # proxy actors that haven't become healthy yet, causing a cascade of
+    # ActorDiedError.  sitecustomize.py has the same patch but Python 3.12
+    # doesn't load it from PYTHONPATH, so we apply it explicitly here.
+    # Patch proxy timeouts in ALL modules that import them by name.
+    # ray.serve._private.client does `from constants import HTTP_PROXY_TIMEOUT`
+    # so we must patch the local reference there too, not just constants.py.
+    from ray.serve._private import constants as _serve_constants
+    _new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "600"))
+    _serve_constants.HTTP_PROXY_TIMEOUT = _new_timeout
+    _serve_constants.PROXY_HEALTH_CHECK_TIMEOUT_S = 60.0
+    _serve_constants.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 10
+    # Also patch modules that imported the constant by name
+    import sys as _sys
+    for _mod_name in list(_sys.modules):
+        if "ray.serve" in _mod_name:
+            _mod = _sys.modules[_mod_name]
+            if hasattr(_mod, "HTTP_PROXY_TIMEOUT"):
+                _mod.HTTP_PROXY_TIMEOUT = _new_timeout
+    print(
+        f"[AuroraServe] Proxy timeouts patched: HTTP_PROXY_TIMEOUT={_new_timeout}s, "
+        f"HEALTH_CHECK_TIMEOUT=60.0s, UNHEALTHY_THRESHOLD=10",
+        flush=True,
+    )
+
     serve.start(
         http_options=HTTPOptions(
             host="0.0.0.0",  # Bind to all interfaces so HSN hostnames are reachable
@@ -1148,7 +1207,7 @@ if __name__ == "__main__":
             port=8000,
         )
     )
-    print("[AuroraServe] HTTP proxy location: EveryNode, host=0.0.0.0, port=8000", flush=True)
+    print(f"[AuroraServe] HTTP proxy location: EveryNode, host=0.0.0.0, port=8000", flush=True)
     print_red(f"[AuroraServe] ✓ Stage 1 ray.init() completed in {time.time() - stage_start:.2f}s")
 
     # ---- Detect cluster resources -------------------------------------------
@@ -1198,7 +1257,44 @@ if __name__ == "__main__":
         primary_config = config.model_configs[0]
         deployment, model_id = deploy_model(primary_config, model_path_map, total_gpus, config)
         serve_start = time.time()
-        serve.run(deployment, route_prefix="/")
+
+        # Monitor deployment progress in a background thread
+        import threading
+        _deploy_done = threading.Event()
+        def _monitor_deploy():
+            while not _deploy_done.is_set():
+                _deploy_done.wait(timeout=15)
+                if _deploy_done.is_set():
+                    break
+                try:
+                    status = serve.status()
+                    app = status.applications.get("default")
+                    if app:
+                        running = sum(
+                            1 for d in app.deployments.values()
+                            for r in d.replicas
+                            if r.state == "RUNNING"
+                        )
+                        total = sum(
+                            len(d.replicas) for d in app.deployments.values()
+                        )
+                        elapsed = time.time() - serve_start
+                        print(
+                            f"[AuroraServe] Deploy progress: {running}/{total} replicas RUNNING "
+                            f"({elapsed:.0f}s elapsed), proxies={len(status.proxies)}",
+                            flush=True,
+                        )
+                except Exception:
+                    pass
+        monitor = threading.Thread(target=_monitor_deploy, daemon=True)
+        monitor.start()
+
+        try:
+            serve.run(deployment, route_prefix="/")
+        finally:
+            _deploy_done.set()
+            monitor.join(timeout=2)
+
         print_red(f"[AuroraServe] serve.run() call: {time.time() - serve_start:.2f}s")
         print(f"[AuroraServe] Service available at http://localhost:8000/v1 (model: {model_id})", flush=True)
     else:
