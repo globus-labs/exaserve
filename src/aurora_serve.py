@@ -42,6 +42,7 @@ from replica_planner import (
     format_replica_plan,
     tp_replica_capacity_for_nodes,
 )
+from scaling_trace import list_trace_part_paths, tracer
 
 
 def _patch_ray_serve_proxy_constants() -> None:
@@ -398,6 +399,7 @@ def init_ray_cluster(
     last_error: Optional[Exception] = None
     for attempt in range(1, retries + 1):
         try:
+            attempt_start = time.monotonic()
             ray.init(
                 address=address,
                 namespace=namespace,
@@ -406,9 +408,16 @@ def init_ray_cluster(
                     worker_process_setup_hook=_patch_ray_serve_proxy_constants,
                 ),
             )
+            tracer.record_phase(
+                "ray.init.connect",
+                time.monotonic() - attempt_start,
+                attempt=attempt,
+                address=address,
+            )
             return
         except Exception as exc:
             last_error = exc
+            tracer.event("ray.init.retry", attempt=attempt, error=str(exc))
             if attempt == retries:
                 break
             print(
@@ -514,8 +523,13 @@ class VLLMWorker:
         max_num_seqs: int = None,
         collect_stats: bool = False,
     ):
+        from scaling_trace import ScalingTracer
+        _replica_tracer = ScalingTracer()
+
         init_start = time.time()
+        init_mono = time.monotonic()
         pid = os.getpid()
+        hostname = socket.gethostname()
         self.model_id = model_id
         self.null_compute = null_compute
         self.stats_collector = None
@@ -531,10 +545,18 @@ class VLLMWorker:
                 f"(latency={self.latency:.2f}s, no vLLM engine)",
                 flush=True,
             )
-            print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {time.time() - init_start:.2f}s ★")
+            total_s = time.time() - init_start
+            print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
+            _replica_tracer.record_replica_init({
+                "pid": pid, "hostname": hostname, "model_id": model_id,
+                "device_id": device_id, "null_compute": True,
+                "total_init_s": round(total_s, 4),
+            })
+            _replica_tracer.save_replica_trace()
             return
 
         # ---- Device isolation ------------------------------------------------
+        t0 = time.monotonic()
         if gpu_ids:
             affinity_mask = ",".join(str(gpu_id) for gpu_id in gpu_ids)
             os.environ["ZE_AFFINITY_MASK"] = affinity_mask
@@ -553,8 +575,10 @@ class VLLMWorker:
                 f"waiting for vLLM Ray workers to claim GPUs",
                 flush=True,
             )
+        device_isolation_s = time.monotonic() - t0
 
         # ---- Distributed init port -------------------------------------------
+        t0 = time.monotonic()
         master_addr = "127.0.0.1"
         bind_host = "127.0.0.1"
         if pipeline_parallel_size > 1:
@@ -575,6 +599,7 @@ class VLLMWorker:
             raise RuntimeError(f"No free port for distributed init (device {device_id})")
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(port)
+        dist_setup_s = time.monotonic() - t0
         print(
             f"[VLLMWorker pid={pid}] Using distributed master {master_addr}:{port} "
             f"(PP={pipeline_parallel_size})",
@@ -597,17 +622,24 @@ class VLLMWorker:
         if pipeline_parallel_size > 1:
             engine_kwargs["pipeline_parallel_size"] = pipeline_parallel_size
             engine_kwargs["distributed_executor_backend"] = "ray"
+
+        # -- Sub-phase: AsyncEngineArgs construction --
+        t0 = time.monotonic()
         engine_args = AsyncEngineArgs(**engine_kwargs)
         if not hasattr(engine_args, "enable_log_requests"):
             engine_args.enable_log_requests = True
+        engine_args_s = time.monotonic() - t0
 
         print(f"[VLLMWorker pid={pid}] Creating vLLM engine for {model_id}...", flush=True)
-        engine_start = time.time()
+
+        # -- Sub-phase: engine creation (weight loading + GPU init + KV cache) --
+        engine_start = time.monotonic()
         extra_engine_kwargs = {}
         if self._collect_stats:
             extra_engine_kwargs["stat_loggers"] = [CollectingStatLogger]
         self.engine = AsyncLLMEngine.from_engine_args(engine_args, **extra_engine_kwargs)
-        print_red(f"[VLLMWorker pid={pid}] Engine creation: {time.time() - engine_start:.2f}s")
+        engine_create_s = time.monotonic() - engine_start
+        print_red(f"[VLLMWorker pid={pid}] Engine creation: {engine_create_s:.2f}s")
 
         if self._collect_stats:
             self.stats_collector = CollectingStatLogger.get_instance()
@@ -616,7 +648,30 @@ class VLLMWorker:
             else:
                 print(f"[VLLMWorker pid={pid}] WARNING: CollectingStatLogger not instantiated by engine", flush=True)
 
-        print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {time.time() - init_start:.2f}s ★")
+        total_s = time.monotonic() - init_mono
+        print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
+
+        # -- Record replica init breakdown for trace --
+        replica_info = {
+            "pid": pid,
+            "hostname": hostname,
+            "model_id": model_id,
+            "device_id": device_id,
+            "gpu_ids": gpu_ids,
+            "null_compute": False,
+            "tensor_parallel_size": tensor_parallel_size,
+            "pipeline_parallel_size": pipeline_parallel_size,
+            "total_init_s": round(total_s, 4),
+            "device_isolation_s": round(device_isolation_s, 4),
+            "dist_setup_s": round(dist_setup_s, 4),
+            "engine_args_s": round(engine_args_s, 4),
+            "engine_create_s": round(engine_create_s, 4),
+            "wall_start": init_start,
+            "wall_end": time.time(),
+        }
+        _replica_tracer.record_replica_init(replica_info)
+        trace_path = _replica_tracer.save_replica_trace()
+        print(f"[VLLMWorker pid={pid}] Replica trace: {trace_path}", flush=True)
 
     # ---- HTTP endpoints ------------------------------------------------------
 
@@ -1084,11 +1139,8 @@ def deploy_from_replica_plan(
         )
 
         if use_root_route:
-            serve_start = time.time()
-            serve.run(deployment, route_prefix="/")
-            print_red(
-                f"[AuroraServe] serve.run() call: {time.time() - serve_start:.2f}s"
-            )
+            with tracer.phase("serve.run", model_id=model_id, replicas=model_plan.assigned_replicas):
+                serve.run(deployment, route_prefix="/")
             print(
                 f"[AuroraServe] Service available at http://localhost:8000/v1 "
                 f"(model: {model_id}, replicas={model_plan.assigned_replicas})",
@@ -1098,7 +1150,8 @@ def deploy_from_replica_plan(
 
         safe_name = get_model_route_name(model_id)
         route_prefix = f"/{safe_name}"
-        serve.run(deployment, name=safe_name, route_prefix=route_prefix)
+        with tracer.phase("serve.run", model_id=model_id, replicas=model_plan.assigned_replicas):
+            serve.run(deployment, name=safe_name, route_prefix=route_prefix)
         print(
             f"[AuroraServe] ✓ {model_id} → http://localhost:8000{route_prefix}/v1 "
             f"(replicas={model_plan.assigned_replicas})",
@@ -1131,11 +1184,30 @@ def deploy_multi_model(
         deployment, model_id = deploy_model(model_config, model_path_map, total_gpus, config, idx)
         safe_name = get_model_route_name(model_id)
         route_prefix = f"/{safe_name}"
-        serve.run(deployment, name=safe_name, route_prefix=route_prefix)
+        with tracer.phase("serve.run", model_id=model_id):
+            serve.run(deployment, name=safe_name, route_prefix=route_prefix)
         print(
             f"[AuroraServe] ✓ {model_id} → http://localhost:8000{route_prefix}/v1",
             flush=True,
         )
+
+
+def _collect_replica_traces() -> None:
+    """Gather per-replica trace JSON files and merge into the main tracer."""
+    files = list_trace_part_paths("replica")
+    if not files:
+        print("[AuroraServe] No replica trace files found", flush=True)
+        return
+    for path in files:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            for replica in data.get("replicas", []):
+                tracer.record_replica_init(replica)
+            os.remove(path)
+        except Exception as exc:
+            print(f"[AuroraServe] Failed to read replica trace {path}: {exc}", flush=True)
+    print(f"[AuroraServe] Collected {len(files)} replica trace file(s)", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1169,22 +1241,27 @@ if __name__ == "__main__":
         )
 
     # ---- Stage 1: Initialize Ray cluster ------------------------------------
-    stage_start = time.time()
+    stage1_start = time.monotonic()
     ray_address = os.environ.get("RAY_ADDRESS", "auto")
+    tracer.set_metadata(
+        ray_address=ray_address,
+        num_nodes=config.num_nodes,
+        num_gpus_per_node=config.num_gpus_per_node,
+        models=[cfg.model_id for cfg in config.model_configs],
+    )
     print(
         f"[AuroraServe] Stage 1: Initializing Ray cluster at {ray_address}...",
         flush=True,
     )
-    init_ray_cluster(ray_address, namespace="serve", include_dashboard=False)
+
+    with tracer.phase("ray.init"):
+        init_ray_cluster(ray_address, namespace="serve", include_dashboard=False)
 
     # Increase proxy startup timeout before serve.start() spawns ProxyActors.
     # At 128 nodes the default 60s is too short — the ServeController kills
     # proxy actors that haven't become healthy yet, causing a cascade of
     # ActorDiedError.  sitecustomize.py has the same patch but Python 3.12
     # doesn't load it from PYTHONPATH, so we apply it explicitly here.
-    # Patch proxy timeouts in ALL modules that import them by name.
-    # ray.serve._private.client does `from constants import HTTP_PROXY_TIMEOUT`
-    # so we must patch the local reference there too, not just constants.py.
     from ray.serve._private import constants as _serve_constants
     _new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600"))
     _serve_constants.HTTP_PROXY_TIMEOUT = _new_timeout
@@ -1199,39 +1276,65 @@ if __name__ == "__main__":
                 _mod.HTTP_PROXY_TIMEOUT = _new_timeout
     print(
         f"[AuroraServe] Proxy timeouts patched: HTTP_PROXY_TIMEOUT={_new_timeout}s, "
-        f"HEALTH_CHECK_TIMEOUT=60.0s, UNHEALTHY_THRESHOLD=10",
+        f"HEALTH_CHECK_TIMEOUT=300.0s, UNHEALTHY_THRESHOLD=100",
         flush=True,
     )
 
-    serve.start(
-        http_options=HTTPOptions(
-            host="0.0.0.0",  # Bind to all interfaces so HSN hostnames are reachable
-            location=ProxyLocation.EveryNode,
-            port=8000,
+    with tracer.phase("serve.start", proxy_location="EveryNode"):
+        serve.start(
+            http_options=HTTPOptions(
+                host="0.0.0.0",
+                location=ProxyLocation.EveryNode,
+                port=8000,
+            )
         )
-    )
-    print(f"[AuroraServe] HTTP proxy location: EveryNode, host=0.0.0.0, port=8000", flush=True)
-    print_red(f"[AuroraServe] ✓ Stage 1 ray.init() completed in {time.time() - stage_start:.2f}s")
+    print("[AuroraServe] HTTP proxy location: EveryNode, host=0.0.0.0, port=8000", flush=True)
+    tracer.record_phase("stage1.total", time.monotonic() - stage1_start)
+    print_red(f"[AuroraServe] ✓ Stage 1 completed in {time.monotonic() - stage1_start:.2f}s")
 
-    # ---- Detect cluster resources -------------------------------------------
-    # Wait for nodes to register — at 512+ nodes some Raylets take longer to
-    # connect to GCS.  Poll until the expected GPU count is reached or timeout.
+    # ---- Detect cluster resources (with polling & per-iteration timing) -----
     expected_gpus = config.num_gpus_per_node * config.num_nodes
-    deadline = time.time() + 300  # 5 min max wait
+    deadline = time.monotonic() + 300  # 5 min max wait
     total_gpus = 0
-    while time.time() < deadline:
-        resources = ray.cluster_resources()
-        total_gpus = int(resources.get("GPU", 0))
-        alive_nodes = sum(1 for n in ray.nodes() if n.get("Alive"))
-        if total_gpus >= expected_gpus * 0.95:  # accept 95% of expected
-            break
-        print(
-            f"[AuroraServe] Waiting for nodes: {alive_nodes} alive, "
-            f"{total_gpus}/{expected_gpus} GPUs ({total_gpus/expected_gpus*100:.0f}%)",
-            flush=True,
-        )
-        time.sleep(15)
-    print(f"[AuroraServe] Detected {total_gpus} GPUs in cluster ({total_gpus/expected_gpus*100:.0f}% of expected)", flush=True)
+    poll_iteration = 0
+    with tracer.phase("node_registration_poll", expected_gpus=expected_gpus):
+        while time.monotonic() < deadline:
+            iter_start = time.monotonic()
+
+            resources = tracer.timed_call("ray.cluster_resources", ray.cluster_resources)
+            total_gpus = int(resources.get("GPU", 0))
+
+            nodes_result = tracer.timed_call("ray.nodes", ray.nodes)
+            alive_nodes = sum(1 for n in nodes_result if n.get("Alive"))
+
+            iter_elapsed = time.monotonic() - iter_start
+            tracer.record_poll_iteration(
+                "node_registration",
+                poll_iteration,
+                elapsed_s=iter_elapsed,
+                alive_nodes=alive_nodes,
+                total_gpus=total_gpus,
+                expected_gpus=expected_gpus,
+                pct=round(total_gpus / max(expected_gpus, 1) * 100, 1),
+            )
+
+            if total_gpus >= expected_gpus * 0.95:
+                break
+
+            print(
+                f"[AuroraServe] Waiting for nodes: {alive_nodes} alive, "
+                f"{total_gpus}/{expected_gpus} GPUs ({total_gpus/max(expected_gpus,1)*100:.0f}%)",
+                flush=True,
+            )
+            poll_iteration += 1
+            time.sleep(15)
+
+    tracer.set_metadata(actual_gpus=total_gpus, alive_nodes=alive_nodes)
+    print(
+        f"[AuroraServe] Detected {total_gpus} GPUs in cluster "
+        f"({total_gpus/max(expected_gpus,1)*100:.0f}% of expected)",
+        flush=True,
+    )
 
     # ---- Stage 2: Resolve staged local models -------------------------------
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
@@ -1260,7 +1363,7 @@ if __name__ == "__main__":
     planner_enabled = should_use_global_planner(config)
 
     # ---- Stage 3: Deploy model services -------------------------------------
-    stage_start = time.time()
+    stage3_start = time.monotonic()
     print("[AuroraServe] Stage 3: Deploying model services to Ray Serve...", flush=True)
 
     # Diagnostic: print effective health check constants in this process
@@ -1280,16 +1383,19 @@ if __name__ == "__main__":
         print(f"[AuroraServe] DIAG constants import failed: {_diag_e}", flush=True)
 
     if planner_enabled:
-        planner_nodes = build_node_inventory()
+        with tracer.phase("build_node_inventory"):
+            planner_nodes = build_node_inventory()
         if not planner_nodes:
             raise RuntimeError("No alive Ray GPU nodes found for replica planning")
-        replica_plan = compute_replica_plan(config.model_configs, planner_nodes)
+        with tracer.phase("compute_replica_plan"):
+            replica_plan = compute_replica_plan(config.model_configs, planner_nodes)
         print(format_replica_plan(replica_plan), flush=True)
-        deploy_from_replica_plan(config, model_path_map, total_gpus, replica_plan)
+        with tracer.phase("deploy_from_replica_plan"):
+            deploy_from_replica_plan(config, model_path_map, total_gpus, replica_plan)
     elif len(config.model_configs) == 1:
         primary_config = config.model_configs[0]
-        deployment, model_id = deploy_model(primary_config, model_path_map, total_gpus, config)
-        serve_start = time.time()
+        with tracer.phase("deploy_model.build", model_id=primary_config.model_id):
+            deployment, model_id = deploy_model(primary_config, model_path_map, total_gpus, config)
 
         # Monitor deployment progress in a background thread
         import threading
@@ -1311,10 +1417,9 @@ if __name__ == "__main__":
                         total = sum(
                             len(d.replicas) for d in app.deployments.values()
                         )
-                        elapsed = time.time() - serve_start
                         print(
-                            f"[AuroraServe] Deploy progress: {running}/{total} replicas RUNNING "
-                            f"({elapsed:.0f}s elapsed), proxies={len(status.proxies)}",
+                            f"[AuroraServe] Deploy progress: {running}/{total} replicas RUNNING, "
+                            f"proxies={len(status.proxies)}",
                             flush=True,
                         )
                 except Exception:
@@ -1322,25 +1427,33 @@ if __name__ == "__main__":
         monitor = threading.Thread(target=_monitor_deploy, daemon=True)
         monitor.start()
 
-        try:
-            serve.run(deployment, route_prefix="/")
-        finally:
-            _deploy_done.set()
-            monitor.join(timeout=2)
-
-        print_red(f"[AuroraServe] serve.run() call: {time.time() - serve_start:.2f}s")
+        with tracer.phase("serve.run", model_id=model_id):
+            try:
+                serve.run(deployment, route_prefix="/")
+            finally:
+                _deploy_done.set()
+                monitor.join(timeout=2)
         print(f"[AuroraServe] Service available at http://localhost:8000/v1 (model: {model_id})", flush=True)
     else:
-        deploy_multi_model(config, model_path_map, total_gpus)
+        with tracer.phase("deploy_multi_model"):
+            deploy_multi_model(config, model_path_map, total_gpus)
 
+    tracer.record_phase("stage3.total", time.monotonic() - stage3_start)
     print_red(
-        f"[AuroraServe] ✓ Stage 3 completed in {time.time() - stage_start:.2f}s"
+        f"[AuroraServe] ✓ Stage 3 completed in {time.monotonic() - stage3_start:.2f}s"
     )
+
+    # ---- Collect per-replica traces from /tmp --------------------------------
+    _collect_replica_traces()
 
     # ---- All stages complete ------------------------------------------------
+    total_time = time.time() - overall_start
+    tracer.set_metadata(total_time_s=round(total_time, 4))
+    trace_path = tracer.save()
     print_red(
-        f"[AuroraServe] ✓✓✓ CLUSTER FULLY READY ✓✓✓ Total time: {time.time() - overall_start:.2f}s"
+        f"[AuroraServe] ✓✓✓ CLUSTER FULLY READY ✓✓✓ Total time: {total_time:.2f}s"
     )
+    print(f"[AuroraServe] Scaling trace: {trace_path}", flush=True)
 
     try:
         while True:

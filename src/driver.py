@@ -1,5 +1,6 @@
 import argparse
 import collections
+import hashlib
 import os
 import subprocess
 import sys
@@ -10,6 +11,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Sequence
+
+from scaling_trace import default_scaling_trace_path, list_trace_part_paths, trace_part_path
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -409,11 +412,89 @@ def stop_proxy(proxy, proc):
         proxy.stop(proc)
 
 
+def _compute_scaling_trace_token(config_path: str, cluster: RayClusterConfig) -> str:
+    seed = os.environ.get("AURORA_RUN_LOG_DIR", "").strip() or os.environ.get("PBS_JOBID", "").strip()
+    if not seed:
+        seed = f"{os.path.abspath(config_path)}:{cluster.head_ip}:{cluster.port}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _collect_and_merge_traces(config_path: str) -> None:
+    """Collect driver traces from all nodes, merge into the scaling trace.
+
+    Called on rank 0 after ALL SERVICES READY.  The scaling trace was already
+    written by aurora_serve.py to the run-scoped trace path.  We:
+      1. Read that file.
+      2. Read the run-scoped driver trace parts.
+      3. Merge everything into the scaling trace and re-save.
+    """
+    import json
+
+    trace_path = default_scaling_trace_path()
+    if not os.path.isfile(trace_path):
+        print(f"[Driver][Trace] No scaling trace found at {trace_path}", flush=True)
+        return
+
+    try:
+        with open(trace_path) as f:
+            merged = json.load(f)
+    except Exception as exc:
+        print(f"[Driver][Trace] Failed to read scaling trace {trace_path}: {exc}", flush=True)
+        return
+
+    driver_trace_paths = list_trace_part_paths("driver")
+    if not driver_trace_paths:
+        print("[Driver][Trace] No driver trace parts found", flush=True)
+
+    for dt_path in driver_trace_paths:
+        try:
+            with open(dt_path) as f:
+                dt = json.load(f)
+            r = dt.get("rank", "?")
+            h = dt.get("hostname", "?")
+            for phase in dt.get("phases", []):
+                phase["source"] = f"driver.rank{r}.{h}"
+            merged.setdefault("driver_phases", []).extend(dt.get("phases", []))
+            os.remove(dt_path)
+        except Exception as exc:
+            print(f"[Driver][Trace] Failed to read driver trace {dt_path}: {exc}", flush=True)
+
+    # Save merged trace
+    out_path = trace_path
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(merged, f, indent=2, default=str)
+    n_driver = len(merged.get("driver_phases", []))
+    print(f"[Driver][Trace] Merged trace saved to {out_path} ({n_driver} driver phases)", flush=True)
+
+
+def _split_json_objects(text: str) -> list[str]:
+    """Split concatenated JSON objects (e.g. from cat *.json)."""
+    objects = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(text[start : i + 1])
+                start = None
+    return objects
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to runtime config YAML")
     args = parser.parse_args()
     cluster = load_ray_cluster_config(args.config)
+    os.environ.setdefault(
+        "AURORA_SCALING_TRACE_TOKEN",
+        _compute_scaling_trace_token(args.config, cluster),
+    )
 
     rank = get_rank()
     hostname = socket.gethostname()
@@ -430,19 +511,48 @@ def main():
     proxy_backend = None
     proxy_process = None
 
+    # Driver-level timing (independent of aurora_serve.py's tracer)
+    _driver_phases: list[dict] = []
+
+    def _driver_phase(name: str, duration_s: float, **extra) -> None:
+        entry = {"name": name, "duration_s": round(duration_s, 4), "wall_end": time.time(), **extra}
+        _driver_phases.append(entry)
+        print(f"[Driver][Trace] {name}: {duration_s:.3f}s", flush=True)
+
+    def _save_driver_trace() -> None:
+        import json as _json
+        path = trace_part_path("driver", f"driver_trace_rank{rank}")
+        nodefile = os.environ.get("PBS_NODEFILE", "")
+        node_count = sum(1 for _ in open(nodefile)) if nodefile and os.path.isfile(nodefile) else 1
+        data = {
+            "hostname": hostname,
+            "rank": rank,
+            "node_count": node_count,
+            "head_ip": cluster.head_ip,
+            "phases": _driver_phases,
+        }
+        with open(path, "w") as f:
+            _json.dump(data, f, indent=2)
+        print(f"[Driver][Trace] Driver trace: {path}", flush=True)
+
     try:
         if rank == 0:
             # === HEAD NODE LOGIC ===
+            head_start = time.monotonic()
 
             # 1. Start Ray Head (Background)
+            t0 = time.monotonic()
             ray_process = start_ray_head(cluster)
+            _driver_phase("start_ray_head.launch", time.monotonic() - t0)
 
             # 2. Wait for GCS to initialize and all nodes to register.
             nodefile = os.environ.get("PBS_NODEFILE", "")
             node_count = sum(1 for _ in open(nodefile)) if nodefile and os.path.isfile(nodefile) else 1
             gcs_wait = max(10, node_count // 5)  # ~2s per 10 nodes
             print(f"[Driver] Waiting {gcs_wait}s for Ray GCS to stabilize ({node_count} nodes)...", flush=True)
+            t0 = time.monotonic()
             time.sleep(gcs_wait)
+            _driver_phase("gcs_stabilization_wait", time.monotonic() - t0, node_count=node_count)
 
             # 3. Launch Aurora Serve as a non-blocking subprocess so that the
             #    proxy can be started after Ray Serve is ready, and both run
@@ -452,6 +562,7 @@ def main():
             serve_env = get_ray_env()
             serve_env["RAY_ADDRESS"] = f"{cluster.head_ip}:{cluster.port}"
             print(f"[Driver] Launching Aurora Serve: {' '.join(serve_cmd)}", flush=True)
+            t0 = time.monotonic()
             serve_process = subprocess.Popen(
                 serve_cmd,
                 env=serve_env,
@@ -465,6 +576,7 @@ def main():
                 ready_marker=AURORA_SERVE_READY_MARKER,
                 label="Aurora Serve",
             ).start()
+            _driver_phase("aurora_serve.launch", time.monotonic() - t0)
 
             proxy_config = None
             deploy_config = None
@@ -482,6 +594,7 @@ def main():
             # Ray is only ready once aurora_serve.py reports its cluster-wide
             # readiness marker. The per-route /health endpoints can return 200
             # earlier while replicas are still coming up elsewhere in the cluster.
+            t0 = time.monotonic()
             if serve_output is None or not wait_for_process_ready_marker(
                 serve_output,
                 timeout=AURORA_SERVE_READY_TIMEOUT_S,
@@ -491,9 +604,11 @@ def main():
                     "[Driver] FATAL: Aurora Serve never reported full cluster readiness."
                     + (f"\n{tail}" if tail else "")
                 )
+            _driver_phase("wait_for_ready_marker", time.monotonic() - t0)
 
             # After the explicit cluster-ready marker, confirm the public HTTP
             # routes respond before starting the proxy.
+            t0 = time.monotonic()
             if not wait_for_ray_serve(
                 port=RAY_SERVE_PORT,
                 process=serve_process,
@@ -502,13 +617,22 @@ def main():
                 raise RuntimeError(
                     f"[Driver] FATAL: Ray Serve health check timed out on port {RAY_SERVE_PORT}."
                 )
+            _driver_phase("wait_for_health_check", time.monotonic() - t0)
 
             if proxy_config is not None and proxy_config.type != "none":
+                t0 = time.monotonic()
                 proxy_backend, proxy_process, _actual_port = start_proxy(
                     proxy_config, deploy_config, args.config
                 )
+                _driver_phase("start_proxy", time.monotonic() - t0)
 
-            # 5. Signal that ALL services (Ray Serve + proxy) are ready.
+            _driver_phase("head_total", time.monotonic() - head_start)
+
+            # 5. Collect and merge all traces into a single file in the run log dir.
+            _save_driver_trace()
+            _collect_and_merge_traces(args.config)
+
+            # 6. Signal that ALL services (Ray Serve + proxy) are ready.
             #    run_exp.sh watches for this exact line to start the client.
             print("[Driver] ALL SERVICES READY", flush=True)
 
@@ -534,7 +658,10 @@ def main():
 
             # 1. Start Ray Worker (Blocking)
             # This process will stay alive as long as the Raylet is running.
+            t0 = time.monotonic()
             ray_process = start_ray_worker(cluster)
+            _driver_phase("start_ray_worker.launch", time.monotonic() - t0)
+            _save_driver_trace()
             ray_process.wait()  # Block until Ray dies or is killed
 
     except KeyboardInterrupt:
