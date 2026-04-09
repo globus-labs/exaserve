@@ -1,8 +1,8 @@
 """
 HAProxy backend implementation.
 
-Generates an haproxy.cfg that round-robins (or least-conn) across all Ray
-Serve HTTP proxies, then launches the haproxy binary.
+Generates an haproxy.cfg that balances across Ray Serve HTTP proxies, then
+launches the haproxy binary.
 
 HAProxy is a pure load balancer -- it has no OpenAI awareness.
 Use it as a performance baseline or when you only need L7 TCP/HTTP routing
@@ -87,9 +87,9 @@ class HAProxyProxy(ProxyBackend):
 
         # --- frontend ---
         # A single frontend receives all incoming OpenAI API requests.
-        # If multiple models are served, we route based on a URL path prefix
-        # or simply fan-out to all models (the model field in the JSON body
-        # determines which vLLM replica handles it inside Ray Serve anyway).
+        # For multi-model deployments, requests must already target the
+        # per-model Ray Serve route prefix because HAProxy does not inspect
+        # the OpenAI JSON body to recover the model name.
         if len(by_model) == 1:
             model_id = next(iter(by_model))
             safe_name = _safe_backend_name(model_id)
@@ -99,53 +99,47 @@ class HAProxyProxy(ProxyBackend):
                     default_backend {safe_name}
                 """))
         else:
-            # Multiple models: use ACLs on the path/header is complex for generic
-            # HAProxy config; fall back to a single unified backend with all nodes.
-            lines.append(dedent("""\
-                frontend openai_api
-                    bind *:{PORT}
-                    default_backend all_nodes
-                """))
+            lines.append("frontend openai_api")
+            lines.append("    bind *:{PORT}")
+            for model_id, eps in by_model.items():
+                safe_name = _safe_backend_name(model_id)
+                path_prefix = _shared_path_prefix(eps)
+                acl_name = f"is_{safe_name}"
+                lines.append(f"    acl {acl_name} path_beg {path_prefix} {path_prefix}/")
+                lines.append(f"    use_backend {safe_name} if {acl_name}")
+            lines.append(
+                '    http-request return status 404 content-type text/plain '
+                'lf-string "missing or unknown model route prefix\\n"'
+            )
+            lines.append("")
 
         # --- backend section(s) ---
         if len(by_model) == 1:
             model_id, eps = next(iter(by_model.items()))
             safe_name = _safe_backend_name(model_id)
+            path_prefix = _shared_path_prefix(eps)
             lines.append(_render_backend(
                 name=safe_name,
                 endpoints=eps,
+                path_prefix=path_prefix,
                 balance=balance,
                 check_interval=check_interval,
                 check_fall=check_fall,
                 check_rise=check_rise,
             ))
         else:
-            # Multi-model: one backend per model AND a unified "all_nodes" backend
-            all_eps: list[BackendEndpoint] = []
-            seen: set[tuple] = set()
             for model_id, eps in by_model.items():
                 safe_name = _safe_backend_name(model_id)
+                path_prefix = _shared_path_prefix(eps)
                 lines.append(_render_backend(
                     name=safe_name,
                     endpoints=eps,
+                    path_prefix=path_prefix,
                     balance=balance,
                     check_interval=check_interval,
                     check_fall=check_fall,
                     check_rise=check_rise,
                 ))
-                for ep in eps:
-                    key = (ep.host, ep.port)
-                    if key not in seen:
-                        seen.add(key)
-                        all_eps.append(ep)
-            lines.append(_render_backend(
-                name="all_nodes",
-                endpoints=all_eps,
-                balance=balance,
-                check_interval=check_interval,
-                check_fall=check_fall,
-                check_rise=check_rise,
-            ))
 
         # --- optional stats page ---
         if stats_port > 0:
@@ -262,16 +256,18 @@ def _safe_backend_name(model_id: str) -> str:
 def _render_backend(
     name: str,
     endpoints: list[BackendEndpoint],
+    path_prefix: str,
     balance: str,
     check_interval: int,
     check_fall: int,
     check_rise: int,
 ) -> str:
     """Render a single HAProxy backend section."""
+    health_path = f"{path_prefix}/health" if path_prefix else "/health"
     lines = [
         f"backend {name}",
         f"    balance {balance}",
-        f"    option httpchk GET /health",
+        f"    option httpchk GET {health_path}",
         f"    http-check expect status 200",
     ]
     for i, ep in enumerate(endpoints):
@@ -282,3 +278,10 @@ def _render_backend(
         )
     lines.append("")  # blank line between sections
     return "\n".join(lines)
+
+
+def _shared_path_prefix(endpoints: list[BackendEndpoint]) -> str:
+    prefixes = {ep.path_prefix for ep in endpoints}
+    if len(prefixes) != 1:
+        raise ValueError(f"Inconsistent path_prefix values in backend set: {sorted(prefixes)!r}")
+    return prefixes.pop()

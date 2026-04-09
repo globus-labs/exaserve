@@ -99,7 +99,8 @@ client:
   include_tp: false
   # Fractional early-stop threshold in [0, 1]; 0 disables early stopping.
   early_stop: 0.0
-  # "proxy" hits the optional proxy layer; "direct" fans out to servers directly.
+  # "proxy" hits the optional proxy layer; "direct" hash-shards requests across
+  # the per-node Ray Serve HTTP endpoints.
   dest: proxy
   # Base value when the matrix does not overwrite client.num_nodes.
   num_nodes: 1

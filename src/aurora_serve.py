@@ -1186,10 +1186,10 @@ if __name__ == "__main__":
     # ray.serve._private.client does `from constants import HTTP_PROXY_TIMEOUT`
     # so we must patch the local reference there too, not just constants.py.
     from ray.serve._private import constants as _serve_constants
-    _new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "600"))
+    _new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600"))
     _serve_constants.HTTP_PROXY_TIMEOUT = _new_timeout
-    _serve_constants.PROXY_HEALTH_CHECK_TIMEOUT_S = 60.0
-    _serve_constants.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 10
+    _serve_constants.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
+    _serve_constants.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
     # Also patch modules that imported the constant by name
     import sys as _sys
     for _mod_name in list(_sys.modules):

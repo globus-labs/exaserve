@@ -62,7 +62,7 @@ class ReplayClientConfig:
     early_stop: float = 0.0
     num_runs: int = 1
     generation_mode: str = "deterministic"  # "deterministic" or "natural"
-    dest: str = "proxy"  # "proxy": local workers -> proxy; "direct": MPI round-robin to servers
+    dest: str = "proxy"  # "proxy": local workers -> proxy; "direct": hash-shard across per-node servers
     num_nodes: int = 1      # total PBS nodes (= pbs_num_nodes); used to compute actual client count
     num_go_procs: int = 16   # number of Go processes per replay_client node
     num_go_workers: int = 2 # dispatch goroutines (N) inside each Go process
