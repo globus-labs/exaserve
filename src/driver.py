@@ -522,6 +522,7 @@ def main():
     def _save_driver_trace() -> None:
         import json as _json
         path = trace_part_path("driver", f"driver_trace_rank{rank}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         nodefile = os.environ.get("PBS_NODEFILE", "")
         node_count = sum(1 for _ in open(nodefile)) if nodefile and os.path.isfile(nodefile) else 1
         data = {
