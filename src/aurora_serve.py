@@ -54,9 +54,12 @@ def _patch_ray_serve_proxy_constants() -> None:
     """
     import sys
     _patches = {
-        "HTTP_PROXY_TIMEOUT": 600,
-        "PROXY_HEALTH_CHECK_TIMEOUT_S": 60.0,
-        "PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 10,
+        "HTTP_PROXY_TIMEOUT": 3600,
+        "PROXY_HEALTH_CHECK_TIMEOUT_S": 300.0,
+        "PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
+        "DEFAULT_HEALTH_CHECK_TIMEOUT_S": 600,
+        "DEFAULT_HEALTH_CHECK_PERIOD_S": 120,
+        "REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
     }
     for mod_name in list(sys.modules):
         if "ray.serve" in mod_name:
@@ -999,7 +1002,7 @@ def deploy_model(
         },
         max_ongoing_requests=config.replica_max_ongoing_requests,
         health_check_period_s=30,
-        health_check_timeout_s=10,
+        health_check_timeout_s=120,
     )
     if placement_group_bundles is not None:
         deployment_options["placement_group_bundles"] = placement_group_bundles
@@ -1211,10 +1214,24 @@ if __name__ == "__main__":
     print_red(f"[AuroraServe] ✓ Stage 1 ray.init() completed in {time.time() - stage_start:.2f}s")
 
     # ---- Detect cluster resources -------------------------------------------
-    resources = ray.cluster_resources()
-    default_gpus = config.num_gpus_per_node * config.num_nodes
-    total_gpus = int(resources.get("GPU", default_gpus))
-    print(f"[AuroraServe] Detected {total_gpus} GPUs in cluster", flush=True)
+    # Wait for nodes to register — at 512+ nodes some Raylets take longer to
+    # connect to GCS.  Poll until the expected GPU count is reached or timeout.
+    expected_gpus = config.num_gpus_per_node * config.num_nodes
+    deadline = time.time() + 300  # 5 min max wait
+    total_gpus = 0
+    while time.time() < deadline:
+        resources = ray.cluster_resources()
+        total_gpus = int(resources.get("GPU", 0))
+        alive_nodes = sum(1 for n in ray.nodes() if n.get("Alive"))
+        if total_gpus >= expected_gpus * 0.95:  # accept 95% of expected
+            break
+        print(
+            f"[AuroraServe] Waiting for nodes: {alive_nodes} alive, "
+            f"{total_gpus}/{expected_gpus} GPUs ({total_gpus/expected_gpus*100:.0f}%)",
+            flush=True,
+        )
+        time.sleep(15)
+    print(f"[AuroraServe] Detected {total_gpus} GPUs in cluster ({total_gpus/expected_gpus*100:.0f}% of expected)", flush=True)
 
     # ---- Stage 2: Resolve staged local models -------------------------------
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
@@ -1245,6 +1262,22 @@ if __name__ == "__main__":
     # ---- Stage 3: Deploy model services -------------------------------------
     stage_start = time.time()
     print("[AuroraServe] Stage 3: Deploying model services to Ray Serve...", flush=True)
+
+    # Diagnostic: print effective health check constants in this process
+    try:
+        from ray.serve._private import constants as _diag_c
+        print(
+            f"[AuroraServe] DIAG health check constants in driver process:\n"
+            f"  HTTP_PROXY_TIMEOUT            = {getattr(_diag_c, 'HTTP_PROXY_TIMEOUT', '?')}\n"
+            f"  PROXY_HEALTH_CHECK_TIMEOUT_S   = {getattr(_diag_c, 'PROXY_HEALTH_CHECK_TIMEOUT_S', '?')}\n"
+            f"  PROXY_HEALTH_CHECK_UNHEALTHY   = {getattr(_diag_c, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD', '?')}\n"
+            f"  DEFAULT_HEALTH_CHECK_TIMEOUT_S = {getattr(_diag_c, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S', '?')}\n"
+            f"  DEFAULT_HEALTH_CHECK_PERIOD_S  = {getattr(_diag_c, 'DEFAULT_HEALTH_CHECK_PERIOD_S', '?')}\n"
+            f"  REPLICA_HEALTH_CHECK_UNHEALTHY = {getattr(_diag_c, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD', '?')}",
+            flush=True,
+        )
+    except Exception as _diag_e:
+        print(f"[AuroraServe] DIAG constants import failed: {_diag_e}", flush=True)
 
     if planner_enabled:
         planner_nodes = build_node_inventory()

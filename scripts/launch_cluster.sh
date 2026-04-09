@@ -274,12 +274,20 @@ def _aurora_import(name, *args, **kwargs):
     _in_hook = True
     try:
         mod = _orig(name, *args, **kwargs)
+        # Proxy timeouts — effectively disable health-check killing
         if hasattr(mod, 'HTTP_PROXY_TIMEOUT') and getattr(mod, 'HTTP_PROXY_TIMEOUT') == 60:
-            mod.HTTP_PROXY_TIMEOUT = 600
+            mod.HTTP_PROXY_TIMEOUT = 3600
         if hasattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') == 10.0:
-            mod.PROXY_HEALTH_CHECK_TIMEOUT_S = 60.0
+            mod.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
         if hasattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
-            mod.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 10
+            mod.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
+        # Replica timeouts — effectively disable health-check killing
+        if hasattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') == 30:
+            mod.DEFAULT_HEALTH_CHECK_TIMEOUT_S = 600
+        if hasattr(mod, 'DEFAULT_HEALTH_CHECK_PERIOD_S') and getattr(mod, 'DEFAULT_HEALTH_CHECK_PERIOD_S') == 10:
+            mod.DEFAULT_HEALTH_CHECK_PERIOD_S = 120
+        if hasattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
+            mod.REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
         return mod
     finally:
         _in_hook = False
