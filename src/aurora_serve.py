@@ -330,6 +330,8 @@ def build_actor_runtime_env(
         "ZE_FLAT_DEVICE_HIERARCHY",
         "VLLM_TARGET_DEVICE",
         "AURORA_SCALING_TRACE",
+        "RAYON_NUM_THREADS",
+        "TOKENIZERS_PARALLELISM",
     ):
         value = os.environ.get(key)
         if value:

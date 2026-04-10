@@ -316,5 +316,15 @@ export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1
 export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-0}"
 echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
 
+# At 128+ nodes, each vLLM replica process has ~1500 gRPC connections to
+# other Ray actors, consuming many threads.  When the HuggingFace Rust
+# tokenizer lazily spawns its rayon thread pool on first request, it
+# tries to create ~nproc (208) threads and hits EAGAIN, panicking with
+# ThreadPoolBuildError.  Force single-threaded tokenizer parallelism to
+# avoid the rayon pool spawn entirely.
+export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKENIZERS_PARALLELISM"
+
 mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
     $PYTHON_EXEC src/driver.py --config "$DEPLOYMENT_CONFIG_PATH"
