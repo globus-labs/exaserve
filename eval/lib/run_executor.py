@@ -299,6 +299,10 @@ def submit_all(
     Runs that already succeeded (status ``succeeded`` **and** a result file
     exists) are skipped.  When a queue is full the function retries every
     *poll_interval* seconds until all runs have been submitted.
+
+    A lock file in the run group directory prevents concurrent submit_all
+    processes for the same spec.  Stale locks (owner PID dead) are cleaned
+    automatically with a WARNING printed.
     """
     try:
         group_dir = resolve_run_group_dir(
@@ -310,6 +314,106 @@ def submit_all(
         print(str(exc))
         return 1
 
+    # --- Lock file check ---
+    lock_path = os.path.join(group_dir, ".submit_all.lock")
+    stale = _check_and_acquire_lock(lock_path, spec_name)
+    if stale is None:
+        # Lock held by a live process — abort
+        return 1
+
+    try:
+        return _submit_all_locked(group_dir, spec_name, dry_run, poll_interval)
+    finally:
+        _release_lock(lock_path)
+
+
+def _check_and_acquire_lock(lock_path: str, spec_name: str) -> bool | None:
+    """Check for existing lock, acquire if free.
+
+    Returns:
+        True  — acquired, stale lock was cleaned
+        False — acquired, no prior lock
+        None  — lock held by live process, caller should abort
+    """
+    if os.path.isfile(lock_path):
+        try:
+            with open(lock_path, "r") as fh:
+                lock_info = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            lock_info = {}
+
+        owner_pid = lock_info.get("pid", 0)
+        owner_host = lock_info.get("hostname", "?")
+        started = lock_info.get("started", "?")
+        import socket
+        current_host = socket.gethostname()
+
+        if owner_host == current_host and _pid_alive(owner_pid):
+            print(
+                f"WARNING: STALE_PROCESS_DETECTED — submit-all for {spec_name!r} "
+                f"is already running (pid={owner_pid}, host={owner_host}, "
+                f"started={started}). Refusing to start a second instance.",
+                flush=True,
+            )
+            print(
+                f"  Lock file: {lock_path}\n"
+                f"  To force: kill {owner_pid} or delete the lock file.",
+                flush=True,
+            )
+            return None
+
+        # Stale lock — owner dead or different host
+        print(
+            f"WARNING: STALE_LOCK_CLEANED — previous submit-all "
+            f"(pid={owner_pid}, host={owner_host}, started={started}) "
+            f"is no longer running. Cleaning lock and proceeding.",
+            flush=True,
+        )
+        os.remove(lock_path)
+        _write_lock(lock_path)
+        return True
+
+    _write_lock(lock_path)
+    return False
+
+
+def _write_lock(lock_path: str) -> None:
+    import socket
+    lock_info = {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "w") as fh:
+        json.dump(lock_info, fh)
+
+
+def _release_lock(lock_path: str) -> None:
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+
+
+def _submit_all_locked(
+    group_dir: str,
+    spec_name: str,
+    dry_run: bool,
+    poll_interval: int,
+) -> int:
     pending = _discover_pending_runs(group_dir)
     if not pending:
         print(f"No pending runs found under {group_dir}")
@@ -349,25 +453,28 @@ def submit_all(
                 queue_counts[queue] = current + 1
                 print(
                     f"  [{len(submitted)}/{total}] Submitted "
-                    f"{run_plan.run_group_id}/{run_plan.run_id}: {msg}"
+                    f"{run_plan.run_group_id}/{run_plan.run_id}: {msg}",
+                    flush=True,
                 )
             else:
                 # qsub rejected — likely queue full despite our count, retry
                 next_round.append(run_plan)
                 print(
                     f"  [{len(submitted)}/{total}] Deferred  "
-                    f"{run_plan.run_group_id}/{run_plan.run_id}: {msg}"
+                    f"{run_plan.run_group_id}/{run_plan.run_id}: {msg}",
+                    flush=True,
                 )
 
         remaining = next_round
         if remaining:
             print(
                 f"  {len(remaining)} run(s) waiting for queue slots, "
-                f"retrying in {poll_interval}s ..."
+                f"retrying in {poll_interval}s ...",
+                flush=True,
             )
             time.sleep(poll_interval)
 
-    print(f"\nAll {len(submitted)}/{total} run(s) submitted.")
+    print(f"\nAll {len(submitted)}/{total} run(s) submitted.", flush=True)
     if failed:
         print("Permanent failures:")
         for rid, err in failed.items():
