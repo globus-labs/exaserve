@@ -37,12 +37,11 @@ from matplotlib.ticker import ScalarFormatter
 # {model_name} {gpus_per_node} {run_count} {rate_per_node} {trace_duration_s}
 # {task_duration_s} {proxy_type_label} {proxy_num_workers}
 # {client_summary} {proxy_summary}
-PLOT_TITLE_TEMPLATE = "LiteLLM + RayServe NULL Compute Weak Scaling Performance (ALCF Aurora)"
+PLOT_TITLE_TEMPLATE = "{proxy_type_label} + RayServe Weak Scaling — {model_name} (ALCF Aurora)"
 PLOT_SUBTITLE_TEMPLATE = (
-    "Empty request body, {gpus_per_node} GPUs per node, {run_count} runs avg"
-    "\n Ray Config: ProxyActor - EveryNode;"
-    "\n Client Config: {rate_per_node} RPS/Node, {trace_duration_s} sec; {task_duration_s}-sec Task."
-    "\n Proxy Config: {proxy_type_label}, {proxy_num_workers} workers"
+    "{input_len}-tok in / {output_len}-tok out, {gpus_per_node} GPUs per node, {run_count} runs avg"
+    "\n Client: {rate_per_node} RPS/Node, {trace_duration_s} sec"
+    "\n Proxy: {proxy_type_label}, {proxy_num_workers} workers"
 )
 
 # Use a modern style (try different style names for compatibility)
@@ -454,7 +453,7 @@ def plot_weak_scaling(
     errors_vals = [r[10] for r in results]
     
     # Set up the figure with a modern style
-    fig, ax1 = plt.subplots(figsize=(18, 7))
+    fig, ax1 = plt.subplots(figsize=(18, 10))
     fig.patch.set_facecolor('white')
     ax1.set_facecolor('#FAFAFA')
     
