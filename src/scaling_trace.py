@@ -32,6 +32,17 @@ from typing import Any, Callable, Optional
 _TRACE_PARTS_DIRNAME = "scaling_trace_parts"
 
 
+def tracing_enabled() -> bool:
+    """Return True if scaling trace instrumentation is enabled.
+
+    Controlled by the AURORA_SCALING_TRACE env var (default "1").  Set to
+    "0" to fully disable all tracing I/O (file writes, file reads, JSON
+    serialization).  This is important at scale where per-replica trace
+    files on Lustre add significant overhead.
+    """
+    return os.environ.get("AURORA_SCALING_TRACE", "1") != "0"
+
+
 def _sanitize_token(raw: str) -> str:
     token = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw)
     token = token.strip("._")
@@ -279,8 +290,10 @@ class ScalingTracer:
                 phase["source"] = f"driver.rank{rank}.{hostname}"
             self._phases.extend(driver_phases)
 
-    def save(self, path: Optional[str] = None) -> str:
+    def save(self, path: Optional[str] = None) -> Optional[str]:
         """Write trace JSON.  Default: $AURORA_RUN_LOG_DIR/scaling_trace.json, fallback /tmp."""
+        if not self._enabled:
+            return None
         if path is None:
             path = default_scaling_trace_path()
         self._metadata["trace_end"] = time.time()
@@ -296,8 +309,10 @@ class ScalingTracer:
                      f"{len(data['replicas'])} replicas)")
         return path
 
-    def save_replica_trace(self, path: Optional[str] = None) -> str:
+    def save_replica_trace(self, path: Optional[str] = None) -> Optional[str]:
         """Write only replica init data — called from within VLLMWorker actors."""
+        if not self._enabled:
+            return None
         if path is None:
             path = trace_part_path("replica", "replica_trace")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

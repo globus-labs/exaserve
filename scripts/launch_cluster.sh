@@ -309,5 +309,12 @@ fi
 
 export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1}"
 
+# Scaling trace instrumentation is OFF by default: at 128+ nodes the
+# per-replica trace files on Lustre add ~10 minutes of setup overhead
+# (see findings/weakscaling_short_v2.md).  Set AURORA_SCALING_TRACE=1
+# explicitly when debugging Ray startup performance.
+export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-0}"
+echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
+
 mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
     $PYTHON_EXEC src/driver.py --config "$DEPLOYMENT_CONFIG_PATH"

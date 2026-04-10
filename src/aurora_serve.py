@@ -42,7 +42,7 @@ from replica_planner import (
     format_replica_plan,
     tp_replica_capacity_for_nodes,
 )
-from scaling_trace import list_trace_part_paths, tracer
+from scaling_trace import list_trace_part_paths, tracer, tracing_enabled
 
 
 def _patch_ray_serve_proxy_constants() -> None:
@@ -329,6 +329,7 @@ def build_actor_runtime_env(
         "VLLM_USE_RAY_WRAPPED_PP_COMM",
         "ZE_FLAT_DEVICE_HIERARCHY",
         "VLLM_TARGET_DEVICE",
+        "AURORA_SCALING_TRACE",
     ):
         value = os.environ.get(key)
         if value:
@@ -1194,6 +1195,10 @@ def deploy_multi_model(
 
 def _collect_replica_traces() -> None:
     """Gather per-replica trace JSON files and merge into the main tracer."""
+    if not tracing_enabled():
+        print("[AuroraServe] Scaling trace disabled (AURORA_SCALING_TRACE=0); "
+              "skipping replica trace collection", flush=True)
+        return
     files = list_trace_part_paths("replica")
     if not files:
         print("[AuroraServe] No replica trace files found", flush=True)

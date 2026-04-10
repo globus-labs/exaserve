@@ -12,7 +12,12 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from scaling_trace import default_scaling_trace_path, list_trace_part_paths, trace_part_path
+from scaling_trace import (
+    default_scaling_trace_path,
+    list_trace_part_paths,
+    trace_part_path,
+    tracing_enabled,
+)
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -428,6 +433,9 @@ def _collect_and_merge_traces(config_path: str) -> None:
       2. Read the run-scoped driver trace parts.
       3. Merge everything into the scaling trace and re-save.
     """
+    if not tracing_enabled():
+        print("[Driver][Trace] Scaling trace disabled; skipping merge", flush=True)
+        return
     import json
 
     trace_path = default_scaling_trace_path()
@@ -520,6 +528,8 @@ def main():
         print(f"[Driver][Trace] {name}: {duration_s:.3f}s", flush=True)
 
     def _save_driver_trace() -> None:
+        if not tracing_enabled():
+            return
         import json as _json
         path = trace_part_path("driver", f"driver_trace_rank{rank}")
         os.makedirs(os.path.dirname(path), exist_ok=True)
