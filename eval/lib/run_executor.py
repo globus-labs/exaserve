@@ -209,7 +209,28 @@ def _validate_replay_results(run_plan) -> dict[str, int | str]:
         )
 
     with open(result_path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+        raw = handle.read()
+    # Tolerate trailing garbage from filesystem quirks (Lustre truncation bugs,
+    # aborted prior writes that left leftover bytes past the valid JSON body).
+    # Use raw_decode to parse the first valid JSON object and ignore the rest.
+    try:
+        payload, end_pos = json.JSONDecoder().raw_decode(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Replay result file is not valid JSON: {result_path}: {exc}") from exc
+    trailing = len(raw) - end_pos
+    if trailing > 0:
+        # Rewrite the file in-place to drop trailing garbage so downstream tools
+        # don't trip on it.  Best effort: only log on failure.
+        print(
+            f"[run_executor] Stripping {trailing} trailing byte(s) of garbage "
+            f"from {result_path}",
+            flush=True,
+        )
+        try:
+            with open(result_path, "w", encoding="utf-8") as handle:
+                handle.write(raw[:end_pos])
+        except OSError as exc:
+            print(f"[run_executor] Warning: could not rewrite {result_path}: {exc}", flush=True)
 
     # Saturation results are flat dicts with __type__=summary; replay results nest under "overall".
     overall = payload.get("overall")
