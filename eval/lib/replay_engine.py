@@ -681,7 +681,14 @@ async def replay_from_manifest(
                     end_time = max((item[4] for item in run_results), default=time.time())
                     run_durations.append(max(end_time - duration_t0, 0.0))
             if run_index < num_runs - 1:
-                await asyncio.sleep(10)
+                cooldown_s = 75
+                if is_root:
+                    print(
+                        f"[replay_engine] Cooldown {cooldown_s}s before run "
+                        f"{run_index + 2}/{num_runs}...",
+                        flush=True,
+                    )
+                await asyncio.sleep(cooldown_s)
         if is_root:
             _save_results(
                 exp_config,
