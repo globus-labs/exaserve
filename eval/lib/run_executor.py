@@ -448,9 +448,12 @@ def _count_queued_jobs() -> dict[str, int]:
 
 def _try_qsub(run_plan) -> tuple[bool, str]:
     """Attempt qsub; return (success, message)."""
-    result = subprocess.run(
-        ["qsub", run_plan.bundle.job_path],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["qsub", run_plan.bundle.job_path],
+            capture_output=True, text=True, check=False, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "qsub timed out (600s)"
     msg = (result.stdout.strip() or result.stderr.strip())
     return result.returncode == 0, msg

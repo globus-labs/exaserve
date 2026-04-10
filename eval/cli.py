@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_submit_all = run_subparsers.add_parser(
         "submit-all", help="Submit all pending runs for a spec name"
     )
-    run_submit_all.add_argument("spec_name", help="Spec name (matches runs/<spec_name>/)")
+    run_submit_all.add_argument("spec_name", nargs="+", help="Spec name(s) (matches runs/<spec_name>/)")
     run_submit_all.add_argument(
         "--run-group",
         default="latest",
@@ -73,8 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_submit_all.add_argument("--experiments-root", default=None)
     run_submit_all.add_argument("--dry-run", action="store_true")
     run_submit_all.add_argument(
-        "--poll-interval", type=int, default=120,
-        help="Seconds between retry attempts when queues are full (default: 120)",
+        "--poll-interval", type=int, default=300,
+        help="Seconds between retry attempts when queues are full (default: 300)",
+    )
+    run_submit_all.add_argument(
+        "--background", action="store_true",
+        help="Daemonize: detach from terminal, write output to --log-file",
+    )
+    run_submit_all.add_argument(
+        "--log-file", default=None,
+        help="Log file path for --background mode (default: /tmp/submit_<spec>.log)",
     )
 
     run_execute = run_subparsers.add_parser("execute", help="Execute a materialized run.yaml")
@@ -129,13 +137,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "submit":
             return submit_run(args.target, dry_run=args.dry_run)
         if args.command == "submit-all":
-            return submit_all(
-                args.spec_name,
-                run_group=args.run_group,
-                experiments_root=args.experiments_root,
-                dry_run=args.dry_run,
-                poll_interval=args.poll_interval,
-            )
+            if getattr(args, "background", False):
+                _daemonize_submit_all(args)
+                return 0
+            rc = 0
+            for spec in args.spec_name:
+                ret = submit_all(
+                    spec,
+                    run_group=args.run_group,
+                    experiments_root=args.experiments_root,
+                    dry_run=args.dry_run,
+                    poll_interval=args.poll_interval,
+                )
+                if ret != 0:
+                    rc = ret
+            return rc
         if args.command == "execute":
             return execute_run(args.run_yaml, dry_run=args.dry_run)
 
@@ -199,6 +215,58 @@ def _derive_params(result_dir: str, headroom: float) -> int:
     print()
     print("# Paste into your weak-scaling spec under 'client:' and 'workload:'")
     return 0
+
+
+def _daemonize_submit_all(args) -> None:
+    """Fork into the background and run submit_all for each spec."""
+    import os as _os
+    import sys as _sys
+
+    specs = args.spec_name
+    log_file = args.log_file or f"/tmp/submit_{'_'.join(specs)}.log"
+
+    pid = _os.fork()
+    if pid > 0:
+        # Parent — print info and exit
+        print(f"Backgrounded submit-all (pid={pid}), log: {log_file}")
+        return
+
+    # Child — detach
+    _os.setsid()
+    try:
+        _os.nice(19)
+    except OSError:
+        pass
+
+    # Redirect stdout/stderr to log file
+    log_fd = open(log_file, "a")
+    _os.dup2(log_fd.fileno(), _sys.stdout.fileno())
+    _os.dup2(log_fd.fileno(), _sys.stderr.fileno())
+
+    import time as _time
+    print(f"[{_time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime())}] "
+          f"submit-all started (pid={_os.getpid()}) for {specs}", flush=True)
+
+    rc = 0
+    for spec in specs:
+        print(f"\n[{_time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime())}] "
+              f"Submitting {spec} ...", flush=True)
+        ret = submit_all(
+            spec,
+            run_group=args.run_group,
+            experiments_root=args.experiments_root,
+            dry_run=args.dry_run,
+            poll_interval=args.poll_interval,
+        )
+        if ret != 0:
+            rc = ret
+        print(f"[{_time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime())}] "
+              f"{spec} done (rc={ret})", flush=True)
+
+    print(f"\n[{_time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime())}] "
+          f"All done (rc={rc})", flush=True)
+    log_fd.close()
+    _os._exit(rc)
 
 
 if __name__ == "__main__":
