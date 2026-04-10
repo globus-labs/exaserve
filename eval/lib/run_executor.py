@@ -283,7 +283,7 @@ _QUEUE_SLOT_LIMITS: dict[str, int | None] = {
     "prod": None,         # 1 running + unlimited queued
 }
 _DEFAULT_QUEUE_SLOTS = 2  # conservative fallback for unknown queues
-_POLL_INTERVAL_S = 120
+_POLL_INTERVAL_S = 300    # 5 min between polls — minimizes qstat load on login node
 
 
 def submit_all(
@@ -417,7 +417,7 @@ def _count_queued_jobs() -> dict[str, int]:
     try:
         result = subprocess.run(
             ["qstat", "-u", user],
-            capture_output=True, text=True, check=False, timeout=30,
+            capture_output=True, text=True, check=False, timeout=600,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return {}
