@@ -267,7 +267,16 @@ class RayBackendAdapter(BackendAdapter):
                     port = int(handle.read().strip())
                 except ValueError:
                     pass
-        return [f"http://0.0.0.0:{port}"]
+        # Use the head node hostname so MPI client ranks on other nodes
+        # can reach the proxy (0.0.0.0 only works on the head node itself).
+        nodefile = os.environ.get("PBS_NODEFILE")
+        head_host = "0.0.0.0"
+        if nodefile and os.path.isfile(nodefile):
+            with open(nodefile, "r", encoding="utf-8") as handle:
+                first = handle.readline().strip()
+                if first:
+                    head_host = first
+        return [f"http://{head_host}:{port}"]
 
     def stop(self, run_ctx: BackendRunContext, launched: LaunchedBackend) -> None:
         terminate_process_tree(launched.monitor.process)

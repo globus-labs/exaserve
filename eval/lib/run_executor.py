@@ -125,7 +125,7 @@ def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
     if run_plan.client.early_stop > 0:
         replay_cmd.extend(["--early-stop", str(run_plan.client.early_stop)])
 
-    if run_plan.client.dest == "direct" and run_plan.client.num_nodes > 1:
+    if run_plan.client.num_nodes > 1:
         hostfile = _build_hostfile(run_plan.client.num_nodes)
         try:
             command = [
