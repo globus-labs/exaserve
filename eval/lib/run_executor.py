@@ -504,10 +504,16 @@ def _submit_all_locked(
     return 0
 
 
+def _natural_sort_key(name: str):
+    """Sort key that orders '2-nodes' before '16-nodes' before '128-nodes'."""
+    import re
+    return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', name)]
+
+
 def _discover_pending_runs(group_dir: str):
     """Return RunPlan objects for runs that are not yet successfully completed."""
     pending = []
-    for entry in sorted(os.listdir(group_dir)):
+    for entry in sorted(os.listdir(group_dir), key=_natural_sort_key):
         run_yaml = os.path.join(group_dir, entry, "run.yaml")
         if not os.path.isfile(run_yaml):
             continue

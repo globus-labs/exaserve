@@ -17,3 +17,4 @@ tools/bcast
 tools/*.o
 tmp/
 site_config_local.py
+codex_hooks/

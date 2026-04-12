@@ -33,7 +33,7 @@ RAY_SERVE_PORT = 8000
 
 # Ray is not truly ready until aurora_serve.py prints its cluster-wide ready marker.
 AURORA_SERVE_READY_MARKER = "CLUSTER FULLY READY"
-AURORA_SERVE_READY_TIMEOUT_S = 1800  # 30 min covers large-scale deployments
+AURORA_SERVE_READY_TIMEOUT_S = int(os.environ.get("AURORA_SERVE_READY_TIMEOUT_S", "3600"))
 
 # After the marker, also confirm the HTTP endpoints respond before starting the proxy.
 RAY_SERVE_HEALTH_TIMEOUT_S = 1800  # 30 min covers large-scale deployments

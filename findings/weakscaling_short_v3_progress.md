@@ -58,9 +58,52 @@ rewrites clean content in place.
 
 Setup time regression from instrumentation is fully eliminated.
 
-## Next Steps
+## 256-Node Ray Init Timing
 
-1. Wait for 256n v3 run1 to complete
-2. Submit remaining node counts (1-64) for haproxy v3 run1 via qsub loop
-3. Run direct_short_v3 run1 (num_go_procs=8 since per-node client load)
-4. Plot results when all runs complete
+Deploying 3072 replicas (256 nodes × 12 replicas/node) at 256 nodes:
+
+| Stage | Duration | Notes |
+|---|---|---|
+| Stage 1 (Ray cluster init) | ~45s | Consistent across all runs |
+| Stage 2 (Model resolution) | ~0s | Models pre-staged to /tmp/hf_home |
+| Stage 3 (Deploy 3072 replicas via serve.run) | **1787s (~30 min)** | Highly variable; first attempt timed out at 1800s, succeeded at 1787s on retry |
+| **Total init** | **~30.5 min** | |
+
+The original `AURORA_SERVE_READY_TIMEOUT_S=1800` was too tight — the successful
+run completed Stage 3 with only 13s to spare. Timeout is now configurable via
+env var, defaulting to 3600s.
+
+## Three-Dispatch Comparison (v3 final results)
+
+Three dispatch modes tested across 1–256 nodes, all with identical server
+config (Llama-3-8B, 12 replicas/node, 64in/64out, target 110 RPS/node):
+
+| Nodes | HAProxy RPS | Direct-MPI RPS | Direct-Fat RPS | Ideal RPS |
+|---|---|---|---|---|
+| 1 | 107.1 | 105.9 | 107.1 | 107 |
+| 2 | 214.2 | 214.1 | 214.2 | 214 |
+| 4 | 428.1 | 427.6 | 428.0 | 428 |
+| 8 | 854.6 | 855.8 | 856.1 | 856 |
+| 16 | 1,711 | 1,681 | 1,712 | 1,712 |
+| 32 | 3,366 | 3,365 | 3,388 | 3,424 |
+| 64 | 6,712 | 6,785 | 6,830 | 6,848 |
+| 128 | 12,142 | 13,426 | 12,105 | 13,696 |
+| 256 | 13,730 | 26,920 | 13,855 | 27,392 |
+
+**Dispatch modes:**
+- **HAProxy**: single HAProxy on head node, leastconn balancer, 4 go-procs
+- **Direct-MPI**: 1 MPI rank per node, each rank runs 8 go-procs, hash-shard
+- **Direct-Fat**: single python on head node, 4 go-procs, hash-shard directly to all backends (no HAProxy, no MPI)
+
+**Key findings:**
+1. All three modes are indistinguishable up to 64 nodes (~6800 RPS)
+2. At 128n, Direct-MPI (13,426) pulls 10% ahead of the head-node modes
+3. At 256n, Direct-MPI scales linearly (26,920 RPS, 99% efficiency) while
+   both head-node modes plateau at ~13,800 RPS (51% efficiency)
+4. **Direct-Fat and HAProxy converge to the same ceiling** — the bottleneck
+   is the single head node running a fat client process, not HAProxy itself
+5. The "lower" p50 latency at 256n for HAProxy/Direct-Fat (1609–1615ms vs
+   1853ms for Direct-MPI) is a queueing artifact: backends are under-loaded
+   at half the target rate, so requests queue less
+
+Plot: `findings/weakscaling_three_dispatch_v3.png`

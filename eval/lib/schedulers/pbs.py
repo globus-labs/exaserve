@@ -8,7 +8,7 @@ from . import __doc__  # noqa: F401
 def default_queue_and_walltime(num_nodes: int) -> tuple[str, str]:
     if num_nodes <= 2:
         return "debug", "01:00:00"
-    if num_nodes <= 256:
+    if num_nodes < 256:
         return "debug-scaling", "01:00:00"
     return "prod", "02:00:00"
 
