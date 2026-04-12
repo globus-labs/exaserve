@@ -1,0 +1,44 @@
+name: weakscaling_direct_512_v3
+matrix:
+  name_template: "{num_nodes}_nodes"
+  axes:
+    - name: num_nodes
+      values: [512]
+      targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+      label_template: "{value}_nodes"
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
+  generation_mode: deterministic
+deployment:
+  models:
+    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 4096
+      size: 8
+      gpu_memory_utilization: 0.90
+      enforce_eager: true
+      max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 4
+  dest: direct
+  stream: false
+  num_go_procs: 8
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: none
+scheduler:
+  type: pbs
+  walltime: "04:00:00"
