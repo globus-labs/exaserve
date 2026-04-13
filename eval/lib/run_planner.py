@@ -447,6 +447,7 @@ def load_run_plan(path: str) -> RunPlan:
         warmup_rps=int(client_raw["warmup_rps"]),
         warmup_duration_s=float(client_raw["warmup_duration_s"]),
         sum_only=bool(client_raw["sum_only"]),
+        startup_only=bool(client_raw.get("startup_only", False)),
     )
     scheduler = SchedulerSpec(
         type=str(scheduler_raw["type"]),

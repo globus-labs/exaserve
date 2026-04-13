@@ -51,6 +51,12 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
         launched = adapter.launch(ctx)
         adapter.wait_ready(ctx, launched)
         base_urls = adapter.discover_targets(ctx, launched)
+
+        if getattr(run_plan.client, "startup_only", False):
+            print("[run_executor] startup_only=True — skipping replay client", flush=True)
+            write_run_state(run_plan, "succeeded", base_urls=base_urls, exit_code=0)
+            return 0
+
         write_run_state(run_plan, "replaying", base_urls=base_urls)
         exit_code = _run_replay_client(run_plan, base_urls)
         if exit_code == 0:

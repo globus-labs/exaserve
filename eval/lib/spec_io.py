@@ -148,6 +148,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         warmup_duration_s=float(client_raw.get("warmup_duration_s", 0.0)),
         sum_only=bool(client_raw.get("sum_only", False)),
         stream=bool(client_raw.get("stream", False)),
+        startup_only=bool(client_raw.get("startup_only", False)),
         saturation=SaturationSpec.from_dict(client_raw.get("saturation", {})),
     )
     backend = BackendSpec(
