@@ -175,6 +175,7 @@ class ClientSpec:
     warmup_duration_s: float = 0.0
     sum_only: bool = False
     stream: bool = False
+    startup_only: bool = False  # If True, exit after CLUSTER FULLY READY (skip replay)
     saturation: SaturationSpec = field(default_factory=SaturationSpec)
 
 
