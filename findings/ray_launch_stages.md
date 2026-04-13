@@ -209,26 +209,29 @@ loop (`CONTROL_LOOP_INTERVAL_S = 0.1s`).
 | 32    | 384      | 2.6s       | ~7ms                 |
 | 64    | 768      | 66.8s      | ~87ms                |
 
-Code analysis confirms the controller's check loop IS non-blocking and parallel:
-- `_check_startup_replicas()` iterates all STARTING replicas in a `for` loop
-- Each `check_ready()` calls `check_obj_ref_ready_nowait()` — instant, no blocking
-- `initialize_and_get_metadata.remote()` is issued via `.remote()` (async) on first check
-- All 768 `.remote()` calls are issued in the same loop iteration — fully parallel
+**Root cause confirmed via instrumentation (run2):** `serve.run()` was decomposed
+into `deploy_applications(wait=True)` + `wait_for_proxies_serving()`:
 
-The 66.8s overhead is from `initialize_and_get_metadata` execution on the replica
-actors themselves. This method (in `replica.py:1261`) runs:
-1. `await self._replica_impl.initialize()` — calls `reconfigure()` on the user callable
-2. `await self.check_health()` — runs an initial health check
-These execute on each replica actor's async event loop. With 768 actors across
-64 nodes, the overhead comes from Ray's gRPC/object store/scheduler contention
-under the load of 768 concurrent actor RPCs completing simultaneously.
+| Phase                        | 2 nodes | 64 nodes |
+|------------------------------|--------:|---------:|
+| `serve.run.deploy_apps`     |  75.3s  |   78.5s  |
+| `serve.run.wait_proxies`    |  0.004s | **69.3s** |
+| **Total**                   |  75.3s  |  147.9s  |
 
-There are no user-facing knobs to parallelize further — the RPCs are already
-parallel. The `CONTROL_LOOP_INTERVAL_S = 0.1s` only affects how often the
-controller polls for completions, not the actual RPC throughput. Potential
-mitigations:
-- Reduce replicas per node (e.g., 6 instead of 12 for larger models)
-- Use `RAY_SERVE_EAGERLY_START_REPLACEMENT_REPLICAS=0` to reduce churn
+`deploy_applications` is constant (~75-78s). The entire scaling overhead is from
+`wait_for_proxies_serving()`, which calls `.serving.remote()` on every ProxyActor
+and does `ray.wait()` for all responses.
+
+The `.serving()` method on the ProxyActor is a **no-op** (`return` immediately,
+proxy.py:1328). Yet collecting 64 no-op remote call results takes 69s. This is
+pure Ray RPC overhead: issuing 64 `.remote()` calls to actors across 64 nodes
+and resolving them through the gRPC layer + object store.
+
+Potential mitigations:
+- Skip `wait_for_proxies_serving` entirely (we already have our own HTTP
+  health check in driver.py that confirms /health on each node)
+- Reduce ProxyActor count (e.g., `ProxyLocation.HeadOnly` — but then each
+  node can't serve directly)
 - Investigate Ray gRPC thread tuning (`RAY_num_server_call_thread`)
 
 ## Known Issues & Action Items
