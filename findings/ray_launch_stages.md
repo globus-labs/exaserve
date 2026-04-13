@@ -193,6 +193,36 @@ launching any Python program.
 
 - driver.py rank 0 detects this marker and proceeds to start the proxy
 
+## Stage 5 — Deploy Drain (`serve.run()` tail)
+
+After all replicas finish `__init__`, `serve.run()` doesn't return immediately.
+The ServeController must confirm each replica via `initialize_and_get_metadata`
+RPC (runs `reconfigure()` + `check_health()` per replica), then transition each
+from STARTING → RUNNING state. This is processed in the controller's reconcile
+loop (`CONTROL_LOOP_INTERVAL_S = 0.1s`).
+
+**Observed scaling:**
+
+| Nodes | Replicas | Drain time | Per-replica overhead |
+|------:|---------:|-----------:|---------------------:|
+| 8     | 96       | 0.3s       | ~3ms                 |
+| 32    | 384      | 2.6s       | ~7ms                 |
+| 64    | 768      | 66.8s      | ~87ms                |
+
+The nonlinear jump at 64 nodes suggests the single-threaded ServeController
+actor saturates under the RPC load of 768 concurrent `initialize_and_get_metadata`
+completions. Each completion triggers `ray.get()` of the result + state machine
+transition + scheduler notification. At 768 replicas the controller's event loop
+becomes the bottleneck.
+
+The controller loop frequency (0.1s) is NOT the cause — making it slower would
+delay detection. The bottleneck is per-replica processing within each loop
+iteration. This is a Ray Serve scalability limitation in the ServeController's
+single-actor architecture. Potential mitigations:
+- Reduce replicas per node (e.g., 6 instead of 12 for larger models)
+- Use `RAY_SERVE_EAGERLY_START_REPLACEMENT_REPLICAS=0` to reduce churn
+- Batch replica state transitions in the controller (requires Ray patch)
+
 ## Known Issues & Action Items
 
 - **GCS sleep was redundant** — aurora_serve's retry loop handles GCS readiness.
