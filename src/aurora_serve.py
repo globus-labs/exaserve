@@ -454,7 +454,7 @@ def init_ray_cluster(
     address: str,
     namespace: str = "serve",
     include_dashboard: bool = False,
-    retries: int = 12,
+    retries: int = 60,
     retry_delay_s: float = 5.0,
 ) -> None:
     """Retry Ray bootstrap for slow Aurora control-plane startup."""
