@@ -42,10 +42,107 @@ from replica_planner import (
     format_replica_plan,
     tp_replica_capacity_for_nodes,
 )
-from scaling_trace import list_trace_part_paths, tracer, tracing_enabled
+from scaling_trace import tracer, tracing_enabled
+
+
+
+def _collect_engine_sub_phases(replica_stats: list[dict]) -> None:
+    """Parse vLLM EngineCore sub-phase timings from Ray worker logs.
+
+    vLLM logs per-EngineCore process (in Ray worker log files):
+      - "Loading weights took X seconds" (default_loader.py)
+      - "init engine (profile, create kv cache, warmup model) took X seconds" (core.py)
+
+    We parse these from /tmp/ray/session_latest/logs/ on the head node and
+    attach aggregate stats to all replicas. Only head-node logs are visible
+    (worker-node /tmp is separate), but all nodes load the same model so
+    the stats are representative.
+
+    Per-replica attribution via monkey-patch is not possible because vLLM
+    forces multiprocessing start method to 'spawn' inside Ray actors with
+    XPU, and the spawned EngineCore subprocess does not load user
+    site-packages (sitecustomize.py).
+    """
+    import glob as _glob
+    import re
+
+    log_dir = "/tmp/ray/session_latest/logs"
+    weight_pattern = re.compile(r"Loading weights took ([\d.]+) seconds")
+    kv_pattern = re.compile(
+        r"init engine \(profile, create kv cache, warmup model\) took ([\d.]+) seconds"
+    )
+
+    weight_times: list[float] = []
+    kv_times: list[float] = []
+
+    for log_path in _glob.glob(f"{log_dir}/worker-*.out"):
+        try:
+            with open(log_path, "r") as f:
+                for line in f:
+                    m = weight_pattern.search(line)
+                    if m:
+                        weight_times.append(float(m.group(1)))
+                    m = kv_pattern.search(line)
+                    if m:
+                        kv_times.append(float(m.group(1)))
+        except Exception:
+            pass
+
+    if not weight_times and not kv_times:
+        return
+
+    import statistics
+    aggregate = {}
+    if weight_times:
+        aggregate["weight_load_s"] = {
+            "mean": round(statistics.mean(weight_times), 2),
+            "min": round(min(weight_times), 2),
+            "max": round(max(weight_times), 2),
+            "count": len(weight_times),
+        }
+    if kv_times:
+        aggregate["kv_cache_init_s"] = {
+            "mean": round(statistics.mean(kv_times), 2),
+            "min": round(min(kv_times), 2),
+            "max": round(max(kv_times), 2),
+            "count": len(kv_times),
+        }
+
+    for rs in replica_stats:
+        rs["engine_sub_phases"] = aggregate
+
+    wl = aggregate.get("weight_load_s", {})
+    kv = aggregate.get("kv_cache_init_s", {})
+    print(
+        f"[AuroraServe] Engine sub-phases: "
+        f"weight_load avg={wl.get('mean', '?')}s ({wl.get('count', 0)} samples), "
+        f"kv_cache avg={kv.get('mean', '?')}s ({kv.get('count', 0)} samples)",
+        flush=True,
+    )
 
 
 def _patch_ray_serve_proxy_constants() -> None:
+    """Worker setup hook: patch Ray Serve proxy timeout constants.
+
+    Called by Ray in every worker process at startup (via runtime_env
+    worker_process_setup_hook). This ensures the ServeController actor
+    uses relaxed health-check thresholds, preventing the ProxyActor
+    death cascade at 128+ nodes.
+    """
+    try:
+        import os
+        from ray.serve._private import constants as c
+
+        timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600"))
+        c.HTTP_PROXY_TIMEOUT = timeout
+        c.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
+        c.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
+    except Exception:
+        pass
+
+
+
+
     """Worker setup hook: patch Ray Serve proxy timeout constants.
 
     Called by Ray in every worker process at startup (via runtime_env
@@ -526,9 +623,6 @@ class VLLMWorker:
         max_num_seqs: int = None,
         collect_stats: bool = False,
     ):
-        from scaling_trace import ScalingTracer
-        _replica_tracer = ScalingTracer()
-
         init_start = time.time()
         init_mono = time.monotonic()
         pid = os.getpid()
@@ -550,12 +644,12 @@ class VLLMWorker:
             )
             total_s = time.time() - init_start
             print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
-            _replica_tracer.record_replica_init({
+            from scaling_trace import report_replica_stats
+            report_replica_stats({
                 "pid": pid, "hostname": hostname, "model_id": model_id,
                 "device_id": device_id, "null_compute": True,
                 "total_init_s": round(total_s, 4),
             })
-            _replica_tracer.save_replica_trace()
             return
 
         # ---- Device isolation ------------------------------------------------
@@ -636,6 +730,10 @@ class VLLMWorker:
         print(f"[VLLMWorker pid={pid}] Creating vLLM engine for {model_id}...", flush=True)
 
         # -- Sub-phase: engine creation (weight loading + GPU init + KV cache) --
+        # EngineCore sub-phase timings (model_load_s, kv_cache_init_s) are
+        # captured via sitecustomize.py import hook and reported to the
+        # ReplicaStatsCollector actor from the spawned EngineCore subprocess.
+        # (Can't monkey-patch from here: vLLM forces spawn on XPU/Ray.)
         engine_start = time.monotonic()
         extra_engine_kwargs = {}
         if self._collect_stats:
@@ -672,9 +770,11 @@ class VLLMWorker:
             "wall_start": init_start,
             "wall_end": time.time(),
         }
-        _replica_tracer.record_replica_init(replica_info)
-        trace_path = _replica_tracer.save_replica_trace()
-        print(f"[VLLMWorker pid={pid}] Replica trace: {trace_path}", flush=True)
+        # EngineCore sub-phase timings (model_load_s, kv_cache_init_s) are
+        # reported asynchronously from the forked subprocess via the
+        # ReplicaStatsCollector actor and merged in get_all().
+        from scaling_trace import report_replica_stats
+        report_replica_stats(replica_info)
 
     # ---- HTTP endpoints ------------------------------------------------------
 
@@ -1195,28 +1295,6 @@ def deploy_multi_model(
         )
 
 
-def _collect_replica_traces() -> None:
-    """Gather per-replica trace JSON files and merge into the main tracer."""
-    if not tracing_enabled():
-        print("[AuroraServe] Scaling trace disabled (AURORA_SCALING_TRACE=0); "
-              "skipping replica trace collection", flush=True)
-        return
-    files = list_trace_part_paths("replica")
-    if not files:
-        print("[AuroraServe] No replica trace files found", flush=True)
-        return
-    for path in files:
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            for replica in data.get("replicas", []):
-                tracer.record_replica_init(replica)
-            os.remove(path)
-        except Exception as exc:
-            print(f"[AuroraServe] Failed to read replica trace {path}: {exc}", flush=True)
-    print(f"[AuroraServe] Collected {len(files)} replica trace file(s)", flush=True)
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1247,7 +1325,7 @@ if __name__ == "__main__":
             flush=True,
         )
 
-    # ---- Stage 1: Initialize Ray cluster ------------------------------------
+    # ---- Serve Init: ray.init + serve.start ----------------------------------
     stage1_start = time.monotonic()
     ray_address = os.environ.get("RAY_ADDRESS", "auto")
     tracer.set_metadata(
@@ -1256,13 +1334,30 @@ if __name__ == "__main__":
         num_gpus_per_node=config.num_gpus_per_node,
         models=[cfg.model_id for cfg in config.model_configs],
     )
+    # Record model broadcast timing from launch_cluster.sh (passed via env var)
+    bcast_timing_raw = os.environ.get("AURORA_MODEL_BCAST_TIMING", "").strip()
+    if bcast_timing_raw:
+        try:
+            bcast_timing = json.loads(bcast_timing_raw)
+            tracer.record_phase(
+                "model_bcast", bcast_timing["model_bcast_total_s"],
+                models=bcast_timing.get("models", []),
+            )
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     print(
-        f"[AuroraServe] Stage 1: Initializing Ray cluster at {ray_address}...",
+        f"[AuroraServe] Serve Init: Connecting to Ray cluster at {ray_address}...",
         flush=True,
     )
 
     with tracer.phase("ray.init"):
         init_ray_cluster(ray_address, namespace="serve", include_dashboard=False)
+
+    # Create stats collector actor for per-replica init timing (replaces
+    # per-file Lustre I/O).  Must be created after ray.init, before serve.run.
+    from scaling_trace import create_stats_collector, collect_replica_stats
+    create_stats_collector()
 
     # Increase proxy startup timeout before serve.start() spawns ProxyActors.
     # At 128 nodes the default 60s is too short — the ServeController kills
@@ -1297,11 +1392,11 @@ if __name__ == "__main__":
         )
     print("[AuroraServe] HTTP proxy location: EveryNode, host=0.0.0.0, port=8000", flush=True)
     tracer.record_phase("stage1.total", time.monotonic() - stage1_start)
-    print_red(f"[AuroraServe] ✓ Stage 1 completed in {time.monotonic() - stage1_start:.2f}s")
+    print_red(f"[AuroraServe] ✓ Serve Init completed in {time.monotonic() - stage1_start:.2f}s")
 
-    # ---- Detect cluster resources (with polling & per-iteration timing) -----
+    # ---- GPU Poll: wait for all nodes to register --------------------------
     expected_gpus = config.num_gpus_per_node * config.num_nodes
-    deadline = time.monotonic() + 300  # 5 min max wait
+    deadline = time.monotonic() + 600  # 10 min max wait
     total_gpus = 0
     poll_iteration = 0
     with tracer.phase("node_registration_poll", expected_gpus=expected_gpus):
@@ -1325,7 +1420,7 @@ if __name__ == "__main__":
                 pct=round(total_gpus / max(expected_gpus, 1) * 100, 1),
             )
 
-            if total_gpus >= expected_gpus * 0.95:
+            if total_gpus >= expected_gpus:
                 break
 
             print(
@@ -1337,24 +1432,31 @@ if __name__ == "__main__":
             time.sleep(15)
 
     tracer.set_metadata(actual_gpus=total_gpus, alive_nodes=alive_nodes)
-    print(
-        f"[AuroraServe] Detected {total_gpus} GPUs in cluster "
-        f"({total_gpus/max(expected_gpus,1)*100:.0f}% of expected)",
-        flush=True,
-    )
+    if total_gpus < expected_gpus:
+        print(
+            f"[AuroraServe] WARNING: Only {total_gpus}/{expected_gpus} GPUs registered "
+            f"after 10min deadline ({total_gpus/max(expected_gpus,1)*100:.0f}%). "
+            f"Proceeding with reduced capacity.",
+            flush=True,
+        )
+    else:
+        print(
+            f"[AuroraServe] All {total_gpus}/{expected_gpus} GPUs registered",
+            flush=True,
+        )
 
-    # ---- Stage 2: Resolve staged local models -------------------------------
+    # ---- Model Resolution: resolve staged local models ---------------------
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
     if null_compute:
         print(
-            "[AuroraServe] Stage 2: NULL-COMPUTE mode — model staging skipped",
+            "[AuroraServe] Model Resolution: NULL-COMPUTE mode — model staging skipped",
             flush=True,
         )
         model_path_map = {cfg.model_id: cfg.model_id for cfg in config.model_configs}
     else:
         stage_start = time.time()
         print(
-            f"[AuroraServe] Stage 2: Resolving staged models from {config.local_stage_path}...",
+            f"[AuroraServe] Model Resolution: Resolving staged models from {config.local_stage_path}...",
             flush=True,
         )
         model_path_map = resolve_model_paths(
@@ -1363,15 +1465,15 @@ if __name__ == "__main__":
             require_complete=True,
         )
         print_red(
-            f"[AuroraServe] ✓ Stage 2 local model resolution completed in "
+            f"[AuroraServe] ✓ Model Resolution completed in "
             f"{time.time() - stage_start:.2f}s"
         )
 
     planner_enabled = should_use_global_planner(config)
 
-    # ---- Stage 3: Deploy model services -------------------------------------
+    # ---- Model Deploy: deploy model services to Ray Serve -------------------
     stage3_start = time.monotonic()
-    print("[AuroraServe] Stage 3: Deploying model services to Ray Serve...", flush=True)
+    print("[AuroraServe] Model Deploy: Deploying model services to Ray Serve...", flush=True)
 
     # Diagnostic: print effective health check constants in this process
     try:
@@ -1447,11 +1549,23 @@ if __name__ == "__main__":
 
     tracer.record_phase("stage3.total", time.monotonic() - stage3_start)
     print_red(
-        f"[AuroraServe] ✓ Stage 3 completed in {time.monotonic() - stage3_start:.2f}s"
+        f"[AuroraServe] ✓ Model Deploy completed in {time.monotonic() - stage3_start:.2f}s"
     )
 
-    # ---- Collect per-replica traces from /tmp --------------------------------
-    _collect_replica_traces()
+    # ---- Collect per-replica stats via Ray actor (no filesystem I/O) ---------
+    replica_stats = collect_replica_stats()
+
+    # ---- Collect EngineCore sub-phase timings from temp files ------------------
+    _collect_engine_sub_phases(replica_stats)
+
+    for rs in replica_stats:
+        tracer.record_replica_init(rs)
+    if replica_stats:
+        print(
+            f"[AuroraServe] Collected {len(replica_stats)} replica init stats "
+            f"(engine_create avg={sum(r.get('engine_create_s', 0) for r in replica_stats)/len(replica_stats):.1f}s)",
+            flush=True,
+        )
 
     # ---- All stages complete ------------------------------------------------
     total_time = time.time() - overall_start

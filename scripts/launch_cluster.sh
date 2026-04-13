@@ -247,6 +247,11 @@ export RAY_raylet_client_connect_timeout_milliseconds="${RAY_raylet_client_conne
 # Enables separate thread for user code and separate event loop for the router.
 export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 
+# Proxy readiness check: default 5s is too short on Aurora because the
+# metrics agent timeout (30s, hardcoded in C++) blocks proxy startup.
+# Without this, the controller kills the proxy after 3×5s=15s < 30s.
+export RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S="${RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S:-60}"
+
 # Patch Ray Serve proxy timeouts in ALL Python processes (including the
 # ServeController Ray actor which runs as a separate process).
 # Install a .pth file in the user site-packages directory. Python's site
@@ -266,12 +271,11 @@ if [ -n "$USER_SITE" ]; then
     cat > "$USER_SITE/sitecustomize.py" <<'PYEOF'
 import builtins as _b
 _orig = _b.__import__
-_in_hook = False
+_processing = set()  # guard against re-entrant import of the SAME module
 def _aurora_import(name, *args, **kwargs):
-    global _in_hook
-    if _in_hook:
+    if name in _processing:
         return _orig(name, *args, **kwargs)
-    _in_hook = True
+    _processing.add(name)
     try:
         mod = _orig(name, *args, **kwargs)
         # Proxy timeouts — effectively disable health-check killing
@@ -281,6 +285,8 @@ def _aurora_import(name, *args, **kwargs):
             mod.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
         if hasattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
             mod.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
+        # PROXY_READY_CHECK_TIMEOUT_S is set via RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S
+        # env var (not import hook) because proxy_state.py copies it on import.
         # Replica timeouts — effectively disable health-check killing
         if hasattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') == 30:
             mod.DEFAULT_HEALTH_CHECK_TIMEOUT_S = 600
@@ -290,7 +296,7 @@ def _aurora_import(name, *args, **kwargs):
             mod.REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
         return mod
     finally:
-        _in_hook = False
+        _processing.discard(name)
 _b.__import__ = _aurora_import
 PYEOF
     echo "[System] Installed sitecustomize.py proxy timeout patch in $USER_SITE"
@@ -300,20 +306,26 @@ fi
 
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 
+AURORA_MODEL_BCAST_TIMING=""
 if [ "${AURORA_NULL_COMPUTE:-0}" = "1" ]; then
     echo "[System] NULL-COMPUTE mode enabled; skipping model staging"
 else
     echo "[System] Staging models to node-local storage via MPI bcast..."
     $PYTHON_EXEC src/model_bcast.py --config "$DEPLOYMENT_CONFIG_PATH" --num-nodes "$NODE_COUNT"
+    # model_bcast.py writes timing JSON to a well-known path
+    BCAST_TIMING_FILE="$RUN_LOG_DIR/model_bcast_timing.json"
+    if [ -f "$BCAST_TIMING_FILE" ]; then
+        AURORA_MODEL_BCAST_TIMING=$(cat "$BCAST_TIMING_FILE")
+    fi
 fi
+export AURORA_MODEL_BCAST_TIMING
 
 export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1}"
 
-# Scaling trace instrumentation is OFF by default: at 128+ nodes the
-# per-replica trace files on Lustre add ~10 minutes of setup overhead
-# (see findings/weakscaling_short_v2.md).  Set AURORA_SCALING_TRACE=1
-# explicitly when debugging Ray startup performance.
-export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-0}"
+# Scaling trace instrumentation: collects per-replica init timing and
+# driver phases via Ray object store (no Lustre file I/O).  Safe at any
+# scale.  Set AURORA_SCALING_TRACE=0 to fully disable.
+export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-1}"
 echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
 
 # At 128+ nodes, each vLLM replica process has ~1500 gRPC connections to

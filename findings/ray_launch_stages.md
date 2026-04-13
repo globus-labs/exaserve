@@ -1,0 +1,186 @@
+# Ray Launch Stage Walkthrough
+
+Reference for the full startup sequence from PBS job to serving readiness.
+Built from code walkthrough and experiment logs (v3 weak-scaling runs).
+
+## Stage 0 — Shell Setup (`launch_cluster.sh`)
+
+**What happens:** Shell script runs on the head node inside the PBS job.
+
+1. Resolves Aurora frameworks Python, sanitizes PYTHONPATH
+2. Detects head node HSN IP via `socket.connect(("10.255.255.255", 1))`, writes it into the manifest YAML
+3. Stages models to node-local `/tmp/hf_home/` via `mpiexec model_bcast.py` (all nodes)
+4. Sets Ray tuning env vars:
+   - `RAY_enable_metrics_collection=0` — intended to disable metrics, but the C++ metrics agent still tries to connect and times out (~30s, see Stage 2 — Serve Init)
+   - `RAY_num_server_call_thread=4`, gRPC thread clamping — prevents thread exhaustion at scale
+   - `RAY_gcs_server_num_threads=8` — helps GCS handle 256+ node registration storms
+   - `RAYON_NUM_THREADS=1`, `TOKENIZERS_PARALLELISM=false` — prevents HF tokenizer thread pool panic at 128+ nodes
+   - `AURORA_SCALING_TRACE=0` — disables per-replica Lustre trace I/O (saves 10+ min at 128n)
+5. Installs `sitecustomize.py` in user site-packages to monkey-patch Ray Serve proxy timeouts in ALL Python processes (including the ServeController actor which runs as a separate process)
+6. Launches `mpiexec -n $NODE_COUNT -ppn 1 python src/driver.py`
+
+## Stage 1 — MPI Fork + Ray Start (`driver.py`)
+
+**All ranks run in parallel via MPI.** Rank 0 = head node, rank 1+ = workers.
+
+### Rank 0 (Head Node)
+
+1. **`start_ray_head()`** — `subprocess.Popen("ray start --head --block ...")`.
+   Async — returns immediately while Ray head starts in background.
+   `--block` keeps the subprocess alive (loops sleeping 1s monitoring child processes),
+   but does NOT wait for GCS readiness or any nodes to join.
+
+2. **Launch aurora_serve.py** — `subprocess.Popen("python src/aurora_serve.py --config ...")`.
+   Non-blocking. Output is relayed through `ProcessOutputRelay` which scans for the
+   readiness marker `"CLUSTER FULLY READY"`.
+
+3. **Wait for readiness marker** — blocks until aurora_serve prints `CLUSTER FULLY READY`
+   (timeout: `AURORA_SERVE_READY_TIMEOUT_S`, default 3600s = 1 hour).
+
+4. **HTTP health check** — polls `GET /health` on localhost:8000 to confirm Ray Serve
+   HTTP routes are live. Timeout: `RAY_SERVE_HEALTH_TIMEOUT_S` (1800s = 30 min).
+
+5. **Start proxy** (if configured) — generates HAProxy config from discovered backends
+   (reads PBS_NODEFILE, creates backend entry per node), starts HAProxy on port 4001.
+
+6. **Print `ALL SERVICES READY`** — run_executor watches for this to start the replay client.
+
+7. **Block** — `serve_process.wait()` keeps the head node alive until aurora_serve exits.
+
+### Rank 1+ (Worker Nodes)
+
+1. **`start_ray_worker()`** — `subprocess.Popen("ray start --address=<head_ip>:6379 --block ...")`.
+   Like the head, `--block` just loops sleeping — it does NOT signal when the worker
+   has successfully registered with GCS. Registration happens asynchronously inside
+   the Ray C++ runtime.
+
+2. **Block** — `ray_process.wait()` keeps the worker alive until Ray dies or is killed.
+
+**Key insight:** There is no explicit barrier between "all workers started" and
+"aurora_serve begins". Workers register with GCS asynchronously, and aurora_serve
+polls `ray.cluster_resources()` to detect them (see Stage 3 — GPU Poll).
+
+## Stage 2 — Serve Init (`aurora_serve.py`)
+
+Runs as a subprocess on the head node, launched by driver.py rank 0.
+**Observed: ~47s constant regardless of cluster size (1 to 256 nodes).**
+
+| Step | Time | What |
+|------|------|------|
+| `ray.init()` | 0.2–1.5s | Connect to GCS (head node only) |
+| Timeout patches | instant | Monkey-patch Ray Serve constants |
+| `serve.start()` | ~45s | Create ServeController + schedule ProxyActors |
+| **Total** | **~47s** | **Constant across 1–256 nodes** |
+
+### `ray.init(address=...)` — Connect to GCS
+
+- `init_ray_cluster()` calls `ray.init(address="<head_ip>:6379")` with retry logic:
+  12 attempts, 5s delay between retries (60s total budget).
+- `ray.init()` only needs GCS on the head node — succeeds as soon as the head's
+  GCS server is accepting connections. Does NOT wait for any workers.
+- Observed: **<2s** at all scales.
+
+### Monkey-patch Ray Serve timeouts
+
+- Patches `HTTP_PROXY_TIMEOUT` from 60s → 3600s (prevents ProxyActor kill cascade at 128n)
+- Patches `PROXY_HEALTH_CHECK_TIMEOUT_S` → 300s, `UNHEALTHY_THRESHOLD` → 100
+- Also patches any ray.serve module that already imported the constant by name
+
+### `serve.start()` — Start Ray Serve controller + ProxyActors
+
+- **Blocking call.** Returns only after the ServeController is ready.
+- Creates ServeController actor (single actor, always on head node)
+- With `ProxyLocation.EveryNode`, schedules ProxyActor on every node (port 8000)
+- ProxyActors are spawned asynchronously — `serve.start()` returns before they're all healthy
+
+**Why ~45s constant?** The bottleneck is the **Ray metrics agent timeout**, not
+ProxyActor spawning. Every new Ray process (GCS server, raylet, ServeController,
+core workers) tries to connect to a metrics exporter gRPC service via
+`MetricsAgentClientImpl::WaitForServerReadyWithRetry`. The retry parameters are
+`constexpr` in `ray/rpc/metrics_agent_client.h`:
+`kMetricAgentInitMaxRetries=30`, `kMetricAgentInitRetryDelayMs=1000` (= 30s).
+Not configurable at runtime. Things we verified do NOT help:
+- `RAY_enable_metrics_collection=0` — does not prevent C++ connection attempt
+- `RAY_agent_register_timeout_ms` — controls a different timeout (dashboard ↔ GCS)
+- `--disable-metrics-collection` on dashboard agent — only affects Python Prometheus export
+
+**Status: Accepted as fixed ~30s overhead. Constant regardless of cluster scale.**
+
+**Proxy readiness vs metrics timeout interaction:** Removing the GCS sleep
+exposed a race: `serve.start()` spawns ProxyActors while the metrics agent is
+still in its 30s retry loop. ProxyActors can't respond to the controller's
+`.ready()` check during this time. The controller checks all proxies in parallel
+(non-blocking async futures in a loop), but `PROXY_READY_CHECK_TIMEOUT_S`
+(default 5.0s) is the per-check timeout. After 3 timeouts (15s < 30s), the
+controller kills the proxy as unhealthy.
+
+Fix: `RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S=60` env var in `launch_cluster.sh`.
+This is read at module load time by `constants.py` via `get_env_float_positive()`,
+so it takes effect in all processes including the ServeController actor. The
+monkey-patch / sitecustomize approach does NOT work for this constant because
+`proxy_state.py` does `from constants import PROXY_READY_CHECK_TIMEOUT_S` which
+copies the value before our hook fires. The env var is the only reliable mechanism.
+60s gives 2× headroom over the 30s metrics timeout, and is constant regardless of
+node count since all proxy readiness checks run in parallel.
+
+## Stage 3 — GPU Poll (`aurora_serve.py`)
+
+- Polls `ray.cluster_resources()` + `ray.nodes()` in a loop (15s sleep between polls)
+- Waits until `total_gpus >= expected_gpus` (100% — changed from 95%)
+- 10-minute deadline (increased from 5 min)
+- This is the real logical barrier that ensures workers have joined before deploying models
+
+**Note:** The 95% threshold means up to 5% of nodes can be missing. At 256 nodes,
+that's 12 nodes. This was presumably pragmatic for straggler tolerance but could
+mask real failures.
+
+## Stage 4 — Model Deployment (`aurora_serve.py`)
+
+### 4a. Resolve staged models
+
+- Looks up model paths in node-local `/tmp/hf_home/` (staged in Stage 0)
+
+### 4b. Build node inventory + compute replica plan
+
+- Inventories all Ray nodes and available GPU resources
+- Plans replica placement: which GPUs on which nodes get which model replicas
+- Default: 12 replicas per node (1 per GPU tile), TP=1, PP=1
+
+### 4c. Deploy models via `serve.run()`
+
+- For each model, creates `VLLMWorker` deployment with computed replica count
+- Each replica's `__init__`:
+  - Sets `ZE_AFFINITY_MASK` for GPU isolation
+  - Constructs vLLM `AsyncEngineArgs`
+  - Creates vLLM engine (loads weights, initializes GPU, allocates KV cache)
+  - If scaling trace enabled: writes per-replica trace JSON to Lustre (**THE BOTTLENECK** — see below)
+- All replicas initialize in parallel across the cluster
+
+### 4d. Collect replica traces (if enabled)
+
+- `_collect_replica_traces()` reads per-replica JSON files from Lustre and merges
+- At 128 nodes × 12 replicas = 1,536 files, each `os.remove()` costs ~5s under MDS contention
+- **Total: ~615s at 128 nodes, ~1000s at 256 nodes**
+- Currently disabled via `AURORA_SCALING_TRACE=0`
+
+### 4e. Print `CLUSTER FULLY READY`
+
+- driver.py rank 0 detects this marker and proceeds to start the proxy
+
+## Known Issues & Action Items
+
+- **GCS sleep was redundant** — aurora_serve's retry loop handles GCS readiness.
+  **Fixed:** Removed `time.sleep()` in driver.py.
+- **Metrics agent timeout wastes ~30s** — hardcoded `constexpr` in C++, not
+  configurable at runtime. Official Ray position: *"doing no monitoring at all
+  is unfortunately not possible now"*
+  ([discuss.ray.io](https://discuss.ray.io/t/ray-command-line-parameter-to-turn-off-monitoring-completely/13135)).
+  **Status: Accept ~30s overhead. Constant regardless of scale.**
+- **Scaling trace I/O is O(n) on Lustre** — per-replica file writes/reads/deletes
+  hit MDS contention. Redesign needed: collect via Ray object store or MPI gather,
+  not filesystem.
+- **95% GPU threshold** — could silently proceed with missing nodes. Consider
+  making this configurable or at least logging a prominent warning.
+- **`serve.start()` returns before ProxyActors are healthy** — the HTTP health
+  check in driver.py (Stage 1, step 4) is the real readiness gate, not
+  `serve.start()` itself.
