@@ -1499,12 +1499,33 @@ if __name__ == "__main__":
         monitor = threading.Thread(target=_monitor_deploy, daemon=True)
         monitor.start()
 
-        with tracer.phase("serve.run", model_id=model_id):
+        # Decompose serve.run() into its two blocking phases for timing.
+        # serve.run() internally calls: deploy_applications(wait=True) + wait_for_proxies_serving()
+        from ray.serve._private.api import serve_start as _serve_start
+        from ray.serve.api import build_app
+        from ray.serve._private.constants import SERVE_DEFAULT_APP_NAME
+
+        client = _serve_start(
+            http_options={"location": "EveryNode"},
+            global_logging_config=None,
+        )
+        built = build_app(deployment, name=SERVE_DEFAULT_APP_NAME, route_prefix="/")
+
+        with tracer.phase("serve.run.deploy_apps", model_id=model_id):
             try:
-                serve.run(deployment, route_prefix="/")
+                client.deploy_applications(
+                    [built],
+                    wait_for_ingress_deployment_creation=True,
+                    wait_for_applications_running=True,
+                )
             finally:
                 _deploy_done.set()
                 monitor.join(timeout=2)
+        print(f"[AuroraServe] deploy_applications complete", flush=True)
+
+        with tracer.phase("serve.run.wait_proxies"):
+            client.wait_for_proxies_serving(wait_for_applications_running=True)
+        print(f"[AuroraServe] wait_for_proxies_serving complete", flush=True)
         print(f"[AuroraServe] Service available at http://localhost:8000/v1 (model: {model_id})", flush=True)
     else:
         with tracer.phase("deploy_multi_model"):
