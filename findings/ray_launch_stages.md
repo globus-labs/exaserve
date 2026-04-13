@@ -209,19 +209,27 @@ loop (`CONTROL_LOOP_INTERVAL_S = 0.1s`).
 | 32    | 384      | 2.6s       | ~7ms                 |
 | 64    | 768      | 66.8s      | ~87ms                |
 
-The nonlinear jump at 64 nodes suggests the single-threaded ServeController
-actor saturates under the RPC load of 768 concurrent `initialize_and_get_metadata`
-completions. Each completion triggers `ray.get()` of the result + state machine
-transition + scheduler notification. At 768 replicas the controller's event loop
-becomes the bottleneck.
+Code analysis confirms the controller's check loop IS non-blocking and parallel:
+- `_check_startup_replicas()` iterates all STARTING replicas in a `for` loop
+- Each `check_ready()` calls `check_obj_ref_ready_nowait()` — instant, no blocking
+- `initialize_and_get_metadata.remote()` is issued via `.remote()` (async) on first check
+- All 768 `.remote()` calls are issued in the same loop iteration — fully parallel
 
-The controller loop frequency (0.1s) is NOT the cause — making it slower would
-delay detection. The bottleneck is per-replica processing within each loop
-iteration. This is a Ray Serve scalability limitation in the ServeController's
-single-actor architecture. Potential mitigations:
+The 66.8s overhead is from `initialize_and_get_metadata` execution on the replica
+actors themselves. This method (in `replica.py:1261`) runs:
+1. `await self._replica_impl.initialize()` — calls `reconfigure()` on the user callable
+2. `await self.check_health()` — runs an initial health check
+These execute on each replica actor's async event loop. With 768 actors across
+64 nodes, the overhead comes from Ray's gRPC/object store/scheduler contention
+under the load of 768 concurrent actor RPCs completing simultaneously.
+
+There are no user-facing knobs to parallelize further — the RPCs are already
+parallel. The `CONTROL_LOOP_INTERVAL_S = 0.1s` only affects how often the
+controller polls for completions, not the actual RPC throughput. Potential
+mitigations:
 - Reduce replicas per node (e.g., 6 instead of 12 for larger models)
 - Use `RAY_SERVE_EAGERLY_START_REPLACEMENT_REPLICAS=0` to reduce churn
-- Batch replica state transitions in the controller (requires Ray patch)
+- Investigate Ray gRPC thread tuning (`RAY_num_server_call_thread`)
 
 ## Known Issues & Action Items
 
