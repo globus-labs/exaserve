@@ -46,79 +46,41 @@ from scaling_trace import tracer, tracing_enabled
 
 
 
-def _collect_engine_sub_phases(replica_stats: list[dict]) -> None:
-    """Parse vLLM EngineCore sub-phase timings from Ray worker logs.
+def _parse_own_engine_log(pid: int) -> dict:
+    """Parse this replica's EngineCore sub-phase timings from its own Ray log.
 
-    vLLM logs per-EngineCore process (in Ray worker log files):
-      - "Loading weights took X seconds" (default_loader.py)
-      - "init engine (profile, create kv cache, warmup model) took X seconds" (core.py)
-
-    We parse these from /tmp/ray/session_latest/logs/ on the head node and
-    attach aggregate stats to all replicas. Only head-node logs are visible
-    (worker-node /tmp is separate), but all nodes load the same model so
-    the stats are representative.
-
-    Per-replica attribution via monkey-patch is not possible because vLLM
-    forces multiprocessing start method to 'spawn' inside Ray actors with
-    XPU, and the spawned EngineCore subprocess does not load user
-    site-packages (sitecustomize.py).
+    Each VLLMWorker's EngineCore output appears in the Ray worker log file
+    at /tmp/ray/session_latest/logs/worker-*-{pid}.out. Since from_engine_args()
+    blocks until model loading completes, the log lines exist by the time this
+    function is called. Gives per-replica, per-GPU attribution.
     """
     import glob as _glob
     import re
 
-    log_dir = "/tmp/ray/session_latest/logs"
+    log_files = _glob.glob(f"/tmp/ray/session_latest/logs/worker-*-{pid}.out")
+    if not log_files:
+        return {}
+
     weight_pattern = re.compile(r"Loading weights took ([\d.]+) seconds")
     kv_pattern = re.compile(
         r"init engine \(profile, create kv cache, warmup model\) took ([\d.]+) seconds"
     )
 
-    weight_times: list[float] = []
-    kv_times: list[float] = []
+    result = {}
+    try:
+        with open(log_files[0], "r") as f:
+            for line in f:
+                m = weight_pattern.search(line)
+                if m:
+                    result["weight_load_s"] = round(float(m.group(1)), 4)
+                m = kv_pattern.search(line)
+                if m:
+                    result["kv_cache_init_s"] = round(float(m.group(1)), 4)
+    except Exception:
+        pass
 
-    for log_path in _glob.glob(f"{log_dir}/worker-*.out"):
-        try:
-            with open(log_path, "r") as f:
-                for line in f:
-                    m = weight_pattern.search(line)
-                    if m:
-                        weight_times.append(float(m.group(1)))
-                    m = kv_pattern.search(line)
-                    if m:
-                        kv_times.append(float(m.group(1)))
-        except Exception:
-            pass
+    return result
 
-    if not weight_times and not kv_times:
-        return
-
-    import statistics
-    aggregate = {}
-    if weight_times:
-        aggregate["weight_load_s"] = {
-            "mean": round(statistics.mean(weight_times), 2),
-            "min": round(min(weight_times), 2),
-            "max": round(max(weight_times), 2),
-            "count": len(weight_times),
-        }
-    if kv_times:
-        aggregate["kv_cache_init_s"] = {
-            "mean": round(statistics.mean(kv_times), 2),
-            "min": round(min(kv_times), 2),
-            "max": round(max(kv_times), 2),
-            "count": len(kv_times),
-        }
-
-    for rs in replica_stats:
-        rs["engine_sub_phases"] = aggregate
-
-    wl = aggregate.get("weight_load_s", {})
-    kv = aggregate.get("kv_cache_init_s", {})
-    print(
-        f"[AuroraServe] Engine sub-phases: "
-        f"weight_load avg={wl.get('mean', '?')}s ({wl.get('count', 0)} samples), "
-        f"kv_cache avg={kv.get('mean', '?')}s ({kv.get('count', 0)} samples)",
-        flush=True,
-    )
 
 
 def _patch_ray_serve_proxy_constants() -> None:
@@ -730,10 +692,6 @@ class VLLMWorker:
         print(f"[VLLMWorker pid={pid}] Creating vLLM engine for {model_id}...", flush=True)
 
         # -- Sub-phase: engine creation (weight loading + GPU init + KV cache) --
-        # EngineCore sub-phase timings (model_load_s, kv_cache_init_s) are
-        # captured via sitecustomize.py import hook and reported to the
-        # ReplicaStatsCollector actor from the spawned EngineCore subprocess.
-        # (Can't monkey-patch from here: vLLM forces spawn on XPU/Ray.)
         engine_start = time.monotonic()
         extra_engine_kwargs = {}
         if self._collect_stats:
@@ -770,9 +728,14 @@ class VLLMWorker:
             "wall_start": init_start,
             "wall_end": time.time(),
         }
-        # EngineCore sub-phase timings (model_load_s, kv_cache_init_s) are
-        # reported asynchronously from the forked subprocess via the
-        # ReplicaStatsCollector actor and merged in get_all().
+        # Parse EngineCore sub-phase timings from this replica's own Ray log.
+        # from_engine_args() blocks until model loading completes, so the
+        # log lines exist by this point. Each replica reads its own log
+        # (local /tmp), giving per-replica, per-GPU attribution.
+        engine_sub = _parse_own_engine_log(pid)
+        if engine_sub:
+            replica_info["engine_sub_phases"] = engine_sub
+
         from scaling_trace import report_replica_stats
         report_replica_stats(replica_info)
 
@@ -1555,15 +1518,14 @@ if __name__ == "__main__":
     # ---- Collect per-replica stats via Ray actor (no filesystem I/O) ---------
     replica_stats = collect_replica_stats()
 
-    # ---- Collect EngineCore sub-phase timings from temp files ------------------
-    _collect_engine_sub_phases(replica_stats)
-
     for rs in replica_stats:
         tracer.record_replica_init(rs)
     if replica_stats:
+        has_sub = sum(1 for rs in replica_stats if "engine_sub_phases" in rs)
         print(
             f"[AuroraServe] Collected {len(replica_stats)} replica init stats "
-            f"(engine_create avg={sum(r.get('engine_create_s', 0) for r in replica_stats)/len(replica_stats):.1f}s)",
+            f"(engine_create avg={sum(r.get('engine_create_s', 0) for r in replica_stats)/len(replica_stats):.1f}s, "
+            f"sub-phases: {has_sub}/{len(replica_stats)})",
             flush=True,
         )
 
