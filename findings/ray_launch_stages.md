@@ -153,15 +153,41 @@ mask real failures.
   - Sets `ZE_AFFINITY_MASK` for GPU isolation
   - Constructs vLLM `AsyncEngineArgs`
   - Creates vLLM engine (loads weights, initializes GPU, allocates KV cache)
-  - If scaling trace enabled: writes per-replica trace JSON to Lustre (**THE BOTTLENECK** — see below)
+  - Each replica parses its own Ray worker log for EngineCore sub-phases
+    (`weight_load_s`, `kv_cache_init_s`) and reports via Ray actor
 - All replicas initialize in parallel across the cluster
 
-### 4d. Collect replica traces (if enabled)
+### 4d. Collect replica stats
 
-- `_collect_replica_traces()` reads per-replica JSON files from Lustre and merges
-- At 128 nodes × 12 replicas = 1,536 files, each `os.remove()` costs ~5s under MDS contention
-- **Total: ~615s at 128 nodes, ~1000s at 256 nodes**
-- Currently disabled via `AURORA_SCALING_TRACE=0`
+- Stats collected via `ReplicaStatsCollector` Ray actor (zero Lustre I/O)
+- Each replica reports: `engine_create_s`, `weight_load_s`, `kv_cache_init_s`,
+  plus placement info (hostname, device_id, gpu_ids)
+- `engine_create_s` ≈ `weight_load_s` + `kv_cache_init_s` + framework overhead
+
+**engine_create_s breakdown** (observed on 2 nodes, Llama-3-8B):
+
+| Sub-phase | Time | Source |
+|-----------|------|--------|
+| weight_load_s | ~18s | Safetensors from /tmp → GPU |
+| kv_cache_init_s | ~1.7s | Memory profiling + KV cache alloc |
+| framework overhead | ~13s | Subprocess spawn, Python imports, device init |
+| **engine_create_s** | **~33s** | Total |
+
+**Per-replica sub-phase collection:** Each VLLMWorker parses its own Ray worker
+log at `/tmp/ray/session_latest/logs/worker-*-{pid}.out` after `from_engine_args()`
+returns (which blocks ~33s until model loading completes). The EngineCore subprocess
+output (tagged with `(EngineCore_DP0 pid=...)`) appears in that log file.
+
+**Why not monkey-patch:** vLLM forces `multiprocessing.spawn` (not fork) when
+running inside a Ray actor with XPU initialized. The spawned EngineCore subprocess
+starts a fresh Python interpreter that does NOT load user site-packages. Verified:
+debug marker files in sitecustomize.py appeared for parent processes but not for
+any EngineCore PIDs. Neither monkey-patching nor sitecustomize can reach inside
+the spawned subprocess.
+
+**Future:** For deeper sub-phase instrumentation, copy the conda environment,
+patch vLLM's `EngineCore.__init__` directly, and distribute via MPI bcast before
+launching any Python program.
 
 ### 4e. Print `CLUSTER FULLY READY`
 
