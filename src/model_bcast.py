@@ -1,9 +1,11 @@
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -144,7 +146,10 @@ def bcast_models(
     lustre_model_paths = stage_models(model_configs, lustre_path)
     local_model_paths: Dict[str, str] = {}
 
+    per_model_timings: list[dict] = []
+
     for model_id in iter_unique_model_ids(model_configs):
+        model_t0 = time.monotonic()
         model_config = next(cfg for cfg in model_configs if cfg.model_id == model_id)
         validate_tensor_parallel_compatibility(
             model_id,
@@ -160,6 +165,10 @@ def bcast_models(
                 flush=True,
             )
             local_model_paths[model_id] = str(target_path)
+            per_model_timings.append({
+                "model_id": model_id, "cache_reused": True,
+                "duration_s": round(time.monotonic() - model_t0, 4),
+            })
             continue
 
         source_path = Path(lustre_model_paths[model_id])
@@ -205,8 +214,12 @@ def bcast_models(
             )
         print_red(f"[ModelBcast] ✓ Broadcast complete for {model_id}")
         local_model_paths[model_id] = str(target_path)
+        per_model_timings.append({
+            "model_id": model_id, "cache_reused": False,
+            "duration_s": round(time.monotonic() - model_t0, 4),
+        })
 
-    return local_model_paths
+    return local_model_paths, per_model_timings
 
 
 def main() -> int:
@@ -239,12 +252,24 @@ def main() -> int:
         f"model(s) for {args.num_nodes} node(s)",
         flush=True,
     )
-    bcast_models(
+    overall_start = time.monotonic()
+    _, per_model_timings = bcast_models(
         config.model_configs,
         config.model_storage_path,
         config.local_stage_path,
         args.num_nodes,
     )
+    overall_s = round(time.monotonic() - overall_start, 4)
+
+    # Write timing JSON to a well-known path for launch_cluster.sh to pick up
+    timing = {"model_bcast_total_s": overall_s, "models": per_model_timings}
+    timing_path = os.path.join(
+        os.environ.get("AURORA_RUN_LOG_DIR", "/tmp"), "model_bcast_timing.json"
+    )
+    os.makedirs(os.path.dirname(timing_path), exist_ok=True)
+    with open(timing_path, "w") as f:
+        json.dump(timing, f)
+    print(f"[ModelBcast] Timing: {overall_s:.1f}s total, {len(per_model_timings)} model(s)", flush=True)
     print_red("[ModelBcast] ✓ All models are ready in node-local storage")
     return 0
 

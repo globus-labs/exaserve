@@ -341,3 +341,83 @@ def _print_trace(msg: str, extra: Any = None) -> None:
         if detail:
             parts.append(f"  ({detail})")
     print("".join(parts), flush=True)
+
+
+# --------------------------------------------------------------------------
+# Replica stats collection via Ray named actor (replaces Lustre file I/O)
+# --------------------------------------------------------------------------
+
+_STATS_COLLECTOR_NAME = "ReplicaStatsCollector"
+_STATS_COLLECTOR_NAMESPACE = "serve"
+
+
+class _ReplicaStatsCollectorImpl:
+    """Collects replica init stats in-memory on the head node."""
+
+    def __init__(self):
+        self._replicas: list[dict] = []
+
+    def report(self, replica_info: dict) -> None:
+        self._replicas.append(replica_info)
+
+    def get_all(self) -> list[dict]:
+        return list(self._replicas)
+
+    def count(self) -> int:
+        return len(self._replicas)
+
+
+def create_stats_collector():
+    """Create the named ReplicaStatsCollector actor. Call once on head node
+    after ray.init(), before serve.run() spawns replicas."""
+    if not tracing_enabled():
+        return None
+    import ray
+    actor_cls = ray.remote(_ReplicaStatsCollectorImpl)
+    return actor_cls.options(
+        name=_STATS_COLLECTOR_NAME,
+        namespace=_STATS_COLLECTOR_NAMESPACE,
+        lifetime="detached",
+        num_cpus=0,
+    ).remote()
+
+
+def _get_stats_collector():
+    """Get the named collector actor, or None if tracing is disabled."""
+    if not tracing_enabled():
+        return None
+    try:
+        import ray
+        return ray.get_actor(_STATS_COLLECTOR_NAME, namespace=_STATS_COLLECTOR_NAMESPACE)
+    except Exception:
+        return None
+
+
+def report_replica_stats(replica_info: dict) -> None:
+    """Fire-and-forget: report replica init stats to the collector actor.
+    Called from VLLMWorker.__init__ on every node."""
+    collector = _get_stats_collector()
+    if collector is None:
+        return
+    try:
+        collector.report.remote(replica_info)
+    except Exception:
+        pass  # best effort; don't crash replica init
+
+
+
+
+def collect_replica_stats() -> list[dict]:
+    """Collect all replica stats from the named actor. Called once on head
+    node after serve.run() completes. Returns [] if unavailable."""
+    collector = _get_stats_collector()
+    if collector is None:
+        return []
+    import ray
+    try:
+        stats = ray.get(collector.get_all.remote(), timeout=60)
+        ray.kill(collector)
+        return stats
+    except Exception as exc:
+        print(f"[ScalingTrace] Failed to collect replica stats: {exc}", flush=True)
+        return []

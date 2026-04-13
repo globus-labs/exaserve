@@ -14,8 +14,6 @@ from typing import Sequence
 
 from scaling_trace import (
     default_scaling_trace_path,
-    list_trace_part_paths,
-    trace_part_path,
     tracing_enabled,
 )
 
@@ -424,19 +422,15 @@ def _compute_scaling_trace_token(config_path: str, cluster: RayClusterConfig) ->
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
 
-def _collect_and_merge_traces(config_path: str) -> None:
-    """Collect driver traces from all nodes, merge into the scaling trace.
+def _merge_driver_phases_into_trace(driver_phases: list[dict], hostname: str, rank: int) -> None:
+    """Merge rank-0 driver phases into the scaling trace written by aurora_serve.py.
 
-    Called on rank 0 after ALL SERVICES READY.  The scaling trace was already
-    written by aurora_serve.py to the run-scoped trace path.  We:
-      1. Read that file.
-      2. Read the run-scoped driver trace parts.
-      3. Merge everything into the scaling trace and re-save.
+    No per-rank file I/O — phases are passed directly in-memory from rank 0.
     """
     if not tracing_enabled():
         print("[Driver][Trace] Scaling trace disabled; skipping merge", flush=True)
         return
-    import json
+    import json as _json
 
     trace_path = default_scaling_trace_path()
     if not os.path.isfile(trace_path):
@@ -445,53 +439,21 @@ def _collect_and_merge_traces(config_path: str) -> None:
 
     try:
         with open(trace_path) as f:
-            merged = json.load(f)
+            merged = _json.load(f)
     except Exception as exc:
         print(f"[Driver][Trace] Failed to read scaling trace {trace_path}: {exc}", flush=True)
         return
 
-    driver_trace_paths = list_trace_part_paths("driver")
-    if not driver_trace_paths:
-        print("[Driver][Trace] No driver trace parts found", flush=True)
+    for phase in driver_phases:
+        phase["source"] = f"driver.rank{rank}.{hostname}"
+    merged.setdefault("driver_phases", []).extend(driver_phases)
 
-    for dt_path in driver_trace_paths:
-        try:
-            with open(dt_path) as f:
-                dt = json.load(f)
-            r = dt.get("rank", "?")
-            h = dt.get("hostname", "?")
-            for phase in dt.get("phases", []):
-                phase["source"] = f"driver.rank{r}.{h}"
-            merged.setdefault("driver_phases", []).extend(dt.get("phases", []))
-            os.remove(dt_path)
-        except Exception as exc:
-            print(f"[Driver][Trace] Failed to read driver trace {dt_path}: {exc}", flush=True)
-
-    # Save merged trace
-    out_path = trace_path
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump(merged, f, indent=2, default=str)
-    n_driver = len(merged.get("driver_phases", []))
-    print(f"[Driver][Trace] Merged trace saved to {out_path} ({n_driver} driver phases)", flush=True)
-
-
-def _split_json_objects(text: str) -> list[str]:
-    """Split concatenated JSON objects (e.g. from cat *.json)."""
-    objects = []
-    depth = 0
-    start = None
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                objects.append(text[start : i + 1])
-                start = None
-    return objects
+    with open(trace_path, "w") as f:
+        _json.dump(merged, f, indent=2, default=str)
+    print(
+        f"[Driver][Trace] Merged {len(driver_phases)} driver phases into {trace_path}",
+        flush=True,
+    )
 
 
 def main():
@@ -527,25 +489,6 @@ def main():
         _driver_phases.append(entry)
         print(f"[Driver][Trace] {name}: {duration_s:.3f}s", flush=True)
 
-    def _save_driver_trace() -> None:
-        if not tracing_enabled():
-            return
-        import json as _json
-        path = trace_part_path("driver", f"driver_trace_rank{rank}")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        nodefile = os.environ.get("PBS_NODEFILE", "")
-        node_count = sum(1 for _ in open(nodefile)) if nodefile and os.path.isfile(nodefile) else 1
-        data = {
-            "hostname": hostname,
-            "rank": rank,
-            "node_count": node_count,
-            "head_ip": cluster.head_ip,
-            "phases": _driver_phases,
-        }
-        with open(path, "w") as f:
-            _json.dump(data, f, indent=2)
-        print(f"[Driver][Trace] Driver trace: {path}", flush=True)
-
     try:
         if rank == 0:
             # === HEAD NODE LOGIC ===
@@ -556,16 +499,7 @@ def main():
             ray_process = start_ray_head(cluster)
             _driver_phase("start_ray_head.launch", time.monotonic() - t0)
 
-            # 2. Wait for GCS to initialize and all nodes to register.
-            nodefile = os.environ.get("PBS_NODEFILE", "")
-            node_count = sum(1 for _ in open(nodefile)) if nodefile and os.path.isfile(nodefile) else 1
-            gcs_wait = max(10, node_count // 5)  # ~2s per 10 nodes
-            print(f"[Driver] Waiting {gcs_wait}s for Ray GCS to stabilize ({node_count} nodes)...", flush=True)
-            t0 = time.monotonic()
-            time.sleep(gcs_wait)
-            _driver_phase("gcs_stabilization_wait", time.monotonic() - t0, node_count=node_count)
-
-            # 3. Launch Aurora Serve as a non-blocking subprocess so that the
+            # 2. Launch Aurora Serve as a non-blocking subprocess so that the
             #    proxy can be started after Ray Serve is ready, and both run
             #    concurrently for the lifetime of the cluster.
             serve_cmd = [sys.executable, "src/aurora_serve.py"]
@@ -639,9 +573,8 @@ def main():
 
             _driver_phase("head_total", time.monotonic() - head_start)
 
-            # 5. Collect and merge all traces into a single file in the run log dir.
-            _save_driver_trace()
-            _collect_and_merge_traces(args.config)
+            # 5. Merge driver phases into the scaling trace (no per-rank files).
+            _merge_driver_phases_into_trace(_driver_phases, hostname, rank)
 
             # 6. Signal that ALL services (Ray Serve + proxy) are ready.
             #    run_exp.sh watches for this exact line to start the client.
@@ -672,7 +605,6 @@ def main():
             t0 = time.monotonic()
             ray_process = start_ray_worker(cluster)
             _driver_phase("start_ray_worker.launch", time.monotonic() - t0)
-            _save_driver_trace()
             ray_process.wait()  # Block until Ray dies or is killed
 
     except KeyboardInterrupt:
