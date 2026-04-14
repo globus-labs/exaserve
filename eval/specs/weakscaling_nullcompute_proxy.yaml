@@ -1,0 +1,54 @@
+name: weakscaling_nullcompute_proxy
+matrix:
+  name_template: "{num_nodes}_nodes"
+  axes:
+    - name: num_nodes
+      values: [32, 64]
+      targets: [deployment.num_nodes, scheduler.nodes]
+      label_template: "{value}_nodes"
+  derived:
+    - path: client.num_nodes
+      expr: "min(num_nodes, 4)"
+trace:
+  kind: weak_scaling
+workload:
+  duration: 10.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 10.0
+  generation_mode: deterministic
+deployment:
+  models:
+    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 4096
+      size: 8
+      gpu_memory_utilization: 0.90
+      enforce_eager: true
+      max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 1
+  dest: proxy
+  stream: false
+  num_go_procs: 4
+  num_go_workers: 4
+  startup_only: true
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        null_compute: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs
