@@ -227,12 +227,32 @@ proxy.py:1328). Yet collecting 64 no-op remote call results takes 69s. This is
 pure Ray RPC overhead: issuing 64 `.remote()` calls to actors across 64 nodes
 and resolving them through the gRPC layer + object store.
 
+**Confirmed NOT RPC overhead:** Running the same `wait_for_proxies_serving` code
+on the live 64-node cluster AFTER full startup completes in **0.028s** (64 no-op
+RPCs, 0.2ms each). The 69.3s during `serve.run()` is spent waiting for
+ProxyActors that are still initializing — specifically, ProxyActors on
+late-starting or restarted nodes going through their 30s metrics agent timeout.
+
+The cliff between 32→64 nodes occurs because at 64 nodes the deploy phase
+takes longer (more replicas to schedule), and some ProxyActors get restarted
+(e.g., from port collisions or node scheduling delays). These restarted proxies
+go through the full 30s metrics agent timeout again. At 32 nodes, all proxies
+finish initialization before `wait_for_proxies_serving` is called, so it returns
+instantly (0.017s).
+
+This is ultimately caused by the same 30s `constexpr` metrics agent timeout
+(`kMetricAgentInitMaxRetries=30 × kMetricAgentInitRetryDelayMs=1000`) that
+affects all Ray processes. The ProxyActor `.serving()` method is a no-op
+(`return` immediately), but the `.remote()` call queues on the actor's async
+event loop, which is blocked until the proxy finishes initialization.
+
 Potential mitigations:
-- Skip `wait_for_proxies_serving` entirely (we already have our own HTTP
-  health check in driver.py that confirms /health on each node)
-- Reduce ProxyActor count (e.g., `ProxyLocation.HeadOnly` — but then each
-  node can't serve directly)
-- Investigate Ray gRPC thread tuning (`RAY_num_server_call_thread`)
+- Skip `wait_for_proxies_serving` (we decomposed `serve.run()` into the two
+  explicit calls; can simply not call the second one since driver.py does its
+  own HTTP health check)
+- Reduce ProxyActor restarts at scale (investigate port collision root cause)
+- The fundamental fix: eliminate the 30s metrics agent timeout (requires Ray
+  C++ change)
 
 ## Known Issues & Action Items
 
