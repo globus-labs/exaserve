@@ -124,6 +124,28 @@ may start in batch 2 or later → finishes after deploy_apps.
 This creates the linear trickle: proxies finish in the order their nodes'
 replicas were placed.
 
+## Direct Evidence: Per-Process Start Times from Metrics Failures
+
+Each Ray worker process goes through a 30s C++ metrics agent timeout. The
+failure log message marks the END of this timeout, so subtracting 30s gives
+the approximate process START time.
+
+From startup_inst run2/64-nodes service.log metrics failure timestamps:
+
+```
+~01:30:49  511 VLLMWorkers started   ← BATCH 1 (8 per node × 64 nodes)
+~01:31:15  303 VLLMWorkers started   ← BATCH 2 (remaining 4-5 per node)
+~01:31:26   15 ProxyActors started   ← BATCH 2 (after batch 1 frees slots)
+```
+
+This directly confirms the batching model:
+- Batch 1 fills all 8 slots with VLLMWorkers at ~01:30:49
+- Batch 2 starts ~26s later at ~01:31:15 when batch 1 workers finish
+- ProxyActors are in batch 2, starting at ~01:31:26
+- ProxyActors finish 30s later at ~01:31:56
+- deploy_apps ends at 01:31:43 (77s after start at 01:30:26)
+- **01:31:56 > 01:31:43** → ProxyActors NOT ready → wait_proxies kicks in
+
 ## Potential Fixes
 
 1. **Increase max_startup_concurrency**: From 8 to 16 would halve per-node
