@@ -1519,8 +1519,9 @@ if __name__ == "__main__":
 
         def _timed_deploy_applications(built_apps, **kwargs):
             import ray as _ray
-            from ray.serve._private.client import get_deploy_args, get_random_string
-            from ray.serve._private.common import DeploymentArgs, ApplicationArgs
+            from ray.serve._private.deploy_utils import get_deploy_args
+            from ray.serve._private.utils import get_random_string
+            from ray.serve.generated.serve_pb2 import DeploymentArgs, ApplicationArgs
 
             # Step 1: Build and submit to controller
             t0 = time.monotonic()
