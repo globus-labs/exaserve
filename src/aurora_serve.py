@@ -1562,43 +1562,37 @@ if __name__ == "__main__":
         _deploy_done = threading.Event()
         _proxy_spawn_log = []  # list of (wall_time, num_proxies, num_replicas_running)
         _monitor_start = time.time()
+        _monitor_error_logged = False
         def _monitor_deploy():
-            prev_proxy_count = 0
+            nonlocal _monitor_error_logged
+            prev_proxy_count = -1
             while not _deploy_done.is_set():
                 _deploy_done.wait(timeout=5)
                 if _deploy_done.is_set():
                     break
                 try:
-                    status = serve.status()
-                    app = status.applications.get("default")
-                    running = 0
-                    total = 0
-                    if app:
-                        running = sum(
-                            1 for d in app.deployments.values()
-                            for r in d.replicas
-                            if r.state == "RUNNING"
-                        )
-                        total = sum(
-                            len(d.replicas) for d in app.deployments.values()
-                        )
-                    n_proxies = len(status.proxies)
+                    # Query controller directly instead of serve.status()
+                    import ray as _mray
+                    proxy_handles = _mray.get(
+                        _mray.get_actor("SERVE_CONTROLLER_ACTOR", namespace="serve")
+                        .get_proxies.remote()
+                    )
+                    n_proxies = len(proxy_handles)
                     elapsed = time.time() - _monitor_start
                     _proxy_spawn_log.append({
                         "elapsed_s": round(elapsed, 2),
                         "proxies": n_proxies,
-                        "replicas_running": running,
-                        "replicas_total": total,
                     })
-                    if n_proxies != prev_proxy_count or running > 0:
+                    if n_proxies != prev_proxy_count:
                         print(
-                            f"[AuroraServe] Deploy progress: {running}/{total} replicas RUNNING, "
-                            f"proxies={n_proxies} (+{elapsed:.0f}s)",
+                            f"[AuroraServe] Deploy monitor: proxies={n_proxies} (+{elapsed:.0f}s)",
                             flush=True,
                         )
                         prev_proxy_count = n_proxies
-                except Exception:
-                    pass
+                except Exception as e:
+                    if not _monitor_error_logged:
+                        print(f"[AuroraServe] Deploy monitor error: {e}", flush=True)
+                        _monitor_error_logged = True
         monitor = threading.Thread(target=_monitor_deploy, daemon=True)
         monitor.start()
 
