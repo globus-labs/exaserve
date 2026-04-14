@@ -41,6 +41,7 @@ SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RAY_HEAD_PORT = 6379
 DEFAULT_RAY_NODE_CPUS = 8
 DEFAULT_RAY_INTERNAL_STARTUP_LIMIT = 8
+RAY_INTERNAL_STARTUP_LIMIT_ENV = "AURORA_RAY_INTERNAL_STARTUP_LIMIT"
 
 
 @dataclass(frozen=True)
@@ -199,7 +200,17 @@ def load_ray_cluster_config(config_path: str) -> RayClusterConfig:
 def get_ray_internal_startup_limit(cluster: RayClusterConfig) -> int:
     # Keep the advertised CPU resources high for scheduling while limiting
     # Raylet's eager worker/process fan-out on Aurora.
-    return max(1, min(cluster.node_cpus, DEFAULT_RAY_INTERNAL_STARTUP_LIMIT))
+    raw_limit = os.environ.get(RAY_INTERNAL_STARTUP_LIMIT_ENV, "").strip()
+    if raw_limit:
+        try:
+            configured_limit = int(raw_limit)
+        except ValueError as exc:
+            raise ValueError(
+                f"{RAY_INTERNAL_STARTUP_LIMIT_ENV} must be an integer, got {raw_limit!r}"
+            ) from exc
+    else:
+        configured_limit = DEFAULT_RAY_INTERNAL_STARTUP_LIMIT
+    return max(1, min(cluster.node_cpus, configured_limit))
 
 
 def start_ray_head(cluster: RayClusterConfig):
