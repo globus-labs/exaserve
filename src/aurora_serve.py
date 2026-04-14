@@ -83,6 +83,94 @@ def _parse_own_engine_log(pid: int) -> dict:
 
 
 
+def _collect_proxy_profiles(tracer) -> None:
+    """Collect per-proxy profiling data from all nodes via Ray remote tasks.
+
+    Each ProxyActor (if AURORA_PROXY_PROFILE=1) writes a JSON to
+    /tmp/aurora_proxy_profile/<hostname>_<pid>.json on its node. This
+    function runs a lightweight Ray task on each node to read those files
+    and aggregates the results.
+    """
+    import glob as _glob
+
+    @ray.remote(num_cpus=0)
+    def _read_proxy_profiles():
+        import glob, json, socket
+        profiles = []
+        for path in glob.glob("/tmp/aurora_proxy_profile/*.json"):
+            try:
+                with open(path) as f:
+                    profiles.append(json.load(f))
+            except Exception:
+                pass
+        return {"hostname": socket.gethostname(), "profiles": profiles}
+
+    nodes = ray.nodes()
+    alive_node_ids = [n["NodeID"] for n in nodes if n["Alive"]]
+
+    # Run one task per node to collect profiles
+    refs = []
+    for node_id in alive_node_ids:
+        ref = _read_proxy_profiles.options(
+            scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                node_id=node_id, soft=False
+            )
+        ).remote()
+        refs.append(ref)
+
+    try:
+        results = ray.get(refs, timeout=60)
+    except Exception as e:
+        print(f"[AuroraServe] Proxy profile collection failed: {e}", flush=True)
+        return
+
+    all_profiles = []
+    for r in results:
+        all_profiles.extend(r.get("profiles", []))
+
+    if not all_profiles:
+        print("[AuroraServe] No proxy profiles collected", flush=True)
+        return
+
+    # Compute relative timings from the earliest process
+    min_start = min(p.get("process_python_start_s", float("inf")) for p in all_profiles)
+    for p in all_profiles:
+        p["relative_python_start_s"] = round(p.get("process_python_start_s", 0) - min_start, 3)
+        p["relative_init_start_s"] = round(p.get("init_start_s", 0) - min_start, 3)
+        p["relative_ready_end_s"] = round(p.get("ready_end_s", 0) - min_start, 3) if p.get("ready_end_s") else None
+
+    # Sort by ready_end (latest first for summary)
+    all_profiles.sort(key=lambda p: p.get("ready_end_s", 0))
+
+    # Print summary
+    print(f"[AuroraServe] Proxy profiles collected: {len(all_profiles)} proxies", flush=True)
+
+    # Distribution of key phases
+    python_starts = sorted(p["relative_python_start_s"] for p in all_profiles)
+    init_durations = sorted(p.get("init_duration_s", 0) for p in all_profiles)
+    ready_durations = sorted(p.get("ready_duration_s", 0) for p in all_profiles if p.get("ready_duration_s") is not None)
+    total_pythons = sorted(p.get("total_python_s", 0) for p in all_profiles if p.get("total_python_s"))
+
+    def _dist(vals, label):
+        if not vals:
+            return
+        n = len(vals)
+        print(
+            f"[AuroraServe] Proxy {label}: "
+            f"min={vals[0]:.2f}s median={vals[n//2]:.2f}s "
+            f"p90={vals[int(n*0.9)]:.2f}s max={vals[-1]:.2f}s",
+            flush=True,
+        )
+
+    _dist(python_starts, "python_start (relative)")
+    _dist(init_durations, "init_duration")
+    _dist(ready_durations, "ready_duration")
+    _dist(total_pythons, "total_python (python_start→ready_end)")
+
+    # Save all profiles to the trace
+    tracer.set_metadata(proxy_profiles=all_profiles)
+
+
 def _patch_ray_serve_proxy_constants() -> None:
     """Worker setup hook: patch Ray Serve proxy timeout constants.
 
@@ -1630,6 +1718,10 @@ if __name__ == "__main__":
                 proxy_wait_median_s=round(statistics.median(proxy_complete_times), 2),
                 proxy_wait_last_s=round(proxy_complete_times[-1], 2),
             )
+        # Collect proxy profiling data if AURORA_PROXY_PROFILE=1
+        if os.environ.get("AURORA_PROXY_PROFILE") == "1":
+            _collect_proxy_profiles(tracer)
+
         print(f"[AuroraServe] Service available at http://localhost:8000/v1 (model: {model_id})", flush=True)
     else:
         with tracer.phase("deploy_multi_model"):
