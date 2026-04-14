@@ -1492,3 +1492,119 @@ def _patch_ray_serve_proxy_startup_timeout() -> None:
 
 
 _patch_ray_serve_proxy_startup_timeout()
+
+
+def _install_proxy_actor_profiling_hook() -> None:
+    """Wrap ProxyActor.__init__ and ready() to collect per-process lifecycle timestamps.
+
+    Each proxy writes a JSON file to /tmp/aurora_proxy_profile/ with:
+      - process_python_start_s: wall time when the proxy module was first loaded
+      - init_start_s / init_end_s: wall time around __init__
+      - ready_start_s / ready_end_s: wall time around ready()
+      - hostname, pid, node_id
+    Enabled by AURORA_PROXY_PROFILE=1.
+    """
+    if os.environ.get("AURORA_PROXY_PROFILE") != "1":
+        return
+
+    try:
+        import builtins
+    except Exception:
+        return
+
+    original_import = builtins.__import__
+    if getattr(original_import, "_aurora_proxy_profile_hook", False):
+        return
+
+    _hook_state = {"active": False}
+
+    def _profiling_import(name, globals=None, locals=None, fromlist=(), level=0):
+        module = original_import(name, globals, locals, fromlist, level)
+        if _hook_state["active"]:
+            return module
+        if name != "ray.serve._private.proxy":
+            return module
+
+        try:
+            _hook_state["active"] = True
+            _wrap_proxy_actor_class(module)
+        finally:
+            _hook_state["active"] = False
+        return module
+
+    _profiling_import._aurora_proxy_profile_hook = True
+    builtins.__import__ = _profiling_import
+    _patch_log("Installed ProxyActor profiling import hook")
+
+
+def _wrap_proxy_actor_class(proxy_module) -> None:
+    """Monkey-patch ProxyActor.__init__ and ready() for profiling."""
+    import time as _time
+    import json as _json
+    import socket as _socket
+
+    cls = getattr(proxy_module, "ProxyActor", None)
+    if cls is None or getattr(cls, "_aurora_profiled", False):
+        return
+
+    _orig_init = cls.__init__
+    _orig_ready = cls.ready
+
+    # When this code runs, the proxy module is being imported inside the
+    # ProxyActor worker process. Record the wall time as an approximation
+    # of when Python became available (after C++ metrics timeout).
+    _process_python_start = _time.time()
+
+    def _profiled_init(self, *args, **kwargs):
+        self._aurora_profile = {
+            "process_python_start_s": _process_python_start,
+            "init_start_s": _time.time(),
+            "hostname": _socket.gethostname(),
+            "pid": os.getpid(),
+        }
+        try:
+            _orig_init(self, *args, **kwargs)
+        finally:
+            self._aurora_profile["init_end_s"] = _time.time()
+            self._aurora_profile["init_duration_s"] = round(
+                self._aurora_profile["init_end_s"] - self._aurora_profile["init_start_s"], 4
+            )
+            self._aurora_profile["node_id"] = getattr(self, "_node_id", "unknown")
+
+    async def _profiled_ready(self):
+        if hasattr(self, "_aurora_profile"):
+            self._aurora_profile["ready_start_s"] = _time.time()
+        try:
+            result = await _orig_ready(self)
+        finally:
+            if hasattr(self, "_aurora_profile"):
+                self._aurora_profile["ready_end_s"] = _time.time()
+                self._aurora_profile["ready_duration_s"] = round(
+                    self._aurora_profile["ready_end_s"] - self._aurora_profile["ready_start_s"], 4
+                )
+                self._aurora_profile["total_python_s"] = round(
+                    self._aurora_profile["ready_end_s"] - _process_python_start, 4
+                )
+                _save_proxy_profile(self._aurora_profile)
+        return result
+
+    cls.__init__ = _profiled_init
+    cls.ready = _profiled_ready
+    cls._aurora_profiled = True
+    _patch_log("Wrapped ProxyActor.__init__ and ready() for profiling")
+
+
+def _save_proxy_profile(profile: dict) -> None:
+    """Write proxy profile to /tmp/aurora_proxy_profile/<hostname>_<pid>.json"""
+    import json as _json
+    profile_dir = "/tmp/aurora_proxy_profile"
+    try:
+        os.makedirs(profile_dir, exist_ok=True)
+        path = os.path.join(profile_dir, f"{profile.get('hostname', 'unknown')}_{profile.get('pid', 0)}.json")
+        with open(path, "w") as f:
+            _json.dump(profile, f, indent=2)
+    except Exception as e:
+        print(f"[AuroraProxyProfile] Failed to save profile: {e}", flush=True)
+
+
+_install_proxy_actor_profiling_hook()

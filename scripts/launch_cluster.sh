@@ -270,8 +270,15 @@ if [ -n "$USER_SITE" ]; then
     # that has our target constants.
     cat > "$USER_SITE/sitecustomize.py" <<'PYEOF'
 import builtins as _b
+import os as _os
+import time as _time
+
 _orig = _b.__import__
 _processing = set()  # guard against re-entrant import of the SAME module
+
+# Record process birth time for proxy profiling
+_process_birth_time = _time.time()
+
 def _aurora_import(name, *args, **kwargs):
     if name in _processing:
         return _orig(name, *args, **kwargs)
@@ -294,9 +301,66 @@ def _aurora_import(name, *args, **kwargs):
             mod.DEFAULT_HEALTH_CHECK_PERIOD_S = 120
         if hasattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
             mod.REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
+
+        # ProxyActor lifecycle profiling (AURORA_PROXY_PROFILE=1)
+        if name == "ray.serve._private.proxy" and _os.environ.get("AURORA_PROXY_PROFILE") == "1":
+            _wrap_proxy_for_profiling(mod)
+
         return mod
     finally:
         _processing.discard(name)
+
+def _wrap_proxy_for_profiling(proxy_module):
+    """Wrap ProxyActor.__init__ and ready() to record per-process timestamps."""
+    import socket as _socket, json as _json
+    cls = getattr(proxy_module, "ProxyActor", None)
+    if cls is None or getattr(cls, "_aurora_profiled", False):
+        return
+
+    _orig_init = cls.__init__
+    _orig_ready = cls.ready
+
+    def _profiled_init(self, *a, **kw):
+        self._aurora_profile = {
+            "process_python_start_s": _process_birth_time,
+            "init_start_s": _time.time(),
+            "hostname": _socket.gethostname(),
+            "pid": _os.getpid(),
+        }
+        try:
+            _orig_init(self, *a, **kw)
+        finally:
+            self._aurora_profile["init_end_s"] = _time.time()
+            self._aurora_profile["init_duration_s"] = round(
+                self._aurora_profile["init_end_s"] - self._aurora_profile["init_start_s"], 4)
+            self._aurora_profile["node_id"] = getattr(self, "_node_id", "unknown")
+
+    async def _profiled_ready(self):
+        if hasattr(self, "_aurora_profile"):
+            self._aurora_profile["ready_start_s"] = _time.time()
+        try:
+            result = await _orig_ready(self)
+        finally:
+            if hasattr(self, "_aurora_profile"):
+                self._aurora_profile["ready_end_s"] = _time.time()
+                self._aurora_profile["ready_duration_s"] = round(
+                    self._aurora_profile["ready_end_s"] - self._aurora_profile["ready_start_s"], 4)
+                self._aurora_profile["total_python_s"] = round(
+                    self._aurora_profile["ready_end_s"] - _process_birth_time, 4)
+                # Save to /tmp
+                _d = "/tmp/aurora_proxy_profile"
+                try:
+                    _os.makedirs(_d, exist_ok=True)
+                    with open(f"{_d}/{self._aurora_profile['hostname']}_{_os.getpid()}.json", "w") as _f:
+                        _json.dump(self._aurora_profile, _f, indent=2)
+                except Exception:
+                    pass
+        return result
+
+    cls.__init__ = _profiled_init
+    cls.ready = _profiled_ready
+    cls._aurora_profiled = True
+
 _b.__import__ = _aurora_import
 PYEOF
     echo "[System] Installed sitecustomize.py proxy timeout patch in $USER_SITE"
@@ -327,6 +391,11 @@ export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1
 # scale.  Set AURORA_SCALING_TRACE=0 to fully disable.
 export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-1}"
 echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
+
+# ProxyActor lifecycle profiling: wraps ProxyActor.__init__ and ready()
+# to collect per-process timestamps.  Writes JSON to /tmp/aurora_proxy_profile/.
+export AURORA_PROXY_PROFILE="${AURORA_PROXY_PROFILE:-1}"
+echo "[System] AURORA_PROXY_PROFILE=$AURORA_PROXY_PROFILE"
 
 # At 128+ nodes, each vLLM replica process has ~1500 gRPC connections to
 # other Ray actors, consuming many threads.  When the HuggingFace Rust
