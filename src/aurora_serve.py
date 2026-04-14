@@ -1562,9 +1562,8 @@ if __name__ == "__main__":
         _deploy_done = threading.Event()
         _proxy_spawn_log = []  # list of (wall_time, num_proxies, num_replicas_running)
         _monitor_start = time.time()
-        _monitor_error_logged = False
+        _monitor_error_logged = {"value": False}
         def _monitor_deploy():
-            nonlocal _monitor_error_logged
             prev_proxy_count = -1
             while not _deploy_done.is_set():
                 _deploy_done.wait(timeout=5)
@@ -1590,9 +1589,9 @@ if __name__ == "__main__":
                         )
                         prev_proxy_count = n_proxies
                 except Exception as e:
-                    if not _monitor_error_logged:
+                    if not _monitor_error_logged["value"]:
                         print(f"[AuroraServe] Deploy monitor error: {e}", flush=True)
-                        _monitor_error_logged = True
+                        _monitor_error_logged["value"] = True
         monitor = threading.Thread(target=_monitor_deploy, daemon=True)
         monitor.start()
 
