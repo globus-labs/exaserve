@@ -1557,17 +1557,22 @@ if __name__ == "__main__":
         with tracer.phase("deploy_model.build", model_id=primary_config.model_id):
             deployment, model_id = deploy_model(primary_config, model_path_map, total_gpus, config)
 
-        # Monitor deployment progress in a background thread
+        # Monitor deployment progress + proxy spawning timeline in background
         import threading
         _deploy_done = threading.Event()
+        _proxy_spawn_log = []  # list of (wall_time, num_proxies, num_replicas_running)
+        _monitor_start = time.time()
         def _monitor_deploy():
+            prev_proxy_count = 0
             while not _deploy_done.is_set():
-                _deploy_done.wait(timeout=15)
+                _deploy_done.wait(timeout=5)
                 if _deploy_done.is_set():
                     break
                 try:
                     status = serve.status()
                     app = status.applications.get("default")
+                    running = 0
+                    total = 0
                     if app:
                         running = sum(
                             1 for d in app.deployments.values()
@@ -1577,11 +1582,21 @@ if __name__ == "__main__":
                         total = sum(
                             len(d.replicas) for d in app.deployments.values()
                         )
+                    n_proxies = len(status.proxies)
+                    elapsed = time.time() - _monitor_start
+                    _proxy_spawn_log.append({
+                        "elapsed_s": round(elapsed, 2),
+                        "proxies": n_proxies,
+                        "replicas_running": running,
+                        "replicas_total": total,
+                    })
+                    if n_proxies != prev_proxy_count or running > 0:
                         print(
                             f"[AuroraServe] Deploy progress: {running}/{total} replicas RUNNING, "
-                            f"proxies={len(status.proxies)}",
+                            f"proxies={n_proxies} (+{elapsed:.0f}s)",
                             flush=True,
                         )
+                        prev_proxy_count = n_proxies
                 except Exception:
                     pass
         monitor = threading.Thread(target=_monitor_deploy, daemon=True)
@@ -1718,6 +1733,31 @@ if __name__ == "__main__":
                 proxy_wait_median_s=round(statistics.median(proxy_complete_times), 2),
                 proxy_wait_last_s=round(proxy_complete_times[-1], 2),
             )
+        # Log proxy spawn timeline from monitor thread
+        if _proxy_spawn_log:
+            tracer.set_metadata(proxy_spawn_timeline=_proxy_spawn_log)
+            # Print summary: when did we first see N proxies?
+            proxy_milestones = {}
+            for entry in _proxy_spawn_log:
+                n = entry["proxies"]
+                if n not in proxy_milestones:
+                    proxy_milestones[n] = entry["elapsed_s"]
+            print(f"[AuroraServe] Proxy spawn timeline: {proxy_milestones}", flush=True)
+
+        # Collect per-proxy status from serve.status()
+        try:
+            status = serve.status()
+            proxy_status_list = []
+            for node_id, proxy in status.proxies.items():
+                proxy_status_list.append({
+                    "node_id": node_id,
+                    "status": str(proxy.status),
+                })
+            tracer.set_metadata(proxy_statuses=proxy_status_list)
+            print(f"[AuroraServe] Proxy statuses: {len(proxy_status_list)} proxies", flush=True)
+        except Exception as e:
+            print(f"[AuroraServe] Failed to collect proxy statuses: {e}", flush=True)
+
         # Collect proxy profiling data if AURORA_PROXY_PROFILE=1
         if os.environ.get("AURORA_PROXY_PROFILE") == "1":
             _collect_proxy_profiles(tracer)
