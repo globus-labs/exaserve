@@ -1511,21 +1511,124 @@ if __name__ == "__main__":
         )
         built = build_app(deployment, name=SERVE_DEFAULT_APP_NAME, route_prefix="/")
 
+        # --- Decomposed deploy with per-step timing ---
+        # Monkey-patch the client to add timing around each internal step.
+        _orig_deploy = client.deploy_applications.__wrapped__ if hasattr(client.deploy_applications, '__wrapped__') else None
+
+        _deploy_step_times = {}
+
+        def _timed_deploy_applications(built_apps, **kwargs):
+            import ray as _ray
+            from ray.serve._private.client import get_deploy_args, get_random_string
+            from ray.serve._private.common import DeploymentArgs, ApplicationArgs
+
+            # Step 1: Build and submit to controller
+            t0 = time.monotonic()
+            name_to_deployment_args_list = {}
+            name_to_application_args = {}
+            for app in built_apps:
+                deployment_args_list = []
+                for dep in app.deployments:
+                    if dep.logging_config is None and app.logging_config:
+                        dep = dep.options(logging_config=app.logging_config)
+                    is_ingress = dep.name == app.ingress_deployment_name
+                    da = get_deploy_args(
+                        dep.name, ingress=is_ingress,
+                        replica_config=dep._replica_config,
+                        deployment_config=dep._deployment_config,
+                        version=dep._version or get_random_string(),
+                        route_prefix=app.route_prefix if is_ingress else None,
+                    )
+                    dap = DeploymentArgs()
+                    dap.deployment_name = da["deployment_name"]
+                    dap.deployment_config = da["deployment_config_proto_bytes"]
+                    dap.replica_config = da["replica_config_proto_bytes"]
+                    dap.deployer_job_id = da["deployer_job_id"]
+                    if da["route_prefix"]:
+                        dap.route_prefix = da["route_prefix"]
+                    dap.ingress = da["ingress"]
+                    deployment_args_list.append(dap.SerializeToString())
+                aap = ApplicationArgs()
+                aap.external_scaler_enabled = app.external_scaler_enabled
+                name_to_deployment_args_list[app.name] = deployment_args_list
+                name_to_application_args[app.name] = aap.SerializeToString()
+            client._check_ingress_deployments(built_apps)
+            _ray.get(client._controller.deploy_applications.remote(
+                name_to_deployment_args_list, name_to_application_args
+            ))
+            _deploy_step_times["submit_to_controller"] = round(time.monotonic() - t0, 4)
+            print(f"[AuroraServe] Step 1 submit_to_controller: {_deploy_step_times['submit_to_controller']}s", flush=True)
+
+            # Step 2: Wait for deployment created
+            t0 = time.monotonic()
+            for app in built_apps:
+                client._wait_for_deployment_created(app.ingress_deployment_name, app.name)
+            _deploy_step_times["wait_deployment_created"] = round(time.monotonic() - t0, 4)
+            print(f"[AuroraServe] Step 2 wait_deployment_created: {_deploy_step_times['wait_deployment_created']}s", flush=True)
+
+            # Step 3: Wait for application RUNNING
+            t0 = time.monotonic()
+            for app in built_apps:
+                client._wait_for_application_running(app.name)
+            _deploy_step_times["wait_app_running"] = round(time.monotonic() - t0, 4)
+            print(f"[AuroraServe] Step 3 wait_app_running: {_deploy_step_times['wait_app_running']}s", flush=True)
+
+            return [client.get_handle(app.ingress_deployment_name, app.name, check_exists=False) for app in built_apps]
+
         with tracer.phase("serve.run.deploy_apps", model_id=model_id):
             try:
-                client.deploy_applications(
-                    [built],
-                    wait_for_ingress_deployment_creation=True,
-                    wait_for_applications_running=True,
-                )
+                _timed_deploy_applications([built])
             finally:
                 _deploy_done.set()
                 monitor.join(timeout=2)
-        print(f"[AuroraServe] deploy_applications complete", flush=True)
 
-        with tracer.phase("serve.run.wait_proxies"):
-            client.wait_for_proxies_serving(wait_for_applications_running=True)
-        print(f"[AuroraServe] wait_for_proxies_serving complete", flush=True)
+        # Record sub-steps as phases
+        for step_name, step_dur in _deploy_step_times.items():
+            tracer.record_phase(f"serve.run.deploy.{step_name}", step_dur)
+
+        # Step 4: Wait for proxies serving (with per-proxy timing)
+        import ray as _ray
+        t0 = time.monotonic()
+        proxy_handles = _ray.get(client._controller.get_proxies.remote())
+        t_get_proxies = time.monotonic() - t0
+        print(f"[AuroraServe] Step 4a get_proxies: {t_get_proxies:.3f}s ({len(proxy_handles)} proxies)", flush=True)
+
+        t0 = time.monotonic()
+        serving_refs = [h.serving.remote(wait_for_applications_running=True) for h in proxy_handles.values()]
+        t_issue = time.monotonic() - t0
+        print(f"[AuroraServe] Step 4b issue .serving.remote() x{len(serving_refs)}: {t_issue:.3f}s", flush=True)
+
+        t0 = time.monotonic()
+        # Track when each proxy finishes
+        remaining = list(serving_refs)
+        proxy_complete_times = []
+        wait_start = time.monotonic()
+        while remaining:
+            done, remaining = _ray.wait(remaining, num_returns=1, timeout=5.0)
+            elapsed = time.monotonic() - wait_start
+            if done:
+                proxy_complete_times.append(elapsed)
+                if len(proxy_complete_times) % 10 == 0 or not remaining:
+                    print(f"[AuroraServe] Step 4c proxies ready: {len(proxy_complete_times)}/{len(serving_refs)} at +{elapsed:.1f}s", flush=True)
+        t_wait = time.monotonic() - t0
+        tracer.record_phase("serve.run.wait_proxies", t_wait)
+
+        # Log proxy completion distribution
+        if proxy_complete_times:
+            import statistics
+            print(
+                f"[AuroraServe] Step 4 wait_proxies: {t_wait:.1f}s total, "
+                f"proxy completion: first={proxy_complete_times[0]:.1f}s "
+                f"median={statistics.median(proxy_complete_times):.1f}s "
+                f"p90={proxy_complete_times[int(len(proxy_complete_times)*0.9)]:.1f}s "
+                f"last={proxy_complete_times[-1]:.1f}s",
+                flush=True,
+            )
+            tracer.set_metadata(
+                proxy_wait_first_s=round(proxy_complete_times[0], 2),
+                proxy_wait_median_s=round(statistics.median(proxy_complete_times), 2),
+                proxy_wait_last_s=round(proxy_complete_times[-1], 2),
+            )
         print(f"[AuroraServe] Service available at http://localhost:8000/v1 (model: {model_id})", flush=True)
     else:
         with tracer.phase("deploy_multi_model"):
