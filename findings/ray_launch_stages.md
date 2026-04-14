@@ -227,32 +227,38 @@ proxy.py:1328). Yet collecting 64 no-op remote call results takes 69s. This is
 pure Ray RPC overhead: issuing 64 `.remote()` calls to actors across 64 nodes
 and resolving them through the gRPC layer + object store.
 
-**Confirmed NOT RPC overhead:** Running the same `wait_for_proxies_serving` code
-on the live 64-node cluster AFTER full startup completes in **0.028s** (64 no-op
-RPCs, 0.2ms each). The 69.3s during `serve.run()` is spent waiting for
-ProxyActors that are still initializing — specifically, ProxyActors on
-late-starting or restarted nodes going through their 30s metrics agent timeout.
+**Partial finding at 64 nodes:** Running the same `wait_for_proxies_serving`
+code on a live 64-node cluster AFTER full startup completes in **0.028s** (64
+no-op RPCs, 0.2ms each). This confirms RPCs are fast when proxies are ready.
+The 69.3s during startup is spent waiting for ProxyActors still initializing.
 
-The cliff between 32→64 nodes occurs because at 64 nodes the deploy phase
-takes longer (more replicas to schedule), and some ProxyActors get restarted
-(e.g., from port collisions or node scheduling delays). These restarted proxies
-go through the full 30s metrics agent timeout again. At 32 nodes, all proxies
-finish initialization before `wait_for_proxies_serving` is called, so it returns
-instantly (0.017s).
+**But the scaling is much worse than 30s at larger scales:**
 
-This is ultimately caused by the same 30s `constexpr` metrics agent timeout
-(`kMetricAgentInitMaxRetries=30 × kMetricAgentInitRetryDelayMs=1000`) that
-affects all Ray processes. The ProxyActor `.serving()` method is a no-op
-(`return` immediately), but the `.remote()` call queues on the actor's async
-event loop, which is blocked until the proxy finishes initialization.
+| Nodes | Deploy time (haproxy) | Deploy time (direct) |
+|------:|----------------------:|---------------------:|
+|     1 |                  74s  |                 75s  |
+|    32 |                  78s  |                 79s  |
+|    64 |                 148s  |                149s  |
+|   128 |                 442s  |                443s  |
+|   256 |                1665s  |                349s  |
 
-Potential mitigations:
-- Skip `wait_for_proxies_serving` (we decomposed `serve.run()` into the two
-  explicit calls; can simply not call the second one since driver.py does its
-  own HTTP health check)
-- Reduce ProxyActor restarts at scale (investigate port collision root cause)
-- The fundamental fix: eliminate the 30s metrics agent timeout (requires Ray
-  C++ change)
+128 nodes takes 442s (7 min), 256 nodes takes 1665s (27 min) in haproxy mode.
+This grows much faster than the 30s metrics timeout can explain. The root cause
+at 128+ nodes is **not yet conclusively identified** — it requires instrumented
+runs with `deploy_apps` vs `wait_proxies` decomposition at 128-256 nodes.
+
+Possible explanations (unverified):
+- ServeController becomes CPU-bound processing 1536-3072 replica state
+  transitions, causing `deploy_applications` itself to scale poorly
+- ProxyActor restarts cascade at scale (port collisions, node failures),
+  multiplying the 30s timeout
+- Ray's GCS or scheduler contention under high concurrent actor count
+- The haproxy 256n outlier (1665s vs 349s direct) suggests proxy-specific
+  issues at that scale
+
+**Next step:** Run 128-256 node experiments with the decomposed instrumentation
+(`serve.run.deploy_apps` vs `serve.run.wait_proxies`) using the `startup_only`
+flag to minimize queue time.
 
 ## Known Issues & Action Items
 
