@@ -192,6 +192,24 @@ event loop becomes the bottleneck that makes it dramatically worse.
 
 All runs: `AURORA_NULL_COMPUTE=1`, commit `9ed7f8f` (perf-inst branch).
 
+## Open Gap: Per-Proxy Lifecycle Timing
+
+We have wait_proxies totals and controller-side data, but NOT per-proxy
+lifecycle breakdown (scheduling_delay vs init_duration vs ready_duration).
+
+Attempts to instrument ProxyActor failed because:
+1. **Monkey-patching doesn't survive Ray pickle**: Ray serializes actor classes
+   from the driver and deserializes in workers. Worker-side patches are ignored.
+2. **Import finder approach**: Works interactively but fails in PBS jobs because
+   Ray's pre-started workers import `ray.serve._private.proxy` during their
+   startup, before the custom MetaPathFinder can intercept.
+3. **`.pth` file approach**: Breaks `ray.serve` import chain (`AttributeError:
+   module 'ray' has no attribute 'serve'`).
+
+**Next approach to try**: Use Ray's `worker_process_setup_hook` to inject timing
+after the worker starts but before the actor task executes. Or accept that
+driver-side timing (which we have) is sufficient to characterize the problem.
+
 ## Files
 
 - Instrumentation code: `scripts/launch_cluster.sh` (usercustomize.py generation)
