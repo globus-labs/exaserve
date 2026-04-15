@@ -295,6 +295,14 @@ _processing = set()  # guard against re-entrant import of the SAME module
 # Record process birth time for proxy profiling
 _process_birth_time = _time.time()
 
+# Canary: confirm usercustomize loaded in every process
+try:
+    _os.makedirs("/tmp/aurora_inst", exist_ok=True)
+    with open(f"/tmp/aurora_inst/canary_{_os.getpid()}.txt", "w") as _cf:
+        _cf.write(f"loaded at {_process_birth_time}\n")
+except Exception:
+    pass
+
 def _aurora_import(name, *args, **kwargs):
     if name in _processing:
         return _orig(name, *args, **kwargs)
@@ -322,33 +330,27 @@ def _aurora_import(name, *args, **kwargs):
             if hasattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
                 mod.REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
 
-        # ProxyActor lifecycle profiling (AURORA_PROXY_PROFILE=1)
-        # Deferred: check sys.modules after any ray.serve import, same as controller
-        if _os.environ.get("AURORA_PROXY_PROFILE") == "1" and name.startswith("ray.serve"):
-            import sys as _sys2
-            _px_mod = _sys2.modules.get("ray.serve._private.proxy")
-            if _px_mod is not None and not getattr(getattr(_px_mod, "ProxyActor", None), "_aurora_profiled", False):
-                if hasattr(_px_mod, "ProxyActor"):
-                    _wrap_proxy_for_profiling(_px_mod)
-
-        # Controller/proxy_state instrumentation (AURORA_CONTROLLER_INST=1)
-        # Deferred wrapping: modules have circular imports, so the class
-        # may not exist on the first __import__ call.  We check sys.modules
-        # after every ray.serve import and wrap once the class appears.
-        if _os.environ.get("AURORA_CONTROLLER_INST") == "1" and name.startswith("ray.serve"):
-            import sys as _sys
-            _ctrl_mod = _sys.modules.get("ray.serve._private.controller")
-            if _ctrl_mod is not None and not getattr(getattr(_ctrl_mod, "ServeController", None), "_aurora_ctrl_inst", False):
-                if hasattr(_ctrl_mod, "ServeController"):
-                    _wrap_controller_for_inst(_ctrl_mod)
-            _ps_mod = _sys.modules.get("ray.serve._private.proxy_state")
-            if _ps_mod is not None and not getattr(getattr(_ps_mod, "ProxyStateManager", None), "_aurora_psm_inst", False):
-                if hasattr(_ps_mod, "ProxyStateManager"):
-                    _wrap_proxy_state_for_inst(_ps_mod)
-
         return mod
     finally:
         _processing.discard(name)
+        # Deferred wrapping runs in finally so it fires even when the
+        # target module itself is what just finished importing (the
+        # _processing guard skips the body for re-entrant imports of
+        # the same module, but the finally block of the FIRST call
+        # runs after the module is fully initialized in sys.modules).
+        if name.startswith("ray.serve"):
+            import sys as _dsys
+            if _os.environ.get("AURORA_PROXY_PROFILE") == "1":
+                _px = _dsys.modules.get("ray.serve._private.proxy")
+                if _px is not None and hasattr(_px, "ProxyActor") and not getattr(_px.ProxyActor, "_aurora_profiled", False):
+                    _wrap_proxy_for_profiling(_px)
+            if _os.environ.get("AURORA_CONTROLLER_INST") == "1":
+                _ct = _dsys.modules.get("ray.serve._private.controller")
+                if _ct is not None and hasattr(_ct, "ServeController") and not getattr(_ct.ServeController, "_aurora_ctrl_inst", False):
+                    _wrap_controller_for_inst(_ct)
+                _ps = _dsys.modules.get("ray.serve._private.proxy_state")
+                if _ps is not None and hasattr(_ps, "ProxyStateManager") and not getattr(_ps.ProxyStateManager, "_aurora_psm_inst", False):
+                    _wrap_proxy_state_for_inst(_ps)
 
 def _wrap_proxy_for_profiling(proxy_module):
     """Wrap ProxyActor.__init__ and ready() to record per-process timestamps.
@@ -408,6 +410,14 @@ def _wrap_proxy_for_profiling(proxy_module):
     cls.__init__ = _profiled_init
     cls.ready = _profiled_ready
     cls._aurora_profiled = True
+    # Debug: confirm wrapping happened
+    _inst_dir = "/tmp/aurora_inst"
+    try:
+        _os.makedirs(_inst_dir, exist_ok=True)
+        with open(f"{_inst_dir}/proxy_wrap_debug_{_socket.gethostname()}_{_os.getpid()}.txt", "w") as _dbg:
+            _dbg.write(f"wrapped at {_time.time()}, init={cls.__init__ is _profiled_init}, ready={cls.ready is _profiled_ready}\n")
+    except Exception:
+        pass
 
 def _wrap_proxy_state_for_inst(proxy_state_module):
     """Instrument ProxyStateManager to log proxy spawn events and state transitions."""
