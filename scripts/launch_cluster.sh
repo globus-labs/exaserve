@@ -295,6 +295,14 @@ _processing = set()  # guard against re-entrant import of the SAME module
 # Record process birth time for proxy profiling
 _process_birth_time = _time.time()
 
+# Diagnostic: log usercustomize load to /tmp
+try:
+    _os.makedirs("/tmp/aurora_inst", exist_ok=True)
+    with open(f"/tmp/aurora_inst/uc_load_{_os.getpid()}.txt", "w") as _uf:
+        _uf.write(f"pid={_os.getpid()} t={_process_birth_time} PROXY_PROFILE={_os.environ.get('AURORA_PROXY_PROFILE','unset')}\n")
+except Exception:
+    pass
+
 # Install a custom module finder that redirects ray.serve._private.proxy
 # to our instrumented overlay file. This is the ONLY reliable way to
 # instrument Ray actors — monkey-patching doesn't survive pickle
