@@ -1,14 +1,17 @@
 name: smoke_haproxy_1node
 matrix:
-  name_template: "{num_nodes}_nodes"
+  name_template: '{num_nodes}_nodes'
   axes:
-    - name: num_nodes
-      values: [1]
-      targets: [deployment.num_nodes, scheduler.nodes]
-      label_template: "{value}_nodes"
+  - name: num_nodes
+    values:
+    - 1
+    targets:
+    - deployment.num_nodes
+    - scheduler.nodes
+    label_template: '{value}_nodes'
   derived:
-    - path: client.num_nodes
-      expr: "1"
+  - path: client.num_nodes
+    expr: '1'
 trace:
   kind: weak_scaling
 workload:
@@ -19,14 +22,14 @@ workload:
   generation_mode: deterministic
 deployment:
   models:
-    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
-      tensor_parallel_size: 1
-      pipeline_parallel_size: 1
-      max_model_len: 4096
-      size: 8
-      gpu_memory_utilization: 0.90
-      enforce_eager: true
-      max_num_seqs: 64
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.9
+    enforce_eager: true
+    max_num_seqs: 64
   replica_max_ongoing_requests: 128
 client:
   num_runs: 1
@@ -53,4 +56,6 @@ backend:
 scheduler:
   type: pbs
   queue: debug
-  walltime: "01:00:00"
+  walltime: 01:00:00
+ray_cluster_config:
+  head_ip: 10.115.31.131
