@@ -323,8 +323,13 @@ def _aurora_import(name, *args, **kwargs):
                 mod.REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
 
         # ProxyActor lifecycle profiling (AURORA_PROXY_PROFILE=1)
-        if name == "ray.serve._private.proxy" and _os.environ.get("AURORA_PROXY_PROFILE") == "1":
-            _wrap_proxy_for_profiling(mod)
+        # Deferred: check sys.modules after any ray.serve import, same as controller
+        if _os.environ.get("AURORA_PROXY_PROFILE") == "1" and name.startswith("ray.serve"):
+            import sys as _sys2
+            _px_mod = _sys2.modules.get("ray.serve._private.proxy")
+            if _px_mod is not None and not getattr(getattr(_px_mod, "ProxyActor", None), "_aurora_profiled", False):
+                if hasattr(_px_mod, "ProxyActor"):
+                    _wrap_proxy_for_profiling(_px_mod)
 
         # Controller/proxy_state instrumentation (AURORA_CONTROLLER_INST=1)
         # Deferred wrapping: modules have circular imports, so the class
@@ -346,7 +351,12 @@ def _aurora_import(name, *args, **kwargs):
         _processing.discard(name)
 
 def _wrap_proxy_for_profiling(proxy_module):
-    """Wrap ProxyActor.__init__ and ready() to record per-process timestamps."""
+    """Wrap ProxyActor.__init__ and ready() to record per-process timestamps.
+
+    Captures the full proxy lifecycle: process birth → __init__ start/end →
+    ready() start/end. Writes JSON to /tmp/aurora_inst/ for collection.
+    No threading.Lock (must be picklable for Ray actor checkpointing).
+    """
     import socket as _socket, json as _json
     cls = getattr(proxy_module, "ProxyActor", None)
     if cls is None or getattr(cls, "_aurora_profiled", False):
@@ -356,13 +366,12 @@ def _wrap_proxy_for_profiling(proxy_module):
     _orig_ready = cls.ready
 
     def _profiled_init(self, *a, **kw):
-        with open("/tmp/aurora_proxy_init_" + str(_os.getpid()) + ".log", "w") as _if:
-            _if.write("INIT CALLED pid=" + str(_os.getpid()) + "\n")
         self._aurora_profile = {
             "process_python_start_s": _process_birth_time,
             "init_start_s": _time.time(),
             "hostname": _socket.gethostname(),
             "pid": _os.getpid(),
+            "scheduling_delay_s": round(_time.time() - _process_birth_time, 4),
         }
         try:
             _orig_init(self, *a, **kw)
@@ -382,13 +391,15 @@ def _wrap_proxy_for_profiling(proxy_module):
                 self._aurora_profile["ready_end_s"] = _time.time()
                 self._aurora_profile["ready_duration_s"] = round(
                     self._aurora_profile["ready_end_s"] - self._aurora_profile["ready_start_s"], 4)
-                self._aurora_profile["total_python_s"] = round(
+                self._aurora_profile["total_from_birth_s"] = round(
                     self._aurora_profile["ready_end_s"] - _process_birth_time, 4)
-                # Save to /tmp
-                _d = "/tmp/aurora_proxy_profile"
+                self._aurora_profile["total_from_init_s"] = round(
+                    self._aurora_profile["ready_end_s"] - self._aurora_profile["init_start_s"], 4)
+                # Save to /tmp/aurora_inst/ (same dir as controller/proxy_state)
+                _d = "/tmp/aurora_inst"
                 try:
                     _os.makedirs(_d, exist_ok=True)
-                    with open(f"{_d}/{self._aurora_profile['hostname']}_{_os.getpid()}.json", "w") as _f:
+                    with open(f"{_d}/proxy_actor_{self._aurora_profile['hostname']}_{_os.getpid()}.json", "w") as _f:
                         _json.dump(self._aurora_profile, _f, indent=2)
                 except Exception:
                     pass
@@ -397,8 +408,6 @@ def _wrap_proxy_for_profiling(proxy_module):
     cls.__init__ = _profiled_init
     cls.ready = _profiled_ready
     cls._aurora_profiled = True
-    with open("/tmp/aurora_proxy_wrap_" + str(_os.getpid()) + ".log", "w") as _wf:
-        _wf.write("wrapped pid=" + str(_os.getpid()) + " init_ok=" + str(cls.__init__ is _profiled_init) + "\n")
 
 def _wrap_proxy_state_for_inst(proxy_state_module):
     """Instrument ProxyStateManager to log proxy spawn events and state transitions."""
