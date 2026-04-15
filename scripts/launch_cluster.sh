@@ -629,28 +629,39 @@ export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKENIZERS_PARALLELISM"
 
+echo "[System] DEBUG: About to set up Ray overlay (AURORA_PROXY_PROFILE=${AURORA_PROXY_PROFILE:-unset})"
 # --- Ray overlay: instrumented proxy.py via symlink tree ---
 # Creates /tmp/ray_overlay on each node with symlinks to the system ray
 # package, replacing only proxy.py with our instrumented version.
 # This is prepended to PYTHONPATH so Python finds our proxy.py first.
 OVERLAY_PROXY="$HOME/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py"
 if [ "${AURORA_PROXY_PROFILE:-0}" = "1" ] && [ -f "$OVERLAY_PROXY" ]; then
-    SYSRAY="$($PYTHON_EXEC -c 'import ray, os; print(os.path.dirname(ray.__file__))' 2>/dev/null)"
-    if [ -n "$SYSRAY" ] && [ -d "$SYSRAY" ]; then
+    # Hardcode the system ray path to avoid slow Python startup
+    SYSRAY="$(dirname "$(dirname "$PYTHON_EXEC")")/lib/python3.12/site-packages/ray"
+    if [ -d "$SYSRAY/serve/_private" ]; then
         RAY_OVERLAY="/tmp/ray_overlay"
-        # Build on each node (including head)
+        # Build overlay on each node. Use a helper script to avoid quoting issues.
+        _OVERLAY_SCRIPT=$(mktemp /tmp/aurora_overlay_XXXX.sh)
+        cat > "$_OVERLAY_SCRIPT" << OVERLAYEOF
+#!/bin/bash
+rm -rf $RAY_OVERLAY
+mkdir -p $RAY_OVERLAY/ray/serve/_private
+for f in $SYSRAY/*; do n=\$(basename \$f); [ "\$n" = serve ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/\$n 2>/dev/null; done
+for f in $SYSRAY/serve/*; do n=\$(basename \$f); [ "\$n" = _private ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/serve/\$n 2>/dev/null; done
+for f in $SYSRAY/serve/_private/*; do n=\$(basename \$f); [ "\$n" = proxy.py ] && continue; [ "\$n" = __pycache__ ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/serve/_private/\$n 2>/dev/null; done
+cp $OVERLAY_PROXY $RAY_OVERLAY/ray/serve/_private/proxy.py
+OVERLAYEOF
+        chmod +x "$_OVERLAY_SCRIPT"
+        # Run locally (head node) first
+        bash "$_OVERLAY_SCRIPT"
+        # Run on remote nodes in parallel (the script is on shared Lustre, so just run it)
         for node in $(sort -u "$UNIQUE_NODES_FILE"); do
-            ssh "$node" "
-                rm -rf $RAY_OVERLAY
-                mkdir -p $RAY_OVERLAY/ray/serve/_private
-                # Symlink everything except what we override
-                for f in $SYSRAY/*; do n=\$(basename \$f); [ \"\$n\" = serve ] && continue; ln -s \"\$f\" $RAY_OVERLAY/ray/\$n 2>/dev/null; done
-                for f in $SYSRAY/serve/*; do n=\$(basename \$f); [ \"\$n\" = _private ] && continue; ln -s \"\$f\" $RAY_OVERLAY/ray/serve/\$n 2>/dev/null; done
-                for f in $SYSRAY/serve/_private/*; do n=\$(basename \$f); [ \"\$n\" = proxy.py ] && continue; [ \"\$n\" = __pycache__ ] && continue; ln -s \"\$f\" $RAY_OVERLAY/ray/serve/_private/\$n 2>/dev/null; done
-                cp $OVERLAY_PROXY $RAY_OVERLAY/ray/serve/_private/proxy.py
-            " 2>/dev/null &
+            short="${node%%.*}"
+            [ "$short" = "$HOSTNAME_SHORT" ] && continue
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -f "$node" "bash $_OVERLAY_SCRIPT" 2>/dev/null
         done
-        wait
+        sleep 5  # give SSH background processes time to complete
+        rm -f "$_OVERLAY_SCRIPT"
         export PYTHONPATH="$RAY_OVERLAY:$PYTHONPATH"
         echo "[System] Ray overlay active: proxy.py from $OVERLAY_PROXY via $RAY_OVERLAY"
     fi
