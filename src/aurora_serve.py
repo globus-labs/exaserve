@@ -172,21 +172,48 @@ def _collect_proxy_profiles(tracer) -> None:
 
 
 def _patch_ray_serve_proxy_constants() -> None:
-    """Worker setup hook: patch Ray Serve proxy timeout constants.
-
-    Called by Ray in every worker process at startup (via runtime_env
-    worker_process_setup_hook). This ensures the ServeController actor
-    uses relaxed health-check thresholds, preventing the ProxyActor
-    death cascade at 128+ nodes.
-    """
+    """Worker setup hook: patch constants + proxy profiling via runtime_env."""
+    import os
     try:
-        import os
         from ray.serve._private import constants as c
-
         timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600"))
         c.HTTP_PROXY_TIMEOUT = timeout
         c.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
         c.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
+    except Exception:
+        pass
+    if os.environ.get("AURORA_PROXY_PROFILE") != "1":
+        return
+    try:
+        import time, socket, json
+        from ray.serve._private.proxy import ProxyActor
+        if getattr(ProxyActor, "_aurora_profiled", False):
+            return
+        _oi = ProxyActor.__init__
+        _or = ProxyActor.ready
+        _b = time.time()
+        def _pi(self, *a, **kw):
+            self._prof = {"birth": _b, "init_start": time.time(), "host": socket.gethostname(), "pid": os.getpid()}
+            _oi(self, *a, **kw)
+            self._prof["init_end"] = time.time()
+            self._prof["init_dur"] = round(self._prof["init_end"] - self._prof["init_start"], 4)
+            self._prof["node_id"] = getattr(self, "_node_id", "?")[:16]
+        async def _pr(self):
+            p = getattr(self, "_prof", None)
+            if p: p["ready_start"] = time.time()
+            result = await _or(self)
+            if p:
+                p["ready_end"] = time.time()
+                p["ready_dur"] = round(p["ready_end"] - p["ready_start"], 4)
+                p["total"] = round(p["ready_end"] - _b, 4)
+                d = "/tmp/aurora_proxy_profile"
+                os.makedirs(d, exist_ok=True)
+                with open(d + "/" + p["host"] + "_" + str(os.getpid()) + ".json", "w") as f:
+                    json.dump(p, f, indent=2)
+            return result
+        ProxyActor.__init__ = _pi
+        ProxyActor.ready = _pr
+        ProxyActor._aurora_profiled = True
     except Exception:
         pass
 
@@ -1432,6 +1459,71 @@ if __name__ == "__main__":
         f"HEALTH_CHECK_TIMEOUT=300.0s, UNHEALTHY_THRESHOLD=100",
         flush=True,
     )
+
+    # Instrument ProxyActor in the driver process BEFORE serve.start() serializes it.
+    # Ray actors are pickled by the driver and deserialized in workers — monkey-patching
+    # in usercustomize.py only affects the worker's local copy, which Ray ignores in
+    # favor of the deserialized original. We must patch here so the serialized version
+    # includes our instrumentation.
+    if os.environ.get("AURORA_PROXY_PROFILE") == "1":
+        import socket as _psock
+        from ray.serve._private.proxy import ProxyActor as _PA
+        if not getattr(_PA, "_aurora_driver_profiled", False):
+            _pa_orig_init = _PA.__init__
+            _pa_orig_ready = _PA.ready
+            _birth = time.time()
+
+            def _profiled_pa_init(self, *a, **kw):
+                import time as _t, os as _o, socket as _s, json as _j
+                _btime = getattr(_profiled_pa_init, "_birth", _t.time())
+                self._aurora_profile = {
+                    "process_python_start_s": _btime,
+                    "init_start_s": _t.time(),
+                    "hostname": _s.gethostname(),
+                    "pid": _o.getpid(),
+                    "scheduling_delay_s": round(_t.time() - _btime, 4),
+                }
+                try:
+                    _pa_orig_init(self, *a, **kw)
+                finally:
+                    self._aurora_profile["init_end_s"] = _t.time()
+                    self._aurora_profile["init_duration_s"] = round(
+                        self._aurora_profile["init_end_s"] - self._aurora_profile["init_start_s"], 4)
+                    self._aurora_profile["node_id"] = getattr(self, "_node_id", "unknown")
+                    _d = "/tmp/aurora_inst"
+                    try:
+                        _o.makedirs(_d, exist_ok=True)
+                        with open(f"{_d}/proxy_init_{self._aurora_profile['hostname']}_{_o.getpid()}.json", "w") as _f:
+                            _j.dump(self._aurora_profile, _f, indent=2)
+                    except Exception:
+                        pass
+
+            async def _profiled_pa_ready(self):
+                import time as _t, os as _o, json as _j
+                if hasattr(self, "_aurora_profile"):
+                    self._aurora_profile["ready_start_s"] = _t.time()
+                try:
+                    result = await _pa_orig_ready(self)
+                finally:
+                    if hasattr(self, "_aurora_profile"):
+                        self._aurora_profile["ready_end_s"] = _t.time()
+                        self._aurora_profile["ready_duration_s"] = round(
+                            self._aurora_profile["ready_end_s"] - self._aurora_profile["ready_start_s"], 4)
+                        self._aurora_profile["total_from_init_s"] = round(
+                            self._aurora_profile["ready_end_s"] - self._aurora_profile["init_start_s"], 4)
+                        _d = "/tmp/aurora_inst"
+                        try:
+                            _o.makedirs(_d, exist_ok=True)
+                            with open(f"{_d}/proxy_actor_{self._aurora_profile['hostname']}_{_o.getpid()}.json", "w") as _f:
+                                _j.dump(self._aurora_profile, _f, indent=2)
+                        except Exception:
+                            pass
+                return result
+
+            _PA.__init__ = _profiled_pa_init
+            _PA.ready = _profiled_pa_ready
+            _PA._aurora_driver_profiled = True
+            print(f"[AuroraServe] ProxyActor instrumented in driver (pre-serialization)", flush=True)
 
     with tracer.phase("serve.start", proxy_location="EveryNode"):
         serve.start(

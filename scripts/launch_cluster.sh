@@ -295,13 +295,26 @@ _processing = set()  # guard against re-entrant import of the SAME module
 # Record process birth time for proxy profiling
 _process_birth_time = _time.time()
 
-# Canary: confirm usercustomize loaded in every process
-try:
-    _os.makedirs("/tmp/aurora_inst", exist_ok=True)
-    with open(f"/tmp/aurora_inst/canary_{_os.getpid()}.txt", "w") as _cf:
-        _cf.write(f"loaded at {_process_birth_time}\n")
-except Exception:
-    pass
+# Install a custom module finder that redirects ray.serve._private.proxy
+# to our instrumented overlay file. This is the ONLY reliable way to
+# instrument Ray actors — monkey-patching doesn't survive pickle
+# serialization across the driver→worker boundary.
+if _os.environ.get("AURORA_PROXY_PROFILE") == "1":
+    import importlib, importlib.abc, importlib.machinery, importlib.util, sys as _sys
+    _overlay_proxy_path = _os.path.join(
+        _os.path.expanduser("~"),
+        ".local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py"
+    )
+    if _os.path.exists(_overlay_proxy_path):
+        class _AuroraProxyFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path, target=None):
+                if fullname == "ray.serve._private.proxy":
+                    return importlib.util.spec_from_file_location(
+                        fullname, _overlay_proxy_path,
+                        submodule_search_locations=[],
+                    )
+                return None
+        _sys.meta_path.insert(0, _AuroraProxyFinder())
 
 def _aurora_import(name, *args, **kwargs):
     if name in _processing:
@@ -368,6 +381,12 @@ def _wrap_proxy_for_profiling(proxy_module):
     _orig_ready = cls.ready
 
     def _profiled_init(self, *a, **kw):
+        # Debug: confirm this wrapper is actually called
+        try:
+            with open(f"/tmp/aurora_inst/init_called_{_os.getpid()}.txt", "w") as _dcf:
+                _dcf.write(f"init called at {_time.time()}\n")
+        except Exception:
+            pass
         self._aurora_profile = {
             "process_python_start_s": _process_birth_time,
             "init_start_s": _time.time(),
@@ -382,6 +401,14 @@ def _wrap_proxy_for_profiling(proxy_module):
             self._aurora_profile["init_duration_s"] = round(
                 self._aurora_profile["init_end_s"] - self._aurora_profile["init_start_s"], 4)
             self._aurora_profile["node_id"] = getattr(self, "_node_id", "unknown")
+            # Write init profile immediately (don't wait for ready)
+            _d = "/tmp/aurora_inst"
+            try:
+                _os.makedirs(_d, exist_ok=True)
+                with open(f"{_d}/proxy_init_{self._aurora_profile['hostname']}_{_os.getpid()}.json", "w") as _pf:
+                    _json.dump(self._aurora_profile, _pf, indent=2)
+            except Exception:
+                pass
 
     async def _profiled_ready(self):
         if hasattr(self, "_aurora_profile"):
