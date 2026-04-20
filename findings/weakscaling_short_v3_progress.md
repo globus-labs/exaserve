@@ -107,3 +107,30 @@ config (Llama-3-8B, 12 replicas/node, 64in/64out, target 110 RPS/node):
    at half the target rate, so requests queue less
 
 Plot: `findings/weakscaling_three_dispatch_v3.png`
+
+## 512-Node Attempt — Ray GCS Failure
+
+**Attempted**: Direct-MPI 512n (job 8433728, prod queue, 4hr walltime, snapshot e5b1569b)
+
+**Result**: Stage 3 failed — `serve.run()` raised `RuntimeError: Deploying application default failed`.
+
+**Root cause**: Ray GCS (Global Control Service) on the head node was overwhelmed by 512 nodes
+(6144 replicas). Multiple raylets reported `Failed to get cluster ID from GCS server: TimedOut:
+RPC error: Deadline Exceeded` (observed on 17+ nodes). When enough workers fail GCS
+connectivity, replica deployment fails outright — not a timeout, but an active rejection.
+
+**Key log lines**:
+```
+gcs_client.cc:205: Failed to get cluster ID from GCS server: TimedOut: RPC error: Deadline Exceeded
+  [repeated 17x across cluster]
+ray.exceptions.RaySystemError: System error: Failed to connect to GCS.
+RuntimeError: Deploying application default failed: Failed to update the deployments [...]
+```
+
+**Init timeline (512n)**: Stage 1 = 45s, Stage 2 = 0s, Stage 3 = crashed ~55 min in.
+
+**Conclusion**: 256 nodes (3072 replicas) is the practical ceiling for single-head-node
+Ray Serve on Aurora with the current Ray version and GCS configuration. 512 nodes
+(6144 replicas) exceeds the GCS connection capacity. Scaling beyond 256n would
+require either multi-head Ray clusters, GCS sharding, or a fundamentally different
+serving architecture.
