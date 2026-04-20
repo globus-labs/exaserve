@@ -42,7 +42,8 @@ RUNS_ROOT = "/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs"
 NODE_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256]
 TARGET_RPS_PER_NODE = 110.0
 GPUS_PER_NODE = 12
-PROCESSED_SCHEMA_VERSION = 2
+PROCESSED_SCHEMA_VERSION = 3
+WARMUP_RUN_INDEX = 0  # treat run 0 as warmup; aggregate stats from runs > 0
 
 SPECS: dict[str, list[tuple[str, str]]] = {
     "HAProxy (up to 4 MPI clients, 1 LB)": [
@@ -54,12 +55,23 @@ SPECS: dict[str, list[tuple[str, str]]] = {
 }
 
 SERIES_STYLE = {
-    "HAProxy (up to 4 MPI clients, 1 LB)": {"color": "#2E86AB", "marker": "o"},
-    "Direct-MPI (1 client/node)":          {"color": "#A23B72", "marker": "s"},
-    "LiteLLM (8 workers on head)":         {"color": "#E67E22", "marker": "D"},
+    # rps_offset: xytext for the RPS+TPS annotation on the throughput panel —
+    # staggered per series so low-scale overlaps don't collide.
+    "HAProxy (up to 4 MPI clients, 1 LB)": {
+        "color": "#2E86AB", "marker": "o",
+        "rps_offset": (0, 18),   "rps_va": "bottom",
+    },
+    "Direct-MPI (1 client/node)": {
+        "color": "#A23B72", "marker": "s",
+        "rps_offset": (0, 60),   "rps_va": "bottom",
+    },
+    "LiteLLM (8 workers on head)": {
+        "color": "#E67E22", "marker": "D",
+        "rps_offset": (0, -22),  "rps_va": "top",
+    },
 }
 
-PLOT_TITLE = "Weak-Scaling v3 — HAProxy vs Direct-MPI vs LiteLLM (ALCF Aurora)"
+PLOT_TITLE = "Weak-Scaling v3 \n HAProxy vs Direct-MPI vs LiteLLM (ALCF Aurora)"
 PLOT_SUBTITLE = (
     "Llama-3-8B, 64-tok in / 64-tok out, {gpus} GPUs per node, 4 runs mean\n"
     "Client: {rpn:g} RPS/node, 60 sec"
@@ -73,58 +85,107 @@ def _latest_result_file(results_dir: Path) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def _percentile(sorted_vals, p: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    k = max(0, min(len(sorted_vals) - 1, int(round((p / 100.0) * (len(sorted_vals) - 1)))))
+    return sorted_vals[k]
+
+
 def _compute_processed(result_path: Path) -> dict:
-    """Parse a result*.json and derive error-excluded metrics."""
+    """Parse result*.json; derive per-run and aggregate metrics.
+
+    Aggregates are reported two ways:
+      - `*_all`:       mean across every recorded run (including warmup)
+      - `*_post_warmup`: mean across runs with run_index > WARMUP_RUN_INDEX
+    """
     with open(result_path) as f:
         data = json.load(f)
     overall = data.get("overall", {})
+    meta = data.get("meta", {})
     requests = data.get("requests", [])
+    dispatch_timings = meta.get("dispatch_timings", [])
 
-    total_reqs = len(requests)
-    successful_reqs = 0
-    total_tokens = 0
-    successful_tokens = 0
+    per_run_duration = {}
+    for i, d in enumerate(dispatch_timings):
+        ri = d.get("run_index", i)
+        per_run_duration[ri] = float(d.get("actual_dispatch_s", 0) or 0)
+
+    # Aggregate per-run stats from the request list
+    from collections import defaultdict
+    stats = defaultdict(lambda: {
+        "total": 0, "successful": 0,
+        "tokens": 0, "successful_tokens": 0,
+        "latencies_ok": [],
+    })
     for r in requests:
+        ri = int(r.get("run_index", 0) or 0)
         tok = int(r.get("actual_prompt_tokens", 0) or 0) + int(r.get("actual_completion_tokens", 0) or 0)
-        total_tokens += tok
+        s = stats[ri]
+        s["total"] += 1
+        s["tokens"] += tok
         if r.get("success"):
-            successful_reqs += 1
-            successful_tokens += tok
+            s["successful"] += 1
+            s["successful_tokens"] += tok
+            lat = r.get("latency")
+            if isinstance(lat, (int, float)):
+                s["latencies_ok"].append(float(lat))
 
-    rps = float(overall.get("rps", 0))
-    tps = float(overall.get("tps", 0))
-    errors = int(overall.get("errors", 0))
+    per_run = []
+    for ri in sorted(stats):
+        s = stats[ri]
+        dur = per_run_duration.get(ri, 0)
+        lats = sorted(s["latencies_ok"])
+        per_run.append({
+            "run_index": ri,
+            "duration_s": dur,
+            "requests": s["total"],
+            "successful": s["successful"],
+            "failures": s["total"] - s["successful"],
+            "tokens": s["tokens"],
+            "successful_tokens": s["successful_tokens"],
+            "rps": (s["total"] / dur) if dur else 0.0,
+            "tps": (s["tokens"] / dur) if dur else 0.0,
+            "rps_ok": (s["successful"] / dur) if dur else 0.0,
+            "tps_ok": (s["successful_tokens"] / dur) if dur else 0.0,
+            "p50_s_ok": _percentile(lats, 50),
+            "p99_s_ok": _percentile(lats, 99),
+        })
 
-    # Scale overall.rps / overall.tps by the success fraction observed in the
-    # request list. This keeps the "with-errors" number equal to overall.rps
-    # (source of truth) while deriving a consistent error-excluded version.
-    req_frac = (successful_reqs / total_reqs) if total_reqs else 1.0
-    tok_frac = (successful_tokens / total_tokens) if total_tokens else 1.0
-    rps_ok = rps * req_frac
-    tps_ok = tps * tok_frac
+    def _mean(vals):
+        return (sum(vals) / len(vals)) if vals else 0.0
 
-    # overall.errors is unreliable (misses client-side timeouts); failures
-    # derived from the request list's success flag are the source of truth.
-    failures_from_list = total_reqs - successful_reqs
+    post_warmup = [p for p in per_run if p["run_index"] > WARMUP_RUN_INDEX]
+
+    def _agg(subset):
+        return {
+            "runs": [p["run_index"] for p in subset],
+            "rps": _mean([p["rps"] for p in subset]),
+            "tps": _mean([p["tps"] for p in subset]),
+            "rps_ok": _mean([p["rps_ok"] for p in subset]),
+            "tps_ok": _mean([p["tps_ok"] for p in subset]),
+            "p50_s_ok": _mean([p["p50_s_ok"] for p in subset]),
+            "p99_s_ok": _mean([p["p99_s_ok"] for p in subset]),
+            "requests_total": sum(p["requests"] for p in subset),
+            "successful_total": sum(p["successful"] for p in subset),
+            "failures_total": sum(p["failures"] for p in subset),
+        }
 
     return {
         "schema_version": PROCESSED_SCHEMA_VERSION,
         "source_result": result_path.name,
         "source_mtime": result_path.stat().st_mtime,
-        "duration_s": float(overall.get("duration_s", 0)),
-        "rps": rps,
-        "tps": tps,
-        "rps_ok": rps_ok,
-        "tps_ok": tps_ok,
-        "total_requests_in_list": total_reqs,
-        "successful_requests_in_list": successful_reqs,
-        "failures_in_list": failures_from_list,
-        "total_tokens_in_list": total_tokens,
-        "successful_tokens_in_list": successful_tokens,
-        "requests_completed": int(overall.get("requests_completed", 0)),
-        "errors_overall": errors,
-        "p50_s": float(overall.get("p50_s", 0)),
-        "p99_s": float(overall.get("p99_s", 0)),
+        "warmup_run_index": WARMUP_RUN_INDEX,
+        "overall_rps": float(overall.get("rps", 0)),
+        "overall_tps": float(overall.get("tps", 0)),
+        "overall_duration_s": float(overall.get("duration_s", 0)),
+        "overall_requests_completed": int(overall.get("requests_completed", 0)),
+        "overall_errors_reported": int(overall.get("errors", 0)),
+        "overall_p50_s": float(overall.get("p50_s", 0)),
+        "overall_p99_s": float(overall.get("p99_s", 0)),
+        "per_run": per_run,
+        "all": _agg(per_run),
+        "post_warmup": _agg(post_warmup),
     }
 
 
@@ -250,7 +311,7 @@ def main() -> int:
     ideal_y = [TARGET_RPS_PER_NODE * n for n in ideal_x]
     ax_rps.plot(
         ideal_x, ideal_y, linestyle=":", color="#7A7A7A", linewidth=1.8,
-        alpha=0.8, label=f"Ideal ({TARGET_RPS_PER_NODE:g} RPS/node)", zorder=2,
+        alpha=0.8, label=f"Ideal Dispatch ({TARGET_RPS_PER_NODE:g} RPS/node)", zorder=2,
     )
     ax_eff.axhline(
         100, color="#7A7A7A", linestyle="--", linewidth=1.8, alpha=0.8,
@@ -264,61 +325,72 @@ def main() -> int:
             continue
 
         nodes = [n for n, _ in rows]
-        rps_err = [p["rps"] for _, p in rows]                 # with errors
-        rps_ok  = [p["rps_ok"] for _, p in rows]              # without errors
-        tps_ok  = [p["tps_ok"] for _, p in rows]
-        p50_ms  = [p["p50_s"] * 1000 for _, p in rows]
-        failures = [p.get("failures_in_list", p.get("errors_overall", 0)) for _, p in rows]
+        # Post-warmup aggregates (runs 1..N; run 0 is treated as warmup).
+        pw = [p["post_warmup"] for _, p in rows]
+        rps_err = [a["rps"] for a in pw]                    # with errors
+        rps_ok  = [a["rps_ok"] for a in pw]                 # without errors
+        tps_ok  = [a["tps_ok"] for a in pw]
+        p50_ms  = [a["p50_s_ok"] * 1000 for a in pw]
+        failures = [a["failures_total"] for a in pw]
+        attempted = [a["requests_total"] for a in pw]
         # Efficiency uses the error-excluded RPS (real sustained throughput)
         eff = [r / (TARGET_RPS_PER_NODE * n) * 100 for n, r in zip(nodes, rps_ok)]
 
-        print(f"  {label}: {len(rows)} points")
-        for n, r_err, r_ok, t_ok, p, e, ef in zip(
-            nodes, rps_err, rps_ok, tps_ok, p50_ms, failures, eff
+        print(f"  {label}: {len(rows)} points (post-warmup; excludes run 0)")
+        for n, r_err, r_ok, t_ok, p, f, att, ef in zip(
+            nodes, rps_err, rps_ok, tps_ok, p50_ms, failures, attempted, eff
         ):
+            rate = (f / att * 100) if att else 0
             print(f"    {n:4d} nodes  rps_ok={r_ok:8.1f}  rps_err={r_err:8.1f}  "
-                  f"tps_ok={t_ok:10.1f}  eff={ef:5.1f}%  p50={p:6.1f}ms  failures={e}")
+                  f"tps_ok={t_ok:10.1f}  eff={ef:5.1f}%  p50={p:6.1f}ms  "
+                  f"failures={f}/{att} ({rate:.2f}%)")
 
         style = SERIES_STYLE[label]
         kw_solid = dict(
             color=style["color"], marker=style["marker"],
-            linewidth=2.6, markersize=9,
+            linewidth=2.6, markersize=8,
             markerfacecolor=style["color"], markeredgecolor="white",
-            markeredgewidth=1.8, alpha=0.95, zorder=4,
+            markeredgewidth=1.6, alpha=0.95, zorder=4,
         )
-        kw_dashed = dict(
-            color=style["color"], marker=style["marker"],
-            linestyle="--", linewidth=2.0, markersize=7,
-            markerfacecolor="white", markeredgecolor=style["color"],
-            markeredgewidth=1.8, alpha=0.9, zorder=3,
-        )
+        # Dashed marker is hollow (transparent face) and LARGER than the solid
+        # marker, with a higher zorder, so a colored ring surrounds the solid
+        # dot even when rps_ok == rps_err (which happens whenever errors are
+        # negligible — i.e. most HAProxy/Direct-MPI points).
+        # kw_dashed = dict(
+        #     color=style["color"], marker=style["marker"],
+        #     linestyle="--", linewidth=1.8, markersize=14,
+        #     markerfacecolor="none", markeredgecolor=style["color"],
+        #     markeredgewidth=2.0, alpha=0.9, zorder=5,
+        # )
 
-        # Throughput panel: solid (without errors) + dashed (with errors)
-        ax_rps.plot(nodes, rps_ok, label=f"{label} — RPS (ok)", **kw_solid)
-        ax_rps.plot(nodes, rps_err, label=f"{label} — RPS (incl. errors)", **kw_dashed)
+        # Throughput panel: solid (without errors) only.
+        # Dashed "with errors" line is intentionally disabled — uncomment the
+        # kw_dashed block above and the ax_rps.plot(...) line below to restore.
+        ax_rps.plot(nodes, rps_ok, label=f"{label} — RPS_ok", **kw_solid)
+        # ax_rps.plot(nodes, rps_err, label=f"{label} — RPS_all (incl. errors)", **kw_dashed)
 
         # Efficiency + latency panels use the single solid series
         ax_eff.plot(nodes, eff, label=label, **kw_solid)
         ax_lat.plot(nodes, p50_ms, label=label, **kw_solid)
 
-        # Annotate solid RPS points with RPS value (above) and TPS value (below)
-        _annotate(ax_rps, nodes, rps_ok, style["color"],
-                  fmt="{:.0f}", xytext=(0, 12), fontsize=8)
+        # Combined RPS + TPS annotation, staggered per-series to avoid collisions
+        off = style["rps_offset"]
+        va = style["rps_va"]
         for x, y, t in zip(nodes, rps_ok, tps_ok):
             ax_rps.annotate(
-                _fmt_tps(t),
+                f"{y:,.0f} RPS\n{_fmt_tps(t)}",
                 (x, y),
                 textcoords="offset points",
-                xytext=(0, -18),
-                ha="center",
+                xytext=off,
+                ha="center", va=va,
                 fontsize=7,
                 fontweight="bold",
                 color=style["color"],
                 bbox=dict(
-                    boxstyle="round,pad=0.2",
-                    facecolor="#FFF8E7",
+                    boxstyle="round,pad=0.25",
+                    facecolor="white",
                     edgecolor=style["color"],
-                    linewidth=1.0,
+                    linewidth=1.1,
                     alpha=0.9,
                 ),
             )
@@ -331,9 +403,13 @@ def main() -> int:
     # Panel titles and axis labels
     ax_rps.set_xlabel("Number of Nodes", fontsize=11, fontweight="bold", color="#333333")
     ax_rps.set_ylabel("Requests per Second (RPS)", fontsize=11, fontweight="bold", color="#333333")
-    ax_rps.set_title(
-        "Throughput — RPS without errors (solid) vs RPS with errors (dashed); TPS annotated",
-        fontsize=12, fontweight="bold", color="#1A1A1A",
+    ax_rps.set_title("Throughput", fontsize=13, fontweight="bold", color="#1A1A1A", pad=30)
+    ax_rps.text(
+        0.5, 1.005,
+        "Requests Per Second (RPS); runs 1–3 (run 0 warmup excluded); TPS annotated",
+        transform=ax_rps.transAxes,
+        ha="center", va="bottom",
+        fontsize=10, style="italic", color="#666666",
     )
 
     ax_eff.set_xlabel("Number of Nodes", fontsize=11, fontweight="bold", color="#333333")
@@ -347,7 +423,7 @@ def main() -> int:
     ax_lat.set_ylabel("p50 Latency (ms, log)", fontsize=11, fontweight="bold", color="#333333")
     ax_lat.set_title("Per-Request Latency (p50)", fontsize=12, fontweight="bold", color="#1A1A1A")
 
-    for ax, loc, ncol in [(ax_rps, "upper left", 2),
+    for ax, loc, ncol in [(ax_rps, "upper left", 1),
                           (ax_eff, "lower left", 1),
                           (ax_lat, "upper left", 1)]:
         legend = ax.legend(

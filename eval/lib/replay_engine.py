@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import glob
 import json
 import math
@@ -14,6 +15,8 @@ import tempfile
 import threading
 import time
 import uuid
+import urllib.error
+import urllib.request
 from dataclasses import asdict
 
 from eval.lib.manifest import EvalManifest, TraceGeneratorConfig, WeakScalingConfig, load_eval_manifest
@@ -35,6 +38,10 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 TIMEOUT_S = 3600
+DIRECT_TARGET_READY_TIMEOUT_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_TIMEOUT_S", "300"))
+DIRECT_TARGET_READY_PROBE_TIMEOUT_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_PROBE_TIMEOUT_S", "2"))
+DIRECT_TARGET_READY_INTERVAL_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_INTERVAL_S", "5"))
+DIRECT_TARGET_READY_MAX_WORKERS = int(os.environ.get("AURORA_DIRECT_TARGET_READY_MAX_WORKERS", "64"))
 
 
 def _init_mpi():
@@ -97,6 +104,48 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[low] * (high - rank) + ordered[high] * (rank - low)
 
 
+def _summarize_run_results(
+    run_index: int,
+    run_results,
+    requests_scheduled: int,
+    duration_s: float | None,
+) -> dict[str, float | int | None]:
+    duration = max(float(duration_s or 0.0), 1e-6)
+    if isinstance(run_results, dict):
+        completed = int(run_results.get("requests_completed", 0))
+        errors = int(run_results.get("errors", 0))
+        successes = max(completed - errors, 0)
+        return {
+            "run_index": run_index,
+            "duration_s": duration,
+            "requests_completed": completed,
+            "requests_scheduled": int(run_results.get("requests_scheduled", requests_scheduled)),
+            "successes": successes,
+            "errors": errors,
+            "rps": completed / duration,
+            "success_rps": successes / duration,
+            "p50_s": run_results.get("p50_s"),
+            "p99_s": run_results.get("p99_s"),
+        }
+
+    successful_latencies = [float(item[1]) for item in run_results if item[2]]
+    completed = len(run_results)
+    successes = len(successful_latencies)
+    errors = completed - successes
+    return {
+        "run_index": run_index,
+        "duration_s": duration,
+        "requests_completed": completed,
+        "requests_scheduled": requests_scheduled,
+        "successes": successes,
+        "errors": errors,
+        "rps": completed / duration,
+        "success_rps": successes / duration,
+        "p50_s": (_percentile(successful_latencies, 0.50) if successful_latencies else None),
+        "p99_s": (_percentile(successful_latencies, 0.99) if successful_latencies else None),
+    }
+
+
 def _trace_path(exp_config: EvalManifest) -> str:
     trace_cfg = exp_config.job_trace_config
     return str(trace_cfg.output_trace_path)
@@ -116,6 +165,94 @@ def _find_go_binary() -> str | None:
         if path.is_file() and os.access(path, os.X_OK):
             return str(path)
     return None
+
+
+def _direct_health_paths(exp_config: EvalManifest) -> list[str]:
+    model_configs = list(getattr(exp_config.model_deployment_config, "model_configs", []) or [])
+    if len(model_configs) <= 1:
+        return ["/health"]
+
+    try:
+        from src.model_paths import get_model_route_name
+    except ImportError:  # pragma: no cover - script-mode fallback
+        from model_paths import get_model_route_name
+
+    paths = []
+    for model_config in model_configs:
+        route = get_model_route_name(model_config.model_id)
+        paths.append(f"/{route}/health")
+    return paths
+
+
+def _probe_direct_target(base_url: str, health_paths: list[str], timeout_s: float) -> bool:
+    for path in health_paths:
+        try:
+            with urllib.request.urlopen(f"{base_url}{path}", timeout=timeout_s) as response:
+                if response.status != 200:
+                    return False
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
+    return True
+
+
+def _wait_for_direct_targets(
+    base_urls: list[str],
+    health_paths: list[str],
+    timeout_s: float = DIRECT_TARGET_READY_TIMEOUT_S,
+    probe_timeout_s: float = DIRECT_TARGET_READY_PROBE_TIMEOUT_S,
+    interval_s: float = DIRECT_TARGET_READY_INTERVAL_S,
+    max_workers: int = DIRECT_TARGET_READY_MAX_WORKERS,
+) -> None:
+    pending = list(dict.fromkeys(base_urls))
+    if not pending:
+        return
+
+    total = len(pending)
+    deadline = time.monotonic() + timeout_s
+    attempt = 0
+    print(
+        f"[replay_engine] Waiting for {total} direct target(s) to pass "
+        f"health checks on {', '.join(health_paths)}",
+        flush=True,
+    )
+
+    while pending and time.monotonic() < deadline:
+        attempt += 1
+        ready = []
+        worker_count = max(1, min(max_workers, len(pending)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = {
+                pool.submit(_probe_direct_target, base_url, health_paths, probe_timeout_s): base_url
+                for base_url in pending
+            }
+            for future in concurrent.futures.as_completed(futures):
+                base_url = futures[future]
+                try:
+                    if future.result():
+                        ready.append(base_url)
+                except Exception:
+                    continue
+        if ready:
+            ready_set = set(ready)
+            pending = [base_url for base_url in pending if base_url not in ready_set]
+
+        print(
+            f"[replay_engine] Direct target health attempt {attempt}: "
+            f"{total - len(pending)}/{total} ready",
+            flush=True,
+        )
+        if pending:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(interval_s, remaining))
+
+    if pending:
+        sample = ", ".join(pending[:5])
+        suffix = "" if len(pending) <= 5 else f" ... ({len(pending)} total pending)"
+        raise RuntimeError(
+            "Timed out waiting for direct targets to become healthy: "
+            f"{sample}{suffix}"
+        )
 
 
 def _write_trace_partition(requests: list[TraceRequest], path: str) -> None:
@@ -559,6 +696,21 @@ async def replay_from_manifest(
         cluster_nodes = []
         base_urls = [f"http://0.0.0.0:{port}"]
 
+    if dest == "direct":
+        health_error = None
+        if is_root:
+            try:
+                _wait_for_direct_targets(
+                    base_urls,
+                    _direct_health_paths(exp_config),
+                )
+            except Exception as exc:
+                health_error = str(exc)
+        health_error = _mpi_bcast(comm, health_error, root=0)
+        if health_error:
+            raise RuntimeError(health_error)
+        _mpi_barrier(comm)
+
     go_bin = _find_go_binary()
     if go_bin is None:
         raise RuntimeError("go_dispatch binary not found; build eval/go_client/bin/go_dispatch first")
@@ -736,6 +888,15 @@ def _save_results(
     result_dir = _result_dir(exp_config)
     final_save_path = _next_result_path(result_dir)
     config_dict = exp_config.to_yaml_dict()
+    per_run = [
+        _summarize_run_results(
+            run_index,
+            run_results,
+            len(requests),
+            run_durations[run_index] if run_index < len(run_durations) else None,
+        )
+        for run_index, run_results in enumerate(all_runs_results)
+    ]
     meta = {
         "num_runs": num_runs,
         "completed_runs": len(all_runs_results),
@@ -760,6 +921,7 @@ def _save_results(
         payload = {
             "config": config_dict,
             "meta": dict(meta, sum_only=True),
+            "per_run": per_run,
             "overall": {
                 "duration_s": duration,
                 "rps": completed_requests / duration,
@@ -833,6 +995,7 @@ def _save_results(
                 token_counts_from_usage_api=usage_count,
                 token_counts_from_trace_spec=trace_count,
             ),
+            "per_run": per_run,
             "summary": {model_name: len(rows) for model_name, rows in model_groups.items()},
             "per_model": per_model,
             "overall": {
