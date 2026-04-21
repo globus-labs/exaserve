@@ -1456,7 +1456,11 @@ def _patch_ray_serve_proxy_future_timeout() -> None:
     _patch_log("Applied Ray Serve proxy timeout future patch")
 
 
-_patch_ray_serve_proxy_future_timeout()
+# perf-inst-dev: Ray Serve patches disabled — constants.py in the overlay
+# (~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray)
+# applies timeouts directly and proxy.py in the overlay carries the
+# ProxyActor instrumentation. Restore from main-repo commit 2f32633 if needed.
+# _patch_ray_serve_proxy_future_timeout()
 
 
 def _patch_ray_serve_proxy_startup_timeout() -> None:
@@ -1491,7 +1495,8 @@ def _patch_ray_serve_proxy_startup_timeout() -> None:
     )
 
 
-_patch_ray_serve_proxy_startup_timeout()
+# perf-inst-dev: disabled — see note above. Overlay constants.py carries these values.
+# _patch_ray_serve_proxy_startup_timeout()
 
 
 def _install_proxy_actor_profiling_hook() -> None:
@@ -1607,4 +1612,6 @@ def _save_proxy_profile(profile: dict) -> None:
         print(f"[AuroraProxyProfile] Failed to save profile: {e}", flush=True)
 
 
-_install_proxy_actor_profiling_hook()
+# perf-inst-dev: disabled — overlay proxy.py carries the ProxyActor profiling
+# directly in ProxyActor.__init__/ready(). Restore from main-repo commit 2f32633 if needed.
+# _install_proxy_actor_profiling_hook()

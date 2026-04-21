@@ -263,327 +263,16 @@ export RAY_raylet_client_connect_timeout_milliseconds="${RAY_raylet_client_conne
 # Enables separate thread for user code and separate event loop for the router.
 export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 
-# Proxy readiness check: default 5s is too short on Aurora because the
-# metrics agent timeout (30s, hardcoded in C++) blocks proxy startup.
-# Without this, the controller kills the proxy after 3×5s=15s < 30s.
-export RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S="${RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S:-60}"
+# Timeout patches (HTTP_PROXY_TIMEOUT, PROXY_HEALTH_CHECK_TIMEOUT_S,
+# PROXY_READY_CHECK_TIMEOUT_S, PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD,
+# DEFAULT_HEALTH_CHECK_*, REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD) are
+# applied directly in the overlaid constants.py (see Ray overlay section
+# below and the overlay git repo at
+# ~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray).
+# Prior approach: sitecustomize/usercustomize monkey-patching, removed on
+# perf-inst-dev for clean profiling. Restore from main-repo commit 2f32633
+# if needed.
 
-# Patch Ray Serve proxy timeouts in ALL Python processes (including the
-# ServeController Ray actor which runs as a separate process).
-# Install a .pth file in the user site-packages directory. Python's site
-# module executes .pth lines starting with "import" at interpreter startup,
-# and the user site-packages is always loaded before any user code.
-USER_SITE=$($PYTHON_EXEC -m site --user-site 2>/dev/null || echo "")
-if [ -n "$USER_SITE" ]; then
-    mkdir -p "$USER_SITE"
-    # Write usercustomize.py in user site-packages. Python's site module
-    # loads sitecustomize from SYSTEM site-packages (before user site is on
-    # sys.path), then loads usercustomize from USER site-packages. So we
-    # must use usercustomize.py for user-site hooks.
-    #
-    # Strategy: hook builtins.__import__ with recursion guard, patch any
-    # ray.serve module that has our target constants.
-    rm -f "$USER_SITE/sitecustomize.py"  # remove old misnamed file
-    cat > "$USER_SITE/usercustomize.py" <<'PYEOF'
-import builtins as _b
-import os as _os
-import time as _time
-
-_orig = _b.__import__
-_processing = set()  # guard against re-entrant import of the SAME module
-
-# Record process birth time for proxy profiling
-_process_birth_time = _time.time()
-
-# Diagnostic: log usercustomize load to /tmp
-try:
-    _os.makedirs("/tmp/aurora_inst", exist_ok=True)
-    with open(f"/tmp/aurora_inst/uc_load_{_os.getpid()}.txt", "w") as _uf:
-        _uf.write(f"pid={_os.getpid()} t={_process_birth_time} PROXY_PROFILE={_os.environ.get('AURORA_PROXY_PROFILE','unset')}\n")
-except Exception:
-    pass
-
-# Install a custom module finder that redirects ray.serve._private.proxy
-# to our instrumented overlay file. This is the ONLY reliable way to
-# instrument Ray actors — monkey-patching doesn't survive pickle
-# serialization across the driver→worker boundary.
-if _os.environ.get("AURORA_PROXY_PROFILE") == "1":
-    import importlib, importlib.abc, importlib.machinery, importlib.util, sys as _sys
-    _overlay_proxy_path = _os.path.join(
-        _os.path.expanduser("~"),
-        ".local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py"
-    )
-    if _os.path.exists(_overlay_proxy_path):
-        class _AuroraProxyFinder(importlib.abc.MetaPathFinder):
-            def find_spec(self, fullname, path, target=None):
-                if fullname == "ray.serve._private.proxy":
-                    return importlib.util.spec_from_file_location(
-                        fullname, _overlay_proxy_path,
-                        submodule_search_locations=[],
-                    )
-                return None
-        _sys.meta_path.insert(0, _AuroraProxyFinder())
-
-def _aurora_import(name, *args, **kwargs):
-    if name in _processing:
-        return _orig(name, *args, **kwargs)
-    _processing.add(name)
-    try:
-        mod = _orig(name, *args, **kwargs)
-        # Only check for Ray Serve constants on ray.serve modules.
-        # Checking hasattr on arbitrary modules (e.g. pydantic) triggers
-        # lazy __getattr__ and circular imports.
-        if name.startswith("ray.serve"):
-            # Proxy timeouts — effectively disable health-check killing
-            if hasattr(mod, 'HTTP_PROXY_TIMEOUT') and getattr(mod, 'HTTP_PROXY_TIMEOUT') == 60:
-                mod.HTTP_PROXY_TIMEOUT = 3600
-            if hasattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') == 10.0:
-                mod.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
-            if hasattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
-                mod.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
-            # PROXY_READY_CHECK_TIMEOUT_S is set via RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S
-            # env var (not import hook) because proxy_state.py copies it on import.
-            # Replica timeouts — effectively disable health-check killing
-            if hasattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') == 30:
-                mod.DEFAULT_HEALTH_CHECK_TIMEOUT_S = 600
-            if hasattr(mod, 'DEFAULT_HEALTH_CHECK_PERIOD_S') and getattr(mod, 'DEFAULT_HEALTH_CHECK_PERIOD_S') == 10:
-                mod.DEFAULT_HEALTH_CHECK_PERIOD_S = 120
-            if hasattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
-                mod.REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
-
-        return mod
-    finally:
-        _processing.discard(name)
-        # Deferred wrapping runs in finally so it fires even when the
-        # target module itself is what just finished importing (the
-        # _processing guard skips the body for re-entrant imports of
-        # the same module, but the finally block of the FIRST call
-        # runs after the module is fully initialized in sys.modules).
-        if name.startswith("ray.serve"):
-            import sys as _dsys
-            if _os.environ.get("AURORA_PROXY_PROFILE") == "1":
-                _px = _dsys.modules.get("ray.serve._private.proxy")
-                if _px is not None and hasattr(_px, "ProxyActor") and not getattr(_px.ProxyActor, "_aurora_profiled", False):
-                    _wrap_proxy_for_profiling(_px)
-            if _os.environ.get("AURORA_CONTROLLER_INST") == "1":
-                _ct = _dsys.modules.get("ray.serve._private.controller")
-                if _ct is not None and hasattr(_ct, "ServeController") and not getattr(_ct.ServeController, "_aurora_ctrl_inst", False):
-                    _wrap_controller_for_inst(_ct)
-                _ps = _dsys.modules.get("ray.serve._private.proxy_state")
-                if _ps is not None and hasattr(_ps, "ProxyStateManager") and not getattr(_ps.ProxyStateManager, "_aurora_psm_inst", False):
-                    _wrap_proxy_state_for_inst(_ps)
-
-def _wrap_proxy_for_profiling(proxy_module):
-    """Wrap ProxyActor.__init__ and ready() to record per-process timestamps.
-
-    Captures the full proxy lifecycle: process birth → __init__ start/end →
-    ready() start/end. Writes JSON to /tmp/aurora_inst/ for collection.
-    No threading.Lock (must be picklable for Ray actor checkpointing).
-    """
-    import socket as _socket, json as _json
-    cls = getattr(proxy_module, "ProxyActor", None)
-    if cls is None or getattr(cls, "_aurora_profiled", False):
-        return
-
-    _orig_init = cls.__init__
-    _orig_ready = cls.ready
-
-    def _profiled_init(self, *a, **kw):
-        # Debug: confirm this wrapper is actually called
-        try:
-            with open(f"/tmp/aurora_inst/init_called_{_os.getpid()}.txt", "w") as _dcf:
-                _dcf.write(f"init called at {_time.time()}\n")
-        except Exception:
-            pass
-        self._aurora_profile = {
-            "process_python_start_s": _process_birth_time,
-            "init_start_s": _time.time(),
-            "hostname": _socket.gethostname(),
-            "pid": _os.getpid(),
-            "scheduling_delay_s": round(_time.time() - _process_birth_time, 4),
-        }
-        try:
-            _orig_init(self, *a, **kw)
-        finally:
-            self._aurora_profile["init_end_s"] = _time.time()
-            self._aurora_profile["init_duration_s"] = round(
-                self._aurora_profile["init_end_s"] - self._aurora_profile["init_start_s"], 4)
-            self._aurora_profile["node_id"] = getattr(self, "_node_id", "unknown")
-            # Write init profile immediately (don't wait for ready)
-            _d = "/tmp/aurora_inst"
-            try:
-                _os.makedirs(_d, exist_ok=True)
-                with open(f"{_d}/proxy_init_{self._aurora_profile['hostname']}_{_os.getpid()}.json", "w") as _pf:
-                    _json.dump(self._aurora_profile, _pf, indent=2)
-            except Exception:
-                pass
-
-    async def _profiled_ready(self):
-        if hasattr(self, "_aurora_profile"):
-            self._aurora_profile["ready_start_s"] = _time.time()
-        try:
-            result = await _orig_ready(self)
-        finally:
-            if hasattr(self, "_aurora_profile"):
-                self._aurora_profile["ready_end_s"] = _time.time()
-                self._aurora_profile["ready_duration_s"] = round(
-                    self._aurora_profile["ready_end_s"] - self._aurora_profile["ready_start_s"], 4)
-                self._aurora_profile["total_from_birth_s"] = round(
-                    self._aurora_profile["ready_end_s"] - _process_birth_time, 4)
-                self._aurora_profile["total_from_init_s"] = round(
-                    self._aurora_profile["ready_end_s"] - self._aurora_profile["init_start_s"], 4)
-                # Save to /tmp/aurora_inst/ (same dir as controller/proxy_state)
-                _d = "/tmp/aurora_inst"
-                try:
-                    _os.makedirs(_d, exist_ok=True)
-                    with open(f"{_d}/proxy_actor_{self._aurora_profile['hostname']}_{_os.getpid()}.json", "w") as _f:
-                        _json.dump(self._aurora_profile, _f, indent=2)
-                except Exception:
-                    pass
-        return result
-
-    cls.__init__ = _profiled_init
-    cls.ready = _profiled_ready
-    cls._aurora_profiled = True
-    # Debug: confirm wrapping happened
-    _inst_dir = "/tmp/aurora_inst"
-    try:
-        _os.makedirs(_inst_dir, exist_ok=True)
-        with open(f"{_inst_dir}/proxy_wrap_debug_{_socket.gethostname()}_{_os.getpid()}.txt", "w") as _dbg:
-            _dbg.write(f"wrapped at {_time.time()}, init={cls.__init__ is _profiled_init}, ready={cls.ready is _profiled_ready}\n")
-    except Exception:
-        pass
-
-def _wrap_proxy_state_for_inst(proxy_state_module):
-    """Instrument ProxyStateManager to log proxy spawn events and state transitions."""
-    import socket as _socket, json as _json
-    mgr_cls = getattr(proxy_state_module, "ProxyStateManager", None)
-    if mgr_cls is None or getattr(mgr_cls, "_aurora_psm_inst", False):
-        return
-
-    _inst_dir = "/tmp/aurora_inst"
-    _os.makedirs(_inst_dir, exist_ok=True)
-    _host = _socket.gethostname()
-    _pid = _os.getpid()
-    _inst_log_path = f"{_inst_dir}/proxy_state_{_host}_{_pid}.jsonl"
-
-    def _log_ps_event(event_type, **data):
-        entry = {"t": _time.time(), "event": event_type, **data}
-        try:
-            with open(_inst_log_path, "a") as f:
-                f.write(_json.dumps(entry) + "\n")
-        except Exception:
-            pass
-
-    # Wrap _start_proxies_if_needed to log each proxy spawn
-    _orig_start_proxies = mgr_cls._start_proxies_if_needed
-    def _inst_start_proxies(self, target_nodes):
-        pre_count = len(self._proxy_states)
-        _orig_start_proxies(self, target_nodes)
-        post_count = len(self._proxy_states)
-        new_count = post_count - pre_count
-        if new_count > 0:
-            _log_ps_event("proxies_spawned", new=new_count, total=post_count, target_nodes=len(target_nodes))
-    mgr_cls._start_proxies_if_needed = _inst_start_proxies
-
-    # Wrap _stop_proxies_if_needed to log proxy stops and restarts
-    _orig_stop_proxies = mgr_cls._stop_proxies_if_needed
-    def _inst_stop_proxies(self):
-        pre = set(self._proxy_states.keys())
-        result = _orig_stop_proxies(self)
-        post = set(self._proxy_states.keys())
-        stopped = pre - post
-        if stopped:
-            _log_ps_event("proxies_stopped", count=len(stopped), node_ids=[n[:16] for n in stopped])
-        return result
-    mgr_cls._stop_proxies_if_needed = _inst_stop_proxies
-
-    # Wrap the update method to log proxy state summary periodically
-    _orig_update = mgr_cls.update
-    _update_count = [0]
-    def _inst_update(self, **kwargs):
-        _orig_update(self, **kwargs)
-        _update_count[0] += 1
-        if _update_count[0] <= 3 or _update_count[0] % 50 == 0:
-            status_counts = {}
-            for ps in self._proxy_states.values():
-                s = str(ps.status)
-                status_counts[s] = status_counts.get(s, 0) + 1
-            _log_ps_event("proxy_state_summary",
-                update_num=_update_count[0],
-                total=len(self._proxy_states),
-                status_counts=status_counts,
-            )
-    mgr_cls.update = _inst_update
-
-    mgr_cls._aurora_psm_inst = True
-    _log_ps_event("proxy_state_inst_installed", host=_host, pid=_pid)
-
-def _wrap_controller_for_inst(controller_module):
-    """Instrument ServeController to log proxy spawning decisions and control loop timing."""
-    import socket as _socket, json as _json
-    cls = getattr(controller_module, "ServeController", None)
-    if cls is None or getattr(cls, "_aurora_ctrl_inst", False):
-        return
-
-    _inst_dir = "/tmp/aurora_inst"
-    _os.makedirs(_inst_dir, exist_ok=True)
-    _host = _socket.gethostname()
-    _pid = _os.getpid()
-    _inst_log_path = f"{_inst_dir}/controller_{_host}_{_pid}.jsonl"
-    # No threading.Lock — append-mode writes <4KB are atomic on Linux.
-    # Mutable state via list refs (picklable, unlike threading.Lock).
-    _loop_count = [0]
-    _prev_proxy_nodes_count = [0]
-
-    def _log_event(event_type, **data):
-        entry = {"t": _time.time(), "event": event_type, **data}
-        try:
-            with open(_inst_log_path, "a") as f:
-                f.write(_json.dumps(entry) + "\n")
-        except Exception:
-            pass
-
-    # Wrap _update_proxy_nodes to log node set changes
-    _orig_update_proxy_nodes = cls._update_proxy_nodes
-    def _inst_update_proxy_nodes(self):
-        _orig_update_proxy_nodes(self)
-        n = len(self._proxy_nodes)
-        if n != _prev_proxy_nodes_count[0]:
-            _log_event("proxy_nodes_changed", prev=_prev_proxy_nodes_count[0], new=n)
-            _prev_proxy_nodes_count[0] = n
-    cls._update_proxy_nodes = _inst_update_proxy_nodes
-
-    # Wrap run_control_loop_step to log timing and recovering state
-    _orig_loop_step = cls.run_control_loop_step
-    async def _inst_loop_step(self, start_time, recovering_timeout, num_loops):
-        t0 = _time.time()
-        was_recovering = not self.done_recovering_event.is_set()
-        await _orig_loop_step(self, start_time, recovering_timeout, num_loops)
-        dur = _time.time() - t0
-        is_recovering = not self.done_recovering_event.is_set()
-        _loop_count[0] += 1
-        # Log every 100th loop, or when recovering state changes, or if loop is slow
-        if (was_recovering and not is_recovering) or dur > 1.0 or _loop_count[0] <= 5 or _loop_count[0] % 100 == 0:
-            _log_event("control_loop",
-                loop_num=_loop_count[0],
-                duration_s=round(dur, 4),
-                recovering_changed=was_recovering and not is_recovering,
-                proxy_nodes=_prev_proxy_nodes_count[0],
-            )
-        if was_recovering and not is_recovering:
-            _log_event("done_recovering", elapsed_since_start=round(_time.time() - start_time, 3))
-    cls.run_control_loop_step = _inst_loop_step
-
-    cls._aurora_ctrl_inst = True
-    _log_event("controller_inst_installed", host=_host, pid=_pid)
-
-_b.__import__ = _aurora_import
-PYEOF
-    echo "[System] Installed usercustomize.py import hook in $USER_SITE"
-else
-    echo "[System] WARNING: Could not determine user site-packages for proxy timeout patch"
-fi
 
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 
@@ -609,15 +298,23 @@ export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1
 export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-1}"
 echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
 
-# ProxyActor lifecycle profiling: wraps ProxyActor.__init__ and ready()
-# to collect per-process timestamps.  Writes JSON to /tmp/aurora_proxy_profile/.
+# ProxyActor JSON collection gate: aurora_serve.py:1846 reads
+# /tmp/aurora_inst/proxy_init_*.json written by the overlaid proxy.py.
+# Default on for perf-inst-dev. Set to 0 to skip collection.
 export AURORA_PROXY_PROFILE="${AURORA_PROXY_PROFILE:-1}"
 echo "[System] AURORA_PROXY_PROFILE=$AURORA_PROXY_PROFILE"
 
-# Controller instrumentation: logs proxy spawning decisions and control loop
-# timing to /tmp/aurora_inst/ for post-mortem analysis.
-export AURORA_CONTROLLER_INST="${AURORA_CONTROLLER_INST:-1}"
-echo "[System] AURORA_CONTROLLER_INST=$AURORA_CONTROLLER_INST"
+# Ray overlay: replace ray/serve/_private/{proxy,controller,proxy_state,constants}.py
+# (whichever exist in the overlay dir) with our patched versions. Source of truth:
+# ~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray (git-tracked).
+export AURORA_RAY_OVERLAY="${AURORA_RAY_OVERLAY:-1}"
+echo "[System] AURORA_RAY_OVERLAY=$AURORA_RAY_OVERLAY"
+
+# Ray's built-in per-RPC event stats — written to {gcs_server,raylet,core-worker-*}.out
+# every RAY_event_stats_print_interval_ms. Used to measure GCS contention quantitatively.
+export RAY_event_stats="${RAY_event_stats:-1}"
+export RAY_event_stats_print_interval_ms="${RAY_event_stats_print_interval_ms:-1000}"
+echo "[System] RAY_event_stats=$RAY_event_stats (print_interval=${RAY_event_stats_print_interval_ms}ms)"
 
 # At 128+ nodes, each vLLM replica process has ~1500 gRPC connections to
 # other Ray actors, consuming many threads.  When the HuggingFace Rust
@@ -629,32 +326,57 @@ export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKENIZERS_PARALLELISM"
 
-echo "[System] DEBUG: About to set up Ray overlay (AURORA_PROXY_PROFILE=${AURORA_PROXY_PROFILE:-unset})"
-# --- Ray overlay: instrumented proxy.py via symlink tree ---
+# --- Ray overlay: patched files via symlink tree ---
 # Creates /tmp/ray_overlay on each node with symlinks to the system ray
-# package, replacing only proxy.py with our instrumented version.
-# This is prepended to PYTHONPATH so Python finds our proxy.py first.
-OVERLAY_PROXY="$HOME/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py"
-if [ "${AURORA_PROXY_PROFILE:-0}" = "1" ] && [ -f "$OVERLAY_PROXY" ]; then
-    # Hardcode the system ray path to avoid slow Python startup
+# package, replacing any file found in OVERLAY_ROOT with our patched version.
+# This is prepended to PYTHONPATH so Python finds our patched files first.
+#
+# The overlay source dir is a git-tracked repo; see commit history there
+# for the full patch set. Any *.py under serve/_private/ that exists in the
+# overlay gets copied in; anything missing falls through to the system ray.
+OVERLAY_ROOT="$HOME/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray"
+if [ "${AURORA_RAY_OVERLAY:-1}" = "1" ] && [ -d "$OVERLAY_ROOT/serve/_private" ]; then
     SYSRAY="$(dirname "$(dirname "$PYTHON_EXEC")")/lib/python3.12/site-packages/ray"
     if [ -d "$SYSRAY/serve/_private" ]; then
         RAY_OVERLAY="/tmp/ray_overlay"
-        # Build overlay on each node. Use a helper script to avoid quoting issues.
-        _OVERLAY_SCRIPT=$(mktemp /tmp/aurora_overlay_XXXX.sh)
+        # List patched files (just the filenames under serve/_private/).
+        # Enumerated at launch-script generation time so the remote script is
+        # self-contained (doesn't need OVERLAY_ROOT at runtime on workers).
+        PATCHED_FILES=$(cd "$OVERLAY_ROOT/serve/_private" && ls *.py 2>/dev/null | tr '\n' ' ')
+        echo "[System] Ray overlay: patched serve/_private files = $PATCHED_FILES"
+
+        # Script must live on shared storage so SSHed workers can read it.
+        # /tmp is local tmpfs per-node, so use $HOME (Lustre).
+        _OVERLAY_SCRIPT=$(mktemp "$HOME/.aurora_overlay_XXXX.sh")
         cat > "$_OVERLAY_SCRIPT" << OVERLAYEOF
 #!/bin/bash
+set -e
 rm -rf $RAY_OVERLAY
 mkdir -p $RAY_OVERLAY/ray/serve/_private
+# Symlink top-level ray/* (excluding serve)
 for f in $SYSRAY/*; do n=\$(basename \$f); [ "\$n" = serve ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/\$n 2>/dev/null; done
+# Symlink ray/serve/* (excluding _private)
 for f in $SYSRAY/serve/*; do n=\$(basename \$f); [ "\$n" = _private ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/serve/\$n 2>/dev/null; done
-for f in $SYSRAY/serve/_private/*; do n=\$(basename \$f); [ "\$n" = proxy.py ] && continue; [ "\$n" = __pycache__ ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/serve/_private/\$n 2>/dev/null; done
-cp $OVERLAY_PROXY $RAY_OVERLAY/ray/serve/_private/proxy.py
+# Symlink ray/serve/_private/* except the patched files and __pycache__
+PATCHED="$PATCHED_FILES"
+for f in $SYSRAY/serve/_private/*; do
+    n=\$(basename \$f)
+    [ "\$n" = __pycache__ ] && continue
+    # Skip if this filename is in the patched list
+    skip=0
+    for p in \$PATCHED; do [ "\$n" = "\$p" ] && skip=1 && break; done
+    [ \$skip -eq 1 ] && continue
+    ln -s "\$f" $RAY_OVERLAY/ray/serve/_private/\$n 2>/dev/null
+done
+# Copy each patched file from OVERLAY_ROOT (dereference to avoid stale cache)
+for p in \$PATCHED; do
+    cp "$OVERLAY_ROOT/serve/_private/\$p" "$RAY_OVERLAY/ray/serve/_private/\$p"
+done
 OVERLAYEOF
         chmod +x "$_OVERLAY_SCRIPT"
         # Run locally (head node) first
         bash "$_OVERLAY_SCRIPT"
-        # Run on remote nodes in parallel (the script is on shared Lustre, so just run it)
+        # Run on remote nodes in parallel (script lives on shared Lustre)
         for node in $(sort -u "$UNIQUE_NODES_FILE"); do
             short="${node%%.*}"
             [ "$short" = "$HOSTNAME_SHORT" ] && continue
@@ -663,7 +385,7 @@ OVERLAYEOF
         sleep 5  # give SSH background processes time to complete
         rm -f "$_OVERLAY_SCRIPT"
         export PYTHONPATH="$RAY_OVERLAY:$PYTHONPATH"
-        echo "[System] Ray overlay active: proxy.py from $OVERLAY_PROXY via $RAY_OVERLAY"
+        echo "[System] Ray overlay active at $RAY_OVERLAY (from $OVERLAY_ROOT)"
     fi
 fi
 
