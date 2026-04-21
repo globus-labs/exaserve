@@ -143,42 +143,62 @@ finalize_run_logs() {
     } > "$metadata_file"
 
     local ray_log_root="$RUN_LOG_DIR/ray_logs"
-    mkdir -p "$ray_log_root"
-    while read -r node; do
-        [ -z "$node" ] && continue
-        local short_node="${node%%.*}"
-        local dest_dir="$ray_log_root/$short_node"
-        mkdir -p "$dest_dir"
-        if [ "$short_node" = "$HOSTNAME_SHORT" ] || [ "$node" = "$(hostname)" ]; then
-            local session_dir
-            session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
-            if [ -n "$session_dir" ]; then
-                echo "$session_dir" > "$dest_dir/session_path.txt"
-                collect_ray_logs "$session_dir/logs" "$dest_dir"
-            fi
-        else
-            collect_remote_ray_logs "$node" "$dest_dir"
-        fi
-    done < "$UNIQUE_NODES_FILE"
-
-    # Collect instrumentation data from all nodes
     local inst_root="$RUN_LOG_DIR/instrumentation"
-    mkdir -p "$inst_root"
+    mkdir -p "$ray_log_root" "$inst_root"
+
+    # Previous serial while-loop stopped early at scale (observed 2/32 for ray_logs,
+    # 11/32 for instrumentation). Likely cause: each ssh/scp had no explicit
+    # timeout, so a single hung node could stall the loop past PBS cleanup.
+    # Fix: fan out per-node collection in parallel, one background job per node,
+    # each with its own 30s timeouts. Bound total wait with `wait -n` in a timed
+    # loop so we don't sit here longer than 120s.
+    local pids=()
     while read -r node; do
         [ -z "$node" ] && continue
         local short_node="${node%%.*}"
-        local inst_dest="$inst_root/$short_node"
-        mkdir -p "$inst_dest"
-        if [ "$short_node" = "$HOSTNAME_SHORT" ] || [ "$node" = "$(hostname)" ]; then
-            cp /tmp/aurora_inst/*.json /tmp/aurora_inst/*.jsonl "$inst_dest/" 2>/dev/null || true
-        else
-            scp "$node:/tmp/aurora_inst/*" "$inst_dest/" >/dev/null 2>&1 || true
-        fi
+        {
+            local ray_dest="$ray_log_root/$short_node"
+            local inst_dest="$inst_root/$short_node"
+            mkdir -p "$ray_dest" "$inst_dest"
+            if [ "$short_node" = "$HOSTNAME_SHORT" ] || [ "$node" = "$(hostname)" ]; then
+                local session_dir
+                session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
+                if [ -n "$session_dir" ]; then
+                    echo "$session_dir" > "$ray_dest/session_path.txt"
+                    cp -a "$session_dir/logs/." "$ray_dest/" 2>/dev/null || true
+                fi
+                cp /tmp/aurora_inst/*.json /tmp/aurora_inst/*.jsonl "$inst_dest/" 2>/dev/null || true
+            else
+                timeout 30 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+                    "$node" "readlink -f /tmp/ray/session_latest 2>/dev/null || true" \
+                    > "$ray_dest/session_path.txt" 2>/dev/null || true
+                timeout 60 scp -o ConnectTimeout=10 -o StrictHostKeyChecking=no -r \
+                    "$node:/tmp/ray/session_latest/logs/." "$ray_dest/" \
+                    >/dev/null 2>&1 || true
+                timeout 30 scp -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+                    "$node:/tmp/aurora_inst/*" "$inst_dest/" \
+                    >/dev/null 2>&1 || true
+            fi
+        } &
+        pids+=($!)
     done < "$UNIQUE_NODES_FILE"
-    echo "[System] Instrumentation data: $inst_root"
 
+    # Bounded wait: give all backgrounded collectors up to 120s.
+    local deadline=$(( $(date +%s) + 120 ))
+    for pid in "${pids[@]}"; do
+        local now=$(date +%s)
+        local budget=$(( deadline - now ))
+        [ $budget -le 0 ] && { kill "$pid" 2>/dev/null || true; continue; }
+        if ! timeout "$budget" bash -c "wait $pid 2>/dev/null" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+
+    local ray_collected=$(find "$ray_log_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
+    local inst_collected=$(find "$inst_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
+    echo "[System] Instrumentation data: $inst_root ($inst_collected/$(wc -l < "$UNIQUE_NODES_FILE") nodes collected)"
+    echo "[System] Ray logs: $ray_log_root ($ray_collected/$(wc -l < "$UNIQUE_NODES_FILE") nodes collected)"
     echo "[System] Persistent run log: $RUN_LOG_FILE"
-    echo "[System] Persistent Ray logs: $ray_log_root"
     echo "[System] Launcher exit code: $exit_code"
 }
 

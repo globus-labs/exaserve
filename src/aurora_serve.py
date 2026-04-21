@@ -97,7 +97,8 @@ def _collect_proxy_profiles(tracer) -> None:
     def _read_proxy_profiles():
         import glob, json, socket
         profiles = []
-        for path in glob.glob("/tmp/aurora_proxy_profile/*.json"):
+        # overlay proxy.py writes to /tmp/aurora_inst/proxy_init_<host>_<pid>.json
+        for path in glob.glob("/tmp/aurora_inst/proxy_init_*.json"):
             try:
                 with open(path) as f:
                     profiles.append(json.load(f))
