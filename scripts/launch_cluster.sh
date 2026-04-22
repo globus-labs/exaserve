@@ -169,12 +169,27 @@ finalize_run_logs() {
                 fi
                 cp /tmp/aurora_inst/*.json /tmp/aurora_inst/*.jsonl "$inst_dest/" 2>/dev/null || true
             else
-                timeout 30 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-                    "$node" "readlink -f /tmp/ray/session_latest 2>/dev/null || true" \
+                # One ssh that resolves session_latest AND tar-pipes the logs.
+                # scp -r with /tmp/ray/session_latest/logs/. was unreliable:
+                # worker session dir may be gone by scp time (Ray cleanup after
+                # SIGTERM), and scp's symlink handling with /. is finicky.
+                # tar-over-ssh dereferences inside one SSH round-trip, so the
+                # session dir can't vanish between two commands.
+                timeout 60 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+                    "$node" '
+                        sp=$(readlink -f /tmp/ray/session_latest 2>/dev/null || true);
+                        echo "$sp" > /tmp/_session_path_out;
+                        if [ -n "$sp" ] && [ -d "$sp/logs" ]; then
+                            cd "$sp/logs" && tar cf - . 2>/dev/null;
+                        fi
+                    ' 2>/dev/null \
+                    | tar xf - -C "$ray_dest/" 2>/dev/null || true
+                # Pull session_path.txt via a second tiny ssh (the tar-pipe
+                # above consumed stdout, so we need a separate call).
+                timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+                    "$node" "cat /tmp/_session_path_out 2>/dev/null || true" \
                     > "$ray_dest/session_path.txt" 2>/dev/null || true
-                timeout 60 scp -o ConnectTimeout=10 -o StrictHostKeyChecking=no -r \
-                    "$node:/tmp/ray/session_latest/logs/." "$ray_dest/" \
-                    >/dev/null 2>&1 || true
+                # Instrumentation dir: still works reliably with scp + glob.
                 timeout 30 scp -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
                     "$node:/tmp/aurora_inst/*" "$inst_dest/" \
                     >/dev/null 2>&1 || true
