@@ -152,54 +152,53 @@ finalize_run_logs() {
     # Fix: fan out per-node collection in parallel, one background job per node,
     # each with its own 30s timeouts. Bound total wait with `wait -n` in a timed
     # loop so we don't sit here longer than 120s.
+    # Step 1: head node collects its own files synchronously (local cp — no ssh).
+    local self_short="$(hostname -s)"
+    local head_ray_dest="$ray_log_root/$self_short"
+    local head_inst_dest="$inst_root/$self_short"
+    mkdir -p "$head_ray_dest" "$head_inst_dest"
+    local session_dir
+    session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
+    if [ -n "$session_dir" ] && [ -d "$session_dir/logs" ]; then
+        echo "$session_dir" > "$head_ray_dest/session_path.txt"
+        cp -a "$session_dir/logs/." "$head_ray_dest/" 2>/dev/null || true
+    fi
+    if [ -d /tmp/aurora_inst ]; then
+        cp -a /tmp/aurora_inst/. "$head_inst_dest/" 2>/dev/null || true
+    fi
+    local head_inst_count=$(ls "$head_inst_dest" 2>/dev/null | wc -l)
+    local head_ray_count=$(ls "$head_ray_dest" 2>/dev/null | wc -l)
+    echo "[finalize] head collected: ray_logs=$head_ray_count files, inst=$head_inst_count files"
+
+    # Step 2: fan out tar-over-ssh to worker nodes in parallel (skip self).
     local pids=()
     while read -r node; do
         [ -z "$node" ] && continue
         local short_node="${node%%.*}"
+        [ "$short_node" = "$self_short" ] && continue
         {
             local ray_dest="$ray_log_root/$short_node"
             local inst_dest="$inst_root/$short_node"
             mkdir -p "$ray_dest" "$inst_dest"
-            if [ "$short_node" = "$(hostname -s)" ]; then
-                echo "[finalize] LOCAL branch for head=$short_node (self=$(hostname -s))"
-                # Head node: local filesystem access — no ssh needed.
-                local session_dir
-                session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
-                echo "[finalize] session_dir=$session_dir aurora_inst=$(ls -d /tmp/aurora_inst 2>/dev/null || echo missing)"
-                if [ -n "$session_dir" ]; then
-                    echo "$session_dir" > "$ray_dest/session_path.txt"
-                    cp -a "$session_dir/logs/." "$ray_dest/" 2>/dev/null || true
-                fi
-                if [ -d /tmp/aurora_inst ]; then
-                    cp -a /tmp/aurora_inst/. "$inst_dest/" 2>/dev/null || true
-                fi
-            else
-                # Worker: tar-over-ssh for BOTH ray session logs and aurora_inst.
-                # Previously the inst used scp+remote-glob which worked at 32n
-                # but returned 0/64 at 64n in run 8445110 — likely a combination
-                # of OpenSSH glob reliability and node SSH-service teardown
-                # timing during PBS cleanup. tar-over-ssh bundles everything
-                # into a single SSH round-trip and is reliable at every scale.
-                timeout 60 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-                    "$node" '
-                        sp=$(readlink -f /tmp/ray/session_latest 2>/dev/null || true);
-                        echo "$sp" > /tmp/_session_path_out;
-                        if [ -n "$sp" ] && [ -d "$sp/logs" ]; then
-                            cd "$sp/logs" && tar cf - . 2>/dev/null;
-                        fi
-                    ' 2>/dev/null \
-                    | tar xf - -C "$ray_dest/" 2>/dev/null || true
-                timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-                    "$node" "cat /tmp/_session_path_out 2>/dev/null || true" \
-                    > "$ray_dest/session_path.txt" 2>/dev/null || true
-                timeout 30 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-                    "$node" '
-                        if [ -d /tmp/aurora_inst ]; then
-                            cd /tmp/aurora_inst && tar cf - . 2>/dev/null;
-                        fi
-                    ' 2>/dev/null \
-                    | tar xf - -C "$inst_dest/" 2>/dev/null || true
-            fi
+            timeout 60 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+                "$node" '
+                    sp=$(readlink -f /tmp/ray/session_latest 2>/dev/null || true);
+                    echo "$sp" > /tmp/_session_path_out;
+                    if [ -n "$sp" ] && [ -d "$sp/logs" ]; then
+                        cd "$sp/logs" && tar cf - . 2>/dev/null;
+                    fi
+                ' 2>/dev/null \
+                | tar xf - -C "$ray_dest/" 2>/dev/null || true
+            timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+                "$node" "cat /tmp/_session_path_out 2>/dev/null || true" \
+                > "$ray_dest/session_path.txt" 2>/dev/null || true
+            timeout 30 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+                "$node" '
+                    if [ -d /tmp/aurora_inst ]; then
+                        cd /tmp/aurora_inst && tar cf - . 2>/dev/null;
+                    fi
+                ' 2>/dev/null \
+                | tar xf - -C "$inst_dest/" 2>/dev/null || true
         } &
         pids+=($!)
     done < "$UNIQUE_NODES_FILE"
