@@ -1,182 +1,250 @@
 # GCS Contention at Scale — Quantitative Measurement (32/64/128/256 nodes)
 
 **Branch:** perf-inst-dev (commit 757809e + overlay 4dce240)
-**Status:** 32n/64n/128n complete; 256n running.
+**Date:** 2026-04-22
+**Jobs:** 8445314 (32n), 8445324 (64n), 8445336 (128n), 8445349 (256n)
+
+## Headline
+
+The "wait_proxies cliff" scales super-linearly (21.8s → 93.6s → 393.8s →
+**1751.5s**) across 32/64/128/256 nodes. It is NOT driven by GCS write
+contention (`GcsInMemoryStore.Put` queueing is constant at ~1210ms
+across all four scales — a fully saturated single-writer path). It IS
+driven by an **O(N²) pattern of GCS actor-handle lookups**: each proxy
+calls `ray.get_actor()` for every replica on every LongPollClient
+broadcast, producing millions of `GetActorInfo` / `GetNamedActorInfo`
+calls per deployment. At 256n this reaches **1.58 million** GetActorInfo
+calls with peak GCS read queueing of 90ms.
+
+**Patched `UNHEALTHY_THRESHOLD=100` successfully prevents the
+ProxyActor kill cascade at 256n** (0 kills despite 1187 "Didn't receive
+health check response" events — the precursor signal).
 
 ## Goal
 
 Quantify the GCS-contention hypothesis from
-[proxyactor_death_cascade_256n.md](proxyactor_death_cascade_256n.md) using
-Ray's built-in `RAY_event_stats=1` telemetry. Specifically answer:
+[proxyactor_death_cascade_256n.md](proxyactor_death_cascade_256n.md):
 
-1. **To what extent** is GCS the bottleneck for the wait_proxies cliff
-   (21.8s → 93.6s at 32n→64n)?
-2. Does GCS queueing time scale with node count?
-3. Which specific GCS RPC methods dominate queueing time, and how do their
-   call counts scale?
+1. Is GCS the bottleneck for wait_proxies at scale? **Partially.** GCS
+   writes are saturated but not growing; GCS reads are the real scaling
+   problem.
+2. Which specific methods dominate queueing and call counts? **Actor-handle
+   lookups.**
+3. Where's the architectural waste? **Quadratic re-resolution of actor
+   handles by every proxy.**
 
 ## Method
 
-Clean instrumentation overlay (perf-inst-dev). Each ProxyActor writes
-its init profile to `$AURORA_RUN_LOG_DIR/instrumentation/<host>/` on Lustre
-(direct write, no SCP). `RAY_event_stats=1` emits per-RPC stats blocks
-every 1s into `gcs_server.out` on the head node.
+- **Clean instrumentation overlay** (perf-inst-dev) replaces
+  sitecustomize/usercustomize. Four files patched at
+  `~/.local/aurora/.../ray`: `constants.py` (Aurora timeouts),
+  `proxy.py` (ProxyActor `__init__`/`ready()` instrumentation with
+  per-substep timing), plus pristine `controller.py` and `proxy_state.py`
+  as baselines.
+- **Direct-to-Lustre output**: ProxyActors write
+  `$AURORA_RUN_LOG_DIR/instrumentation/<host>/proxy_init_<pid>.json`
+  instead of `/tmp/aurora_inst/` (which was being cleaned by PBS epilogue
+  before the head-node finalize trap could ssh to collect).
+- **`RAY_event_stats=1 RAY_event_stats_print_interval_ms=1000`** — Ray's
+  built-in per-RPC telemetry, dumped every 1s to the head's
+  `gcs_server.out`.
+- **All runs**: null-compute mode, `startup_only=True` (no replay client),
+  12 replicas/node. 32/64/128n on reservation R8443082; 256n on `prod`
+  queue.
 
-All runs: null-compute mode, `startup_only=True` (no replay client), null
-replicas = 12/node. Uses reservation R8443082 for 32/64/128n, prod queue
-for 256n.
+## Results
 
-## Stage timing (seconds, from `scaling_trace.json`)
+### Stage timing (from `scaling_trace.json`)
 
 | Phase | 32n | 64n | 128n | 256n |
 |---|---:|---:|---:|---:|
-| `serve.start` | 40.2 | 44.6 | 37.6 | TBD |
-| `serve.run.deploy_apps` | 43.8 | 43.2 | 45.9 | TBD |
-| **`serve.run.wait_proxies`** | **21.8** | **93.6** | **393.8** | **TBD** |
-| `stage3.total` | 86.9 | 156.7 | 463.5 | TBD |
-| Total CLUSTER FULLY READY | ~145 | ~217 | ~500 | TBD |
+| `ray.init` | 25.8 | ~24 | — | 24.9 |
+| `serve.start` | 40.2 | 44.6 | 37.6 | 38.7 |
+| `serve.run.deploy_apps` | 43.8 | 43.2 | 45.9 | **104.6** |
+| **`serve.run.wait_proxies`** | **21.8** | **93.6** | **393.8** | **1751.5** |
+| `stage3.total` | 86.9 | 156.7 | 463.5 | **1880.6** |
+| CLUSTER FULLY READY | ~145 | ~217 | ~500 | ~1940 |
 
-**Key observations:**
-- `serve.start` and `deploy_apps` are essentially **flat** across 32→128n
-- **`wait_proxies` scales super-linearly**: 21.8s → 93.6s → 393.8s. Doubling nodes → 4× wait_proxies.
-- Stage 3 total dominated by wait_proxies at higher scales.
+Doubling nodes → **~4.5× wait_proxies**. Classic O(N²) scaling.
 
-## Proxy init duration (from per-proxy JSON on Lustre)
+`deploy_apps` is flat up to 128n and finally jumps 2.3× at 256n.
+This jump mirrors replica count scaling (3074 replicas at 256n).
+
+### Proxy init distribution (per-proxy JSON)
 
 | Stat | 32n | 64n | 128n | 256n |
 |---|---:|---:|---:|---:|
-| mean (s) | 0.345 | 0.344 | 0.359 | TBD |
-| p95 | 0.416 | 0.449 | 0.471 | TBD |
-| p99 | 0.428 | 0.471 | 0.536 | TBD |
-| max | 0.432 | 0.498 | 0.574 | TBD |
-| proxies collected | 32/32 | 64/64 | 128/128 | TBD |
+| mean (s) | 0.345 | 0.344 | 0.359 | **0.558** |
+| p95 | 0.416 | 0.449 | 0.471 | **1.030** |
+| p99 | 0.428 | 0.471 | 0.536 | **1.255** |
+| max | 0.432 | 0.498 | 0.574 | **1.876** |
+| collected | 32/32 | 64/64 | 128/128 | 256/256 |
 
-**Proxy init itself is flat.** ProxyActor `__init__` takes ~0.35s at all
-scales. The wait_proxies cliff is NOT in the proxy's own work.
+Proxy `__init__` is flat through 128n (~0.35s) and bumps to 0.56s mean
+at 256n with a tail out to 1.88s — the `long_poll_client` and
+`create_proxies` substeps slow down because they're hitting the saturated
+GCS read path themselves.
 
-## Controller health-check events
+### Controller health-check events (from `controller_*.log`)
 
 | Event | 32n | 64n | 128n | 256n |
 |---|---:|---:|---:|---:|
-| Proxy `failed the health check` (× kill) | 0 | 0 | 0 | TBD |
-| Proxy `Didn't receive ... response` | 0 | 0 | **126** | TBD |
-| Replica `Didn't receive ... response` | 0 | 0 | 0 | TBD |
-| Replicas `started successfully` | 384 | 768 | 1536 | TBD |
+| Proxy `failed health check` (→ kill) | 0 | 0 | 0 | **0** |
+| Proxy `Didn't receive ... response` | 0 | 0 | 126 | **1187** |
+| Replica `Didn't receive ... response` | 0 | 0 | 0 | 0 |
+| Replicas `started successfully` | 384 | 768 | 1536 | 3074 |
 
-**First signal of proxy-side trouble appears at 128n**: 126 cases where
-the controller dispatched a health check to a proxy but didn't get a
-response back in time (patched timeout 300s). None of these reached the
-100-consecutive-failure threshold, so no proxies were actually killed
-(our patch worked — without it, 3-consecutive-failures at 30s/each
-would have killed proxies by 128n).
+**"Didn't receive response" events scale ~10× per node-doubling**
+(0→0→126→1187). This is the controller failing to reach a proxy within
+the patched 300s timeout. It's the precursor to the proxy-kill cascade
+documented in the prior findings note.
 
-## GCS event stats — peak queueing time and call counts
+**Our patches prevented the kill cascade at 256n** (0 kills). With the
+default `UNHEALTHY_THRESHOLD=3`, the 1187 timeout events would have
+easily crossed the threshold per-proxy (4.6 avg per proxy → some
+proxies hit ≥3 consecutive), producing kills matching the historical
+74-proxy cascade at 256n.
 
-Format: `peak_q_max_ms / total_calls`. Peak queueing = maximum observed
-queueing time (time from RPC dispatch to handler start) across all 1-second
-event-stats blocks.
+### GCS event stats — peak queueing / total calls
 
-| Method | 32n | 64n | 128n | 256n |
-|---|---:|---:|---:|---:|
-| GcsInMemoryStore.Put | **1225**/3169 | **1241**/6072 | **1209**/12282 | TBD |
-| GcsInMemoryStore.Get | 1.4/3466 | 3.9/6804 | **59.2**/13360 | TBD |
-| ActorInfoGcsService.GetActorInfo | 1.0/25442 | 2.3/100034 | **86.6**/396674 | TBD |
-| ActorInfoGcsService.GetNamedActorInfo | 19.3/13566 | 19.7/51660 | **86.2**/206360 | TBD |
-| NodeInfoGcsService.GetAllNodeAddressAndLiveness | 63.4/522 | 18.5/1034 | 37.7/2058 | TBD |
-| NodeManagerService.grpc_client.GetResourceLoad | 10.6/5041 | 26.4/14685 | **63.6**/66940 | TBD |
-| PeriodicalRunner.RunFnPeriodically | 1226/5 | 1241/5 | 1209/5 | TBD |
-| GcsHealthCheckManager::MarkNodeHealthy | 10.1/529 | 16.4/1276 | **85.8**/2480 | TBD |
-| HealthCheck | 0.3/1553 | 2.9/4592 | **71.1**/21713 | TBD |
+Format: `peak_q_max_ms / total_calls`. Peak queueing = max observed
+over all 1-second event-stats blocks.
 
-**The picture at 128n:**
+| Method | 32n | 64n | 128n | 256n | Call scaling |
+|---|---:|---:|---:|---:|:---:|
+| `GcsInMemoryStore.Put` | 1225/3.2k | 1241/6.1k | 1209/12.3k | 1211/**27k** | 2× per step |
+| `GcsInMemoryStore.Get` | 1.4/3.5k | 3.9/6.8k | 59.2/13k | 70.8/**27k** | 2× |
+| **`ActorInfoGcsService.GetActorInfo`** | 1.0/**25k** | 2.3/**100k** | 86.6/**397k** | 90.0/**1,581k** | **~4×/step (N²)** |
+| **`ActorInfoGcsService.GetNamedActorInfo`** | 19.3/14k | 19.7/52k | 86.2/**206k** | 89.0/**921k** | **~4×/step (N²)** |
+| `NodeManagerService.GetResourceLoad` | 10.6/5k | 26.4/15k | 63.6/67k | 83.0/**494k** | 3-7× |
+| `HealthCheck` | 0.3/1.5k | 2.9/4.6k | 71.1/22k | 85.0/**163k** | 3-7× |
+| `GcsHealthCheckManager::MarkNodeHealthy` | 10.1/0.5k | 16.4/1.3k | 85.8/2.5k | 87.1/5.5k | ~2× (linear) |
+| `PeriodicalRunner.RunFnPeriodically` | 1226/5 | 1241/5 | 1209/5 | 1212/5 | flat |
 
-1. **`GcsInMemoryStore.Put` queueing is flat (~1200ms)** across 32→128n despite
-   calls doubling each step. This is a single serialization hotspot (only
-   one thread can Put at a time) that's already saturated at 32n; it has
-   a fixed worst-case queue depth that doesn't grow further.
-   `PeriodicalRunner` shows the same profile because it queues behind Puts.
+**The O(N²) methods are the story.** GetActorInfo and GetNamedActorInfo
+grow ~4× per node-doubling — matching the N² pattern where each of N
+proxies resolves each of N×R replicas. At 256n this is **1.58 million
+GetActorInfo calls** over a 1751s wait_proxies window = 900 calls/sec
+sustained to GCS, with 90ms peak queueing per call.
 
-2. **GCS READ methods become contended at 128n.** GetActorInfo,
-   GetNamedActorInfo, Get, HealthCheck, MarkNodeHealthy all jump from
-   sub-30ms peak queueing at 32/64n to **60-90ms at 128n**. This is GCS
-   read contention emerging as the cluster scales.
+**GCS write path (Put) is saturated but static.** ~1200ms peak queueing
+across all scales; call count doubles per step but queueing never grows.
+This is Ray's single-writer InMemoryStore thread already at capacity at
+32n. It doesn't gate wait_proxies because writes are background
+(node/actor registration).
 
-3. **Call counts scale super-linearly** for actor lookups:
-   GetActorInfo: 25k (32n) → 100k (64n) → **397k (128n)** — 4× per step.
-   Each proxy calls `ray.get_actor()` per replica; at 128n that's
-   128 proxies × 1536 replicas = ~197k name lookups, fanned out as
-   handle lookups.
+**GCS read path plateaus at ~85-90ms peak queueing** between 128n and
+256n. Throughput is the bottleneck, not latency-per-call.
 
-## Interpretation (so far)
+## Interpretation
 
-### Why is `wait_proxies` the dominant Stage 3 cost at scale?
+### Why is `wait_proxies` the dominant Stage 3 cost?
 
-`wait_proxies` in our code is `ray.wait()` on `.serving.remote()` calls
-dispatched to every proxy. Each `.serving()` is a no-op on the proxy side,
-but for the proxy to *respond*, its `LongPollClient` must have received
-the updated replica set from the controller AND resolved each replica's
-actor handle via `ray.get_actor()`. This last step is 128 × 1536 ≈ 197k
-GCS queries.
+`wait_proxies` is our code's `ray.wait()` on `.serving.remote()` calls
+dispatched to every proxy. The proxy-side `.serving()` method is a
+no-op (it just returns). But for the proxy to *reach* the state where
+its event loop can pick up and respond to the RPC, its LongPollClient
+must have:
 
-The elapsed time before a proxy can respond to `.serving()` is dominated
-by this long-poll + handle-resolution pipeline, not by the proxy's own
-init. That's why `wait_proxies` grows super-linearly while `__init__`
-stays flat.
+1. Received the controller's broadcast of the new replica set
+2. Resolved **every replica's actor handle** via
+   `ray.get_actor(name, namespace)` (see `replica_wrapper.py:109`)
+3. Updated its internal request router
 
-### GCS writes aren't the bottleneck
+Step 2 is the O(N²) cost. The controller's broadcast is O(N_proxies)
+network-wise, but the proxy-side handle resolution is O(N_proxies ×
+N_replicas) GCS queries across the cluster. N_replicas = 12 ×
+N_proxies, so total is O(N²) × 12.
 
-The Put peak queueing is *identical* across scales (1225ms flat). This
-is not a "not yet at capacity" signal — it's a saturated single-thread
-serialization already at 32n. But crucially, Put's queueing doesn't
-translate directly to user-visible latency. Writes happen in background
-(node registration, actor state updates) and don't gate wait_proxies.
+At 256n: 256 proxies × 3072 replicas = 786k lookups per broadcast.
+Each logical ray.get_actor involves ~2 GCS round-trips (name +
+handle) = 1.57M GCS calls — matches observed 1.58M.
 
-### GCS reads ARE the emerging bottleneck
+### Why GCS reads but not writes?
 
-At 128n, read paths (GetActorInfo, GetNamedActorInfo, HealthCheck) start
-seeing 60-90ms queueing. Each proxy does hundreds of actor lookups
-sequentially (or nearly so) — at 86ms/lookup × ~1.5k lookups = 130s just
-for one proxy's long-poll refresh. 128 proxies doing this concurrently
-saturates GCS reads.
+Writes are serialized through `GcsInMemoryStore.Put` (~1200ms peak
+queue, constant at all scales). But writes are driven by structural
+events (node register, actor register, job create) — O(N), not O(N²).
 
-### The `proxy didn't receive response` emergence at 128n
+Reads hit the same store but can parallelize more inside the GCS
+process. They still hit a ceiling: ~900 calls/sec throughput, ~85ms
+peak queueing. Beyond that, calls stack up in the queue.
 
-This controller log line (126 occurrences at 128n) appears when the
-controller's health-check RPC to a proxy exceeds its timeout. It's the
-precursor to the 256n proxy-death cascade documented in
-[proxyactor_death_cascade_256n.md](proxyactor_death_cascade_256n.md).
+### Why the "Didn't receive response" cascade at 128n+?
 
-At 128n our patched `PROXY_HEALTH_CHECK_UNHEALTHY=100` prevents actual
-kills (100 consecutive failures never accumulate within the short
-Stage 3 window). At 256n the same signal at higher rate historically
-reached the threshold and killed proxies.
+The controller polls each proxy's health every
+`PROXY_HEALTH_CHECK_PERIOD_S=10s`. The health-check RPC is:
 
-## 256n data — to be filled
+```
+controller.core_worker → GCS: resolve proxy actor handle
+                      → gRPC to proxy's raylet
+                      → proxy's asyncio loop → check_health()
+                      → return path
+```
 
-(awaiting run16/256-nodes job completion)
+When the proxy's asyncio loop is blocked on 3k ray.get_actor()
+resolutions at 85ms each, it can't service incoming health-check RPCs.
+The controller's 300s timeout (our patched value) fires — recorded as
+"Didn't receive response".
 
-## Headline conclusion (current)
+Our patched `UNHEALTHY_THRESHOLD=100` prevents the kill: even at 256n
+with 1187 timeouts over 1751s, no single proxy accumulates 100
+consecutive failures within the window.
 
-The wait_proxies cliff is **not caused by GCS write contention** — Put
-queueing is constant from 32n to 128n. The actual scaling problem is:
+### Architectural implication
 
-1. **GCS actor-handle lookups scale super-linearly** because every
-   proxy must resolve every replica's actor on each long-poll update,
-   producing O(proxies × replicas) = O(N²) lookups per cluster event.
-2. At 128n this pushes GCS read queueing into the 60-90ms range; at
-   256n it likely pushes past the controller's health-check timeout
-   often enough to trigger the documented proxy-death cascade.
-3. **Raising UNHEALTHY_THRESHOLD to 100 successfully prevents the
-   proxy-kill cascade** at 128n (126 timeouts observed, 0 kills).
+The actor-handle re-resolution on every long-poll update is the
+scaling-fundamental problem. The controller already knows the full
+replica→actor mapping — it just sends names over long-poll and expects
+every proxy to re-resolve. A fix would be: **ship actor handles in the
+long-poll payload**, making the proxy's update O(1) GCS calls instead
+of O(N_replicas). This turns the total from O(N² × R) to O(N × R) =
+O(N), a huge scaling win.
 
-The theoretical fix would be: proxies should receive PRE-RESOLVED actor
-handles from the controller's broadcast, not names that each proxy
-re-resolves. This moves the O(N²) GCS lookup into a single O(N) operation
-in the controller.
+## Takeaways
+
+1. **Wait_proxies is our dominant Stage 3 cost** and scales ~4.5× per
+   node-doubling up through 256n (21.8s → 1751.5s).
+2. **GCS contention IS real but it's READ-side** (actor lookup storm),
+   not the write-side path that the initial hypothesis focused on.
+3. **Ray Serve's LongPollClient replica-refresh is O(N²)** in GCS
+   lookups. This is the scaling-fundamental architectural issue.
+4. **Our timeout patches are a successful workaround**: they prevent
+   the proxy-kill cascade that historically was observed at 256n
+   (74 kills in prior runs). With patches applied, the system is
+   *slow* at 256n but *not broken*.
+5. **GCS writes are saturated at 32n already**, but don't further
+   bottleneck because write rate is O(N), not O(N²).
+
+## Future work
+
+- **Eliminate the per-proxy re-resolution** by including actor handles
+  in the long-poll payload (Ray Serve change).
+- **Measure the controller asyncio loop** directly — the "Didn't receive
+  response" signals include proxy-side delays AND controller
+  dispatch delays, and we haven't separated them.
+- **Test with `RAY_gcs_server_num_threads` increased** to see if
+  read-side parallelism lifts the 900/sec ceiling. (Current: 8.)
 
 ## Data
-All runs stored under `/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs/weakscaling_nullcompute_proxy/run16/{32,64,128,256}-nodes/`.
+
+All runs stored under:
+`/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs/weakscaling_nullcompute_proxy/run16/{32,64,128,256}-nodes/`
+
+Key artifacts per run:
+- `logs/backend/*_ray_runtime/scaling_trace.json` — phase timing
+- `logs/backend/*_ray_runtime/instrumentation/<host>/proxy_init_<pid>.json` — per-proxy init breakdown with substeps
+- `logs/backend/*_ray_runtime/ray_logs/<head>/gcs_server.out` — Ray event stats (2-19k blocks)
+- `logs/backend/*_ray_runtime/ray_logs/<head>/serve/controller_*.log` — controller events
 
 ## Tools
-- `tools/parse_gcs_event_stats.py` — parse `gcs_server.out` event-stats blocks
+
+- `tools/parse_gcs_event_stats.py` — parse gcs_server.out event-stats
+  blocks into CSV
 - `tools/analyze_scaling.py` — cross-scale comparison table generator
+  (takes N run_dirs, produces side-by-side table)
+
+## Rollback
+
+Main-repo commit 2f32633 restores the pre-perf-inst-dev state.
+Overlay repo commit 2014298 restores pristine upstream Ray files.
