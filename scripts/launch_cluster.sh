@@ -183,16 +183,14 @@ finalize_run_logs() {
         pids+=($!)
     done < "$UNIQUE_NODES_FILE"
 
-    # Bounded wait: give all backgrounded collectors up to 120s.
-    local deadline=$(( $(date +%s) + 120 ))
-    for pid in "${pids[@]}"; do
-        local now=$(date +%s)
-        local budget=$(( deadline - now ))
-        [ $budget -le 0 ] && { kill "$pid" 2>/dev/null || true; continue; }
-        if ! timeout "$budget" bash -c "wait $pid 2>/dev/null" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-        fi
-    done
+    # Each background job is already bounded by per-command `timeout` on the
+    # ssh/scp steps (30s+60s+30s worst case = 120s). They finish naturally;
+    # just wait for all of them. Previous attempt used `timeout N bash -c "wait PID"`
+    # which runs the inner `wait` in a subshell that is NOT the parent of the
+    # backgrounded jobs — wait returns 127 immediately, the outer `timeout`
+    # exits nonzero, and the else-branch `kill`ed every SCP before it copied
+    # anything. Job 8444548 hit this bug (all 32 dirs created but 0 payloads).
+    wait 2>/dev/null || true
 
     local ray_collected=$(find "$ray_log_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
     local inst_collected=$(find "$inst_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
