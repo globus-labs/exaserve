@@ -142,38 +142,55 @@ finalize_run_logs() {
         echo "exit_code=$exit_code"
     } > "$metadata_file"
 
+    # Disable set -e inside finalize: we use `|| true` to tolerate individual
+    # node collection failures, but bash's set -e can still kill the function
+    # in surprising ways (especially with command substitutions inside `local`).
+    set +e
+
     local ray_log_root="$RUN_LOG_DIR/ray_logs"
     local inst_root="$RUN_LOG_DIR/instrumentation"
     mkdir -p "$ray_log_root" "$inst_root"
 
-    # Previous serial while-loop stopped early at scale (observed 2/32 for ray_logs,
-    # 11/32 for instrumentation). Likely cause: each ssh/scp had no explicit
-    # timeout, so a single hung node could stall the loop past PBS cleanup.
-    # Fix: fan out per-node collection in parallel, one background job per node,
-    # each with its own 30s timeouts. Bound total wait with `wait -n` in a timed
-    # loop so we don't sit here longer than 120s.
+    local dbg="$RUN_LOG_DIR/finalize_debug.log"
+    : > "$dbg"
+    echo "finalize start $(date -u +%Y-%m-%dT%H:%M:%SZ) exit_code=$exit_code" >> "$dbg"
+
     # Step 1: head node collects its own files synchronously (local cp — no ssh).
     local self_short="$(hostname -s)"
+    echo "self_short=$self_short hostname=$(hostname)" >> "$dbg"
     local head_ray_dest="$ray_log_root/$self_short"
     local head_inst_dest="$inst_root/$self_short"
     mkdir -p "$head_ray_dest" "$head_inst_dest"
+    echo "head dirs mkdir OK" >> "$dbg"
     local session_dir
     session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
+    echo "session_dir=$session_dir" >> "$dbg"
     if [ -n "$session_dir" ] && [ -d "$session_dir/logs" ]; then
         echo "$session_dir" > "$head_ray_dest/session_path.txt"
-        cp -a "$session_dir/logs/." "$head_ray_dest/" 2>/dev/null || true
+        echo "copying head session logs..." >> "$dbg"
+        cp -a "$session_dir/logs/." "$head_ray_dest/" 2>>"$dbg"
+        echo "head ray_logs cp rc=$?" >> "$dbg"
     fi
     if [ -d /tmp/aurora_inst ]; then
-        cp -a /tmp/aurora_inst/. "$head_inst_dest/" 2>/dev/null || true
+        echo "head aurora_inst listing:" >> "$dbg"
+        ls /tmp/aurora_inst >> "$dbg" 2>&1
+        cp -a /tmp/aurora_inst/. "$head_inst_dest/" 2>>"$dbg"
+        echo "head inst cp rc=$?" >> "$dbg"
+    else
+        echo "head has no /tmp/aurora_inst dir" >> "$dbg"
     fi
-    local head_inst_count=$(ls "$head_inst_dest" 2>/dev/null | wc -l)
     local head_ray_count=$(ls "$head_ray_dest" 2>/dev/null | wc -l)
+    local head_inst_count=$(ls "$head_inst_dest" 2>/dev/null | wc -l)
+    echo "head_ray_count=$head_ray_count head_inst_count=$head_inst_count" >> "$dbg"
     echo "[finalize] head collected: ray_logs=$head_ray_count files, inst=$head_inst_count files"
 
     # Step 2: fan out tar-over-ssh to worker nodes in parallel (skip self).
+    echo "entering worker loop" >> "$dbg"
     local pids=()
+    local loop_iterations=0
     while read -r node; do
         [ -z "$node" ] && continue
+        loop_iterations=$((loop_iterations + 1))
         local short_node="${node%%.*}"
         [ "$short_node" = "$self_short" ] && continue
         {
@@ -210,7 +227,9 @@ finalize_run_logs() {
     # backgrounded jobs — wait returns 127 immediately, the outer `timeout`
     # exits nonzero, and the else-branch `kill`ed every SCP before it copied
     # anything. Job 8444548 hit this bug (all 32 dirs created but 0 payloads).
+    echo "loop_iterations=$loop_iterations pids_spawned=${#pids[@]}" >> "$dbg"
     wait 2>/dev/null || true
+    echo "finalize end $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$dbg"
 
     local ray_collected=$(find "$ray_log_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
     local inst_collected=$(find "$inst_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
