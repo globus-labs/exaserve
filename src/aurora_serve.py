@@ -95,16 +95,24 @@ def _collect_proxy_profiles(tracer) -> None:
 
     @ray.remote(num_cpus=0)
     def _read_proxy_profiles():
-        import glob, json, socket
+        import glob, json, socket, os
         profiles = []
-        # overlay proxy.py writes to /tmp/aurora_inst/proxy_init_<host>_<pid>.json
-        for path in glob.glob("/tmp/aurora_inst/proxy_init_*.json"):
-            try:
-                with open(path) as f:
-                    profiles.append(json.load(f))
-            except Exception:
-                pass
-        return {"hostname": socket.gethostname(), "profiles": profiles}
+        # overlay proxy.py writes to $AURORA_RUN_LOG_DIR/instrumentation/<host>/
+        # (Lustre) if set, else /tmp/aurora_inst (node-local tmpfs).
+        run_log = os.environ.get("AURORA_RUN_LOG_DIR")
+        host = socket.gethostname()
+        if run_log:
+            patterns = [f"{run_log}/instrumentation/{host}/proxy_init_*.json"]
+        else:
+            patterns = ["/tmp/aurora_inst/proxy_init_*.json"]
+        for pat in patterns:
+            for path in glob.glob(pat):
+                try:
+                    with open(path) as f:
+                        profiles.append(json.load(f))
+                except Exception:
+                    pass
+        return {"hostname": host, "profiles": profiles}
 
     nodes = ray.nodes()
     alive_node_ids = [n["NodeID"] for n in nodes if n["Alive"]]
