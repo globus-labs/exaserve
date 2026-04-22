@@ -167,14 +167,19 @@ finalize_run_logs() {
     echo "session_dir=$session_dir" >> "$dbg"
     if [ -n "$session_dir" ] && [ -d "$session_dir/logs" ]; then
         echo "$session_dir" > "$head_ray_dest/session_path.txt"
-        echo "tar-piping head session logs..." >> "$dbg"
-        # Use timeout-bounded tar instead of cp -a: cp hung indefinitely on
-        # run13 (shell got stuck writing Lustre while Ray was still appending
-        # to gcs_server.out). tar handles open files gracefully and timeout
-        # guarantees forward progress.
-        timeout 60 bash -c "tar -cf - -C '$session_dir/logs' . 2>/dev/null" \
-            | tar -xf - -C "$head_ray_dest/" 2>>"$dbg"
-        echo "head ray_logs tar rc=${PIPESTATUS[*]}" >> "$dbg"
+        # Copy only the specific files needed for analysis. tar and cp -a
+        # on the whole dir hung repeatedly — likely because Ray is still
+        # appending to some files and/or writing to a FIFO/socket in the
+        # session dir. Targeted cp avoids the problematic files entirely.
+        for f in gcs_server.out gcs_server.err raylet.out raylet.err dashboard.log dashboard.err dashboard.out; do
+            timeout 10 cp "$session_dir/logs/$f" "$head_ray_dest/" 2>>"$dbg"
+            echo "cp $f rc=$?" >> "$dbg"
+        done
+        if [ -d "$session_dir/logs/serve" ]; then
+            mkdir -p "$head_ray_dest/serve"
+            timeout 30 cp -r "$session_dir/logs/serve/." "$head_ray_dest/serve/" 2>>"$dbg"
+            echo "cp serve/ rc=$?" >> "$dbg"
+        fi
     fi
     if [ -d /tmp/aurora_inst ]; then
         echo "head aurora_inst listing:" >> "$dbg"
