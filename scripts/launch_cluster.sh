@@ -160,10 +160,12 @@ finalize_run_logs() {
             local ray_dest="$ray_log_root/$short_node"
             local inst_dest="$inst_root/$short_node"
             mkdir -p "$ray_dest" "$inst_dest"
-            if [ "$short_node" = "$HOSTNAME_SHORT" ] || [ "$node" = "$(hostname)" ]; then
+            if [ "$short_node" = "$(hostname -s)" ]; then
+                echo "[finalize] LOCAL branch for head=$short_node (self=$(hostname -s))"
                 # Head node: local filesystem access — no ssh needed.
                 local session_dir
                 session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
+                echo "[finalize] session_dir=$session_dir aurora_inst=$(ls -d /tmp/aurora_inst 2>/dev/null || echo missing)"
                 if [ -n "$session_dir" ]; then
                     echo "$session_dir" > "$ray_dest/session_path.txt"
                     cp -a "$session_dir/logs/." "$ray_dest/" 2>/dev/null || true
