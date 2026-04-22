@@ -160,30 +160,44 @@ finalize_run_logs() {
             local ray_dest="$ray_log_root/$short_node"
             local inst_dest="$inst_root/$short_node"
             mkdir -p "$ray_dest" "$inst_dest"
-            # Uniform path for head + workers: tar-over-ssh for ray session
-            # logs, tar-over-ssh for /tmp/aurora_inst. ssh localhost for head
-            # avoids head-vs-worker branching bugs observed in run8/64n where
-            # the head branch didn't fire and controller/GCS logs were lost.
-            # scp+glob for inst was also flaky — tar is reliable.
-            timeout 60 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-                "$node" '
-                    sp=$(readlink -f /tmp/ray/session_latest 2>/dev/null || true);
-                    echo "$sp" > /tmp/_session_path_out;
-                    if [ -n "$sp" ] && [ -d "$sp/logs" ]; then
-                        cd "$sp/logs" && tar cf - . 2>/dev/null;
-                    fi
-                ' 2>/dev/null \
-                | tar xf - -C "$ray_dest/" 2>/dev/null || true
-            timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-                "$node" "cat /tmp/_session_path_out 2>/dev/null || true" \
-                > "$ray_dest/session_path.txt" 2>/dev/null || true
-            timeout 30 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-                "$node" '
-                    if [ -d /tmp/aurora_inst ]; then
-                        cd /tmp/aurora_inst && tar cf - . 2>/dev/null;
-                    fi
-                ' 2>/dev/null \
-                | tar xf - -C "$inst_dest/" 2>/dev/null || true
+            if [ "$short_node" = "$HOSTNAME_SHORT" ] || [ "$node" = "$(hostname)" ]; then
+                # Head node: local filesystem access — no ssh needed.
+                local session_dir
+                session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
+                if [ -n "$session_dir" ]; then
+                    echo "$session_dir" > "$ray_dest/session_path.txt"
+                    cp -a "$session_dir/logs/." "$ray_dest/" 2>/dev/null || true
+                fi
+                if [ -d /tmp/aurora_inst ]; then
+                    cp -a /tmp/aurora_inst/. "$inst_dest/" 2>/dev/null || true
+                fi
+            else
+                # Worker: tar-over-ssh for BOTH ray session logs and aurora_inst.
+                # Previously the inst used scp+remote-glob which worked at 32n
+                # but returned 0/64 at 64n in run 8445110 — likely a combination
+                # of OpenSSH glob reliability and node SSH-service teardown
+                # timing during PBS cleanup. tar-over-ssh bundles everything
+                # into a single SSH round-trip and is reliable at every scale.
+                timeout 60 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+                    "$node" '
+                        sp=$(readlink -f /tmp/ray/session_latest 2>/dev/null || true);
+                        echo "$sp" > /tmp/_session_path_out;
+                        if [ -n "$sp" ] && [ -d "$sp/logs" ]; then
+                            cd "$sp/logs" && tar cf - . 2>/dev/null;
+                        fi
+                    ' 2>/dev/null \
+                    | tar xf - -C "$ray_dest/" 2>/dev/null || true
+                timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+                    "$node" "cat /tmp/_session_path_out 2>/dev/null || true" \
+                    > "$ray_dest/session_path.txt" 2>/dev/null || true
+                timeout 30 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+                    "$node" '
+                        if [ -d /tmp/aurora_inst ]; then
+                            cd /tmp/aurora_inst && tar cf - . 2>/dev/null;
+                        fi
+                    ' 2>/dev/null \
+                    | tar xf - -C "$inst_dest/" 2>/dev/null || true
+            fi
         } &
         pids+=($!)
     done < "$UNIQUE_NODES_FILE"
