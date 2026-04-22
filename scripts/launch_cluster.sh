@@ -167,15 +167,21 @@ finalize_run_logs() {
     echo "session_dir=$session_dir" >> "$dbg"
     if [ -n "$session_dir" ] && [ -d "$session_dir/logs" ]; then
         echo "$session_dir" > "$head_ray_dest/session_path.txt"
-        echo "copying head session logs..." >> "$dbg"
-        cp -a "$session_dir/logs/." "$head_ray_dest/" 2>>"$dbg"
-        echo "head ray_logs cp rc=$?" >> "$dbg"
+        echo "tar-piping head session logs..." >> "$dbg"
+        # Use timeout-bounded tar instead of cp -a: cp hung indefinitely on
+        # run13 (shell got stuck writing Lustre while Ray was still appending
+        # to gcs_server.out). tar handles open files gracefully and timeout
+        # guarantees forward progress.
+        timeout 60 bash -c "tar -cf - -C '$session_dir/logs' . 2>/dev/null" \
+            | tar -xf - -C "$head_ray_dest/" 2>>"$dbg"
+        echo "head ray_logs tar rc=${PIPESTATUS[*]}" >> "$dbg"
     fi
     if [ -d /tmp/aurora_inst ]; then
         echo "head aurora_inst listing:" >> "$dbg"
         ls /tmp/aurora_inst >> "$dbg" 2>&1
-        cp -a /tmp/aurora_inst/. "$head_inst_dest/" 2>>"$dbg"
-        echo "head inst cp rc=$?" >> "$dbg"
+        timeout 30 bash -c "tar -cf - -C /tmp/aurora_inst . 2>/dev/null" \
+            | tar -xf - -C "$head_inst_dest/" 2>>"$dbg"
+        echo "head inst tar rc=${PIPESTATUS[*]}" >> "$dbg"
     else
         echo "head has no /tmp/aurora_inst dir" >> "$dbg"
     fi
