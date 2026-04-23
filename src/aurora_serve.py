@@ -83,22 +83,92 @@ def _parse_own_engine_log(pid: int) -> dict:
 
 
 
-def _collect_proxy_profiles(tracer) -> None:
-    """Collect per-proxy profiling data from all nodes via Ray remote tasks.
+def _collect_instrumentation_all() -> None:
+    """Gather ALL /tmp/aurora_inst/* files from every node via Ray remote
+    tasks, then write them to Lustre on the head as a single per-node sink.
 
-    Each ProxyActor (if AURORA_PROXY_PROFILE=1) writes a JSON to
-    /tmp/aurora_proxy_profile/<hostname>_<pid>.json on its node. This
-    function runs a lightweight Ray task on each node to read those files
-    and aggregates the results.
+    This replaces per-call Lustre writes from the overlay probes (which
+    hammered the MDS with hundreds of thousands of open/close ops). Each
+    node reads its own /tmp in-memory and returns bytes; head writes once
+    per file per node.
+
+    Called from aurora_serve right before 'Model Deploy completed'. At that
+    point, all critical-path work is done and /tmp/aurora_inst has the
+    startup data. Continuing activity after this (late long-poll updates,
+    late ticks) won't be captured — that's fine for the startup-profile
+    use case.
     """
+    run_log = os.environ.get("AURORA_RUN_LOG_DIR")
+    if not run_log:
+        print("[AuroraServe] No AURORA_RUN_LOG_DIR; skipping instrumentation gather", flush=True)
+        return
+
+    @ray.remote(num_cpus=0)
+    def _read_node_inst():
+        import glob, os, socket
+        host = socket.gethostname()
+        out = {"hostname": host, "files": {}}
+        for path in glob.glob("/tmp/aurora_inst/*"):
+            if os.path.isdir(path):
+                continue
+            try:
+                with open(path, "rb") as f:
+                    out["files"][os.path.basename(path)] = f.read()
+            except Exception:
+                pass
+        return out
+
+    nodes = ray.nodes()
+    alive_node_ids = [n["NodeID"] for n in nodes if n["Alive"]]
+
+    refs = []
+    for node_id in alive_node_ids:
+        ref = _read_node_inst.options(
+            scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                node_id=node_id, soft=False
+            )
+        ).remote()
+        refs.append(ref)
+
+    try:
+        results = ray.get(refs, timeout=120)
+    except Exception as e:
+        print(f"[AuroraServe] Instrumentation gather failed: {e}", flush=True)
+        return
+
+    total_files = 0
+    total_bytes = 0
+    for r in results:
+        host = r["hostname"]
+        dest_dir = f"{run_log}/instrumentation/{host}"
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except Exception:
+            pass
+        for name, content in r["files"].items():
+            try:
+                with open(f"{dest_dir}/{name}", "wb") as f:
+                    f.write(content)
+                total_files += 1
+                total_bytes += len(content)
+            except Exception:
+                pass
+    print(
+        f"[AuroraServe] Instrumentation gather: {total_files} files "
+        f"({total_bytes/1024/1024:.1f} MB) from {len(results)} nodes",
+        flush=True,
+    )
+
+
+def _collect_proxy_profiles(tracer) -> None:
+    """Legacy: read proxy_init_*.json after _collect_instrumentation_all has
+    landed them in $AURORA_RUN_LOG_DIR/instrumentation/<host>/."""
     import glob as _glob
 
     @ray.remote(num_cpus=0)
     def _read_proxy_profiles():
         import glob, json, socket, os
         profiles = []
-        # overlay proxy.py writes to $AURORA_RUN_LOG_DIR/instrumentation/<host>/
-        # (Lustre) if set, else /tmp/aurora_inst (node-local tmpfs).
         run_log = os.environ.get("AURORA_RUN_LOG_DIR")
         host = socket.gethostname()
         if run_log:
@@ -1851,6 +1921,10 @@ if __name__ == "__main__":
             print(f"[AuroraServe] Proxy statuses: {len(proxy_status_list)} proxies", flush=True)
         except Exception as e:
             print(f"[AuroraServe] Failed to collect proxy statuses: {e}", flush=True)
+
+        # Gather /tmp/aurora_inst from every node to Lustre (single write per file).
+        # This replaces per-probe writes hitting MDS during the critical path.
+        _collect_instrumentation_all()
 
         # Collect proxy profiling data if AURORA_PROXY_PROFILE=1
         if os.environ.get("AURORA_PROXY_PROFILE") == "1":
