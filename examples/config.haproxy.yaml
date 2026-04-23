@@ -1,0 +1,43 @@
+# --- HAProxy-fronted deployment ------------------------------------------
+# A single HAProxy runs on the head node and load-balances across every
+# Ray Serve HTTP proxy. Clients hit http://<head>:4001/. Pure L7 routing;
+# no API keys or usage tracking. Best performance baseline.
+#
+# Requires haproxy on $PATH. Build with scripts/build_haproxy.sh.
+#
+# Run with:
+#   qsub -v CONFIG=examples/config.haproxy.yaml examples/launch.pbs
+
+ray_cluster_config:
+  head_ip: ""
+  port: 6379
+  node_cpus: 64
+
+model_deployment_config:
+  num_nodes: 2
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models # ! Change to your own model path
+  local_stage_path: /tmp/hf_home
+  deployment_name: aurora_serve
+  replica_max_ongoing_requests: 128
+  num_gpus_per_node: 12
+
+  model_configs:
+    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 4096
+      size: 8
+      gpu_memory_utilization: 0.90
+      enforce_eager: true
+      max_num_seqs: 64
+
+proxy_config:
+  type: haproxy
+  port: 4001          # HAProxy front-end port (clients connect here)
+  backend_port: 8000  # Ray Serve HTTP port on each node
+  num_workers: 1      # unused by haproxy; kept for schema symmetry
+  options:
+    balance: leastconn   # leastconn | roundrobin | random
+    maxconn: 50000
+    check_interval: 5000 # ms between backend health probes
+    stats_port: 9999     # HAProxy stats page (0 disables)

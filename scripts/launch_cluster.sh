@@ -110,7 +110,15 @@ fi
 HOSTNAME_SHORT="$(hostname -s)"
 UNIQUE_NODES_FILE="$RUN_LOG_DIR/pbs_nodes.txt"
 sort -u "$PBS_NODEFILE" > "$UNIQUE_NODES_FILE"
-cp "$DEPLOYMENT_CONFIG_PATH" "$RUN_LOG_DIR/deployment_config.yaml"
+
+# Copy the user-supplied config into the run-log dir and work off that
+# copy for the rest of the job. The launcher injects head_ip and the
+# driver's start_proxy writes a proxy_out/ beside it, so operating on
+# the original would clobber the caller's config file and litter their
+# directory.
+DEPLOYMENT_CONFIG_SRC="$DEPLOYMENT_CONFIG_PATH"
+DEPLOYMENT_CONFIG_PATH="$RUN_LOG_DIR/deployment_config.yaml"
+cp "$DEPLOYMENT_CONFIG_SRC" "$DEPLOYMENT_CONFIG_PATH"
 
 collect_ray_logs() {
     local source_logs=$1
@@ -136,6 +144,7 @@ finalize_run_logs() {
     {
         echo "run_timestamp_utc=$RUN_STAMP"
         echo "launcher_host=$HOSTNAME_SHORT"
+        echo "deployment_config_src=$DEPLOYMENT_CONFIG_SRC"
         echo "deployment_config=$DEPLOYMENT_CONFIG_PATH"
         echo "pbs_jobid=${PBS_JOBID:-}"
         echo "pbs_nodefile=$PBS_NODEFILE"
@@ -172,7 +181,7 @@ echo "[System] Project Root: $PROJECT_ROOT"
 echo "[System] Nodefile: $PBS_NODEFILE"
 echo "[System] PYTHONPATH: $PYTHONPATH"
 echo "[System] Backend Python: $PYTHON_EXEC"
-echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
+echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH (source: $DEPLOYMENT_CONFIG_SRC)"
 echo "[System] Persistent run dir: $RUN_LOG_DIR"
 
 # --- 2. IP Resolution (The Scout) ---
@@ -249,56 +258,21 @@ export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 
 # Patch Ray Serve proxy timeouts in ALL Python processes (including the
 # ServeController Ray actor which runs as a separate process).
-# Install a .pth file in the user site-packages directory. Python's site
-# module executes .pth lines starting with "import" at interpreter startup,
-# and the user site-packages is always loaded before any user code.
+# We deploy scripts/ray_serve_sitecustomize.py into the frameworks-Python
+# user site-packages as `sitecustomize.py`; Python's `site` module runs
+# that file at every interpreter startup — before any user code — and
+# the hook in it patches Ray Serve's hardcoded health-check constants.
+# See README.md § "What the launcher modifies outside the repo".
 USER_SITE=$($PYTHON_EXEC -m site --user-site 2>/dev/null || echo "")
 if [ -n "$USER_SITE" ]; then
     mkdir -p "$USER_SITE"
-    # Write sitecustomize.py in user site-packages. Python loads this at
-    # startup in EVERY process. The previous src/sitecustomize.py only patched
-    # constants.py; we also need to patch client.py and proxy_state.py which
-    # import constants by name (creating local copies that survive monkey-patching
-    # the constants module).
-    #
-    # Strategy: hook builtins.__import__ with recursion guard, patch any module
-    # that has our target constants.
-    cat > "$USER_SITE/sitecustomize.py" <<'PYEOF'
-import builtins as _b
-_orig = _b.__import__
-_in_hook = False
-def _aurora_import(name, *args, **kwargs):
-    global _in_hook
-    if _in_hook:
-        return _orig(name, *args, **kwargs)
-    _in_hook = True
-    try:
-        mod = _orig(name, *args, **kwargs)
-        # Proxy timeouts — effectively disable health-check killing
-        if hasattr(mod, 'HTTP_PROXY_TIMEOUT') and getattr(mod, 'HTTP_PROXY_TIMEOUT') == 60:
-            mod.HTTP_PROXY_TIMEOUT = 3600
-        if hasattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'PROXY_HEALTH_CHECK_TIMEOUT_S') == 10.0:
-            mod.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
-        if hasattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
-            mod.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
-        # Replica timeouts — effectively disable health-check killing
-        if hasattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') and getattr(mod, 'DEFAULT_HEALTH_CHECK_TIMEOUT_S') == 30:
-            mod.DEFAULT_HEALTH_CHECK_TIMEOUT_S = 600
-        if hasattr(mod, 'DEFAULT_HEALTH_CHECK_PERIOD_S') and getattr(mod, 'DEFAULT_HEALTH_CHECK_PERIOD_S') == 10:
-            mod.DEFAULT_HEALTH_CHECK_PERIOD_S = 120
-        if hasattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') and getattr(mod, 'REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD') == 3:
-            mod.REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
-        return mod
-    finally:
-        _in_hook = False
-_b.__import__ = _aurora_import
-PYEOF
+    cp "$SCRIPT_DIR/ray_serve_sitecustomize.py" "$USER_SITE/sitecustomize.py"
     echo "[System] Installed sitecustomize.py proxy timeout patch in $USER_SITE"
 else
     echo "[System] WARNING: Could not determine user site-packages for proxy timeout patch"
 fi
 
-echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
+echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH (source: $DEPLOYMENT_CONFIG_SRC)"
 
 if [ "${AURORA_NULL_COMPUTE:-0}" = "1" ]; then
     echo "[System] NULL-COMPUTE mode enabled; skipping model staging"

@@ -519,13 +519,16 @@ def main():
     proxy_backend = None
     proxy_process = None
 
-    # Driver-level timing (independent of aurora_serve.py's tracer)
+    # Driver-level phase timings. Always emitted to stdout so the launch
+    # log tells you where time went even when scaling-trace JSON is off
+    # (AURORA_SCALING_TRACE=0). Tagged [Phase] so it doesn't get confused
+    # with the [Trace] lines from the scaling-trace machinery.
     _driver_phases: list[dict] = []
 
     def _driver_phase(name: str, duration_s: float, **extra) -> None:
         entry = {"name": name, "duration_s": round(duration_s, 4), "wall_end": time.time(), **extra}
         _driver_phases.append(entry)
-        print(f"[Driver][Trace] {name}: {duration_s:.3f}s", flush=True)
+        print(f"[Driver][Phase] {name}: {duration_s:.3f}s", flush=True)
 
     def _save_driver_trace() -> None:
         if not tracing_enabled():

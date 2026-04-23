@@ -1,0 +1,41 @@
+# --- Direct-mode deployment (no proxy) ----------------------------------
+# Ray Serve is reachable on each node at http://<node>:8000/. Clients must
+# pick a node themselves. Best for benchmarking the raw Ray Serve path.
+#
+# Run with:
+#   qsub -v CONFIG=examples/config.direct.yaml examples/launch.pbs
+
+ray_cluster_config:
+  # head_ip is auto-populated by scripts/launch_cluster.sh; leave blank.
+  head_ip: ""
+  port: 6379
+  node_cpus: 64
+
+model_deployment_config:
+  # Must equal the PBS select=N you submit with.
+  num_nodes: 1
+
+  # Absolute path on Lustre where model weights live. The cluster will
+  # download from HuggingFace on first use if the dir is empty.
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models # ! Change to your own model path
+
+  # Absolute path on each node's local scratch where weights are staged.
+  local_stage_path: /tmp/hf_home
+
+  deployment_name: aurora_serve
+  replica_max_ongoing_requests: 32
+  num_gpus_per_node: 12   # Aurora: 12 GPU tiles per node
+
+  model_configs:
+    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 4096
+      size: 8                     # model size in B params (used for placement sizing)
+      gpu_memory_utilization: 0.90
+      enforce_eager: true
+      max_num_seqs: 64
+      # num_replicas: null        # auto-sized from num_nodes * num_gpus_per_node / tp
+
+proxy_config:
+  type: none

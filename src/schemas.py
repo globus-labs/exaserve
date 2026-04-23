@@ -54,7 +54,7 @@ class DeploymentConfig:
     model_storage_path: str = ""
     local_stage_path: str = ""
     deployment_name: str = "aurora_serve"
-    replica_max_ongoing_requests: int = 32
+    replica_max_ongoing_requests: int = 128  # Max concurrent requests per replica. Should be tuned based on model size and expected request load.
     num_gpus_per_node: int = 12  # Aurora default: 12 GPU tiles per node
     collect_stats: bool = False  # Enable per-replica vLLM stats collection
   
@@ -82,7 +82,7 @@ class ProxyConfig:
     port: int = 4001
     backend_port: int = 8000
     python_path: str = ""   # Python interpreter for the proxy process (empty = sys.executable)
-    num_workers: int = 8    # uvicorn worker count for the proxy (LiteLLM --num_workers)
+    num_workers: int = 4    # uvicorn worker count for the proxy (LiteLLM --num_workers)
     options: Dict[str, Any] = field(default_factory=dict)
 
 

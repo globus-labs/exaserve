@@ -1,0 +1,46 @@
+#!/bin/bash
+# Minimal launcher script for a Ray cluster + Ray Serve on Aurora.
+#
+# All PBS parameters (nodes, queue, walltime, job name, filesystems, project)
+# are passed at submit time — this script stays parameter-free so you can
+# reuse it across debug / debug-scaling / capacity / reservation queues.
+#
+# Example submission:
+#   qsub -l select=1 \
+#        -l walltime=01:00:00 \
+#        -l filesystems=home:flare \
+#        -q debug \
+#        -A YOUR_PROJECT \
+#        -N ray-serve \
+#        -o $HOME/tmp/ray-serve.stdout \
+#        -e $HOME/tmp/ray-serve.stderr \
+#        -v CONFIG=examples/config.direct.yaml \
+#        examples/launch.pbs
+#
+# Once the job prints "[Driver] ALL SERVICES READY", hit the cluster from
+# another shell (find the head with `qstat -xf <job>`):
+#   direct:   http://<head>:8000/v1/...
+#   haproxy:  http://<head>:4001/v1/...
+#   litellm:  http://<head>:4001/v1/...  (with Authorization: Bearer <master_key>)
+
+# -u is intentionally off: `module load` (lmod) references unset internal
+# vars and trips `set -u` with "ZSH_EVAL_CONTEXT: unbound variable".
+set -eo pipefail
+
+# Point at this checkout. Override by exporting PROJECT_ROOT before qsub.
+PROJECT_ROOT="${PROJECT_ROOT:-$PBS_O_WORKDIR}"
+CONFIG="${CONFIG:-examples/config.direct.yaml}"
+
+cd "$PROJECT_ROOT"
+
+# Load Aurora modules (frameworks, go) and ALCF outbound proxy vars.
+source "$PROJECT_ROOT/scripts/env_aurora.sh"
+
+# http_proxy breaks intra-cluster health checks to compute nodes. The
+# launcher only needs egress for HuggingFace downloads (handled before
+# compute starts), so drop it for the job.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
+
+# Hand off to the launcher. Blocks until the cluster shuts down (or
+# walltime expires).
+exec bash scripts/launch_cluster.sh "$CONFIG"
