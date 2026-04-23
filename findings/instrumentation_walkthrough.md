@@ -10,14 +10,16 @@ specific lines of Ray Serve code.
 ## 1. Overlay files and what each one does
 
 Our overlay at `~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray`
-is a git-tracked repo. The overlay replaces six files under `serve/_private/`:
+is a git-tracked repo. It currently tracks seven files under
+`serve/_private/`: six patched files plus one pristine baseline copy
+(`proxy_state.py`).
 
 | File | Patched? | Purpose |
 |---|---|---|
 | `constants.py` | ✅ timeouts | `HTTP_PROXY_TIMEOUT=3600`, `PROXY_HEALTH_CHECK_TIMEOUT_S=300`, `PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD=100` (prevents the ProxyActor kill cascade). |
 | `proxy.py` | ✅ timing probe | 7 substep timers in `ProxyActor.__init__` and wall-time around `ready()`. Writes `proxy_init_<host>_<pid>.json` once per proxy. |
 | `common.py` | ✅ §6 probe | Every `RunningReplicaInfo.get_actor_handle()` call records `(t, dur_ms)` into a buffered in-memory list; flushed every 500 calls (tunable via `AURORA_PROBE_FLUSH_N`) and again at `atexit`. |
-| `router.py` | ✅ §6 probe | Wraps `RequestRouter.update_deployment_targets()` to append one JSONL line per call with `n_replicas + duration_s`. |
+| `router.py` | ✅ §6 probe | Wraps `AsyncioRouter.update_deployment_targets()` to append one JSONL line per call with `n_replicas + duration_s`. |
 | `controller.py` | ✅ §6.1 probe | Per-tick JSONL in `ServeController.run_control_loop_step`, capturing sub-phase durations (`cluster_node_info_update`, `dsm_update`, `asm_update`, `node_update`, `proxy_state_update`). |
 | `deployment_state.py` | ✅ §6.2 probe | Per-call JSONL in `DeploymentStateManager.update()` with 7 step-level timings (`s1_check_and_update_replicas` … `s7_broadcast`). |
 | `proxy_state.py` | pristine | In the overlay for future probe work. |
@@ -159,16 +161,77 @@ Driver (aurora_serve.py, head node) 🔵
             │
             └── ray.wait(serving_refs, timeout=HTTP_PROXY_TIMEOUT, num_returns=N)
                 # Waits until every proxy's event loop picks up and replies.
-                # Proxies can only reply AFTER LongPollClient callback processes
-                # the replica set and does N_replicas GCS lookups (below).
+                # In this repo's Serve config, proxies can only reply AFTER
+                # the handle-router LongPollClient callback processes the
+                # replica set and does N_replicas ray.get_actor() lookups
+                # (below).
 ```
 
-### What a proxy's event loop does during `wait_proxies`
+### Important repo-specific assumption for the event-loop story
+
+This repo exports `RAY_SERVE_THROUGHPUT_OPTIMIZED=1`
+(`src/driver.py`, `scripts/launch_cluster.sh`). In upstream Ray Serve,
+that flips `RAY_SERVE_RUN_ROUTER_IN_SEPARATE_LOOP` from its default `1`
+to `0`.
+
+That matters because proxy-created handles then use
+`CurrentLoopRouter` rather than `SingletonThreadRouter`. So in **this**
+repo's runs, the handle router and the proxy actor share the same
+asyncio loop; the event-loop-blocking explanation below depends on that
+configuration.
+
+### How a proxy becomes subscribed to `DEPLOYMENT_TARGETS`
+
+`ProxyActor.__init__` itself only creates a `LongPollClient` for
+`ROUTE_TABLE` and `GLOBAL_LOGGING_CONFIG`. The `DEPLOYMENT_TARGETS`
+subscription is reached later, through the route-table update path:
+
+```
+ProxyActor.__init__()
+└── LongPollClient subscribes to:
+    ├── ROUTE_TABLE
+    └── GLOBAL_LOGGING_CONFIG
+
+ROUTE_TABLE update arrives
+└── ProxyActor._update_routes_in_proxies(endpoints)
+    └── ProxyRouter.update_routes(endpoints)
+        └── for each new endpoint:
+            self._get_handle(endpoint, info)            # = get_proxy_handle(...)
+            └── client.get_handle(...)
+                └── if not handle.is_initialized:
+                    handle._init(
+                        _run_router_in_separate_loop=RAY_SERVE_RUN_ROUTER_IN_SEPARATE_LOOP,
+                        ...
+                    )
+                    └── create_router(...)
+                        └── CurrentLoopRouter(...)      # in this repo's config
+                            └── AsyncioRouter(...)
+                                ├── dedicated LongPollClient for fast initial update
+                                └── SharedRouterLongPollClient registration
+                                    subscribes to DEPLOYMENT_TARGETS / DEPLOYMENT_CONFIG
+```
+
+So the startup chain is:
+
+`ROUTE_TABLE` broadcast
+→ `ProxyRouter.update_routes()`
+→ `get_proxy_handle()`
+→ `handle._init()`
+→ router creation
+→ router subscribes to `DEPLOYMENT_TARGETS`
+→ later `DEPLOYMENT_TARGETS` broadcast calls `update_deployment_targets()`.
+
+### In this repo's config, what shares the proxy's event loop during `wait_proxies`
 
 ```
 ProxyActor (on each of N nodes, its own Python process) 🟢
 │
-├── LongPollClient (running long-poll loop in background thread):
+├── ProxyActor main loop also hosts handle routers
+│   because this repo sets RAY_SERVE_THROUGHPUT_OPTIMIZED=1
+│   → RAY_SERVE_RUN_ROUTER_IN_SEPARATE_LOOP=0
+│   → proxy-created handles use CurrentLoopRouter
+│
+├── Handle-router LongPollClient (running long-poll loop in background thread):
 │   ◄── controller ServeController.listen_for_change returns updates
 │   long_poll.py:180 _process_update(updates):
 │       self._schedule_to_event_loop(chained_callback)
@@ -197,24 +260,207 @@ ProxyActor (on each of N nodes, its own Python process) 🟢
                           └── GCS: GetActorInfo(actor_id)
 ```
 
-At 256n: 256 proxies × 3072 replicas × 2 GCS calls ≈ **1.57M lookups**
-(observed 1.58M in §5 event stats, 2.0M in §6 direct probe including
-cache-hit fast-path re-lookups).
+At 256n, one full-broadcast back-of-envelope is:
+
+- 256 proxies × 3072 replicas = **786,432 logical `ray.get_actor()` calls**
+- If every lookup takes the cold path, that implies up to
+  **~1.57M underlying GCS RPCs** (`GetNamedActorInfo` + `GetActorInfo`)
+
+The totals quoted in §5 and §6 are different measurement streams and
+should not be merged into one unit:
+
+- §5 `RAY_event_stats`: per-RPC counters by GCS method
+  (`GetActorInfo`, `GetNamedActorInfo`, ...)
+- §6 direct probe: per-call timings of logical `ray.get_actor()` calls
+
+### Interlude: how the `ServeController` actor is spawned, and why its event loop is everything
+
+The `.remote()` method calls scattered throughout the call graph above (and
+our §6.1 tick probe, and §6.2 dsm probe, and the whole 128n cliff story)
+only make sense if you know how the `ServeController` actor gets started
+and what runs inside it. The short version: **`ServeController` is a Ray
+actor whose single asyncio event loop hosts the control loop, every
+inbound RPC handler, and the LongPoll fan-out — all three compete for
+the same thread.**
+
+#### Actor spawn chain
+
+```
+aurora_serve.py driver process (head node, Python process #A)
+  serve.run(deployment)                                  [serve/api.py:686]
+    _run(...)                                            [serve/api.py:614]
+      client = _private_api.serve_start(...)             [serve/api.py:593]
+        ▼
+      serve_start_async(...)                             [_private/api.py:85-111]
+        controller_impl = get_controller_impl()          ← applies
+                                                           @ray.remote(...)
+                                                           to ServeController
+                                                           [default_impl.py:225]
+        controller = controller_impl.remote(...)         ← SPAWN ACTOR
+                                                           [api.py:94]
+        # returned handle points at the new controller actor
+```
+
+`controller_impl.remote(...)` tells the raylet on the head node to:
+
+1. Allocate a new Python process (honoring `num_cpus=0` +
+   `head_node_resource` from the `@ray.remote(...)` decorator —
+   [default_impl.py:225-235](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/default_impl.py#L225-L235)).
+2. Start that process.
+3. Instantiate `ServeController(*args)` inside it. Because `__init__` is
+   declared `async def`, Ray creates an asyncio event loop and runs
+   `__init__` as a coroutine on it.
+4. Once `__init__` returns, the actor is "alive" and accepts `.remote()`
+   RPC calls on its methods; those RPCs are dispatched as coroutines onto
+   the same event loop.
+
+#### What `ServeController.__init__` does
+
+Most of it wires up long-lived state: kv_store, `LongPollHost`,
+`DeploymentStateManager`, `ApplicationStateManager`, `ProxyStateManager`,
+`EndpointState`, metrics. Then at the end:
+
+```python
+# controller.py:229-230
+self._create_control_loop_metrics()
+run_background_task(self.run_control_loop())     # ← kickoff
+```
+
+`run_background_task(coro)`
+([ray/_common/utils.py:103](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/_common/utils.py#L103))
+is a thin wrapper around:
+
+```python
+task = asyncio.get_event_loop().create_task(coroutine)
+_BACKGROUND_TASKS.add(task)   # strong reference so GC doesn't kill it
+```
+
+So `run_control_loop` becomes a **background `asyncio.Task` on the same
+event loop** the controller uses for everything else. It runs
+concurrently with inbound RPC handlers.
+
+#### What the control loop does — [controller.py:416](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/controller.py#L416)
+
+```python
+async def run_control_loop(self) -> None:
+    while True:
+        try:
+            await self.run_control_loop_step(...)        # one tick
+        except Exception:
+            await asyncio.sleep(1)
+
+        loop_duration = time.time() - loop_start_time
+        if loop_duration > 10:
+            logger.warning(f"The last control loop was slow (took {loop_duration}s). ...")
+        num_loops += 1
+        await asyncio.sleep(CONTROL_LOOP_INTERVAL_S)     # default 0.1s
+```
+
+Inside each tick (where our §6.1 probe records sub-phase timings):
+
+```
+run_control_loop_step()                                  [controller.py:452]
+  ├── self.cluster_node_info_cache.update()              [:460]
+  ├── self.deployment_state_manager.update()             [:486]  ← §6.2 dsm probe
+  ├── self.application_state_manager.update()            [:504]
+  └── self.proxy_state_manager.update(...)               [:511+]
+```
+
+#### The single-event-loop picture
+
+```
+┌───────────────────────────────────────────────────────────────────────┐
+│ aurora_serve.py driver process (head node, Python process #A)         │
+│                                                                       │
+│   serve.run(deployment)                                               │
+│     └── serve_start_async()                                           │
+│           └── controller_impl.remote(...)      ──────┐                │
+│                 (fire RPC to raylet; returns handle) │                │
+└──────────────────────────────────────────────────────┼────────────────┘
+                                                       │ spawn
+                                                       ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│ ServeController actor (head node, Python process #B)                  │
+│                                                                       │
+│   asyncio event loop (single thread)                                  │
+│                                                                       │
+│   ┌──────────────┐   ┌──────────────────┐   ┌─────────────────────┐   │
+│   │ RPC handler  │   │ run_control_loop │   │ LongPollHost        │   │
+│   │ for          │   │ (background task │   │ (async task for     │   │
+│   │ deploy_apps  │   │  created in      │   │  listen_for_change  │   │
+│   │ get_proxies  │   │  __init__ at     │   │  broadcasts)        │   │
+│   │ list_services│   │  line 230)       │   │                     │   │
+│   └───────▲──────┘   └────────▲─────────┘   └──────────▲──────────┘   │
+│           │                   │                         │             │
+│           │ Ray dispatches    │ awaits                  │ fires on    │
+│           │ inbound RPCs      │ run_control_loop_step() │ notify_     │
+│           │ onto this loop    │ every ~0.1s             │ changed     │
+│                                                                       │
+│   All three coroutines share the SAME event loop — they cooperatively │
+│   yield at `await` points. If any one holds the loop (e.g. a slow     │
+│   synchronous stretch inside dsm.update()), the others are starved.   │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+#### Why this matters for the 128n wait_proxies cliff
+
+Everything we probe in §6.1 and §6.2 comes back to *this* architecture:
+
+- **Controller tick max 4.3 s at 128n (§6.1).** A single `dsm.update()`
+  iteration that takes 3–4 s is blocking the asyncio loop for that whole
+  window. During that blockage, no inbound RPCs get served, no LongPoll
+  subscribers get pulled, the next tick can't start.
+- **300 s proxy healthcheck timeout warnings at 256n.** The controller
+  serves `check_health` RPCs from proxies on the **same** loop that is
+  spending seconds inside `dsm.update()` per tick. The RPC queues up.
+  The proxy, meanwhile, is itself stuck in its own asyncio loop doing
+  `update_deployment_targets` → `get_actor_handle × N_replicas`. Both
+  ends of the RPC are pathologically single-threaded.
+- **Per-call `update_deployment_targets` max 110.9 s at 128n (§6).** The
+  proxy's asyncio loop also hosts the handle-router LongPollClient
+  callback (because this repo exports `RAY_SERVE_THROUGHPUT_OPTIMIZED=1`,
+  which flips `RAY_SERVE_RUN_ROUTER_IN_SEPARATE_LOOP=0` — see §4.) So
+  the N_replicas `get_actor_handle` lookups happen on the same loop that
+  answers `serving()` and `check_health()`. Until that full iteration
+  completes, the proxy *cannot* ack readiness.
+- **`s7_broadcast` (dsm's notify_changed fan-out) scaling from 3 ms
+  (32n) to 514 ms (128n) (§6.2).** That's the controller trying to push
+  `DEPLOYMENT_TARGETS` to N LongPoll subscribers via RPCs that must all
+  serialize through its single event loop.
+
+The controller's single event loop is a shared resource; the cliff is
+what happens when the demand for that resource scales
+superlinearly (N × N_replicas × per-call GCS latency) while the supply
+stays at one cooperating coroutine.
+
+#### Who "spawns" the control loop process
+
+Nobody spawns a process — `run_control_loop` is **just an `asyncio.Task`**
+living inside the controller actor's existing Python process. `__init__`
+creates the task via `run_background_task(...)` on line 230; Python's
+asyncio scheduler keeps it alive. It dies only when the actor dies
+(controller crash, `serve.shutdown`, raylet SIGTERM). There's no
+separate thread or process.
+
+The closest thing to a "spawning event" is:
+
+1. `controller_impl.remote(...)` at [api.py:94](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/api.py#L94) — spawns the controller **process** (Ray raylet side).
+2. `run_background_task(self.run_control_loop())` at [controller.py:230](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/controller.py#L230) — schedules the control loop **coroutine** onto the process's existing event loop.
 
 ## 5. Mapping the timing numbers to code lines (clean, run21)
 
 | Measurement | Probe file:line | Scope | 32n | 64n | 128n |
 |---|---|---:|---:|---:|---:|
 | **proxy.py / init substeps** | | | | | |
-| super_init | proxy.py:1167 | local (`super().__init__`) | ~1ms | ~1ms | ~1ms |
-| long_poll_client | proxy.py:1182 | 1 GCS call (to controller) | ~22ms | ~30ms | ~50ms |
-| server_tasks_and_gc | proxy.py:1272 | event_loop.create_task | ~380ms | ~420ms | ~520ms |
+| super_init | proxy.py:1172 | local (`super().__init__`) | ~1ms | ~1ms | ~1ms |
+| long_poll_client | proxy.py:1187 | 1 GCS call (to controller) | ~22ms | ~30ms | ~50ms |
+| server_tasks_and_gc | proxy.py:1274 | event_loop.create_task | ~380ms | ~420ms | ~520ms |
 | total `__init__` | — | everything above | 0.34s | 0.34s | 0.36s |
 | **common.py / per-call GCS** | | | | | |
-| median | common.py:628 | fast path (actor cache hit) | 0.044 ms | 0.044 ms | 0.047 ms |
-| mean | common.py:628 | includes slow path | 13.4 ms | 30.7 ms | 82.0 ms |
-| p99 | common.py:628 | high-tail GCS queueing | 137 ms | 227 ms | 295 ms |
-| max | common.py:628 | worst-case | 363 ms | 918 ms | 2,349 ms |
+| median | common.py:681 | fast path (actor cache hit) | 0.044 ms | 0.044 ms | 0.047 ms |
+| mean | common.py:681 | includes slow path | 13.4 ms | 30.7 ms | 82.0 ms |
+| p99 | common.py:681 | high-tail GCS queueing | 137 ms | 227 ms | 295 ms |
+| max | common.py:681 | worst-case | 363 ms | 918 ms | 2,349 ms |
 | **router.py / update_deployment_targets** | | | | | |
 | mean | router.py:663 | per-call (iterates N_replicas) | 0.33s | 0.67s | 5.3s |
 | max | router.py:663 | worst broadcast | 6.2s | 7.7s | **110.9s** |
@@ -228,6 +474,67 @@ cache-hit fast-path re-lookups).
 | **s1_check_and_update_replicas mean** | ditto | per-replica state probe | 20.5ms | 32.5ms | 57.3ms |
 | **s6_schedule_and_stop max** | ditto | **one-time startup burst** | **1014ms** | **2048ms** | **3915ms** |
 | **s7_broadcast max** | ditto | notify_changed fan-out | 3ms | **477ms** | **514ms** |
+
+### Why `update_deployment_targets` max cliffs from 7.7 s (64n) to 110.9 s (128n)
+
+The function iterates every replica in the broadcast snapshot and calls
+`ray.get_actor` via `get_actor_handle` for each one. Both the iteration
+count and the per-call latency degrade between 64n and 128n, and their
+product crosses a regime boundary.
+
+**Factor 1 — replicas per broadcast roughly doubles per scale** (~640 →
+~1280 from 64n → 128n).
+
+**Factor 2 — per-call `get_actor_handle` latency ~triples**:
+
+| | 32n | 64n | 128n |
+|---|---:|---:|---:|
+| median (cache hit) | 0.044 ms | 0.044 ms | 0.047 ms **(flat)** |
+| **mean** | 13.4 ms | 30.7 ms | **82.0 ms** (~2.7×) |
+| max | 363 ms | 918 ms | 2,349 ms |
+
+Median is flat 44 μs because that is the actor-handle cache fast path.
+Mean tracks GCS slow-path fraction — the share of lookups that miss the
+cache and round-trip to the GCS `GetNamedActorInfo`+`GetActorInfo` pair
+(read-pool pegged at ~85–90 ms peak queueing from 128n onward, per §5).
+
+**Multiplying the two factors against "every replica hits the slow
+path":**
+
+| Scale | N_replicas × mean | Observed max | Slow-path fraction observed |
+|---|---:|---:|---:|
+| 64n | 640 × 30.7 ms = **19.6 s** | **7.7 s** | ~40% (cache still absorbing) |
+| 128n | 1280 × 82 ms = **105 s** | **110.9 s** | **~100%** (cache fully saturated) |
+
+At 64n, the observed max is well below the every-call-slow bound — the
+actor-handle cache is still catching most of the 640 lookups. At 128n
+the observed max **matches** the bound: essentially every lookup in the
+worst broadcast went through GCS.
+
+**Why the cache saturates at 128n specifically.** Ray's `CoreWorker`
+actor-handle cache is bounded and gets evicted under three pressures
+that all worsen together:
+
+1. **Replica churn** — more replicas starting, more `(name, namespace)`
+   entries being added, more evictions of older entries.
+2. **Concurrent broadcasts fan-out** — 128 proxies each processing a
+   fresh `DEPLOYMENT_TARGETS` update in parallel. Cache entries don't
+   get a chance to warm up before the next broadcast overwrites them.
+3. **GCS read-pool saturation** — ~2,100 req/s cluster-wide ceiling.
+   Once queue depth is non-trivial, even cache-adjacent paths that
+   require a GCS metadata check slow down.
+
+Compound factor between 64n and 128n:
+
+- **2×** (replicas) ×
+- **2.7×** (mean per-call) ×
+- **~2.5×** (slow-path fraction rising from ~0.4 to ~1.0)
+- ≈ **~14× cliff** → 7.7 s → 110.9 s, exactly the measurement.
+
+This is the signature of a linear scan with per-call latency that is
+not O(1). The architectural fix — ship pre-resolved actor handles in
+the broadcast payload — zeros out both factors: no iteration, no
+per-replica GCS round-trip.
 
 ## 6. Per-proxy aggregate ≈ wait_proxies (the clean causal chain)
 
@@ -267,7 +574,7 @@ overhead** and is available in every run including run16 baseline.
 Key observations from §5:
 - `GcsInMemoryStore.Put` peak queueing is flat at ~1210ms across all scales — single-writer lock already saturated at 32n.
 - GCS **read** paths (`GetActorInfo`, `GetNamedActorInfo`, `HealthCheck`) plateau at ~85-90ms peak queueing from 128n onward — read-pool saturated at ~2100 calls/sec cluster-wide.
-- Call counts for actor lookups scale **~4× per node-doubling** (25k → 100k → 397k → 1.58M) — confirmed O(N²).
+- `GetActorInfo` counts scale **~4× per node-doubling** (25k → 100k → 397k → 1.58M), while `GetNamedActorInfo` also grows superlinearly (14k → 52k → 206k → 921k) — consistent with the O(N²) startup/update pattern.
 
 ## 8. What each probe adds to the picture
 
@@ -275,7 +582,7 @@ Key observations from §5:
 |---|---|---|
 | proxy.py substeps (§orig) | Proxy `__init__` time broken into 7 sub-phases | Where does proxy init spend time? (answer: mostly `server_tasks_and_gc` ~500ms) |
 | common.py get_actor_handle (§6) | Every individual GCS lookup's duration | What does the per-call GCS distribution look like? |
-| router.py update_deployment_targets (§6) | Every `update_deployment_targets` call's duration + replica count | How long does processing one broadcast take? |
+| router.py update_deployment_targets (§6) | Every `AsyncioRouter.update_deployment_targets()` call's duration + replica count | How long does processing one broadcast take? |
 | controller.py tick (§6.1) | Each reconcile loop iteration's total + per-sub-phase time | Is the controller's asyncio loop saturated? If so, in which step? |
 | deployment_state.py dsm.update() (§6.2) | 7 step-level timings inside `dsm.update()` | Which dsm step (s1..s7) dominates a controller stall? |
 | RAY_event_stats (§5, built-in) | Per-RPC execution + queueing time at GCS | Is GCS the bottleneck, and in which methods? |
