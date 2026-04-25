@@ -332,14 +332,12 @@ export RAY_raylet_client_connect_timeout_milliseconds="${RAY_raylet_client_conne
 export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 
 # Timeout patches (HTTP_PROXY_TIMEOUT, PROXY_HEALTH_CHECK_TIMEOUT_S,
-# PROXY_READY_CHECK_TIMEOUT_S, PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD,
-# DEFAULT_HEALTH_CHECK_*, REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD) are
-# applied directly in the overlaid constants.py (see Ray overlay section
-# below and the overlay git repo at
-# ~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray).
-# Prior approach: sitecustomize/usercustomize monkey-patching, removed on
-# perf-inst-dev for clean profiling. Restore from main-repo commit 2f32633
-# if needed.
+# PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD, DEFAULT_HEALTH_CHECK_*,
+# REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD) are applied two ways:
+#   - On clean Ray: aurora_serve._patch_ray_serve_proxy_constants runs as a
+#     runtime_env worker_process_setup_hook on every Ray worker.
+#   - With AURORA_INSTRUMENTATION=1: src/overlay/ray/serve/_private/constants.py
+#     ships the same values statically.
 
 
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
@@ -366,17 +364,12 @@ export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1
 export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-1}"
 echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
 
-# ProxyActor JSON collection gate: aurora_serve.py:1846 reads
-# /tmp/aurora_inst/proxy_init_*.json written by the overlaid proxy.py.
-# Default on for perf-inst-dev. Set to 0 to skip collection.
-export AURORA_PROXY_PROFILE="${AURORA_PROXY_PROFILE:-1}"
-echo "[System] AURORA_PROXY_PROFILE=$AURORA_PROXY_PROFILE"
-
-# Ray overlay: replace ray/serve/_private/{proxy,controller,proxy_state,constants}.py
-# (whichever exist in the overlay dir) with our patched versions. Source of truth:
-# ~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray (git-tracked).
-export AURORA_RAY_OVERLAY="${AURORA_RAY_OVERLAY:-1}"
-echo "[System] AURORA_RAY_OVERLAY=$AURORA_RAY_OVERLAY"
+# Instrumentation gate. When 1, scripts/distribute_to_nodes.sh stages a Ray
+# Serve overlay (with probes/timeout patches) under /tmp/aurora_overlay on
+# every node, and aurora_serve._collect_instrumentation_all gathers the
+# resulting /tmp/aurora_inst/* files at end of startup. Default 0 = clean Ray.
+export AURORA_INSTRUMENTATION="${AURORA_INSTRUMENTATION:-0}"
+echo "[System] AURORA_INSTRUMENTATION=$AURORA_INSTRUMENTATION"
 
 # Ray's built-in per-RPC event stats — written to {gcs_server,raylet,core-worker-*}.out
 # every RAY_event_stats_print_interval_ms. Used to measure GCS contention quantitatively.
@@ -394,68 +387,19 @@ export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKENIZERS_PARALLELISM"
 
-# --- Ray overlay: patched files via symlink tree ---
-# Creates /tmp/ray_overlay on each node with symlinks to the system ray
-# package, replacing any file found in OVERLAY_ROOT with our patched version.
-# This is prepended to PYTHONPATH so Python finds our patched files first.
-#
-# The overlay source dir is a git-tracked repo; see commit history there
-# for the full patch set. Any *.py under serve/_private/ that exists in the
-# overlay gets copied in; anything missing falls through to the system ray.
-OVERLAY_ROOT="$HOME/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray"
-if [ "${AURORA_RAY_OVERLAY:-1}" = "1" ] && [ -d "$OVERLAY_ROOT/serve/_private" ]; then
-    SYSRAY="$(dirname "$(dirname "$PYTHON_EXEC")")/lib/python3.12/site-packages/ray"
-    if [ -d "$SYSRAY/serve/_private" ]; then
-        RAY_OVERLAY="/tmp/ray_overlay"
-        # List patched files (just the filenames under serve/_private/).
-        # Enumerated at launch-script generation time so the remote script is
-        # self-contained (doesn't need OVERLAY_ROOT at runtime on workers).
-        PATCHED_FILES=$(cd "$OVERLAY_ROOT/serve/_private" && ls *.py 2>/dev/null | tr '\n' ' ')
-        echo "[System] Ray overlay: patched serve/_private files = $PATCHED_FILES"
+# --- Per-node distribution: aurora_serve src + (optional) Ray Serve overlay ---
+# Stages /tmp/aurora_src on every node so user code runs from local tmpfs.
+# When AURORA_INSTRUMENTATION=1, also stages /tmp/aurora_overlay (symlink farm
+# pointing at the system Ray package, with patched files from src/overlay/).
+export PROJECT_ROOT PYTHON_EXEC UNIQUE_NODES_FILE HOSTNAME_SHORT
+bash "$PROJECT_ROOT/scripts/distribute_to_nodes.sh"
 
-        # Script must live on shared storage so SSHed workers can read it.
-        # /tmp is local tmpfs per-node, so use $HOME (Lustre).
-        _OVERLAY_SCRIPT=$(mktemp "$HOME/.aurora_overlay_XXXX.sh")
-        cat > "$_OVERLAY_SCRIPT" << OVERLAYEOF
-#!/bin/bash
-set -e
-rm -rf $RAY_OVERLAY
-mkdir -p $RAY_OVERLAY/ray/serve/_private
-# Symlink top-level ray/* (excluding serve)
-for f in $SYSRAY/*; do n=\$(basename \$f); [ "\$n" = serve ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/\$n 2>/dev/null; done
-# Symlink ray/serve/* (excluding _private)
-for f in $SYSRAY/serve/*; do n=\$(basename \$f); [ "\$n" = _private ] && continue; ln -s "\$f" $RAY_OVERLAY/ray/serve/\$n 2>/dev/null; done
-# Symlink ray/serve/_private/* except the patched files and __pycache__
-PATCHED="$PATCHED_FILES"
-for f in $SYSRAY/serve/_private/*; do
-    n=\$(basename \$f)
-    [ "\$n" = __pycache__ ] && continue
-    # Skip if this filename is in the patched list
-    skip=0
-    for p in \$PATCHED; do [ "\$n" = "\$p" ] && skip=1 && break; done
-    [ \$skip -eq 1 ] && continue
-    ln -s "\$f" $RAY_OVERLAY/ray/serve/_private/\$n 2>/dev/null
-done
-# Copy each patched file from OVERLAY_ROOT (dereference to avoid stale cache)
-for p in \$PATCHED; do
-    cp "$OVERLAY_ROOT/serve/_private/\$p" "$RAY_OVERLAY/ray/serve/_private/\$p"
-done
-OVERLAYEOF
-        chmod +x "$_OVERLAY_SCRIPT"
-        # Run locally (head node) first
-        bash "$_OVERLAY_SCRIPT"
-        # Run on remote nodes in parallel (script lives on shared Lustre)
-        for node in $(sort -u "$UNIQUE_NODES_FILE"); do
-            short="${node%%.*}"
-            [ "$short" = "$HOSTNAME_SHORT" ] && continue
-            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -f "$node" "bash $_OVERLAY_SCRIPT" 2>/dev/null
-        done
-        sleep 5  # give SSH background processes time to complete
-        rm -f "$_OVERLAY_SCRIPT"
-        export PYTHONPATH="$RAY_OVERLAY:$PYTHONPATH"
-        echo "[System] Ray overlay active at $RAY_OVERLAY (from $OVERLAY_ROOT)"
-    fi
+export PYTHONPATH="/tmp/aurora_src${PYTHONPATH:+:$PYTHONPATH}"
+if [ "${AURORA_INSTRUMENTATION:-0}" = "1" ] && [ -d /tmp/aurora_overlay/ray/serve/_private ]; then
+    export PYTHONPATH="/tmp/aurora_overlay:$PYTHONPATH"
+    echo "[System] Ray overlay active at /tmp/aurora_overlay (from $PROJECT_ROOT/src/overlay)"
 fi
+echo "[System] PYTHONPATH after distribution: $PYTHONPATH"
 
 # --- Copper: scalable Python module distribution ---
 # Copper is a read-only caching layer that distributes Python modules across
@@ -483,8 +427,10 @@ fi
 # Force unbuffered Python output so tee gets lines immediately
 export PYTHONUNBUFFERED=1
 
+# driver.py runs from the per-node /tmp/aurora_src copy so all node-local
+# imports (driver, aurora_serve, model_paths, ...) come from tmpfs, not Lustre.
 mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
-    $PYTHON_EXEC src/driver.py --config "$DEPLOYMENT_CONFIG_PATH"
+    $PYTHON_EXEC /tmp/aurora_src/driver.py --config "$DEPLOYMENT_CONFIG_PATH"
 
 # Stop Copper if it was started
 if [ "$COPPER_ACTIVE" = "1" ]; then

@@ -83,21 +83,18 @@ def _parse_own_engine_log(pid: int) -> dict:
 
 
 
+def _instrumentation_enabled() -> bool:
+    return os.environ.get("AURORA_INSTRUMENTATION", "0") == "1"
+
+
 def _collect_instrumentation_all() -> None:
-    """Gather ALL /tmp/aurora_inst/* files from every node via Ray remote
-    tasks, then write them to Lustre on the head as a single per-node sink.
-
-    This replaces per-call Lustre writes from the overlay probes (which
-    hammered the MDS with hundreds of thousands of open/close ops). Each
-    node reads its own /tmp in-memory and returns bytes; head writes once
-    per file per node.
-
-    Called from aurora_serve right before 'Model Deploy completed'. At that
-    point, all critical-path work is done and /tmp/aurora_inst has the
-    startup data. Continuing activity after this (late long-poll updates,
-    late ticks) won't be captured — that's fine for the startup-profile
-    use case.
+    """Gather /tmp/aurora_inst/* from every node onto Lustre once at the end
+    of startup. Only runs when AURORA_INSTRUMENTATION=1 — the overlay probes
+    that produce these files are also gated on that flag, so on a clean Ray
+    install this is a no-op.
     """
+    if not _instrumentation_enabled():
+        return
     run_log = os.environ.get("AURORA_RUN_LOG_DIR")
     if not run_log:
         print("[AuroraServe] No AURORA_RUN_LOG_DIR; skipping instrumentation gather", flush=True)
@@ -118,18 +115,15 @@ def _collect_instrumentation_all() -> None:
                 pass
         return out
 
-    nodes = ray.nodes()
-    alive_node_ids = [n["NodeID"] for n in nodes if n["Alive"]]
-
-    refs = []
-    for node_id in alive_node_ids:
-        ref = _read_node_inst.options(
+    alive_node_ids = [n["NodeID"] for n in ray.nodes() if n["Alive"]]
+    refs = [
+        _read_node_inst.options(
             scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                 node_id=node_id, soft=False
             )
         ).remote()
-        refs.append(ref)
-
+        for node_id in alive_node_ids
+    ]
     try:
         results = ray.get(refs, timeout=120)
     except Exception as e:
@@ -139,8 +133,7 @@ def _collect_instrumentation_all() -> None:
     total_files = 0
     total_bytes = 0
     for r in results:
-        host = r["hostname"]
-        dest_dir = f"{run_log}/instrumentation/{host}"
+        dest_dir = f"{run_log}/instrumentation/{r['hostname']}"
         try:
             os.makedirs(dest_dir, exist_ok=True)
         except Exception:
@@ -160,174 +153,33 @@ def _collect_instrumentation_all() -> None:
     )
 
 
-def _collect_proxy_profiles(tracer) -> None:
-    """Legacy: read proxy_init_*.json after _collect_instrumentation_all has
-    landed them in $AURORA_RUN_LOG_DIR/instrumentation/<host>/."""
-    import glob as _glob
-
-    @ray.remote(num_cpus=0)
-    def _read_proxy_profiles():
-        import glob, json, socket, os
-        profiles = []
-        run_log = os.environ.get("AURORA_RUN_LOG_DIR")
-        host = socket.gethostname()
-        if run_log:
-            patterns = [f"{run_log}/instrumentation/{host}/proxy_init_*.json"]
-        else:
-            patterns = ["/tmp/aurora_inst/proxy_init_*.json"]
-        for pat in patterns:
-            for path in glob.glob(pat):
-                try:
-                    with open(path) as f:
-                        profiles.append(json.load(f))
-                except Exception:
-                    pass
-        return {"hostname": host, "profiles": profiles}
-
-    nodes = ray.nodes()
-    alive_node_ids = [n["NodeID"] for n in nodes if n["Alive"]]
-
-    # Run one task per node to collect profiles
-    refs = []
-    for node_id in alive_node_ids:
-        ref = _read_proxy_profiles.options(
-            scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                node_id=node_id, soft=False
-            )
-        ).remote()
-        refs.append(ref)
-
-    try:
-        results = ray.get(refs, timeout=60)
-    except Exception as e:
-        print(f"[AuroraServe] Proxy profile collection failed: {e}", flush=True)
-        return
-
-    all_profiles = []
-    for r in results:
-        all_profiles.extend(r.get("profiles", []))
-
-    if not all_profiles:
-        print("[AuroraServe] No proxy profiles collected", flush=True)
-        return
-
-    # Compute relative timings from the earliest process
-    min_start = min(p.get("process_python_start_s", float("inf")) for p in all_profiles)
-    for p in all_profiles:
-        p["relative_python_start_s"] = round(p.get("process_python_start_s", 0) - min_start, 3)
-        p["relative_init_start_s"] = round(p.get("init_start_s", 0) - min_start, 3)
-        p["relative_ready_end_s"] = round(p.get("ready_end_s", 0) - min_start, 3) if p.get("ready_end_s") else None
-
-    # Sort by ready_end (latest first for summary)
-    all_profiles.sort(key=lambda p: p.get("ready_end_s", 0))
-
-    # Print summary
-    print(f"[AuroraServe] Proxy profiles collected: {len(all_profiles)} proxies", flush=True)
-
-    # Distribution of key phases
-    python_starts = sorted(p["relative_python_start_s"] for p in all_profiles)
-    init_durations = sorted(p.get("init_duration_s", 0) for p in all_profiles)
-    ready_durations = sorted(p.get("ready_duration_s", 0) for p in all_profiles if p.get("ready_duration_s") is not None)
-    total_pythons = sorted(p.get("total_python_s", 0) for p in all_profiles if p.get("total_python_s"))
-
-    def _dist(vals, label):
-        if not vals:
-            return
-        n = len(vals)
-        print(
-            f"[AuroraServe] Proxy {label}: "
-            f"min={vals[0]:.2f}s median={vals[n//2]:.2f}s "
-            f"p90={vals[int(n*0.9)]:.2f}s max={vals[-1]:.2f}s",
-            flush=True,
-        )
-
-    _dist(python_starts, "python_start (relative)")
-    _dist(init_durations, "init_duration")
-    _dist(ready_durations, "ready_duration")
-    _dist(total_pythons, "total_python (python_start→ready_end)")
-
-    # Save all profiles to the trace
-    tracer.set_metadata(proxy_profiles=all_profiles)
-
-
 def _patch_ray_serve_proxy_constants() -> None:
-    """Worker setup hook: patch constants + proxy profiling via runtime_env."""
-    import os
-    try:
-        from ray.serve._private import constants as c
-        timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600"))
-        c.HTTP_PROXY_TIMEOUT = timeout
-        c.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
-        c.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
-    except Exception:
-        pass
-    if os.environ.get("AURORA_PROXY_PROFILE") != "1":
-        return
-    try:
-        import time, socket, json
-        from ray.serve._private.proxy import ProxyActor
-        if getattr(ProxyActor, "_aurora_profiled", False):
-            return
-        _oi = ProxyActor.__init__
-        _or = ProxyActor.ready
-        _b = time.time()
-        def _pi(self, *a, **kw):
-            self._prof = {"birth": _b, "init_start": time.time(), "host": socket.gethostname(), "pid": os.getpid()}
-            _oi(self, *a, **kw)
-            self._prof["init_end"] = time.time()
-            self._prof["init_dur"] = round(self._prof["init_end"] - self._prof["init_start"], 4)
-            self._prof["node_id"] = getattr(self, "_node_id", "?")[:16]
-        async def _pr(self):
-            p = getattr(self, "_prof", None)
-            if p: p["ready_start"] = time.time()
-            result = await _or(self)
-            if p:
-                p["ready_end"] = time.time()
-                p["ready_dur"] = round(p["ready_end"] - p["ready_start"], 4)
-                p["total"] = round(p["ready_end"] - _b, 4)
-                d = "/tmp/aurora_proxy_profile"
-                os.makedirs(d, exist_ok=True)
-                with open(d + "/" + p["host"] + "_" + str(os.getpid()) + ".json", "w") as f:
-                    json.dump(p, f, indent=2)
-            return result
-        ProxyActor.__init__ = _pi
-        ProxyActor.ready = _pr
-        ProxyActor._aurora_profiled = True
-    except Exception:
-        pass
-
-
-
-
-    """Worker setup hook: patch Ray Serve proxy timeout constants.
-
-    Called by Ray in every worker process at startup (via runtime_env
-    worker_process_setup_hook). This ensures the ServeController actor
-    uses relaxed health-check thresholds, preventing the ProxyActor
-    death cascade at 128+ nodes.
+    """Worker setup hook applied via runtime_env. Relaxes Ray Serve proxy/
+    replica health-check thresholds so the ServeController doesn't kill
+    proxies during 128+-node startup. Functional patch — runs on clean Ray
+    too. Idempotent w.r.t. the overlay's static patches in constants.py.
     """
-    import sys
-    _patches = {
-        "HTTP_PROXY_TIMEOUT": 3600,
+    import os, sys
+    patches = {
+        "HTTP_PROXY_TIMEOUT": int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600")),
         "PROXY_HEALTH_CHECK_TIMEOUT_S": 300.0,
         "PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
         "DEFAULT_HEALTH_CHECK_TIMEOUT_S": 600,
         "DEFAULT_HEALTH_CHECK_PERIOD_S": 120,
         "REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
     }
-    for mod_name in list(sys.modules):
-        if "ray.serve" in mod_name:
-            mod = sys.modules[mod_name]
-            for attr, val in _patches.items():
-                if hasattr(mod, attr):
-                    setattr(mod, attr, val)
-    # Also import and patch directly in case not yet loaded
     try:
         from ray.serve._private import constants
-        for attr, val in _patches.items():
+        for attr, val in patches.items():
             setattr(constants, attr, val)
     except Exception:
         pass
+    for mod_name in list(sys.modules):
+        if "ray.serve" in mod_name:
+            mod = sys.modules[mod_name]
+            for attr, val in patches.items():
+                if hasattr(mod, attr):
+                    setattr(mod, attr, val)
 
 
 def get_hsn_ip():
@@ -1516,11 +1368,9 @@ if __name__ == "__main__":
     from scaling_trace import create_stats_collector, collect_replica_stats
     create_stats_collector()
 
-    # Increase proxy startup timeout before serve.start() spawns ProxyActors.
-    # At 128 nodes the default 60s is too short — the ServeController kills
-    # proxy actors that haven't become healthy yet, causing a cascade of
-    # ActorDiedError.  sitecustomize.py has the same patch but Python 3.12
-    # doesn't load it from PYTHONPATH, so we apply it explicitly here.
+    # Patch proxy timeouts in *this* (driver) process before serve.start()
+    # spawns ProxyActors. The runtime_env worker hook covers Ray workers, but
+    # the driver imports ray.serve directly and needs its own patch.
     from ray.serve._private import constants as _serve_constants
     _new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600"))
     _serve_constants.HTTP_PROXY_TIMEOUT = _new_timeout
@@ -1538,71 +1388,6 @@ if __name__ == "__main__":
         f"HEALTH_CHECK_TIMEOUT=300.0s, UNHEALTHY_THRESHOLD=100",
         flush=True,
     )
-
-    # Instrument ProxyActor in the driver process BEFORE serve.start() serializes it.
-    # Ray actors are pickled by the driver and deserialized in workers — monkey-patching
-    # in usercustomize.py only affects the worker's local copy, which Ray ignores in
-    # favor of the deserialized original. We must patch here so the serialized version
-    # includes our instrumentation.
-    if os.environ.get("AURORA_PROXY_PROFILE") == "1":
-        import socket as _psock
-        from ray.serve._private.proxy import ProxyActor as _PA
-        if not getattr(_PA, "_aurora_driver_profiled", False):
-            _pa_orig_init = _PA.__init__
-            _pa_orig_ready = _PA.ready
-            _birth = time.time()
-
-            def _profiled_pa_init(self, *a, **kw):
-                import time as _t, os as _o, socket as _s, json as _j
-                _btime = getattr(_profiled_pa_init, "_birth", _t.time())
-                self._aurora_profile = {
-                    "process_python_start_s": _btime,
-                    "init_start_s": _t.time(),
-                    "hostname": _s.gethostname(),
-                    "pid": _o.getpid(),
-                    "scheduling_delay_s": round(_t.time() - _btime, 4),
-                }
-                try:
-                    _pa_orig_init(self, *a, **kw)
-                finally:
-                    self._aurora_profile["init_end_s"] = _t.time()
-                    self._aurora_profile["init_duration_s"] = round(
-                        self._aurora_profile["init_end_s"] - self._aurora_profile["init_start_s"], 4)
-                    self._aurora_profile["node_id"] = getattr(self, "_node_id", "unknown")
-                    _d = "/tmp/aurora_inst"
-                    try:
-                        _o.makedirs(_d, exist_ok=True)
-                        with open(f"{_d}/proxy_init_{self._aurora_profile['hostname']}_{_o.getpid()}.json", "w") as _f:
-                            _j.dump(self._aurora_profile, _f, indent=2)
-                    except Exception:
-                        pass
-
-            async def _profiled_pa_ready(self):
-                import time as _t, os as _o, json as _j
-                if hasattr(self, "_aurora_profile"):
-                    self._aurora_profile["ready_start_s"] = _t.time()
-                try:
-                    result = await _pa_orig_ready(self)
-                finally:
-                    if hasattr(self, "_aurora_profile"):
-                        self._aurora_profile["ready_end_s"] = _t.time()
-                        self._aurora_profile["ready_duration_s"] = round(
-                            self._aurora_profile["ready_end_s"] - self._aurora_profile["ready_start_s"], 4)
-                        self._aurora_profile["total_from_init_s"] = round(
-                            self._aurora_profile["ready_end_s"] - self._aurora_profile["init_start_s"], 4)
-                        _d = "/tmp/aurora_inst"
-                        try:
-                            _o.makedirs(_d, exist_ok=True)
-                            with open(f"{_d}/proxy_actor_{self._aurora_profile['hostname']}_{_o.getpid()}.json", "w") as _f:
-                                _j.dump(self._aurora_profile, _f, indent=2)
-                        except Exception:
-                            pass
-                return result
-
-            _PA.__init__ = _profiled_pa_init
-            _PA.ready = _profiled_pa_ready
-            _PA._aurora_driver_profiled = True
-            print(f"[AuroraServe] ProxyActor instrumented in driver (pre-serialization)", flush=True)
 
     with tracer.phase("serve.start", proxy_location="EveryNode"):
         serve.start(
@@ -1922,13 +1707,9 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[AuroraServe] Failed to collect proxy statuses: {e}", flush=True)
 
-        # Gather /tmp/aurora_inst from every node to Lustre (single write per file).
-        # This replaces per-probe writes hitting MDS during the critical path.
+        # When instrumentation is on, gather /tmp/aurora_inst from every node
+        # to Lustre once. No-op for clean Ray installs.
         _collect_instrumentation_all()
-
-        # Collect proxy profiling data if AURORA_PROXY_PROFILE=1
-        if os.environ.get("AURORA_PROXY_PROFILE") == "1":
-            _collect_proxy_profiles(tracer)
 
         print(f"[AuroraServe] Service available at http://localhost:8000/v1 (model: {model_id})", flush=True)
     else:
