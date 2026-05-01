@@ -331,9 +331,9 @@ export RAY_raylet_client_connect_timeout_milliseconds="${RAY_raylet_client_conne
 # Enables separate thread for user code and separate event loop for the router.
 export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 
-# Timeout patches (HTTP_PROXY_TIMEOUT, PROXY_HEALTH_CHECK_TIMEOUT_S,
-# PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD, DEFAULT_HEALTH_CHECK_*,
-# REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD) are applied two ways:
+# Timeout patches (HTTP_PROXY_TIMEOUT, PROXY_READY_CHECK_TIMEOUT_S,
+# PROXY_HEALTH_CHECK_TIMEOUT_S, PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD,
+# DEFAULT_HEALTH_CHECK_*, REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD) are applied two ways:
 #   - On clean Ray: aurora_serve._patch_ray_serve_proxy_constants runs as a
 #     runtime_env worker_process_setup_hook on every Ray worker.
 #   - With AURORA_INSTRUMENTATION=1: src/overlay/ray/serve/_private/constants.py
@@ -403,8 +403,10 @@ echo "[System] PYTHONPATH after distribution: $PYTHONPATH"
 
 # --- Copper: scalable Python module distribution ---
 # Copper is a read-only caching layer that distributes Python modules across
-# nodes via cooperative caching, avoiding Lustre stampedes.  Recommended at
-# >2k nodes but useful whenever we have overlay files to distribute.
+# nodes via cooperative caching, avoiding Lustre stampedes.  The Ray Serve
+# overlay and aurora sources are now staged explicitly under /tmp above; do not
+# prepend the legacy ~/.local Ray overlay here, because that bypasses
+# AURORA_INSTRUMENTATION=0 and silently turns clean-Ray runs into patched runs.
 # Enable with AURORA_USE_COPPER=1; auto-disabled for single-node runs.
 COPPER_ACTIVE=0
 if [ "${AURORA_USE_COPPER:-0}" = "1" ] && [ "$NODE_COUNT" -ge 2 ]; then
@@ -413,12 +415,7 @@ if [ "${AURORA_USE_COPPER:-0}" = "1" ] && [ "$NODE_COUNT" -ge 2 ]; then
         mkdir -p "$COPPER_LOG_DIR"
         launch_copper_aurora.sh -d "$COPPER_LOG_DIR" -v /tmp/${USER}/copper_mount 2>&1 || true
         COPPER_ACTIVE=1
-        # Prepend Copper-mounted overlay path to PYTHONPATH
-        OVERLAY_DIR="$HOME/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages"
-        if [ -d "$OVERLAY_DIR" ]; then
-            export PYTHONPATH="/tmp/${USER}/copper/${OVERLAY_DIR}:$PYTHONPATH"
-            echo "[System] Copper active: overlay at /tmp/${USER}/copper/${OVERLAY_DIR}"
-        fi
+        echo "[System] Copper active; PYTHONPATH unchanged (per-run /tmp staging is source of truth)"
     else
         echo "[System] Copper module not available, continuing without it"
     fi

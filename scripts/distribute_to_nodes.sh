@@ -118,6 +118,15 @@ if [ "\$INSTRUMENTATION" = "1" ]; then
         cp "\$OVERLAY_SRC/serve/_private/\$p" "\$LOCAL_OVERLAY/ray/serve/_private/\$p"
     done
 fi
+
+# Verify the files that the runtime now depends on are present on this node.
+test -f "\$LOCAL_SRC/driver.py"
+test -f "\$LOCAL_SRC/aurora_serve.py"
+test -f "\$LOCAL_SRC/ray_start.py"
+if [ "\$INSTRUMENTATION" = "1" ]; then
+    test -f "\$LOCAL_OVERLAY/ray/serve/_private/constants.py"
+    test -f "\$LOCAL_OVERLAY/ray/serve/_private/deployment_state.py"
+fi
 NODEEOF
 
 chmod +x "$_STAGED_SCRIPT"
@@ -125,22 +134,33 @@ chmod +x "$_STAGED_SCRIPT"
 # Run on head first (synchronous so failures surface immediately).
 bash "$_STAGED_SCRIPT"
 
-# Fan out to workers in parallel via ssh -f. Stays consistent with
-# launch_cluster.sh's current overlay fan-out behavior.
+# Fan out to workers in parallel and wait for completion so missing /tmp
+# staging fails before mpiexec starts the runtime.
+DIST_LOG_DIR="${AURORA_RUN_LOG_DIR:-/tmp}"
+mkdir -p "$DIST_LOG_DIR" 2>/dev/null || DIST_LOG_DIR="/tmp"
 worker_count=0
+pids=()
+nodes=()
 while read -r node; do
     [ -z "$node" ] && continue
     short="${node%%.*}"
     [ "$short" = "$HOSTNAME_SHORT" ] && continue
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -f "$node" \
-        "bash $_STAGED_SCRIPT" 2>/dev/null
+    timeout 180 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$node" \
+        "bash $_STAGED_SCRIPT" >"$DIST_LOG_DIR/distribute_${short}.log" 2>&1 &
+    pids+=($!)
+    nodes+=("$node")
     worker_count=$((worker_count + 1))
 done < "$UNIQUE_NODES_FILE"
 
-# Give the backgrounded ssh sessions time to actually start the script
-# before the trap removes the staged file. ssh -f returns after auth.
-if [ $worker_count -gt 0 ]; then
-    sleep 5
+failed=0
+for i in "${!pids[@]}"; do
+    if ! wait "${pids[$i]}"; then
+        echo "[distribute_to_nodes] ERROR: staging failed on ${nodes[$i]} (see $DIST_LOG_DIR/distribute_${nodes[$i]%%.*}.log)"
+        failed=1
+    fi
+done
+if [ "$failed" -ne 0 ]; then
+    exit 1
 fi
 
 if [ "$INSTRUMENTATION" = "1" ]; then

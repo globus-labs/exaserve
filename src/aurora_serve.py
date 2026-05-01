@@ -153,21 +153,26 @@ def _collect_instrumentation_all() -> None:
     )
 
 
+def _ray_serve_timeout_patches() -> Dict[str, Any]:
+    return {
+        "HTTP_PROXY_TIMEOUT": int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600")),
+        "PROXY_HEALTH_CHECK_TIMEOUT_S": 300.0,
+        "PROXY_READY_CHECK_TIMEOUT_S": 60.0,
+        "PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
+        "DEFAULT_HEALTH_CHECK_TIMEOUT_S": 600,
+        "DEFAULT_HEALTH_CHECK_PERIOD_S": 120,
+        "REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
+    }
+
+
 def _patch_ray_serve_proxy_constants() -> None:
     """Worker setup hook applied via runtime_env. Relaxes Ray Serve proxy/
     replica health-check thresholds so the ServeController doesn't kill
     proxies during 128+-node startup. Functional patch — runs on clean Ray
     too. Idempotent w.r.t. the overlay's static patches in constants.py.
     """
-    import os, sys
-    patches = {
-        "HTTP_PROXY_TIMEOUT": int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600")),
-        "PROXY_HEALTH_CHECK_TIMEOUT_S": 300.0,
-        "PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
-        "DEFAULT_HEALTH_CHECK_TIMEOUT_S": 600,
-        "DEFAULT_HEALTH_CHECK_PERIOD_S": 120,
-        "REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD": 100,
-    }
+    import sys
+    patches = _ray_serve_timeout_patches()
     try:
         from ray.serve._private import constants
         for attr, val in patches.items():
@@ -1372,20 +1377,23 @@ if __name__ == "__main__":
     # spawns ProxyActors. The runtime_env worker hook covers Ray workers, but
     # the driver imports ray.serve directly and needs its own patch.
     from ray.serve._private import constants as _serve_constants
-    _new_timeout = int(os.environ.get("RAY_SERVE_HTTP_PROXY_TIMEOUT", "3600"))
-    _serve_constants.HTTP_PROXY_TIMEOUT = _new_timeout
-    _serve_constants.PROXY_HEALTH_CHECK_TIMEOUT_S = 300.0
-    _serve_constants.PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD = 100
-    # Also patch modules that imported the constant by name
+    _serve_patches = _ray_serve_timeout_patches()
+    for _attr, _val in _serve_patches.items():
+        setattr(_serve_constants, _attr, _val)
+    # Also patch modules that imported constants by name.
     import sys as _sys
     for _mod_name in list(_sys.modules):
         if "ray.serve" in _mod_name:
             _mod = _sys.modules[_mod_name]
-            if hasattr(_mod, "HTTP_PROXY_TIMEOUT"):
-                _mod.HTTP_PROXY_TIMEOUT = _new_timeout
+            for _attr, _val in _serve_patches.items():
+                if hasattr(_mod, _attr):
+                    setattr(_mod, _attr, _val)
     print(
-        f"[AuroraServe] Proxy timeouts patched: HTTP_PROXY_TIMEOUT={_new_timeout}s, "
-        f"HEALTH_CHECK_TIMEOUT=300.0s, UNHEALTHY_THRESHOLD=100",
+        "[AuroraServe] Ray Serve timeouts patched: "
+        f"HTTP_PROXY_TIMEOUT={_serve_patches['HTTP_PROXY_TIMEOUT']}s, "
+        f"PROXY_READY_CHECK_TIMEOUT={_serve_patches['PROXY_READY_CHECK_TIMEOUT_S']}s, "
+        f"PROXY_HEALTH_CHECK_TIMEOUT={_serve_patches['PROXY_HEALTH_CHECK_TIMEOUT_S']}s, "
+        f"UNHEALTHY_THRESHOLD={_serve_patches['PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD']}",
         flush=True,
     )
 

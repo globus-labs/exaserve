@@ -224,7 +224,7 @@ def start_ray_head(cluster: RayClusterConfig):
     # --block is CRITICAL: It keeps the subprocess alive.
     cmd = [
         sys.executable,
-        "src/ray_start.py",
+        os.path.join(SRC_DIR, "ray_start.py"),
         "--head",
         f"--node-ip-address={cluster.head_ip}",
         f"--num-cpus={cluster.node_cpus}",
@@ -250,7 +250,7 @@ def start_ray_worker(cluster: RayClusterConfig):
     )
     cmd = [
         sys.executable,
-        "src/ray_start.py",
+        os.path.join(SRC_DIR, "ray_start.py"),
         f"--address={cluster.head_ip}:{cluster.port}",
         f"--node-ip-address={worker_ip}",
         f"--num-cpus={cluster.node_cpus}",
@@ -513,7 +513,7 @@ def main():
             # 2. Launch Aurora Serve as a non-blocking subprocess so that the
             #    proxy can be started after Ray Serve is ready, and both run
             #    concurrently for the lifetime of the cluster.
-            serve_cmd = [sys.executable, "src/aurora_serve.py"]
+            serve_cmd = [sys.executable, os.path.join(SRC_DIR, "aurora_serve.py")]
             serve_cmd.extend(["--config", args.config])
             serve_env = get_ray_env()
             serve_env["RAY_ADDRESS"] = f"{cluster.head_ip}:{cluster.port}"
