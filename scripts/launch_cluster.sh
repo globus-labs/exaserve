@@ -336,7 +336,7 @@ export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 # DEFAULT_HEALTH_CHECK_*, REPLICA_HEALTH_CHECK_UNHEALTHY_THRESHOLD) are applied two ways:
 #   - On clean Ray: aurora_serve._patch_ray_serve_proxy_constants runs as a
 #     runtime_env worker_process_setup_hook on every Ray worker.
-#   - With AURORA_INSTRUMENTATION=1: src/overlay/ray/serve/_private/constants.py
+#   - With AURORA_INSTRUMENTATION=1: src/patches/ray_serve_overlay/ray/serve/_private/constants.py
 #     ships the same values statically.
 
 
@@ -390,14 +390,15 @@ echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKE
 # --- Per-node distribution: aurora_serve src + (optional) Ray Serve overlay ---
 # Stages /tmp/aurora_src on every node so user code runs from local tmpfs.
 # When AURORA_INSTRUMENTATION=1, also stages /tmp/aurora_overlay (symlink farm
-# pointing at the system Ray package, with patched files from src/overlay/).
+# pointing at the system Ray package, with patched files from
+# src/patches/ray_serve_overlay/).
 export PROJECT_ROOT PYTHON_EXEC UNIQUE_NODES_FILE HOSTNAME_SHORT
 bash "$PROJECT_ROOT/scripts/distribute_to_nodes.sh"
 
 export PYTHONPATH="/tmp/aurora_src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "${AURORA_INSTRUMENTATION:-0}" = "1" ] && [ -d /tmp/aurora_overlay/ray/serve/_private ]; then
     export PYTHONPATH="/tmp/aurora_overlay:$PYTHONPATH"
-    echo "[System] Ray overlay active at /tmp/aurora_overlay (from $PROJECT_ROOT/src/overlay)"
+    echo "[System] Ray overlay active at /tmp/aurora_overlay (from $PROJECT_ROOT/src/patches/ray_serve_overlay)"
 fi
 echo "[System] PYTHONPATH after distribution: $PYTHONPATH"
 

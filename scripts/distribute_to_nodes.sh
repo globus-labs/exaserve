@@ -4,12 +4,13 @@
 #
 # Outputs:
 #   /tmp/aurora_src                 — copy of $PROJECT_ROOT/src (minus the
-#                                     overlay/ subtree). Prepended to PYTHONPATH
+#                                     patches/ subtree). Prepended to PYTHONPATH
 #                                     so user code is loaded from node-local
 #                                     tmpfs instead of Lustre.
 #   /tmp/aurora_overlay/ray/...     — symlink farm pointing at the system Ray
 #                                     install, with a few patched files
-#                                     replaced from $PROJECT_ROOT/src/overlay/.
+#                                     replaced from
+#                                     $PROJECT_ROOT/src/patches/ray_serve_overlay/.
 #                                     Only created when AURORA_INSTRUMENTATION=1.
 #
 # Caller is responsible for prepending the resulting paths to PYTHONPATH.
@@ -32,7 +33,7 @@ fi
 
 INSTRUMENTATION="${AURORA_INSTRUMENTATION:-0}"
 SRC_DIR="$PROJECT_ROOT/src"
-OVERLAY_SRC="$PROJECT_ROOT/src/overlay/ray"
+OVERLAY_SRC="$PROJECT_ROOT/src/patches/ray_serve_overlay/ray"
 SYSRAY="$(dirname "$(dirname "$PYTHON_EXEC")")/lib/python3.12/site-packages/ray"
 
 if [ ! -d "$SRC_DIR" ]; then
@@ -73,16 +74,18 @@ LOCAL_OVERLAY="$LOCAL_OVERLAY"
 INSTRUMENTATION="$INSTRUMENTATION"
 PATCHED_FILES="$PATCHED_FILES"
 
-# 1. aurora_serve sources -> /tmp/aurora_src (excluding overlay/ subtree).
+# 1. aurora_serve sources -> /tmp/aurora_src (excluding the patches overlay
+#    subtree, which is staged separately at /tmp/aurora_overlay below).
 rm -rf "\$LOCAL_SRC"
 mkdir -p "\$LOCAL_SRC"
 # rsync is ubiquitous on Aurora compute nodes; falls back to cp if missing.
 if command -v rsync >/dev/null 2>&1; then
-    rsync -a --exclude='overlay/' --exclude='__pycache__/' --exclude='*.pyc' \\
+    rsync -a --exclude='patches/ray_serve_overlay/' \\
+        --exclude='__pycache__/' --exclude='*.pyc' \\
         "\$SRC_DIR/" "\$LOCAL_SRC/"
 else
     cp -a "\$SRC_DIR/." "\$LOCAL_SRC/"
-    rm -rf "\$LOCAL_SRC/overlay"
+    rm -rf "\$LOCAL_SRC/patches/ray_serve_overlay"
     find "\$LOCAL_SRC" -name __pycache__ -type d -prune -exec rm -rf {} +
 fi
 
