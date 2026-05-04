@@ -364,7 +364,7 @@ export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1
 export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-1}"
 echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
 
-# Instrumentation gate. When 1, scripts/distribute_to_nodes.sh stages a Ray
+# Instrumentation gate. When 1, eval/scripts/distribute_to_nodes.sh stages a Ray
 # Serve overlay (with probes/timeout patches) under /tmp/aurora_overlay on
 # every node, and aurora_serve._collect_instrumentation_all gathers the
 # resulting /tmp/aurora_inst/* files at end of startup. Default 0 = clean Ray.
@@ -393,7 +393,7 @@ echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKE
 # pointing at the system Ray package, with patched files from
 # src/patches/ray_serve_overlay/).
 export PROJECT_ROOT PYTHON_EXEC UNIQUE_NODES_FILE HOSTNAME_SHORT
-bash "$PROJECT_ROOT/scripts/distribute_to_nodes.sh"
+bash "$PROJECT_ROOT/eval/scripts/distribute_to_nodes.sh"
 
 export PYTHONPATH="/tmp/aurora_src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "${AURORA_INSTRUMENTATION:-0}" = "1" ] && [ -d /tmp/aurora_overlay/ray/serve/_private ]; then

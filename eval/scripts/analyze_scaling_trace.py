@@ -3,8 +3,8 @@
 Analyze aurora scaling trace JSON files to identify bottlenecks.
 
 Usage:
-    python scripts/analyze_scaling_trace.py /tmp/aurora_scaling_trace_*.json
-    python scripts/analyze_scaling_trace.py trace_1node.json trace_4node.json trace_64node.json
+    python eval/scripts/analyze_scaling_trace.py /tmp/aurora_scaling_trace_*.json
+    python eval/scripts/analyze_scaling_trace.py trace_1node.json trace_4node.json trace_64node.json
 """
 
 import json

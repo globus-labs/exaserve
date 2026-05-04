@@ -2,7 +2,7 @@
 # Submit all v2 weak-scaling runs in the background with minimal footprint.
 #
 # Usage:
-#   nohup bash scripts/submit_v2.sh &> /tmp/submit_v2.log &
+#   nohup bash eval/scripts/submit_v2.sh &> /tmp/submit_v2.log &
 #   disown
 #
 # Monitor:

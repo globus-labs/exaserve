@@ -128,8 +128,8 @@ PYTHONPATH=/home/wenyiw/aurora_rayserver python3 -m eval.cli run materialize wea
 qsub /lus/flare/.../runN/{scale}-nodes/job/job.pbs
 
 # analyze
-python3 tools/analyze_scaling.py runN/{32,64,128,256}-nodes
-python3 tools/analyze_probes.py runN/{32,64,128,256}-nodes
-python3 tools/analyze_controller_ticks.py runN/{32,64,128,256}-nodes
-python3 tools/analyze_dsm.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_scaling.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_probes.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_controller_ticks.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_dsm.py runN/{32,64,128,256}-nodes
 ```

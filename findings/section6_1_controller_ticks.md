@@ -195,5 +195,5 @@ instead of O(replicas).
 ## Commits
 
 - Overlay: `7233fca` — controller tick probe
-- Analyzer: `tools/analyze_controller_ticks.py` (committed with this findings doc)
+- Analyzer: `eval/tools/analyze_controller_ticks.py` (committed with this findings doc)
 - Data: `/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs/weakscaling_nullcompute_proxy/run18/`

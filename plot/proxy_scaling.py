@@ -24,7 +24,7 @@ _REPO_ROOT = _PLOT_DIR.parent
 _SRC_DIR = _REPO_ROOT / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
-from site_config import get_site_config
+from eval.site_config import get_site_config
 
 # Edit this string directly to change the subtitle without lengthening the CLI.
 DEFAULT_SUBTITLE = (

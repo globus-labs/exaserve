@@ -239,9 +239,9 @@ Key artifacts per run:
 
 ## Tools
 
-- `tools/parse_gcs_event_stats.py` — parse gcs_server.out event-stats
+- `eval/tools/parse_gcs_event_stats.py` — parse gcs_server.out event-stats
   blocks into CSV
-- `tools/analyze_scaling.py` — cross-scale comparison table generator
+- `eval/tools/analyze_scaling.py` — cross-scale comparison table generator
   (takes N run_dirs, produces side-by-side table)
 
 ## Rollback

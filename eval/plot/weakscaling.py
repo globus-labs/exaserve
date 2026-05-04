@@ -21,7 +21,7 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from eval.lib.catalog import find_spec_path, list_spec_names
 from eval.lib.run_planner import resolve_run_group_dir
-from site_config import get_site_config
+from eval.site_config import get_site_config
 
 EXPERIMENT_REGISTRY = {name: find_spec_path(name) for name in list_spec_names()}
 DEFAULT_EXPERIMENTS_ROOT = get_site_config().experiments_root

@@ -21,7 +21,7 @@ import os
 from dataclasses import replace
 from typing import Any
 
-from site_config import get_site_config
+from eval.site_config import get_site_config
 
 from .models import (
     BackendSpec,

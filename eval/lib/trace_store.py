@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from site_config import get_site_config
+from eval.site_config import get_site_config
 
 from .models import ExperimentSpec, TraceArtifact, VariantSpec
 from .trace_generators import TRACE_GENERATOR_VERSION, generate_rows, write_trace

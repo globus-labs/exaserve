@@ -29,7 +29,7 @@ from typing import Any
 
 _MP_CONTEXT = multiprocessing.get_context("forkserver")
 
-from site_config import get_site_config
+from eval.site_config import get_site_config
 
 from .backends import get_backend_adapter
 from .matrix import expand_matrix

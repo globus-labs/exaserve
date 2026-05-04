@@ -784,7 +784,7 @@ Event stats:
 - **Execution time** = handler code duration.
 - **Queueing time** = how long the RPC waited in the dispatch queue before the handler started.
 
-Our [parse_gcs_event_stats.py](../tools/parse_gcs_event_stats.py) parses
+Our [parse_gcs_event_stats.py](../eval/tools/parse_gcs_event_stats.py) parses
 these into a time-series CSV and peak summary. Because the stats are
 collected by Ray itself (not by us), this view has **zero instrumentation
 overhead** and is available in every run including run16 baseline.
@@ -861,19 +861,19 @@ qsub /lus/flare/.../runN/32-nodes/job/job.pbs
 
 ```bash
 # Cross-scale summary (wait_proxies, proxy init, controller events, GCS stats)
-python3 tools/analyze_scaling.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_scaling.py runN/{32,64,128,256}-nodes
 
 # §6 probes — per-proxy GCS calls + update_deployment_targets breakdown
-python3 tools/analyze_probes.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_probes.py runN/{32,64,128,256}-nodes
 
 # §6.1 controller tick timing
-python3 tools/analyze_controller_ticks.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_controller_ticks.py runN/{32,64,128,256}-nodes
 
 # §6.2 dsm.update() step breakdown
-python3 tools/analyze_dsm.py runN/{32,64,128,256}-nodes
+python3 eval/tools/analyze_dsm.py runN/{32,64,128,256}-nodes
 
 # Raw GCS event stats
-python3 tools/parse_gcs_event_stats.py runN/256-nodes/.../gcs_server.out
+python3 eval/tools/parse_gcs_event_stats.py runN/256-nodes/.../gcs_server.out
 ```
 
 ## 10. File map and references
@@ -891,11 +891,11 @@ python3 tools/parse_gcs_event_stats.py runN/256-nodes/.../gcs_server.out
 ### Main repo (`perf-inst-dev`)
 - `scripts/launch_cluster.sh` — overlay build + symlink tree + env vars
 - `src/aurora_serve.py` — `_collect_instrumentation_all` Ray-remote gather + `_collect_proxy_profiles` legacy summary
-- `tools/parse_gcs_event_stats.py` — GCS server-side event parser
-- `tools/analyze_scaling.py` — cross-scale table
-- `tools/analyze_probes.py` — §6 probes (get_actor + router)
-- `tools/analyze_controller_ticks.py` — §6.1 ticks
-- `tools/analyze_dsm.py` — §6.2 dsm sub-phases
+- `eval/tools/parse_gcs_event_stats.py` — GCS server-side event parser
+- `eval/tools/analyze_scaling.py` — cross-scale table
+- `eval/tools/analyze_probes.py` — §6 probes (get_actor + router)
+- `eval/tools/analyze_controller_ticks.py` — §6.1 ticks
+- `eval/tools/analyze_dsm.py` — §6.2 dsm sub-phases
 - `findings/` — all analysis docs
 
 ### Pristine upstream (`/opt/aurora/.../ray/serve/_private/`)

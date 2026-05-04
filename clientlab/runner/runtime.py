@@ -20,7 +20,7 @@ from clientlab.reports.markdown import render_report, write_report
 from clientlab.reports.plots import generate_plots
 from clientlab.runner.spec_io import EXPECTED_POINT_ARTIFACTS, expand_matrix, load_study_spec
 from clientlab.utils import dump_json_file, dump_yaml_file, ensure_dir, utc_timestamp
-from site_config import get_site_config
+from eval.site_config import get_site_config
 
 
 def plan_study(spec_ref, output_dir=None):

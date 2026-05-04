@@ -24,7 +24,7 @@ import subprocess
 from dataclasses import asdict
 
 from src.schemas import DeploymentConfig, ModelConfig, ProxyConfig
-from site_config import get_site_config
+from eval.site_config import get_site_config
 
 from ..manifest import (
     EvalManifest,

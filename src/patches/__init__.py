@@ -181,7 +181,7 @@ def apply_all(strict: bool = False) -> None:
     Today this is a soft validator — the actual patch application happens
     in two places that pre-date this consolidation:
         1. ray_serve_overlay/* via PYTHONPATH precedence (set up by
-           scripts/launch_cluster.sh + scripts/distribute_to_nodes.sh).
+           scripts/launch_cluster.sh + eval/scripts/distribute_to_nodes.sh).
         2. sitecustomize.py at the top of src/, auto-imported by CPython.
 
     Future work: consolidate sitecustomize.py monkey-patches into per-concern

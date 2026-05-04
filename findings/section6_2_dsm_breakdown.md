@@ -219,8 +219,8 @@ Specifically:
   - run18: §6.1 controller tick probe
   - run19: §6.2 dsm step breakdown (this doc)
 - Tools:
-  - `tools/parse_gcs_event_stats.py` — GCS server event-stats parser
-  - `tools/analyze_scaling.py` — cross-scale summary
-  - `tools/analyze_probes.py` — §6 probes
-  - `tools/analyze_controller_ticks.py` — §6.1 ticks
-  - `tools/analyze_dsm.py` — §6.2 sub-phases (this doc)
+  - `eval/tools/parse_gcs_event_stats.py` — GCS server event-stats parser
+  - `eval/tools/analyze_scaling.py` — cross-scale summary
+  - `eval/tools/analyze_probes.py` — §6 probes
+  - `eval/tools/analyze_controller_ticks.py` — §6.1 ticks
+  - `eval/tools/analyze_dsm.py` — §6.2 sub-phases (this doc)

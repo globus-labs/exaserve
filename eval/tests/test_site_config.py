@@ -9,7 +9,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import site_config
+import eval.site_config as site_config
 
 
 @contextmanager

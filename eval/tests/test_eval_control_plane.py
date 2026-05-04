@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import site_config
+import eval.site_config as site_config
 from eval.lib.backends import get_backend_adapter
 from eval.lib.matrix import expand_matrix
 from eval.lib.run_executor import execute_run

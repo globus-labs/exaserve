@@ -104,7 +104,7 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 
 resolve_site_config_field() {
     local field="$1"
-    PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python3 -S -m site_config get "$field" 2>/dev/null || true
+    PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python3 -S -m eval.site_config get "$field" 2>/dev/null || true
 }
 
 SITE_BENCH_ROOT="$(resolve_site_config_field bench_results_dir)"

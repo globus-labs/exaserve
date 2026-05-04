@@ -1,7 +1,7 @@
 #!/bin/bash
 # submit_and_wait.sh - Submit experiment runs sequentially, waiting for completion
-# Usage: bash scripts/submit_and_wait.sh <spec_name> <run_group>
-# Example: bash scripts/submit_and_wait.sh weakscaling_haproxy run3
+# Usage: bash eval/scripts/submit_and_wait.sh <spec_name> <run_group>
+# Example: bash eval/scripts/submit_and_wait.sh weakscaling_haproxy run3
 
 set -e
 SPEC_NAME="$1"
