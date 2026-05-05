@@ -24,11 +24,25 @@ export PATH="$HOME/aurora_rayserver_install/bin:$PATH"
 export PYTHONPATH="$HOME/aurora_rayserver_install:$PYTHONPATH"
 ```
 
-`ray`, `vllm`, MPI, PBS, HAProxy, and LiteLLM are expected to come from the
-Aurora frameworks module rather than from `pip install`. The optional
-extras under `[project.optional-dependencies]` (`server`, `proxy`, `dev`)
-exist to document the intended dependency groups but are not a substitute
-for the frameworks module.
+`ray`, `vllm`, MPI, and PBS come from the Aurora frameworks module rather
+than from `pip install`. The optional extras under
+`[project.optional-dependencies]` (`server`, `proxy`, `dev`) exist to
+document the intended dependency groups but are not a substitute for the
+frameworks module.
+
+**HAProxy and LiteLLM need separate one-time setup before you can run a
+deployment that uses them:**
+
+- **HAProxy** is not on Aurora out of the box and is not in the frameworks
+  module. If your config has `proxy_config.type: haproxy`, build it with
+  `bash scripts/build_haproxy.sh` (see [One-time setup](#one-time-setup)).
+- **LiteLLM** has dependency versions that conflict with Ray + vLLM, so it
+  needs its own venv. If your config has `proxy_config.type: litellm`,
+  follow the venv recipe in [One-time setup](#one-time-setup) and point
+  `proxy_config.python_path` at it.
+
+If you only use `proxy_config.type: direct` (no proxy; clients hit each
+node's Ray Serve HTTP on port 8000), you don't need either of these.
 
 ## Quickstart
 
