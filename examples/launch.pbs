@@ -1,50 +1,74 @@
-#!/bin/bash
-# Minimal PBS script for a Ray cluster + Ray Serve on Aurora.
+#!/bin/bash -l
+# ============================================================================
+# Sample PBS script that hands off to ``aurora-launch-cluster``.
 #
-# All PBS parameters (nodes, queue, walltime, job name, filesystems, project)
-# are passed at submit time — this script stays parameter-free so you can
-# reuse it across debug / debug-scaling / capacity / reservation queues.
+# Most users should use ``aurora-serve-submit <config>`` instead — it
+# generates and qsubs a self-contained PBS script for you. This template
+# is for users who need to integrate the launcher into their own PBS
+# pipeline (chained jobs, reservation queues, custom prologue, etc.).
 #
-# Most users should use ``aurora-serve-submit <config>`` instead; this file
-# exists for users who want to integrate the launcher into their own PBS
-# scripting pipeline (for example, chained jobs or custom wrappers).
+# Edit the #PBS directives below to match your project / config / queue,
+# then submit with simply::
 #
-# Example submission:
-#   qsub -l select=1 \
-#        -l walltime=01:00:00 \
-#        -l filesystems=home:flare \
-#        -q debug-scaling \
-#        -A YOUR_PROJECT \
-#        -N ray-serve \
-#        -o $HOME/tmp/ray-serve.stdout \
-#        -e $HOME/tmp/ray-serve.stderr \
-#        -v CONFIG=examples/config.haproxy.yaml \
-#        examples/launch.pbs
+#     qsub examples/launch.pbs
 #
-# Once the job prints "[Driver] ALL SERVICES READY", resolve the head node
-# (e.g. ``aurora-serve-url <jobid>`` or ``qstat -xf <jobid> | grep exec_host``)
-# and hit the service:
-#   direct:   http://<head>:8000/v1/...
-#   haproxy:  http://<head>:4001/v1/...
-#   litellm:  http://<head>:4001/v1/...  (with Authorization: Bearer <master_key>)
+# (or override individual fields per-submission, e.g. ``qsub -l select=4
+# -v CONFIG=examples/config.haproxy.yaml examples/launch.pbs``).
+# ============================================================================
 
-# -u is intentionally off: `module load` (lmod) references unset internal
-# vars and trips `set -u` with "ZSH_EVAL_CONTEXT: unbound variable".
+# --- PBS directives ---------------------------------------------------------
+# Allocation / project — edit YOUR_PROJECT.
+#PBS -A YOUR_PROJECT
+
+# Nodes, walltime, filesystems, queue. Edit as needed.
+#PBS -l select=2
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:flare
+#PBS -q debug-scaling
+
+# Job name. PBS limits this to ~15 chars on some sites.
+#PBS -N aurora-serve
+
+# Keep stdout+stderr on the execution host so they survive job rerun
+# (matches what aurora-serve-submit does).
+#PBS -k doe
+
+# Where to spool stdout/stderr after the job ends. Make sure the
+# directory exists before submission.
+#PBS -o /home/USER/tmp/
+#PBS -e /home/USER/tmp/
+# ----------------------------------------------------------------------------
+
+# -u is intentionally off: ``module load`` (lmod) references unset internal
+# vars and trips ``set -u`` with "ZSH_EVAL_CONTEXT: unbound variable".
 set -eo pipefail
 
+# PBS jobs land in $HOME by default — switch to the submit dir so a
+# relative CONFIG (e.g. examples/config.haproxy.yaml) resolves the way
+# the user expects. Pass an absolute path via -v CONFIG=/path/... if
+# you want this to work from anywhere.
+cd "${PBS_O_WORKDIR:-$PWD}"
+
 CONFIG="${CONFIG:-examples/config.haproxy.yaml}"
+if [ ! -f "$CONFIG" ]; then
+    echo "ERROR: CONFIG=$CONFIG not found from $(pwd). Pass -v CONFIG=<path> at qsub time." >&2
+    exit 1
+fi
 
 # Aurora frameworks Python (3.12) — required for ray, vllm, mpiexec, mpicc.
-module load frameworks
+# Mirror what ``aurora-serve-submit``-rendered PBS does: prefer the user's
+# env_aurora script if present (sets ALCF proxy + module loads); otherwise
+# fall back to a bare ``module load frameworks``.
+if [ -f "$HOME/script/env_aurora" ]; then
+    source "$HOME/script/env_aurora"
+else
+    module load frameworks
+fi
 
-# (Optional) ALCF outbound proxy for HuggingFace downloads on first model
-# fetch. Unset http_proxy/https_proxy before compute begins so intra-
-# cluster health checks can reach compute-node IPs.
-# export HTTP_PROXY=http://proxy.alcf.anl.gov:3128
-# export HTTPS_PROXY=$HTTP_PROXY
-
-# Hand off to the installed-package launcher. ``aurora-launch-cluster`` is
-# a console script the wheel installs; it resolves the bash launcher via
-# importlib.resources so this script does not need to know where the
-# package lives.
+# Hand off to the installed-package launcher. ``aurora-launch-cluster``
+# is a console script the wheel installs; it resolves the bash launcher
+# via importlib.resources so this script does not need to know where the
+# package lives. Requires the wheel's bin/ on PATH (typical with
+# ``pip install --user`` + Python's user-base, or a venv that's been
+# activated in env_aurora).
 exec aurora-launch-cluster "$CONFIG"
