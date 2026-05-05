@@ -14,7 +14,7 @@ is a git-tracked repo. It currently tracks seven files under
 `serve/_private/`: six patched files plus one pristine baseline copy
 (`proxy_state.py`).
 
-At launch, `scripts/launch_cluster.sh` copies every `*.py` currently
+At launch, `src/aurora_rayserver/resources/launch_cluster.sh` copies every `*.py` currently
 present under the overlay's `serve/_private/` into `/tmp/ray_overlay`.
 So the tracked files below are the intended patch set, but any untracked
 Python file left in that directory is also active for that run.
@@ -260,7 +260,7 @@ router-side cliff.
 ### Important repo-specific assumption for the event-loop story
 
 This repo exports `RAY_SERVE_THROUGHPUT_OPTIMIZED=1`
-(`src/driver.py`, `scripts/launch_cluster.sh`). In upstream Ray Serve,
+(`src/driver.py`, `src/aurora_rayserver/resources/launch_cluster.sh`). In upstream Ray Serve,
 that flips `RAY_SERVE_RUN_ROUTER_IN_SEPARATE_LOOP` from its default `1`
 to `0`.
 
@@ -889,7 +889,7 @@ python3 eval/tools/parse_gcs_event_stats.py runN/256-nodes/.../gcs_server.out
 - `.gitignore`
 
 ### Main repo (`perf-inst-dev`)
-- `scripts/launch_cluster.sh` — overlay build + symlink tree + env vars
+- `src/aurora_rayserver/resources/launch_cluster.sh` — overlay build + symlink tree + env vars
 - `src/aurora_serve.py` — `_collect_instrumentation_all` Ray-remote gather + `_collect_proxy_profiles` legacy summary
 - `eval/tools/parse_gcs_event_stats.py` — GCS server-side event parser
 - `eval/tools/analyze_scaling.py` — cross-scale table

@@ -25,7 +25,7 @@ export PBS_NODEFILE="$OUTDIR/nodefile"
 echo "$(hostname)" > "$PBS_NODEFILE"
 
 echo "=== Launching cluster ==="
-bash scripts/launch_cluster.sh "$MANIFEST" > "$OUTDIR/cluster.log" 2>&1 &
+bash src/aurora_rayserver/resources/launch_cluster.sh "$MANIFEST" > "$OUTDIR/cluster.log" 2>&1 &
 CLUSTER_PID=$!
 
 # Wait for Ray Serve health

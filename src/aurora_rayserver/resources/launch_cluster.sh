@@ -8,9 +8,20 @@ if [ -z "$PBS_NODEFILE" ]; then
     exit 1
 fi
 
-# Get the absolute path of the directory containing this script
+# Get the absolute path of the directory containing this script.
+# The launcher lives inside the installed package at
+#   <project_root>/src/aurora_rayserver/resources/launch_cluster.sh
+# so PROJECT_ROOT is three levels up. AURORA_PROJECT_ROOT can override
+# this when the wheel is installed outside a source tree (e.g. into a
+# venv's site-packages) — in that case the user must point us at the
+# repo containing tools/ and eval/ that the launcher still references.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+if [ -n "${AURORA_PROJECT_ROOT:-}" ]; then
+    PROJECT_ROOT="$AURORA_PROJECT_ROOT"
+else
+    # Walk up: resources -> aurora_rayserver -> src -> <project_root>
+    PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )"
+fi
 cd "$PROJECT_ROOT"
 
 sanitize_pythonpath() {

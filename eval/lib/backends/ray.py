@@ -1,13 +1,13 @@
 """Ray backend adapter.
 
 This adapter bridges the new eval control plane with the existing serving
-infrastructure (scripts/launch_cluster.sh, src/driver.py, src/aurora_serve.py).
+infrastructure (src/aurora_rayserver/resources/launch_cluster.sh, src/driver.py, src/aurora_serve.py).
 
 Key responsibilities:
   - build_runtime_manifest: translates the eval-layer RunPlan into an
     EvalManifest YAML that launch_cluster.sh and replay_client.py expect.
     This is the bridge between the two config schemas.
-  - launch: starts `bash scripts/launch_cluster.sh <manifest>` as a child
+  - launch: starts `bash src/aurora_rayserver/resources/launch_cluster.sh <manifest>` as a child
     process group, monitored by ProcessMonitor for the readiness marker.
   - runtime_env: selects the shell env used for the Ray/vLLM stack and sets
     launcher exports such as AURORA_NULL_COMPUTE. Ray cluster settings such as
@@ -197,9 +197,20 @@ class RayBackendAdapter(BackendAdapter):
         env = _sanitize_launch_env(os.environ.copy())
         runtime_env = self.runtime_env(run_plan)
         env.update(runtime_env.exports)
-        env["PYTHONPATH"] = run_plan.repo_root + os.pathsep + env.get("PYTHONPATH", "")
+        # PYTHONPATH must include both the repo root (so 'from eval.X' resolves)
+        # and repo_root/src (so 'from aurora_rayserver.X' resolves).
+        env["PYTHONPATH"] = (
+            run_plan.repo_root
+            + os.pathsep
+            + os.path.join(run_plan.repo_root, "src")
+            + os.pathsep
+            + env.get("PYTHONPATH", "")
+        )
         env["AURORA_RUN_LOG_ROOT"] = os.path.join(run_plan.bundle.logs_dir, "backend")
-        launch_script = os.path.join(run_plan.repo_root, "scripts", "launch_cluster.sh")
+        # The launcher lives inside the package's resources/ data dir as of v0.1.0.
+        launch_script = os.path.join(
+            run_plan.repo_root, "src", "aurora_rayserver", "resources", "launch_cluster.sh"
+        )
         cmd = ["bash", launch_script, run_plan.runtime_manifest_path]
         process = subprocess.Popen(
             cmd,

@@ -9,7 +9,7 @@ Only files under `serve/_private/` that we actually edit are present:
 instrumentation), and pristine copies of `controller.py`/`proxy_state.py` as
 baselines for future patches.
 
-[scripts/launch_cluster.sh](../scripts/launch_cluster.sh) builds a per-node
+[src/aurora_rayserver/resources/launch_cluster.sh](../src/aurora_rayserver/resources/launch_cluster.sh) builds a per-node
 **symlink farm** at `/tmp/ray_overlay/` on each compute node:
 
 - Symlinks for every other file in `ray/*`, `ray/serve/*`, and
@@ -58,7 +58,7 @@ subsequent nodes get it peer-to-peer over the compute fabric.
   → use → `stop_copper_aurora.sh`
 
 ### Mismatch with our sparse overlay
-The current code in [launch_cluster.sh:397-413](../scripts/launch_cluster.sh#L397-L413)
+The current code in [launch_cluster.sh:397-413](../src/aurora_rayserver/resources/launch_cluster.sh#L397-L413)
 attempts to prepend `/tmp/$USER/copper/$OVERLAY_DIR` to PYTHONPATH. Two
 problems:
 

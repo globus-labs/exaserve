@@ -76,7 +76,7 @@ for NC in "${NODE_COUNTS[@]}"; do
     export AURORA_PROJECT_LOGGING_INITIALIZED=1
 
     # Timeout: 10 min per run (generous)
-    timeout 600 bash "$PROJECT_ROOT/scripts/launch_cluster.sh" "$CONFIG" > "$LOG" 2>&1 &
+    timeout 600 bash "$PROJECT_ROOT/src/aurora_rayserver/resources/launch_cluster.sh" "$CONFIG" > "$LOG" 2>&1 &
     LAUNCH_PID=$!
 
     # Wait for "CLUSTER FULLY READY" or timeout

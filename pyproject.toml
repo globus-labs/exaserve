@@ -14,12 +14,11 @@ dependencies = [
 ]
 
 [project.scripts]
-# aurora-launch-cluster is added in commit 3 once the launcher moves into
-# resources/. For now console scripts cover the Python entry points only.
-aurora-driver       = "aurora_rayserver.cli:driver"
-aurora-server       = "aurora_rayserver.cli:server"
-aurora-model-bcast  = "aurora_rayserver.cli:model_bcast"
-aurora-ray-start    = "aurora_rayserver.cli:ray_start"
+aurora-launch-cluster = "aurora_rayserver.cli:launch_cluster"
+aurora-driver         = "aurora_rayserver.cli:driver"
+aurora-server         = "aurora_rayserver.cli:server"
+aurora-model-bcast    = "aurora_rayserver.cli:model_bcast"
+aurora-ray-start      = "aurora_rayserver.cli:ray_start"
 
 [tool.setuptools]
 include-package-data = true
@@ -32,7 +31,4 @@ namespaces = false
 [tool.setuptools.package-data]
 "aurora_rayserver" = ["py.typed"]
 "aurora_rayserver.patches" = ["ray_serve_overlay/ray/serve/_private/*.py"]
-# Note: scripts/launch_cluster.sh stays at the repo root (snapshot path)
-# for now since the eval pipeline invokes it from there. v0.1.0 wheel users
-# get the Python API; the launcher gets packaged into resources/ in a
-# follow-up commit (commit 3 of the production_packaging plan).
+"aurora_rayserver.resources" = ["*.sh"]

@@ -40,7 +40,7 @@ PYEOF
     export PBS_NODEFILE="$OUTDIR/nodefile"
     echo "$(hostname)" > "$PBS_NODEFILE"
 
-    bash scripts/launch_cluster.sh "$OUTDIR/runtime_${LABEL}.yaml" > "$OUTDIR/cluster_${LABEL}.log" 2>&1 &
+    bash src/aurora_rayserver/resources/launch_cluster.sh "$OUTDIR/runtime_${LABEL}.yaml" > "$OUTDIR/cluster_${LABEL}.log" 2>&1 &
     local CPID=$!
 
     local tries=0

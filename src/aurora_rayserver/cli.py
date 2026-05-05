@@ -12,14 +12,22 @@ restructure 450 lines of script-style code in this commit, ``server()``
 re-execs into the module via ``python -m`` so the ``__main__`` block runs
 exactly as it does when launched by the driver.
 
-A future commit will add ``launch_cluster()`` here once the bash launcher
-moves into ``aurora_rayserver/resources/``.
+For shell-script entries (``aurora-launch-cluster``) we resolve the
+script's path inside the installed package's ``resources/`` data dir
+via ``importlib.resources`` and ``os.execvp`` into bash. The .sh stays
+the source of truth; the Python wrapper just locates it.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from importlib import resources
+
+
+def launch_cluster() -> None:
+    script = resources.files("aurora_rayserver.resources") / "launch_cluster.sh"
+    os.execvp("bash", ["bash", str(script), *sys.argv[1:]])
 
 
 def driver() -> None:

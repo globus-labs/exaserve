@@ -54,7 +54,7 @@ print(f'  Manifest written: max_ongoing={$MOR}')
 
     # Launch cluster
     echo "  Launching cluster..."
-    bash scripts/launch_cluster.sh "$STEP_DIR/runtime.yaml" > "$STEP_DIR/cluster.log" 2>&1 &
+    bash src/aurora_rayserver/resources/launch_cluster.sh "$STEP_DIR/runtime.yaml" > "$STEP_DIR/cluster.log" 2>&1 &
     CLUSTER_PID=$!
 
     # Wait for health

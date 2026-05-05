@@ -110,7 +110,7 @@ export AURORA_RUN_LOG_FILE="$DEBUG_OUT/run_logs/launch.log"
 export AURORA_DEBUG_HOLD_ON_FAILURE_S=300
 mkdir -p "$DEBUG_OUT/run_logs"
 
-bash scripts/launch_cluster.sh "$DEBUG_OUT/config.yaml" &
+bash src/aurora_rayserver/resources/launch_cluster.sh "$DEBUG_OUT/config.yaml" &
 CLUSTER_PID=$!
 echo "Cluster launcher PID: $CLUSTER_PID"
 
