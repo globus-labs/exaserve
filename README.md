@@ -12,23 +12,40 @@ module load frameworks
 python3 -m pip install --user .
 ```
 
-This installs into `~/.local/`. The console scripts (`aurora-launch-cluster`,
-`aurora-serve-submit`, etc.) land in `~/.local/bin/`. Add that to `PATH`
-if it isn't already:
+Aurora's `frameworks` module pins `pip install --user` to a frameworks-
+versioned user base (so packages installed against one frameworks
+version don't shadow another). Concretely, the console scripts land
+in `~/.local/aurora/frameworks/<version>/bin/` — not `~/.local/bin/`.
+`pip install --user` will print a warning showing the exact directory:
+
+```
+WARNING: The scripts aurora-driver, ... are installed in
+'/home/<your-user>/.local/aurora/frameworks/2025.3.1/bin'
+```
+
+Add that directory to `PATH`. Use the dynamic form so it keeps working
+when Aurora bumps the frameworks version:
 
 ```bash
-# In your current shell:
-export PATH="$HOME/.local/bin:$PATH"
+module load frameworks
+SCRIPTS_DIR="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))')"
+export PATH="$SCRIPTS_DIR:$PATH"
 
-# To persist across logins, append the same line to ~/.bashrc:
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+# Persist across logins (after `module load frameworks` so the right
+# scripts dir is picked up):
+cat >> ~/.bashrc <<'BASH'
+if module is-loaded frameworks 2>/dev/null; then
+    SCRIPTS_DIR="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))')"
+    case ":$PATH:" in *":$SCRIPTS_DIR:"*) ;; *) export PATH="$SCRIPTS_DIR:$PATH" ;; esac
+fi
+BASH
 ```
 
 Verify with:
 
 ```bash
 which aurora-serve-submit
-# /home/<your-user>/.local/bin/aurora-serve-submit
+# /home/<your-user>/.local/aurora/frameworks/2025.3.1/bin/aurora-serve-submit
 ```
 
 For an isolated install, use `--target` and prepend that location to
