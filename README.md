@@ -5,8 +5,7 @@ deployments on the ALCF Aurora HPC cluster.
 
 ## Install
 
-The package targets Aurora's frameworks Python (3.12). Don't use the system
-Python on login nodes — it's 3.6 and won't satisfy `requires-python>=3.10`.
+The package targets Aurora's frameworks Python (3.12).
 
 ```bash
 module load frameworks
@@ -81,6 +80,53 @@ Defaults if you don't pass the flags / set the env vars:
 project=`AuroraGPT`, queue=`debug-scaling`, walltime=`01:00:00`,
 filesystems=`home:flare`. See [examples/config.reference.yaml](examples/config.reference.yaml)
 for the full set of submit-time env vars.
+
+## One-time setup
+
+### HAProxy (only for `proxy_config.type: haproxy`)
+
+Aurora doesn't ship a recent `haproxy`, and the Aurora frameworks module
+doesn't include one. Build it once from source:
+
+```bash
+bash scripts/build_haproxy.sh           # installs to ~/.local/haproxy-<version>,
+                                        # symlinks ~/bin/haproxy
+```
+
+The launcher prepends `$HOME/bin` to `PATH` so the symlinked binary is
+picked up automatically inside the PBS job. The default version is HAProxy
+`3.1.6`; pass a different version as the script's first arg if you need
+one.
+
+If you want to skip this step, use `proxy_config.type: direct` (clients
+hit each node's Ray Serve HTTP directly on port 8000) or
+`proxy_config.type: litellm` (one-time setup below).
+
+### LiteLLM (only for `proxy_config.type: litellm`)
+
+LiteLLM pins dependency versions that conflict with Ray and vLLM, so it
+needs its own venv. Create one and point `proxy_config.python_path` at
+the venv's `python3`. The release branch shipped a
+`scripts/setup_litellm_venv.sh` helper; reproduce it manually if you need
+LiteLLM in v0.1.0:
+
+```bash
+module load frameworks
+python3 -m venv ~/litellm_venv
+source ~/litellm_venv/bin/activate
+pip install 'litellm[proxy]'
+deactivate
+```
+
+Then in your config:
+
+```yaml
+proxy_config:
+  type: litellm
+  python_path: /home/<your-user>/litellm_venv/bin/python3
+  options:
+    master_key: "sk-yourtoken"
+```
 
 ## Required environment
 
