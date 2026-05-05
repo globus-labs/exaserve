@@ -360,8 +360,8 @@ def start_proxy(proxy_config, deploy_config, config_path: str):
 
     # proxy/ lives alongside driver.py in src/; Python adds src/ to sys.path
     # automatically when running src/driver.py, so no path manipulation needed.
-    from proxy import get_proxy
-    from proxy.backends import discover_backends
+    from .proxy import get_proxy
+    from .proxy.backends import discover_backends
 
     proxy = get_proxy(proxy_config.type)
 

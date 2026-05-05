@@ -2,8 +2,8 @@
 Proxy package for Aurora Ray Server.
 
 Public API used by driver.py:
-    from proxy import get_proxy
-    from proxy.backends import discover_backends
+    from aurora_rayserver.proxy import get_proxy
+    from aurora_rayserver.proxy.backends import discover_backends
 
     proxy = get_proxy("litellm")        # or "haproxy"
     backends = discover_backends(deploy_config)
@@ -14,7 +14,7 @@ Public API used by driver.py:
     proxy.stop(proc)
 
 To add a new proxy backend:
-    1. Create src/proxy/my_proxy.py implementing ProxyBackend (base.py).
+    1. Create src/aurora_rayserver/proxy/my_proxy.py implementing ProxyBackend (base.py).
     2. Register it in _REGISTRY below.
     3. Set type: my_proxy in the experiment config's proxy_config section.
 """
@@ -25,8 +25,8 @@ _REGISTRY: dict[str, type[ProxyBackend]] = {}
 
 
 def _register():
-    from proxy.litellm_proxy import LiteLLMProxy
-    from proxy.haproxy_proxy import HAProxyProxy
+    from .litellm_proxy import LiteLLMProxy
+    from .haproxy_proxy import HAProxyProxy
     _REGISTRY["litellm"] = LiteLLMProxy
     _REGISTRY["haproxy"] = HAProxyProxy
 
