@@ -175,7 +175,7 @@ def _direct_health_paths(exp_config: EvalManifest) -> list[str]:
     try:
         from src.model_paths import get_model_route_name
     except ImportError:  # pragma: no cover - script-mode fallback
-        from model_paths import get_model_route_name
+        from aurora_rayserver.model_paths import get_model_route_name
 
     paths = []
     for model_config in model_configs:

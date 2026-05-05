@@ -665,7 +665,7 @@ class VLLMWorker:
             )
             total_s = time.time() - init_start
             print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
-            from scaling_trace import report_replica_stats
+            from .scaling_trace import report_replica_stats
             report_replica_stats({
                 "pid": pid, "hostname": hostname, "model_id": model_id,
                 "device_id": device_id, "null_compute": True,
@@ -795,7 +795,7 @@ class VLLMWorker:
         if engine_sub:
             replica_info["engine_sub_phases"] = engine_sub
 
-        from scaling_trace import report_replica_stats
+        from .scaling_trace import report_replica_stats
         report_replica_stats(replica_info)
 
     # ---- HTTP endpoints ------------------------------------------------------
@@ -1378,7 +1378,7 @@ if __name__ == "__main__":
 
     # Create stats collector actor for per-replica init timing (replaces
     # per-file Lustre I/O).  Must be created after ray.init, before serve.run.
-    from scaling_trace import create_stats_collector, collect_replica_stats
+    from .scaling_trace import create_stats_collector, collect_replica_stats
     create_stats_collector()
 
     # Patch proxy timeouts in *this* (driver) process before serve.start()

@@ -8,7 +8,7 @@ poorly.
 
 Usage (aurora_serve.py / driver.py):
 
-    from scaling_trace import tracer
+    from .scaling_trace import tracer
 
     with tracer.phase("ray.init"):
         ray.init(...)

@@ -6,7 +6,7 @@ from pathlib import Path
 try:
     from .model_paths import iter_unique_model_ids
 except ImportError:  # pragma: no cover - script-mode fallback
-    from model_paths import iter_unique_model_ids
+    from .model_paths import iter_unique_model_ids
 
 
 def require_yaml():

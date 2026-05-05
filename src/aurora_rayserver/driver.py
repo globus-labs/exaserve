@@ -172,7 +172,7 @@ def get_ray_env():
 
 
 def load_ray_cluster_config(config_path: str) -> RayClusterConfig:
-    from schemas import require_yaml
+    from .schemas import require_yaml
 
     yaml = require_yaml()
     with open(config_path, "r", encoding="utf-8") as handle:
@@ -540,8 +540,8 @@ def main():
             proxy_config = None
             deploy_config = None
             serve_health_paths = ["/health"]
-            from schemas import load_deployment_config, load_proxy_config
-            from model_paths import get_model_route_name
+            from .schemas import load_deployment_config, load_proxy_config
+            from .model_paths import get_model_route_name
             proxy_config = load_proxy_config(args.config)
             deploy_config = load_deployment_config(args.config)
             if len(deploy_config.model_configs) > 1:
