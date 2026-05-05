@@ -12,7 +12,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from scaling_trace import (
+from .scaling_trace import (
     default_scaling_trace_path,
     tracing_enabled,
 )
@@ -513,7 +513,10 @@ def main():
             # 2. Launch Aurora Serve as a non-blocking subprocess so that the
             #    proxy can be started after Ray Serve is ready, and both run
             #    concurrently for the lifetime of the cluster.
-            serve_cmd = [sys.executable, os.path.join(SRC_DIR, "aurora_serve.py")]
+            # Invoke the server module via -m so its relative imports
+            # (`from .schemas import ...`) resolve. Direct `python <path>` would
+            # break those imports because __package__ would be empty.
+            serve_cmd = [sys.executable, "-m", "aurora_rayserver.server"]
             serve_cmd.extend(["--config", args.config])
             serve_env = get_ray_env()
             serve_env["RAY_ADDRESS"] = f"{cluster.head_ip}:{cluster.port}"

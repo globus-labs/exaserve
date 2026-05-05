@@ -57,7 +57,7 @@ write_ray_cluster_head_ip() {
     local head_ip="$2"
     "$PYTHON_EXEC" - "$config_path" "$head_ip" <<'PY'
 import sys
-from schemas import require_yaml
+from aurora_rayserver.schemas import require_yaml
 
 config_path, head_ip = sys.argv[1:3]
 yaml = require_yaml()
@@ -347,7 +347,8 @@ if [ "${AURORA_NULL_COMPUTE:-0}" = "1" ]; then
     echo "[System] NULL-COMPUTE mode enabled; skipping model staging"
 else
     echo "[System] Staging models to node-local storage via MPI bcast..."
-    $PYTHON_EXEC src/model_bcast.py --config "$DEPLOYMENT_CONFIG_PATH" --num-nodes "$NODE_COUNT"
+    PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+        $PYTHON_EXEC -m aurora_rayserver.model_bcast --config "$DEPLOYMENT_CONFIG_PATH" --num-nodes "$NODE_COUNT"
     # model_bcast.py writes timing JSON to a well-known path
     BCAST_TIMING_FILE="$RUN_LOG_DIR/model_bcast_timing.json"
     if [ -f "$BCAST_TIMING_FILE" ]; then
@@ -425,10 +426,11 @@ fi
 # Force unbuffered Python output so tee gets lines immediately
 export PYTHONUNBUFFERED=1
 
-# driver.py runs from the per-node /tmp/aurora_src copy so all node-local
-# imports (driver, aurora_serve, model_paths, ...) come from tmpfs, not Lustre.
+# driver runs from the per-node /tmp/aurora_src copy so all node-local
+# imports (aurora_rayserver.driver, .server, .model_paths, ...) come from
+# tmpfs, not Lustre. Invoke as a module so relative imports resolve.
 mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
-    $PYTHON_EXEC /tmp/aurora_src/driver.py --config "$DEPLOYMENT_CONFIG_PATH"
+    $PYTHON_EXEC -m aurora_rayserver.driver --config "$DEPLOYMENT_CONFIG_PATH"
 
 # Stop Copper if it was started
 if [ "$COPPER_ACTIVE" = "1" ]; then

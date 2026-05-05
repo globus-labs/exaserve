@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Union
 
-from src.schemas import (
+from aurora_rayserver.schemas import (
     DeploymentConfig,
     ProxyConfig,
     _path_to_str,

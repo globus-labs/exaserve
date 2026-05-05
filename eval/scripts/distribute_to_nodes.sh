@@ -33,7 +33,7 @@ fi
 
 INSTRUMENTATION="${AURORA_INSTRUMENTATION:-0}"
 SRC_DIR="$PROJECT_ROOT/src"
-OVERLAY_SRC="$PROJECT_ROOT/src/patches/ray_serve_overlay/ray"
+OVERLAY_SRC="$PROJECT_ROOT/src/aurora_rayserver/patches/ray_serve_overlay/ray"
 SYSRAY="$(dirname "$(dirname "$PYTHON_EXEC")")/lib/python3.12/site-packages/ray"
 
 if [ ! -d "$SRC_DIR" ]; then
@@ -80,12 +80,12 @@ rm -rf "\$LOCAL_SRC"
 mkdir -p "\$LOCAL_SRC"
 # rsync is ubiquitous on Aurora compute nodes; falls back to cp if missing.
 if command -v rsync >/dev/null 2>&1; then
-    rsync -a --exclude='patches/ray_serve_overlay/' \\
+    rsync -a --exclude='aurora_rayserver/patches/ray_serve_overlay/' \\
         --exclude='__pycache__/' --exclude='*.pyc' \\
         "\$SRC_DIR/" "\$LOCAL_SRC/"
 else
     cp -a "\$SRC_DIR/." "\$LOCAL_SRC/"
-    rm -rf "\$LOCAL_SRC/patches/ray_serve_overlay"
+    rm -rf "\$LOCAL_SRC/aurora_rayserver/patches/ray_serve_overlay"
     find "\$LOCAL_SRC" -name __pycache__ -type d -prune -exec rm -rf {} +
 fi
 
@@ -123,9 +123,9 @@ if [ "\$INSTRUMENTATION" = "1" ]; then
 fi
 
 # Verify the files that the runtime now depends on are present on this node.
-test -f "\$LOCAL_SRC/driver.py"
-test -f "\$LOCAL_SRC/aurora_serve.py"
-test -f "\$LOCAL_SRC/ray_start.py"
+test -f "\$LOCAL_SRC/aurora_rayserver/driver.py"
+test -f "\$LOCAL_SRC/aurora_rayserver/server.py"
+test -f "\$LOCAL_SRC/aurora_rayserver/ray_start.py"
 if [ "\$INSTRUMENTATION" = "1" ]; then
     test -f "\$LOCAL_OVERLAY/ray/serve/_private/constants.py"
     test -f "\$LOCAL_OVERLAY/ray/serve/_private/deployment_state.py"

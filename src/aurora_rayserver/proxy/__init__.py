@@ -19,7 +19,7 @@ To add a new proxy backend:
     3. Set type: my_proxy in the experiment config's proxy_config section.
 """
 
-from proxy.base import BackendEndpoint, ProxyBackend
+from .base import BackendEndpoint, ProxyBackend
 
 _REGISTRY: dict[str, type[ProxyBackend]] = {}
 

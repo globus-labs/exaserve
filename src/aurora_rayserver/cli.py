@@ -1,0 +1,46 @@
+"""Console-script entry points for aurora-rayserver.
+
+Each entry point is wired in ``pyproject.toml`` under ``[project.scripts]``.
+
+For pure-Python modules with a ``main()`` function (driver, model_bcast,
+ray_start), the entry point delegates by invoking that ``main()`` so
+``sys.argv`` parsing and exit-code propagation flow through unchanged.
+
+The ``server`` module currently exposes its CLI via a ``if __name__ ==
+"__main__":`` block rather than a ``main()`` function. Rather than
+restructure 450 lines of script-style code in this commit, ``server()``
+re-execs into the module via ``python -m`` so the ``__main__`` block runs
+exactly as it does when launched by the driver.
+
+A future commit will add ``launch_cluster()`` here once the bash launcher
+moves into ``aurora_rayserver/resources/``.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+
+def driver() -> None:
+    from . import driver as _driver
+    _driver.main()
+
+
+def server() -> None:
+    # server.py has its CLI in a __main__ block; re-exec via -m so the
+    # block fires exactly as the launcher invokes it.
+    os.execvp(
+        sys.executable,
+        [sys.executable, "-m", "aurora_rayserver.server", *sys.argv[1:]],
+    )
+
+
+def model_bcast() -> None:
+    from . import model_bcast as _mb
+    raise SystemExit(_mb.main())
+
+
+def ray_start() -> None:
+    from . import ray_start as _rs
+    raise SystemExit(_rs.main())

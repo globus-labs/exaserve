@@ -9,14 +9,14 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
-from model_paths import get_model_storage_name, get_model_storage_path, iter_unique_model_ids
-from model_staging import (
+from .model_paths import get_model_storage_name, get_model_storage_path, iter_unique_model_ids
+from .model_staging import (
     get_model_dir_state,
     print_red,
     stage_models,
     validate_tensor_parallel_compatibility,
 )
-from schemas import load_deployment_config
+from .schemas import load_deployment_config
 
 
 def compile_bcast(tools_dir: Path) -> Path:

@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from schemas import ModelConfig
+from .schemas import ModelConfig
 
 
 @dataclass

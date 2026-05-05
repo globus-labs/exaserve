@@ -22,6 +22,14 @@ import time
 import uuid
 from typing import Optional, List, Dict, Any
 
+# Patches MUST be installed before any ray.serve / vllm imports below —
+# Ray Serve instantiates classes from ray.serve._private during package
+# import, so monkey-patching after the fact is too late. The launcher
+# arranges PYTHONPATH so the overlay tree wins import precedence; the
+# vLLM monkey-patches in aurora_rayserver._sitecustomize are applied here.
+from .patches import apply_all as _apply_all  # noqa: I001
+_apply_all()
+
 import ray
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -31,10 +39,10 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-from schemas import ModelConfig, DeploymentConfig, load_deployment_config
-from model_paths import get_model_route_name
-from model_staging import print_red, resolve_model_paths
-from replica_planner import (
+from .schemas import ModelConfig, DeploymentConfig, load_deployment_config
+from .model_paths import get_model_route_name
+from .model_staging import print_red, resolve_model_paths
+from .replica_planner import (
     NodeInventory,
     DeploymentReplicaPlan,
     ModelReplicaPlan,
@@ -42,7 +50,7 @@ from replica_planner import (
     format_replica_plan,
     tp_replica_capacity_for_nodes,
 )
-from scaling_trace import tracer, tracing_enabled
+from .scaling_trace import tracer, tracing_enabled
 
 
 

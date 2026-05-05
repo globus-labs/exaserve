@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from textwrap import dedent
 
-from proxy.base import BackendEndpoint, ProxyBackend
+from .base import BackendEndpoint, ProxyBackend
 
 
 class HAProxyProxy(ProxyBackend):

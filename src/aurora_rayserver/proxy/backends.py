@@ -9,8 +9,8 @@ discovery logic is never duplicated.
 import os
 from typing import Optional
 
-from model_paths import get_model_route_name
-from proxy.base import BackendEndpoint
+from ..model_paths import get_model_route_name
+from .base import BackendEndpoint
 
 
 def _read_nodefile(pbs_nodefile: str) -> list[str]:

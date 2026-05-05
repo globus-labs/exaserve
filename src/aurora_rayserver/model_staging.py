@@ -11,8 +11,8 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, List
-from schemas import ModelConfig
-from model_paths import (
+from .schemas import ModelConfig
+from .model_paths import (
     get_model_storage_path,
     get_model_storage_name,
     iter_unique_model_ids,

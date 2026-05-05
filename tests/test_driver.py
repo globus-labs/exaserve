@@ -2,7 +2,7 @@ import subprocess
 import sys
 import textwrap
 
-from src.driver import (
+from aurora_rayserver.driver import (
     AURORA_SERVE_READY_MARKER,
     ProcessOutputRelay,
     wait_for_process_ready_marker,

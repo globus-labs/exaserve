@@ -23,7 +23,7 @@ import os
 import subprocess
 from dataclasses import asdict
 
-from src.schemas import DeploymentConfig, ModelConfig, ProxyConfig
+from aurora_rayserver.schemas import DeploymentConfig, ModelConfig, ProxyConfig
 from eval.site_config import get_site_config
 
 from ..manifest import (

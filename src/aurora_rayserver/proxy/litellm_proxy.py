@@ -27,7 +27,7 @@ from pathlib import Path
 
 import yaml
 
-from proxy.base import BackendEndpoint, ProxyBackend
+from .base import BackendEndpoint, ProxyBackend
 
 
 class LiteLLMProxy(ProxyBackend):

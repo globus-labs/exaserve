@@ -20,7 +20,7 @@ import urllib.request
 from dataclasses import asdict
 
 from eval.lib.manifest import EvalManifest, TraceGeneratorConfig, WeakScalingConfig, load_eval_manifest
-from src.schemas import load_proxy_config
+from aurora_rayserver.schemas import load_proxy_config
 
 try:
     import uvloop

@@ -1,0 +1,4 @@
+include README.md
+include LICENSE
+recursive-include src/aurora_rayserver/patches/ray_serve_overlay *.py
+include src/aurora_rayserver/py.typed

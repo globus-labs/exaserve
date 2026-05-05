@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.model_paths import get_model_storage_path
+from aurora_rayserver.model_paths import get_model_storage_path
 
 from .models import ExperimentSpec
 
