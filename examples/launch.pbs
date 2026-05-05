@@ -1,0 +1,50 @@
+#!/bin/bash
+# Minimal PBS script for a Ray cluster + Ray Serve on Aurora.
+#
+# All PBS parameters (nodes, queue, walltime, job name, filesystems, project)
+# are passed at submit time — this script stays parameter-free so you can
+# reuse it across debug / debug-scaling / capacity / reservation queues.
+#
+# Most users should use ``aurora-serve-submit <config>`` instead; this file
+# exists for users who want to integrate the launcher into their own PBS
+# scripting pipeline (for example, chained jobs or custom wrappers).
+#
+# Example submission:
+#   qsub -l select=1 \
+#        -l walltime=01:00:00 \
+#        -l filesystems=home:flare \
+#        -q debug-scaling \
+#        -A YOUR_PROJECT \
+#        -N ray-serve \
+#        -o $HOME/tmp/ray-serve.stdout \
+#        -e $HOME/tmp/ray-serve.stderr \
+#        -v CONFIG=examples/config.haproxy.yaml \
+#        examples/launch.pbs
+#
+# Once the job prints "[Driver] ALL SERVICES READY", resolve the head node
+# (e.g. ``aurora-serve-url <jobid>`` or ``qstat -xf <jobid> | grep exec_host``)
+# and hit the service:
+#   direct:   http://<head>:8000/v1/...
+#   haproxy:  http://<head>:4001/v1/...
+#   litellm:  http://<head>:4001/v1/...  (with Authorization: Bearer <master_key>)
+
+# -u is intentionally off: `module load` (lmod) references unset internal
+# vars and trips `set -u` with "ZSH_EVAL_CONTEXT: unbound variable".
+set -eo pipefail
+
+CONFIG="${CONFIG:-examples/config.haproxy.yaml}"
+
+# Aurora frameworks Python (3.12) — required for ray, vllm, mpiexec, mpicc.
+module load frameworks
+
+# (Optional) ALCF outbound proxy for HuggingFace downloads on first model
+# fetch. Unset http_proxy/https_proxy before compute begins so intra-
+# cluster health checks can reach compute-node IPs.
+# export HTTP_PROXY=http://proxy.alcf.anl.gov:3128
+# export HTTPS_PROXY=$HTTP_PROXY
+
+# Hand off to the installed-package launcher. ``aurora-launch-cluster`` is
+# a console script the wheel installs; it resolves the bash launcher via
+# importlib.resources so this script does not need to know where the
+# package lives.
+exec aurora-launch-cluster "$CONFIG"

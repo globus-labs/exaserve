@@ -178,7 +178,25 @@ Thin wrapper around `ray start` with Aurora-specific defaults, used by
 
 ## Configuration
 
-A deployment YAML has three top-level sections:
+The `examples/` directory has four ready-to-customize templates plus a sample
+PBS script:
+
+| File | Use |
+|---|---|
+| [examples/config.direct.yaml](examples/config.direct.yaml)       | No proxy. Each node serves its own Ray Serve HTTP on port 8000; clients pick a node themselves. Best for benchmarking the raw Ray Serve path. |
+| [examples/config.haproxy.yaml](examples/config.haproxy.yaml)     | HAProxy on the head load-balances across every Ray Serve HTTP proxy. Pure L7 routing on port 4001. Best performance baseline. |
+| [examples/config.litellm.yaml](examples/config.litellm.yaml)     | LiteLLM on the head exposes an OpenAI-compatible API with auth, rate limiting, usage tracking. Needs a separate LiteLLM venv (its deps conflict with Ray/vLLM). |
+| [examples/config.reference.yaml](examples/config.reference.yaml) | Comprehensive list of every field the schema accepts, with defaults and per-knob commentary. Not meant to run as-is — copy the fields you need. |
+| [examples/launch.pbs](examples/launch.pbs)                       | Sample parameter-free PBS script that calls `aurora-launch-cluster`. Use only if you're writing a custom PBS pipeline; for everyday submission use `aurora-serve-submit`. |
+
+To run one of the templates, edit `model_storage_path` to point at your own
+Lustre dir, then:
+
+```bash
+aurora-serve-submit examples/config.haproxy.yaml --wait
+```
+
+The deployment YAML has three top-level sections:
 
 ```yaml
 ray_cluster_config:

@@ -1,0 +1,94 @@
+# --- Full reference config -----------------------------------------------
+# Every knob exposed by the launcher, each with its schema default, grouped
+# by the dataclass that consumes it. Not meant to be run as-is — pick the
+# fields you need and drop this into your own config.
+#
+# Authoritative definitions (keep this file in sync if those change):
+#   src/aurora_rayserver/schemas.py             RayClusterConfig, DeploymentConfig, ModelConfig, ProxyConfig
+#   src/aurora_rayserver/proxy/haproxy_proxy.py HAProxy options
+#   src/aurora_rayserver/proxy/litellm_proxy.py LiteLLM options
+
+# --------------------------------------------------------------- cluster ---
+ray_cluster_config:
+  head_ip: ""         # Auto-populated by aurora-launch-cluster; leave empty.
+  port: 6379          # Ray GCS port (head).
+  node_cpus: 8        # CPUs advertised to Ray per node. Raise (e.g. 64) for
+                      # serve-heavy deployments so Raylet can schedule more
+                      # HTTP workers + replica actors.
+
+# ------------------------------------------------------------ deployment ---
+model_deployment_config:
+  num_nodes: 1                      # Required. Must equal qsub -l select=N.
+  model_storage_path: ""            # Lustre path where weights live (or will
+                                    # be downloaded to on first run).
+  local_stage_path: "/tmp/hf_home"  # Absolute path on each node's local scratch;
+                                    # model_bcast.py stages weights here.
+  deployment_name: "aurora_serve"   # Ray Serve application name.
+  replica_max_ongoing_requests: 32  # Per-replica concurrency cap. 128+ for
+                                    # high-throughput workloads.
+  num_gpus_per_node: 12             # Aurora default: 12 XPU tiles/node.
+  collect_stats: false              # Enable per-replica vLLM stats collection.
+
+  model_configs:
+    - model_id: "meta-llama/Meta-Llama-3-8B-Instruct"  # Required.
+      tensor_parallel_size: 1              # Required.
+      max_model_len: 4096                  # Required. Max context window.
+      size: 8                              # Required. Model size in B params
+                                           # (used for placement sizing).
+      pipeline_parallel_size: 1
+      gpu_memory_utilization: 0.90
+      enforce_eager: true                  # Disable torch.compile; more stable.
+      enable_log_requests: true            # vLLM per-request logging.
+      max_num_seqs: null                   # vLLM scheduler concurrency cap;
+                                           # null = vLLM default.
+      num_replicas: null                   # null = auto-size from
+                                           # num_nodes * num_gpus_per_node / tp.
+      num_cpus_per_replica: 4              # Ray Serve scheduler hint.
+
+# ----------------------------------------------------------------- proxy ---
+proxy_config:
+  type: "none"        # "none" | "haproxy" | "litellm"
+  port: 4001          # Front-end port users connect to.
+  backend_port: 8000  # Ray Serve HTTP port on each node (don't change
+                      # unless you also edit src/aurora_serve.py).
+  python_path: ""     # Interpreter for the proxy subprocess (empty = current).
+                      # For litellm, point at your litellm venv's python3.
+  num_workers: 1      # uvicorn worker count for litellm. Keep at 1 — see
+                      # config.litellm.yaml for the rationale.
+
+  # ------------------------ options: type=haproxy ------------------------
+  # options:
+  #   balance: "leastconn"   # "leastconn" | "roundrobin" | "random"
+  #   check_interval: 5000   # ms between backend health probes
+  #   check_fall: 3          # consecutive fails before marking backend DOWN
+  #   check_rise: 2          # consecutive successes to mark backend UP
+  #   stats_port: 9999       # HAProxy stats page port (0 disables)
+  #   maxconn: 50000         # total concurrent connections ceiling
+
+  # ------------------------ options: type=litellm ------------------------
+  # options:
+  #   master_key: ""                    # required bearer token; empty = no auth
+  #   routing_strategy: "least-busy"    # "least-busy" | "simple-shuffle"
+  #                                     # | "latency-based-routing"
+  #   num_retries: 2                    # retries on backend failure
+  #   timeout: 300                      # per-request timeout (s)
+  #   db_url: ""                        # SQLAlchemy URL for usage DB
+  #                                     # (empty = no DB, no Prisma needed)
+  #   extra_general: {}                 # merged verbatim into general_settings
+  #   extra_router: {}                  # merged verbatim into router_settings
+
+  options: {}
+
+# ------------------------------------------------ environment variables ---
+# Not in the YAML schema, but set on the launcher shell to tune behavior:
+#
+#   AURORA_SCALING_TRACE=1       Emit per-replica startup timing traces.
+#                                Adds ~10 min overhead on Lustre at 128+ nodes.
+#   AURORA_NULL_COMPUTE=1        Skip model staging & vLLM init (infra test).
+#   AURORA_DEBUG_HOLD_ON_FAILURE_S=300   Keep Ray alive for N seconds after
+#                                        aurora_serve.py exits on error, so you
+#                                        can ssh in and inspect.
+#   RAYON_NUM_THREADS=1                  Already set by launch_cluster.sh to
+#   TOKENIZERS_PARALLELISM=false         avoid HF tokenizer rayon panics at 128+.
+#   RAY_num_server_call_thread=4         Serve HTTP proxy thread count.
+#   RAY_gcs_server_num_threads=8         GCS worker threads for 256+ nodes.
