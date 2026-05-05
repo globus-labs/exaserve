@@ -52,3 +52,13 @@ def model_bcast() -> None:
 def ray_start() -> None:
     from . import ray_start as _rs
     raise SystemExit(_rs.main())
+
+
+def serve_submit() -> None:
+    from . import submit as _submit
+    raise SystemExit(_submit.serve_submit_main())
+
+
+def serve_url() -> None:
+    from . import submit as _submit
+    raise SystemExit(_submit.serve_url_main())
