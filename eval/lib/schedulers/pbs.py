@@ -62,6 +62,9 @@ if [ -n "$PYTHONPATH" ]; then
     IFS="$OLD_IFS"
     export PYTHONPATH="$CLEAN_PYTHONPATH"
 fi
+# Prepend the snapshot repo root + its src/ subdir so 'from eval.X' and
+# 'from aurora_rayserver.X' both resolve when eval.cli imports backends.
+export PYTHONPATH="{code_root}:{code_root}/src${{PYTHONPATH:+:$PYTHONPATH}}"
 source "{env_script}"
 python3 -m eval.cli run execute "{run_yaml_path}"
 """
