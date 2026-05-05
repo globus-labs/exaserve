@@ -31,6 +31,55 @@ extras under `[project.optional-dependencies]` (`server`, `proxy`, `dev`)
 exist to document the intended dependency groups but are not a substitute
 for the frameworks module.
 
+## Quickstart
+
+End-to-end from a clean Aurora login node, using the bundled HAProxy
+example. Run these on a login node — `aurora-serve-submit` does not
+need an allocation, only `qsub`.
+
+```bash
+# 1. Install the package against Aurora's Python.
+module load frameworks
+python3 -m pip install --user .
+
+# 2. Point a copy of the example at your Lustre model dir. The only
+#    field you typically have to change is model_storage_path.
+cp examples/config.haproxy.yaml my_config.yaml
+sed -i 's|/lus/flare/projects/AuroraGPT/wenyiw/models|/lus/flare/projects/<your-project>/<your-user>/models|' my_config.yaml
+
+# 3. Submit. --wait blocks until PBS reports the job is running and
+#    then prints the service URL. Without --wait, you only get the
+#    job id back; use aurora-serve-url <jobid> later to resolve it.
+aurora-serve-submit my_config.yaml \
+    --project-account YOUR_PROJECT \
+    --queue debug-scaling \
+    --walltime 01:00:00 \
+    --wait
+# 8470123.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov
+# http://x4310c1s0b0n0:4001
+
+# 4. Hit the service from the same login node (or anywhere on the HSN
+#    that can reach the head node).
+URL="http://x4310c1s0b0n0:4001"   # printed by step 3
+curl -sS -X POST "$URL/v1/chat/completions" \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+       "messages": [{"role":"user","content":"hello"}],
+       "max_tokens": 8
+     }'
+# {"id":"chatcmpl-...","choices":[{"message":{"role":"assistant","content":"Hi!"}}], ...}
+
+# 5. Tear it down when you're done. The job runs until walltime
+#    expires; qdel ends it early.
+qdel 8470123
+```
+
+Defaults if you don't pass the flags / set the env vars:
+project=`AuroraGPT`, queue=`debug-scaling`, walltime=`01:00:00`,
+filesystems=`home:flare`. See [examples/config.reference.yaml](examples/config.reference.yaml)
+for the full set of submit-time env vars.
+
 ## Required environment
 
 A login shell with `module load frameworks` is enough to import the package
