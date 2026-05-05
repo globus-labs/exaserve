@@ -60,6 +60,9 @@ def run_cache_probe(script_path: Path, path: Path, num_nodes: int) -> List[Dict[
     """
     Probe the cache state on every allocated node via MPI.
     """
+    # Invoke the module via -m (not by absolute path) so the package's
+    # relative imports (`from .schemas import ...`) resolve. `python <abspath>`
+    # would set __package__ to None and break the imports.
     cmd = [
         "mpiexec",
         "-n",
@@ -69,16 +72,19 @@ def run_cache_probe(script_path: Path, path: Path, num_nodes: int) -> List[Dict[
         "--cpu-bind",
         "none",
         sys.executable,
-        str(script_path),
+        "-m",
+        "aurora_rayserver.model_bcast",
         "--probe-cache",
         str(path),
     ]
+    # script_path lives at <repo>/src/aurora_rayserver/model_bcast.py;
+    # parents[2] is <repo> (where 'tools/' and other top-level dirs live).
     result = subprocess.run(
         cmd,
         check=False,
         text=True,
         capture_output=True,
-        cwd=str(script_path.parent.parent),
+        cwd=str(script_path.resolve().parents[2]),
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -138,7 +144,9 @@ def bcast_models(
     """
     Ensure every model exists on Lustre, then broadcast it to local storage.
     """
-    project_root = Path(__file__).resolve().parent.parent
+    # Module file lives at <repo_root>/src/aurora_rayserver/model_bcast.py
+    # so we walk up three levels to reach <repo_root>; tools/ is at the root.
+    project_root = Path(__file__).resolve().parents[2]
     tools_dir = project_root / "tools"
     script_path = Path(__file__).resolve()
     binary_path = compile_bcast(tools_dir)
