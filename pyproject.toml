@@ -13,6 +13,20 @@ dependencies = [
     "packaging>=23",
 ]
 
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.100",
+    "ray[serve]>=2.49",
+    "vllm",
+]
+proxy = [
+    "litellm",
+]
+dev = [
+    "build>=1",
+    "pytest>=8",
+]
+
 [project.scripts]
 aurora-launch-cluster = "aurora_rayserver.cli:launch_cluster"
 aurora-driver         = "aurora_rayserver.cli:driver"
@@ -28,9 +42,9 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["aurora_rayserver*"]
-namespaces = false
+namespaces = true
 
 [tool.setuptools.package-data]
 "aurora_rayserver" = ["py.typed"]
 "aurora_rayserver.patches" = ["ray_serve_overlay/ray/serve/_private/*.py"]
-"aurora_rayserver.resources" = ["*.sh"]
+"aurora_rayserver.resources" = ["*.sh", "*.c", "*.Makefile"]

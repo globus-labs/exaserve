@@ -6,8 +6,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from importlib import resources
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from .model_paths import get_model_storage_name, get_model_storage_path, iter_unique_model_ids
 from .model_staging import (
@@ -19,10 +20,42 @@ from .model_staging import (
 from .schemas import load_deployment_config
 
 
-def compile_bcast(tools_dir: Path) -> Path:
+def _resource_bytes(name: str) -> bytes:
+    return (resources.files("aurora_rayserver.resources") / name).read_bytes()
+
+
+def _write_if_changed(path: Path, data: bytes) -> None:
+    if path.exists() and path.read_bytes() == data:
+        return
+    path.write_bytes(data)
+
+
+def _default_bcast_build_dir() -> Path:
+    raw = os.environ.get("AURORA_BCAST_BUILD_DIR", "").strip()
+    if raw:
+        return Path(raw)
+
+    run_log_dir = os.environ.get("AURORA_RUN_LOG_DIR", "").strip()
+    if run_log_dir:
+        return Path(run_log_dir) / "bcast_build"
+
+    return Path.cwd() / ".aurora_rayserver_build" / "bcast"
+
+
+def prepare_bcast_tools(build_dir: Path | None = None) -> Path:
+    """Materialize packaged bcast sources into a writable shared build dir."""
+    tools_dir = build_dir or _default_bcast_build_dir()
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    _write_if_changed(tools_dir / "bcast.c", _resource_bytes("bcast.c"))
+    _write_if_changed(tools_dir / "Makefile", _resource_bytes("bcast.Makefile"))
+    return tools_dir
+
+
+def compile_bcast(tools_dir: Path | None = None) -> Path:
     """
-    Build the MPI broadcast helper if the binary is missing or stale.
+    Build the packaged MPI broadcast helper if the binary is missing or stale.
     """
+    tools_dir = prepare_bcast_tools(tools_dir)
     binary_path = tools_dir / "bcast"
     source_path = tools_dir / "bcast.c"
     makefile_path = tools_dir / "Makefile"
@@ -56,7 +89,7 @@ def probe_cache_locally(path: Path) -> None:
     print(json.dumps(payload), flush=True)
 
 
-def run_cache_probe(script_path: Path, path: Path, num_nodes: int) -> List[Dict[str, str]]:
+def run_cache_probe(path: Path, num_nodes: int) -> List[Dict[str, str]]:
     """
     Probe the cache state on every allocated node via MPI.
     """
@@ -77,14 +110,11 @@ def run_cache_probe(script_path: Path, path: Path, num_nodes: int) -> List[Dict[
         "--probe-cache",
         str(path),
     ]
-    # script_path lives at <repo>/src/aurora_rayserver/model_bcast.py;
-    # parents[2] is <repo> (where 'tools/' and other top-level dirs live).
     result = subprocess.run(
         cmd,
         check=False,
         text=True,
         capture_output=True,
-        cwd=str(script_path.resolve().parents[2]),
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -114,13 +144,12 @@ def check_cache_state(
     model_id: str,
     local_stage_path: str,
     num_nodes: int,
-    script_path: Path,
 ) -> str:
     """
     Return the aggregate cache state for a model across all nodes.
     """
     target_path = get_model_storage_path(model_id, local_stage_path)
-    entries = run_cache_probe(script_path, target_path, num_nodes)
+    entries = run_cache_probe(target_path, num_nodes)
     states = {entry["state"] for entry in entries}
 
     if states == {"complete"}:
@@ -140,16 +169,11 @@ def bcast_models(
     lustre_path: str,
     local_path: str,
     num_nodes: int,
-) -> Dict[str, str]:
+) -> Tuple[Dict[str, str], list[dict]]:
     """
     Ensure every model exists on Lustre, then broadcast it to local storage.
     """
-    # Module file lives at <repo_root>/src/aurora_rayserver/model_bcast.py
-    # so we walk up three levels to reach <repo_root>; tools/ is at the root.
-    project_root = Path(__file__).resolve().parents[2]
-    tools_dir = project_root / "tools"
-    script_path = Path(__file__).resolve()
-    binary_path = compile_bcast(tools_dir)
+    binary_path = compile_bcast()
 
     lustre_model_paths = stage_models(model_configs, lustre_path)
     local_model_paths: Dict[str, str] = {}
@@ -165,7 +189,7 @@ def bcast_models(
             model_config.tensor_parallel_size,
         )
         target_path = get_model_storage_path(model_id, local_path)
-        cache_state = check_cache_state(model_id, local_path, num_nodes, script_path)
+        cache_state = check_cache_state(model_id, local_path, num_nodes)
 
         if cache_state == "complete":
             print(
@@ -211,10 +235,9 @@ def bcast_models(
                     str(local_path),
                 ],
                 check=True,
-                cwd=str(project_root),
             )
 
-        final_state = check_cache_state(model_id, local_path, num_nodes, script_path)
+        final_state = check_cache_state(model_id, local_path, num_nodes)
         if final_state != "complete":
             raise RuntimeError(
                 f"[ModelBcast] Expected a complete staged cache for {model_id} after broadcast, "

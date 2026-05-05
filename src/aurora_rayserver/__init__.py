@@ -6,9 +6,6 @@ Public API (all importable as ``from aurora_rayserver import …``):
         DeploymentConfig, ModelConfig, ProxyConfig
         load_deployment_config, load_proxy_config
 
-    Server entry points (programmatic use):
-        serve  (alias for the script main; reads a config and starts the cluster)
-
     Patch installer:
         apply_all  (must be called BEFORE any ``import ray.serve`` / ``import vllm``;
                     see ``aurora_rayserver.patches.apply_all`` for the why-explicit

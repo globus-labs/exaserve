@@ -6,6 +6,7 @@ workflow without going through the eval pipeline:
 
     $ aurora-serve-submit my_config.yaml --wait
     8470000.aurora-pbs-0001
+    http://x4709c1s5b0n0.hsn.cm.aurora.alcf.anl.gov:4001
     $ aurora-serve-url 8470000.aurora-pbs-0001
     http://x4709c1s5b0n0.hsn.cm.aurora.alcf.anl.gov:4001
 
@@ -25,10 +26,12 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
+from importlib import resources
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +40,7 @@ from .schemas import load_deployment_config, load_proxy_config
 
 
 _QSUB_TIMEOUT_S = 600
-_QSTAT_TIMEOUT_S = 60
+_QSTAT_TIMEOUT_S = 600
 _JOB_ID_RE = re.compile(r"^(\d+\.[\w\-.]+)")
 
 
@@ -49,6 +52,9 @@ _JOB_ID_RE = re.compile(r"^(\d+\.[\w\-.]+)")
 def _render_job_pbs(
     config_path: Path,
     *,
+    launch_script: Path,
+    package_root: Path,
+    package_parent: Path,
     num_nodes: int,
     walltime: str,
     queue: str,
@@ -59,11 +65,10 @@ def _render_job_pbs(
     log_dir: Path,
 ) -> str:
     """Render a one-shot PBS script that calls aurora-launch-cluster <config>."""
-    # We ship the launcher inside the package; ``aurora-launch-cluster``
-    # is the console script that resolves the .sh via importlib.resources.
-    # PYTHONPATH must include the source tree so ``aurora_rayserver`` resolves
-    # at runtime; the launcher itself uses AURORA_PROJECT_ROOT to locate
-    # tools/ and eval/ when running outside a source tree.
+    launch_script_q = shlex.quote(str(launch_script))
+    config_path_q = shlex.quote(str(config_path.resolve()))
+    package_root_q = shlex.quote(str(package_root))
+    package_parent_q = shlex.quote(str(package_parent))
     return f"""#!/bin/bash -l
 #PBS -N {job_name}
 #PBS -A {project_account}
@@ -78,10 +83,24 @@ def _render_job_pbs(
 set -e
 unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M
 
-# aurora-launch-cluster is a console script installed by the package.
-# It resolves the bash launcher via importlib.resources and execs into it.
-exec aurora-launch-cluster "{config_path.resolve()}"
+if [ -f "$HOME/script/env_aurora" ]; then
+    source "$HOME/script/env_aurora"
+else
+    module load frameworks
+fi
+
+export AURORA_RAYSERVER_PACKAGE_ROOT={package_root_q}
+export AURORA_RAYSERVER_PACKAGE_PARENT={package_parent_q}
+
+exec bash {launch_script_q} {config_path_q}
 """
+
+
+def _package_paths() -> tuple[Path, Path, Path]:
+    package_root = Path(str(resources.files("aurora_rayserver")))
+    package_parent = package_root.parent
+    launch_script = package_root / "resources" / "launch_cluster.sh"
+    return package_root, package_parent, launch_script
 
 
 def submit_serve(
@@ -112,6 +131,7 @@ def submit_serve(
     proxy_cfg = load_proxy_config(str(cfg_path))
 
     defaults = get_site_defaults()
+    package_root, package_parent, launch_script = _package_paths()
     queue = queue or defaults.queue
     walltime = walltime or defaults.walltime
     project_account = project_account or defaults.project_account
@@ -121,6 +141,9 @@ def submit_serve(
 
     job_pbs_text = _render_job_pbs(
         cfg_path,
+        launch_script=launch_script,
+        package_root=package_root,
+        package_parent=package_parent,
         num_nodes=deploy_cfg.num_nodes,
         walltime=walltime,
         queue=queue,
@@ -169,6 +192,9 @@ def _serve_submit_argparser() -> argparse.ArgumentParser:
     p.add_argument("--job-name", default=None)
     p.add_argument("--log-dir", default=None, help="Where to write the .pbs and PBS stdout/stderr")
     p.add_argument("--dry-run", action="store_true", help="Render the .pbs but don't qsub")
+    p.add_argument("--wait", action="store_true", help="After qsub, wait for the job to run and print the service URL")
+    p.add_argument("--poll-interval", type=float, default=5.0)
+    p.add_argument("--timeout", type=float, default=1800.0)
     return p
 
 
@@ -186,6 +212,16 @@ def serve_submit_main() -> int:
     )
     if job_id:
         print(job_id)
+        if args.wait:
+            print(
+                serve_url(
+                    job_id,
+                    config_path=args.config,
+                    wait=True,
+                    poll_interval_s=args.poll_interval,
+                    timeout_s=args.timeout,
+                )
+            )
     return 0
 
 

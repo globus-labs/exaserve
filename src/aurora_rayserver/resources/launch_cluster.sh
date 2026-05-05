@@ -8,19 +8,21 @@ if [ -z "$PBS_NODEFILE" ]; then
     exit 1
 fi
 
-# Get the absolute path of the directory containing this script.
-# The launcher lives inside the installed package at
-#   <project_root>/src/aurora_rayserver/resources/launch_cluster.sh
-# so PROJECT_ROOT is three levels up. AURORA_PROJECT_ROOT can override
-# this when the wheel is installed outside a source tree (e.g. into a
-# venv's site-packages) — in that case the user must point us at the
-# repo containing tools/ and eval/ that the launcher still references.
+# Get the absolute paths for the installed package and the working tree.
+# In a source checkout, SCRIPT_DIR is <repo>/src/aurora_rayserver/resources.
+# In an installed wheel, SCRIPT_DIR is <site-packages>/aurora_rayserver/resources.
+# Runtime code and helper resources come from the package. PROJECT_ROOT is only
+# the working directory used for relative configs and default run_logs.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+PACKAGE_ROOT="${AURORA_RAYSERVER_PACKAGE_ROOT:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+PACKAGE_PARENT="${AURORA_RAYSERVER_PACKAGE_PARENT:-$( cd "$PACKAGE_ROOT/.." && pwd )}"
 if [ -n "${AURORA_PROJECT_ROOT:-}" ]; then
     PROJECT_ROOT="$AURORA_PROJECT_ROOT"
-else
-    # Walk up: resources -> aurora_rayserver -> src -> <project_root>
+elif [ -d "$SCRIPT_DIR/../../../src/aurora_rayserver" ] && [ -d "$SCRIPT_DIR/../../../tools" ]; then
+    # Source-tree compatibility: resources -> aurora_rayserver -> src -> repo.
     PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )"
+else
+    PROJECT_ROOT="${AURORA_WORKDIR:-$PWD}"
 fi
 cd "$PROJECT_ROOT"
 
@@ -86,7 +88,7 @@ PY
 # export PYTHONPATH="/path/to/debug_libs:$PYTHONPATH"
 unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M
 SANITIZED_PYTHONPATH="$(sanitize_pythonpath "${PYTHONPATH:-}")"
-export PYTHONPATH="$PROJECT_ROOT/src${SANITIZED_PYTHONPATH:+:$SANITIZED_PYTHONPATH}"
+export PYTHONPATH="$PACKAGE_PARENT${SANITIZED_PYTHONPATH:+:$SANITIZED_PYTHONPATH}"
 
 # Ensure user-local binaries (e.g. haproxy built from source) are reachable.
 export PATH="$HOME/bin:$PATH"
@@ -264,6 +266,7 @@ finalize_run_logs() {
 trap 'finalize_run_logs $?' EXIT
 
 echo "[System] Project Root: $PROJECT_ROOT"
+echo "[System] Package Root: $PACKAGE_ROOT"
 echo "[System] Nodefile: $PBS_NODEFILE"
 echo "[System] PYTHONPATH: $PYTHONPATH"
 echo "[System] Backend Python: $PYTHON_EXEC"
@@ -358,7 +361,7 @@ if [ "${AURORA_NULL_COMPUTE:-0}" = "1" ]; then
     echo "[System] NULL-COMPUTE mode enabled; skipping model staging"
 else
     echo "[System] Staging models to node-local storage via MPI bcast..."
-    PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$PACKAGE_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
         $PYTHON_EXEC -m aurora_rayserver.model_bcast --config "$DEPLOYMENT_CONFIG_PATH" --num-nodes "$NODE_COUNT"
     # model_bcast.py writes timing JSON to a well-known path
     BCAST_TIMING_FILE="$RUN_LOG_DIR/model_bcast_timing.json"
@@ -376,10 +379,10 @@ export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1
 export AURORA_SCALING_TRACE="${AURORA_SCALING_TRACE:-1}"
 echo "[System] AURORA_SCALING_TRACE=$AURORA_SCALING_TRACE"
 
-# Instrumentation gate. When 1, eval/scripts/distribute_to_nodes.sh stages a Ray
-# Serve overlay (with probes/timeout patches) under /tmp/aurora_overlay on
-# every node, and aurora_serve._collect_instrumentation_all gathers the
-# resulting /tmp/aurora_inst/* files at end of startup. Default 0 = clean Ray.
+# Instrumentation gate. When 1, distribute_to_nodes.sh stages a Ray Serve
+# overlay (with probes/timeout patches) under /tmp/aurora_overlay on every
+# node, and aurora_serve._collect_instrumentation_all gathers the resulting
+# /tmp/aurora_inst/* files at end of startup. Default 0 = clean Ray.
 export AURORA_INSTRUMENTATION="${AURORA_INSTRUMENTATION:-0}"
 echo "[System] AURORA_INSTRUMENTATION=$AURORA_INSTRUMENTATION"
 
@@ -403,14 +406,17 @@ echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKE
 # Stages /tmp/aurora_src on every node so user code runs from local tmpfs.
 # When AURORA_INSTRUMENTATION=1, also stages /tmp/aurora_overlay (symlink farm
 # pointing at the system Ray package, with patched files from
-# src/patches/ray_serve_overlay/).
-export PROJECT_ROOT PYTHON_EXEC UNIQUE_NODES_FILE HOSTNAME_SHORT
-bash "$PROJECT_ROOT/eval/scripts/distribute_to_nodes.sh"
+# aurora_rayserver/patches/ray_serve_overlay/).
+export PROJECT_ROOT PACKAGE_ROOT PACKAGE_PARENT PYTHON_EXEC UNIQUE_NODES_FILE HOSTNAME_SHORT
+export AURORA_RAYSERVER_PACKAGE_ROOT="$PACKAGE_ROOT"
+export AURORA_RAYSERVER_PACKAGE_PARENT="$PACKAGE_PARENT"
+DISTRIBUTE_SCRIPT="${AURORA_DISTRIBUTE_SCRIPT:-$SCRIPT_DIR/distribute_to_nodes.sh}"
+bash "$DISTRIBUTE_SCRIPT"
 
 export PYTHONPATH="/tmp/aurora_src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "${AURORA_INSTRUMENTATION:-0}" = "1" ] && [ -d /tmp/aurora_overlay/ray/serve/_private ]; then
     export PYTHONPATH="/tmp/aurora_overlay:$PYTHONPATH"
-    echo "[System] Ray overlay active at /tmp/aurora_overlay (from $PROJECT_ROOT/src/patches/ray_serve_overlay)"
+    echo "[System] Ray overlay active at /tmp/aurora_overlay (from $PACKAGE_ROOT/patches/ray_serve_overlay)"
 fi
 echo "[System] PYTHONPATH after distribution: $PYTHONPATH"
 

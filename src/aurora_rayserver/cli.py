@@ -26,7 +26,11 @@ from importlib import resources
 
 
 def launch_cluster() -> None:
-    script = resources.files("aurora_rayserver.resources") / "launch_cluster.sh"
+    package_root = resources.files("aurora_rayserver")
+    package_parent = package_root.parent
+    script = package_root / "resources" / "launch_cluster.sh"
+    os.environ.setdefault("AURORA_RAYSERVER_PACKAGE_ROOT", str(package_root))
+    os.environ.setdefault("AURORA_RAYSERVER_PACKAGE_PARENT", str(package_parent))
     os.execvp("bash", ["bash", str(script), *sys.argv[1:]])
 
 
