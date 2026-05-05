@@ -42,10 +42,12 @@ need an allocation, only `qsub`.
 module load frameworks
 python3 -m pip install --user .
 
-# 2. Point a copy of the example at your Lustre model dir. The only
-#    field you typically have to change is model_storage_path.
+# 2. Point a copy of the example at your Lustre model dir. Open
+#    my_config.yaml and change `model_storage_path:` to a Lustre path
+#    you can write to. That's typically the only field you need to
+#    edit; everything else has reasonable defaults.
 cp examples/config.haproxy.yaml my_config.yaml
-sed -i 's|/lus/flare/projects/AuroraGPT/wenyiw/models|/lus/flare/projects/<your-project>/<your-user>/models|' my_config.yaml
+$EDITOR my_config.yaml   # or vi / nano
 
 # 3. Submit. --wait blocks until PBS reports the job is running and
 #    then prints the service URL. Without --wait, you only get the
