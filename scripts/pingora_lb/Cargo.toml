@@ -1,0 +1,21 @@
+[package]
+name = "pingora_lb"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal Pingora-based HTTP load balancer for Aurora Ray Serve benchmarks"
+
+[dependencies]
+pingora = { version = "0.5", features = ["lb"] }
+pingora-load-balancing = "0.5"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

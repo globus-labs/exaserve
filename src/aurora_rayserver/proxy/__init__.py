@@ -27,8 +27,16 @@ _REGISTRY: dict[str, type[ProxyBackend]] = {}
 def _register():
     from .litellm_proxy import LiteLLMProxy
     from .haproxy_proxy import HAProxyProxy
+    from .nginx_proxy import NGINXProxy
+    from .envoy_proxy import EnvoyProxy
+    from .pingora_proxy import PingoraProxy
+    from .ray_serve_proxy import RayServeProxy
     _REGISTRY["litellm"] = LiteLLMProxy
     _REGISTRY["haproxy"] = HAProxyProxy
+    _REGISTRY["nginx"] = NGINXProxy
+    _REGISTRY["envoy"] = EnvoyProxy
+    _REGISTRY["pingora"] = PingoraProxy
+    _REGISTRY["ray_serve"] = RayServeProxy
 
 
 def get_proxy(proxy_type: str) -> ProxyBackend:
@@ -36,7 +44,8 @@ def get_proxy(proxy_type: str) -> ProxyBackend:
     Return an instantiated ProxyBackend for the given type string.
 
     Args:
-        proxy_type: One of "litellm", "haproxy", or any registered custom type.
+        proxy_type: One of "litellm", "haproxy", "nginx", "envoy", "pingora",
+                    "ray_serve", or any registered custom type.
 
     Raises:
         ValueError if proxy_type is unknown.

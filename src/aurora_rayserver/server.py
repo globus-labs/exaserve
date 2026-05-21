@@ -39,7 +39,7 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-from .schemas import ModelConfig, DeploymentConfig, load_deployment_config
+from .schemas import ModelConfig, DeploymentConfig, load_deployment_config, load_proxy_config
 from .model_paths import get_model_route_name
 from .model_staging import print_red, resolve_model_paths
 from .replica_planner import (
@@ -1338,7 +1338,22 @@ if __name__ == "__main__":
 
     # ---- Load configuration -------------------------------------------------
     config = load_deployment_config(config_path)
+    # Determine Ray Serve proxy placement. The "ray_serve" proxy mode is the
+    # out-of-the-box baseline: ProxyLocation.HeadOnly, no external proxy. All
+    # other modes (haproxy/litellm/nginx/envoy/pingora/none) keep EveryNode so
+    # each node has its own Ray Serve HTTP proxy actor for the external LB to
+    # fan out to.
+    _proxy_cfg = load_proxy_config(config_path)
+    if _proxy_cfg.type == "ray_serve":
+        _ray_serve_proxy_location = ProxyLocation.HeadOnly
+    else:
+        _ray_serve_proxy_location = ProxyLocation.EveryNode
     print(f"[AuroraServe] Loaded config from {config_path}: {config.deployment_name}", flush=True)
+    print(
+        f"[AuroraServe] proxy_config.type={_proxy_cfg.type!r} -> "
+        f"Ray Serve proxy_location={_ray_serve_proxy_location}",
+        flush=True,
+    )
     print(f"[AuroraServe] Models: {len(config.model_configs)}", flush=True)
     for cfg in config.model_configs:
         print(
@@ -1405,15 +1420,19 @@ if __name__ == "__main__":
         flush=True,
     )
 
-    with tracer.phase("serve.start", proxy_location="EveryNode"):
+    with tracer.phase("serve.start", proxy_location=str(_ray_serve_proxy_location)):
         serve.start(
             http_options=HTTPOptions(
                 host="0.0.0.0",
-                location=ProxyLocation.EveryNode,
+                location=_ray_serve_proxy_location,
                 port=8000,
             )
         )
-    print("[AuroraServe] HTTP proxy location: EveryNode, host=0.0.0.0, port=8000", flush=True)
+    print(
+        f"[AuroraServe] HTTP proxy location: {_ray_serve_proxy_location}, "
+        f"host=0.0.0.0, port=8000",
+        flush=True,
+    )
     tracer.record_phase("stage1.total", time.monotonic() - stage1_start)
     print_red(f"[AuroraServe] ✓ Serve Init completed in {time.monotonic() - stage1_start:.2f}s")
 
@@ -1573,8 +1592,11 @@ if __name__ == "__main__":
         from ray.serve.api import build_app
         from ray.serve._private.constants import SERVE_DEFAULT_APP_NAME
 
+        # _serve_start accepts either a ProxyLocation enum or the underlying
+        # string ("EveryNode" / "HeadOnly" / ...). ProxyLocation is a str-enum
+        # so .value is the canonical name.
         client = _serve_start(
-            http_options={"location": "EveryNode"},
+            http_options={"location": _ray_serve_proxy_location.value},
             global_logging_config=None,
         )
         built = build_app(deployment, name=SERVE_DEFAULT_APP_NAME, route_prefix="/")
