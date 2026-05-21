@@ -66,11 +66,15 @@ class EnvoyProxy(ProxyBackend):
         clusters = []
         for model_id, eps in by_model.items():
             cluster_name = _safe_name(model_id)
+            # STRICT_DNS lets Envoy accept DNS hostnames (Aurora HSN endpoints
+            # are addressed by `x...hsn.cm.aurora.alcf.anl.gov`, not by IP).
+            # Envoy resolves at startup and periodically re-resolves.
             clusters.append({
                 "name": cluster_name,
-                "type": "STATIC",
+                "type": "STRICT_DNS",
                 "connect_timeout": connect_timeout,
                 "lb_policy": lb_policy,
+                "dns_lookup_family": "V4_ONLY",
                 "circuit_breakers": {
                     "thresholds": [{
                         "priority": "DEFAULT",
