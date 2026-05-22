@@ -26,9 +26,17 @@ if [ ! -d "$PATCHES_DIR/serve/_private" ]; then
     exit 1
 fi
 
-SYSRAY=$("$PYTHON_EXEC" -c 'import ray, os; print(os.path.dirname(ray.__file__))')
+# PYTHON_EXEC must be able to `import ray` so we can locate the system
+# Ray install dir. An explicit AURORA_SYSRAY override is honored when the
+# python in use doesn't ship ray (e.g. CI / standalone wheel smoke tests).
+if [ -n "${AURORA_SYSRAY:-}" ] && [ -d "$AURORA_SYSRAY/serve/_private" ]; then
+    SYSRAY="$AURORA_SYSRAY"
+else
+    SYSRAY=$("$PYTHON_EXEC" -c 'import ray, os; print(os.path.dirname(ray.__file__))' 2>/dev/null || true)
+fi
 if [ -z "$SYSRAY" ] || [ ! -d "$SYSRAY/serve/_private" ]; then
-    echo "[setup_overlay $(hostname -s)] ERROR: cannot resolve system ray dir ($SYSRAY)"
+    echo "[setup_overlay $(hostname -s)] ERROR: cannot resolve system ray dir." \
+         "Set AURORA_SYSRAY or use a PYTHON_EXEC that imports ray. Got: '$SYSRAY'"
     exit 1
 fi
 
