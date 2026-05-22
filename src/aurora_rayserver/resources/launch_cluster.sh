@@ -125,25 +125,11 @@ UNIQUE_NODES_FILE="$RUN_LOG_DIR/pbs_nodes.txt"
 sort -u "$PBS_NODEFILE" > "$UNIQUE_NODES_FILE"
 cp "$DEPLOYMENT_CONFIG_PATH" "$RUN_LOG_DIR/deployment_config.yaml"
 
-collect_ray_logs() {
-    local source_logs=$1
-    local dest_dir=$2
-    mkdir -p "$dest_dir"
-    if [ -d "$source_logs" ]; then
-        cp -a "$source_logs/." "$dest_dir/" 2>/dev/null || true
-    fi
-}
-
-collect_remote_ray_logs() {
-    local node=$1
-    local dest_dir=$2
-    mkdir -p "$dest_dir"
-    ssh "$node" "readlink -f /tmp/ray/session_latest 2>/dev/null || true" \
-        > "$dest_dir/session_path.txt" 2>/dev/null || true
-    scp -r "$node:/tmp/ray/session_latest/logs/." "$dest_dir/" >/dev/null 2>&1 || true
-}
-
 finalize_run_logs() {
+    # MPI-driven log/artifact collection (replaces the prior parallel-ssh
+    # fan-out). Each PBS-allocated rank tars its node-local files and
+    # writes <RUN_LOG_DIR>/per_node/<hostname>.tar.gz directly to Lustre.
+    # mpiexec is launched once via PALS — no head-side ssh fork storm.
     local exit_code=$1
     local metadata_file="$RUN_LOG_DIR/run_metadata.txt"
     {
@@ -155,110 +141,77 @@ finalize_run_logs() {
         echo "exit_code=$exit_code"
     } > "$metadata_file"
 
-    # Disable set -e inside finalize: we use `|| true` to tolerate individual
-    # node collection failures, but bash's set -e can still kill the function
-    # in surprising ways (especially with command substitutions inside `local`).
     set +e
 
-    local ray_log_root="$RUN_LOG_DIR/ray_logs"
-    local inst_root="$RUN_LOG_DIR/instrumentation"
-    mkdir -p "$ray_log_root" "$inst_root"
-
+    local node_count
+    node_count="$(wc -l < "$UNIQUE_NODES_FILE")"
+    local per_node_dir="$RUN_LOG_DIR/per_node"
     local dbg="$RUN_LOG_DIR/finalize_debug.log"
+    mkdir -p "$per_node_dir"
     : > "$dbg"
-    echo "finalize start $(date -u +%Y-%m-%dT%H:%M:%SZ) exit_code=$exit_code" >> "$dbg"
+    echo "finalize start $(date -u +%Y-%m-%dT%H:%M:%SZ) exit_code=$exit_code node_count=$node_count" >> "$dbg"
 
-    # Step 1: head node collects its own files synchronously (local cp — no ssh).
-    local self_short="$(hostname -s)"
-    echo "self_short=$self_short hostname=$(hostname)" >> "$dbg"
-    local head_ray_dest="$ray_log_root/$self_short"
-    local head_inst_dest="$inst_root/$self_short"
-    mkdir -p "$head_ray_dest" "$head_inst_dest"
-    echo "head dirs mkdir OK" >> "$dbg"
-    local session_dir
-    session_dir="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
-    echo "session_dir=$session_dir" >> "$dbg"
-    if [ -n "$session_dir" ] && [ -d "$session_dir/logs" ]; then
-        echo "$session_dir" > "$head_ray_dest/session_path.txt"
-        # Copy only the specific files needed for analysis. tar and cp -a
-        # on the whole dir hung repeatedly — likely because Ray is still
-        # appending to some files and/or writing to a FIFO/socket in the
-        # session dir. Targeted cp avoids the problematic files entirely.
-        for f in gcs_server.out gcs_server.err raylet.out raylet.err dashboard.log dashboard.err dashboard.out; do
-            timeout 10 cp "$session_dir/logs/$f" "$head_ray_dest/" 2>>"$dbg"
-            echo "cp $f rc=$?" >> "$dbg"
-        done
-        if [ -d "$session_dir/logs/serve" ]; then
-            mkdir -p "$head_ray_dest/serve"
-            timeout 30 cp -r "$session_dir/logs/serve/." "$head_ray_dest/serve/" 2>>"$dbg"
-            echo "cp serve/ rc=$?" >> "$dbg"
+    # Resolve the gather binary. It's compiled once per run group by
+    # distribute_to_nodes.sh; rebuild on demand if missing (covers the case
+    # where finalize fires before staging completed — e.g. early failure).
+    local build_dir="${AURORA_BCAST_BUILD_DIR:-$RUN_LOG_DIR/bcast_build}"
+    local gather_bin="$build_dir/gather"
+    if [ ! -x "$gather_bin" ]; then
+        echo "[finalize] gather binary missing; compiling under $build_dir" | tee -a "$dbg"
+        AURORA_BCAST_BUILD_DIR="$build_dir" "$PYTHON_EXEC" - <<PY 2>>"$dbg" || true
+from aurora_rayserver.model_bcast import compile_gather
+from pathlib import Path
+compile_gather(Path("$build_dir"))
+PY
+    fi
+
+    if [ ! -x "$gather_bin" ]; then
+        echo "[finalize] WARNING: gather binary unavailable; falling back to head-only collect" | tee -a "$dbg"
+        # Head-only fallback: at least we get this node's logs to Lustre.
+        local self_short="$(hostname -s)"
+        local local_session
+        local_session="$(readlink -f /tmp/ray/session_latest 2>/dev/null || true)"
+        if [ -n "$local_session" ] && [ -d "$local_session/logs" ]; then
+            local out="$per_node_dir/$self_short.tar.gz"
+            local args=()
+            for f in gcs_server.out gcs_server.err raylet.out raylet.err dashboard.log dashboard.err dashboard.out; do
+                [ -f "$local_session/logs/$f" ] && args+=("$local_session/logs/$f")
+            done
+            [ -d "$local_session/logs/serve" ] && args+=("$local_session/logs/serve")
+            [ -d /tmp/aurora_inst ] && args+=("/tmp/aurora_inst")
+            if [ "${#args[@]}" -gt 0 ]; then
+                tar --ignore-failed-read --warning=no-file-changed -czf "$out" "${args[@]}" 2>>"$dbg" || true
+            fi
         fi
-    fi
-    if [ -d /tmp/aurora_inst ]; then
-        echo "head aurora_inst listing:" >> "$dbg"
-        ls /tmp/aurora_inst >> "$dbg" 2>&1
-        timeout 30 bash -c "tar -cf - -C /tmp/aurora_inst . 2>/dev/null" \
-            | tar -xf - -C "$head_inst_dest/" 2>>"$dbg"
-        echo "head inst tar rc=${PIPESTATUS[*]}" >> "$dbg"
     else
-        echo "head has no /tmp/aurora_inst dir" >> "$dbg"
+        # The shared "safe" set of Ray session files. Whole-directory tarring
+        # of /tmp/ray/session_latest/logs/ hung historically (live FIFOs/sockets
+        # written by Ray); naming files explicitly avoids that.
+        local gather_args=(
+            "$per_node_dir"
+            "/tmp/ray/session_latest/logs/gcs_server.out"
+            "/tmp/ray/session_latest/logs/gcs_server.err"
+            "/tmp/ray/session_latest/logs/raylet.out"
+            "/tmp/ray/session_latest/logs/raylet.err"
+            "/tmp/ray/session_latest/logs/dashboard.log"
+            "/tmp/ray/session_latest/logs/dashboard.err"
+            "/tmp/ray/session_latest/logs/dashboard.out"
+            "/tmp/ray/session_latest/logs/serve"
+            "/tmp/aurora_inst"
+        )
+        echo "[finalize] mpiexec gather to $per_node_dir ($node_count rank(s))" | tee -a "$dbg"
+        # bound the whole collective at 5 min — at 256 nodes with ~100 MB each
+        # writing in parallel to Lustre this is far longer than needed.
+        timeout 300 mpiexec -n "$node_count" -ppn 1 --cpu-bind none \
+            "$gather_bin" "${gather_args[@]}" >>"$dbg" 2>&1
+        echo "[finalize] gather rc=$?" >> "$dbg"
     fi
-    local head_ray_count=$(ls "$head_ray_dest" 2>/dev/null | wc -l)
-    local head_inst_count=$(ls "$head_inst_dest" 2>/dev/null | wc -l)
-    echo "head_ray_count=$head_ray_count head_inst_count=$head_inst_count" >> "$dbg"
-    echo "[finalize] head collected: ray_logs=$head_ray_count files, inst=$head_inst_count files"
 
-    # Step 2: fan out tar-over-ssh to worker nodes in parallel (skip self).
-    echo "entering worker loop" >> "$dbg"
-    local pids=()
-    local loop_iterations=0
-    while read -r node; do
-        [ -z "$node" ] && continue
-        loop_iterations=$((loop_iterations + 1))
-        local short_node="${node%%.*}"
-        [ "$short_node" = "$self_short" ] && continue
-        {
-            local ray_dest="$ray_log_root/$short_node"
-            local inst_dest="$inst_root/$short_node"
-            mkdir -p "$ray_dest" "$inst_dest"
-            timeout 60 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-                "$node" '
-                    sp=$(readlink -f /tmp/ray/session_latest 2>/dev/null || true);
-                    echo "$sp" > /tmp/_session_path_out;
-                    if [ -n "$sp" ] && [ -d "$sp/logs" ]; then
-                        cd "$sp/logs" && tar cf - . 2>/dev/null;
-                    fi
-                ' 2>/dev/null \
-                | tar xf - -C "$ray_dest/" 2>/dev/null || true
-            timeout 10 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-                "$node" "cat /tmp/_session_path_out 2>/dev/null || true" \
-                > "$ray_dest/session_path.txt" 2>/dev/null || true
-            timeout 30 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
-                "$node" '
-                    if [ -d /tmp/aurora_inst ]; then
-                        cd /tmp/aurora_inst && tar cf - . 2>/dev/null;
-                    fi
-                ' 2>/dev/null \
-                | tar xf - -C "$inst_dest/" 2>/dev/null || true
-        } &
-        pids+=($!)
-    done < "$UNIQUE_NODES_FILE"
+    local collected
+    collected="$(find "$per_node_dir" -maxdepth 1 -name '*.tar.gz' | wc -l)"
+    echo "finalize end $(date -u +%Y-%m-%dT%H:%M:%SZ) archives=$collected" >> "$dbg"
 
-    # Each background job is already bounded by per-command `timeout` on the
-    # ssh/scp steps (30s+60s+30s worst case = 120s). They finish naturally;
-    # just wait for all of them. Previous attempt used `timeout N bash -c "wait PID"`
-    # which runs the inner `wait` in a subshell that is NOT the parent of the
-    # backgrounded jobs — wait returns 127 immediately, the outer `timeout`
-    # exits nonzero, and the else-branch `kill`ed every SCP before it copied
-    # anything. Job 8444548 hit this bug (all 32 dirs created but 0 payloads).
-    echo "loop_iterations=$loop_iterations pids_spawned=${#pids[@]}" >> "$dbg"
-    wait 2>/dev/null || true
-    echo "finalize end $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$dbg"
-
-    local ray_collected=$(find "$ray_log_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
-    local inst_collected=$(find "$inst_root" -maxdepth 1 -mindepth 1 -type d | wc -l)
-    echo "[System] Instrumentation data: $inst_root ($inst_collected/$(wc -l < "$UNIQUE_NODES_FILE") nodes collected)"
-    echo "[System] Ray logs: $ray_log_root ($ray_collected/$(wc -l < "$UNIQUE_NODES_FILE") nodes collected)"
+    echo "[System] Per-node archives: $per_node_dir ($collected/$node_count nodes collected)"
     echo "[System] Persistent run log: $RUN_LOG_FILE"
     echo "[System] Launcher exit code: $exit_code"
 }

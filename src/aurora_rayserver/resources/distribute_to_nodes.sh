@@ -1,27 +1,33 @@
 #!/bin/bash
-# Distribute aurora_rayserver package code and, optionally, a Ray Serve overlay
-# to every PBS node's local /tmp. Always runs.
+# Distribute aurora_rayserver package code and, optionally, a Ray Serve
+# overlay to every PBS node's local /tmp via MPI primitives.
 #
-# Outputs:
-#   /tmp/aurora_src/aurora_rayserver
-#       Copy of the installed aurora_rayserver package, excluding the large
-#       Ray overlay subtree. /tmp/aurora_src is prepended to PYTHONPATH so
-#       runtime code is loaded from node-local tmpfs instead of Lustre.
+# Replaces the prior parallel-ssh fan-out: the head node opened one ssh
+# per worker and bash-forked them with &+wait, which:
+#   - serialized on head-node CPU at large scale (256+ TCP sessions),
+#   - made a non-trivial paper-claim weak (control plane is ssh, not MPI),
+#   - duplicated reads from Lustre because each worker `cp -r`'d from
+#     shared FS independently.
 #
-#   /tmp/aurora_overlay/ray/...
-#       Symlink farm pointing at the system Ray install, with patched files
-#       replaced from aurora_rayserver/patches/ray_serve_overlay/. Only created
-#       when AURORA_INSTRUMENTATION=1.
+# The new path: one bcast for the package tree (1 Lustre read + tree
+# broadcast over HSN, written into rank-local tmpfs), and if
+# AURORA_INSTRUMENTATION=1, a second bcast for the small set of patched
+# Ray Serve files plus an mpiexec'd setup_overlay.sh on every rank.
+#
+# Outputs (unchanged):
+#   /tmp/aurora_src/aurora_rayserver       (always)
+#   /tmp/aurora_overlay/ray/...            (when AURORA_INSTRUMENTATION=1)
 #
 # Required env:
-#   AURORA_RAYSERVER_PACKAGE_ROOT    absolute path to aurora_rayserver package
-#   PYTHON_EXEC                      Aurora frameworks python3
-#   UNIQUE_NODES_FILE                one PBS hostname per line
-#   HOSTNAME_SHORT                   short hostname of the head node
+#   AURORA_RAYSERVER_PACKAGE_ROOT          absolute path to package dir
+#   PYTHON_EXEC                            Aurora frameworks python3
+#   UNIQUE_NODES_FILE                      one PBS hostname per line
+#   HOSTNAME_SHORT                         short hostname of the head node
 #
 # Optional env:
-#   AURORA_INSTRUMENTATION           1 to build overlay, 0 to skip
-set -e
+#   AURORA_INSTRUMENTATION                 1 to build overlay, 0 to skip
+#   AURORA_BCAST_BUILD_DIR                 override bcast build dir
+set -euo pipefail
 
 if [ -z "${PYTHON_EXEC:-}" ] || [ -z "${UNIQUE_NODES_FILE:-}" ] || [ -z "${HOSTNAME_SHORT:-}" ]; then
     echo "[distribute_to_nodes] ERROR: PYTHON_EXEC/UNIQUE_NODES_FILE/HOSTNAME_SHORT must be set"
@@ -40,7 +46,6 @@ fi
 PACKAGE_ROOT="$AURORA_RAYSERVER_PACKAGE_ROOT"
 INSTRUMENTATION="${AURORA_INSTRUMENTATION:-0}"
 OVERLAY_SRC="$PACKAGE_ROOT/patches/ray_serve_overlay/ray"
-SYSRAY="$(dirname "$(dirname "$PYTHON_EXEC")")/lib/python3.12/site-packages/ray"
 
 if [ ! -d "$PACKAGE_ROOT" ]; then
     echo "[distribute_to_nodes] ERROR: package root does not exist: $PACKAGE_ROOT"
@@ -54,120 +59,80 @@ if [ "$INSTRUMENTATION" = "1" ] && [ ! -d "$OVERLAY_SRC/serve/_private" ]; then
     echo "[distribute_to_nodes] ERROR: AURORA_INSTRUMENTATION=1 but $OVERLAY_SRC/serve/_private not found"
     exit 1
 fi
-if [ "$INSTRUMENTATION" = "1" ] && [ ! -d "$SYSRAY/serve/_private" ]; then
-    echo "[distribute_to_nodes] ERROR: system Ray not found at $SYSRAY"
-    exit 1
-fi
 
 LOCAL_SRC="/tmp/aurora_src"
 LOCAL_OVERLAY="/tmp/aurora_overlay"
+NODE_COUNT="$(wc -l < "$UNIQUE_NODES_FILE")"
 
-# List of patched filenames, computed once on the head and used on every node.
-PATCHED_FILES=""
-if [ "$INSTRUMENTATION" = "1" ]; then
-    PATCHED_FILES=$(cd "$OVERLAY_SRC/serve/_private" && ls *.py 2>/dev/null | tr '\n' ' ')
-fi
-
-# Stage the per-node setup script on shared storage so SSHed workers can read it.
-_STAGED_SCRIPT=$(mktemp "$HOME/.aurora_distribute_XXXX.sh")
-trap 'rm -f "$_STAGED_SCRIPT"' EXIT
-
-cat > "$_STAGED_SCRIPT" <<NODEEOF
-#!/bin/bash
-set -e
-
-PACKAGE_ROOT="$PACKAGE_ROOT"
-OVERLAY_SRC="$OVERLAY_SRC"
-SYSRAY="$SYSRAY"
-LOCAL_SRC="$LOCAL_SRC"
-LOCAL_OVERLAY="$LOCAL_OVERLAY"
-INSTRUMENTATION="$INSTRUMENTATION"
-PATCHED_FILES="$PATCHED_FILES"
-
-rm -rf "\$LOCAL_SRC"
-mkdir -p "\$LOCAL_SRC/aurora_rayserver"
-if command -v rsync >/dev/null 2>&1; then
-    rsync -a --exclude='patches/ray_serve_overlay/' \\
-        --exclude='__pycache__/' --exclude='*.pyc' \\
-        "\$PACKAGE_ROOT/" "\$LOCAL_SRC/aurora_rayserver/"
-else
-    cp -a "\$PACKAGE_ROOT/." "\$LOCAL_SRC/aurora_rayserver/"
-    rm -rf "\$LOCAL_SRC/aurora_rayserver/patches/ray_serve_overlay"
-    find "\$LOCAL_SRC" -name __pycache__ -type d -prune -exec rm -rf {} +
-    find "\$LOCAL_SRC" -name '*.pyc' -type f -delete
-fi
-
-if [ "\$INSTRUMENTATION" = "1" ]; then
-    rm -rf "\$LOCAL_OVERLAY"
-    mkdir -p "\$LOCAL_OVERLAY/ray/serve/_private"
-    for f in "\$SYSRAY"/*; do
-        n=\$(basename "\$f")
-        [ "\$n" = serve ] && continue
-        ln -s "\$f" "\$LOCAL_OVERLAY/ray/\$n" 2>/dev/null
-    done
-    for f in "\$SYSRAY/serve"/*; do
-        n=\$(basename "\$f")
-        [ "\$n" = _private ] && continue
-        ln -s "\$f" "\$LOCAL_OVERLAY/ray/serve/\$n" 2>/dev/null
-    done
-    for f in "\$SYSRAY/serve/_private"/*; do
-        n=\$(basename "\$f")
-        [ "\$n" = __pycache__ ] && continue
-        skip=0
-        for p in \$PATCHED_FILES; do
-            [ "\$n" = "\$p" ] && skip=1 && break
-        done
-        [ \$skip -eq 1 ] && continue
-        ln -s "\$f" "\$LOCAL_OVERLAY/ray/serve/_private/\$n" 2>/dev/null
-    done
-    for p in \$PATCHED_FILES; do
-        cp "\$OVERLAY_SRC/serve/_private/\$p" "\$LOCAL_OVERLAY/ray/serve/_private/\$p"
-    done
-fi
-
-test -f "\$LOCAL_SRC/aurora_rayserver/driver.py"
-test -f "\$LOCAL_SRC/aurora_rayserver/server.py"
-test -f "\$LOCAL_SRC/aurora_rayserver/ray_start.py"
-if [ "\$INSTRUMENTATION" = "1" ]; then
-    test -f "\$LOCAL_OVERLAY/ray/serve/_private/constants.py"
-    test -f "\$LOCAL_OVERLAY/ray/serve/_private/deployment_state.py"
-fi
-NODEEOF
-
-chmod +x "$_STAGED_SCRIPT"
-
-# Run on the head first so failures surface immediately.
-bash "$_STAGED_SCRIPT"
-
-DIST_LOG_DIR="${AURORA_RUN_LOG_DIR:-/tmp}"
-mkdir -p "$DIST_LOG_DIR" 2>/dev/null || DIST_LOG_DIR="/tmp"
-worker_count=0
-pids=()
-nodes=()
-while read -r node; do
-    [ -z "$node" ] && continue
-    short="${node%%.*}"
-    [ "$short" = "$HOSTNAME_SHORT" ] && continue
-    timeout 180 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$node" \
-        "bash $_STAGED_SCRIPT" >"$DIST_LOG_DIR/distribute_${short}.log" 2>&1 &
-    pids+=($!)
-    nodes+=("$node")
-    worker_count=$((worker_count + 1))
-done < "$UNIQUE_NODES_FILE"
-
-failed=0
-for i in "${!pids[@]}"; do
-    if ! wait "${pids[$i]}"; then
-        echo "[distribute_to_nodes] ERROR: staging failed on ${nodes[$i]} (see $DIST_LOG_DIR/distribute_${nodes[$i]%%.*}.log)"
-        failed=1
-    fi
-done
-if [ "$failed" -ne 0 ]; then
+# Compile bcast (+ gather, harmless) on demand. We share the same build
+# dir Python-side uses, so a single mtime-keyed make handles both.
+BUILD_DIR="${AURORA_BCAST_BUILD_DIR:-${AURORA_RUN_LOG_DIR:-/tmp}/bcast_build}"
+mkdir -p "$BUILD_DIR"
+"$PYTHON_EXEC" - <<PY
+from aurora_rayserver.model_bcast import compile_bcast, compile_gather
+from pathlib import Path
+tools = Path("$BUILD_DIR")
+compile_bcast(tools)
+compile_gather(tools)
+PY
+BCAST_BIN="$BUILD_DIR/bcast"
+if [ ! -x "$BCAST_BIN" ]; then
+    echo "[distribute_to_nodes] ERROR: bcast binary not built at $BCAST_BIN"
     exit 1
 fi
 
-if [ "$INSTRUMENTATION" = "1" ]; then
-    echo "[distribute_to_nodes] aurora_src -> $LOCAL_SRC; ray overlay -> $LOCAL_OVERLAY ($worker_count workers + head)"
+# Excluded subtrees / files. The bcast'd tree is what every rank loads on
+# startup, so __pycache__ and the (large) overlay source dir are not needed.
+# tar handles these via --exclude before piping into MPI_Bcast.
+#
+# We don't have a "tar --exclude" hook into bcast.c, so we stage a clean
+# copy on rank 0's tmpfs first, then bcast that. This is one extra local
+# copy on the head — negligible vs. the saved 256× Lustre reads.
+TMP_CLEAN="${BUILD_DIR}/aurora_rayserver_clean"
+rm -rf "$TMP_CLEAN"
+mkdir -p "$TMP_CLEAN/aurora_rayserver"
+if command -v rsync >/dev/null 2>&1; then
+    rsync -a \
+        --exclude='patches/ray_serve_overlay/' \
+        --exclude='__pycache__/' --exclude='*.pyc' \
+        "$PACKAGE_ROOT/" "$TMP_CLEAN/aurora_rayserver/"
 else
-    echo "[distribute_to_nodes] aurora_src -> $LOCAL_SRC ($worker_count workers + head); overlay disabled"
+    cp -a "$PACKAGE_ROOT/." "$TMP_CLEAN/aurora_rayserver/"
+    rm -rf "$TMP_CLEAN/aurora_rayserver/patches/ray_serve_overlay"
+    find "$TMP_CLEAN" -name __pycache__ -type d -prune -exec rm -rf {} +
+    find "$TMP_CLEAN" -name '*.pyc' -type f -delete
+fi
+
+echo "[distribute_to_nodes] bcast source ($(du -sh "$TMP_CLEAN" | awk '{print $1}')) to $NODE_COUNT node(s) -> $LOCAL_SRC"
+mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+    "$BCAST_BIN" "$TMP_CLEAN/aurora_rayserver" "$LOCAL_SRC"
+
+# Optional: overlay. bcast the patched files (tiny — five .py files),
+# then run setup_overlay.sh on every rank to assemble the symlink farm
+# locally. mpiexec replaces the previous `for node in ...; do ssh & done`.
+if [ "$INSTRUMENTATION" = "1" ]; then
+    # bcast extracts <dest>/<basename(src)>/. We want every node to end up
+    # with /tmp/overlay_patches/serve/_private/*.py, so the src basename
+    # must be exactly "overlay_patches" and we bcast to dest=/tmp.
+    TMP_PATCHES="${BUILD_DIR}/overlay_patches"
+    rm -rf "$TMP_PATCHES"
+    mkdir -p "$TMP_PATCHES/serve/_private"
+    cp "$OVERLAY_SRC"/serve/_private/*.py "$TMP_PATCHES/serve/_private/"
+
+    echo "[distribute_to_nodes] bcast overlay patches to $NODE_COUNT node(s) -> /tmp/overlay_patches"
+    mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+        "$BCAST_BIN" "$TMP_PATCHES" "/tmp"
+
+    SETUP_SCRIPT="$PACKAGE_ROOT/resources/setup_overlay.sh"
+    if [ ! -x "$SETUP_SCRIPT" ]; then chmod +x "$SETUP_SCRIPT" || true; fi
+    echo "[distribute_to_nodes] building per-node /tmp/aurora_overlay symlink farm"
+    PYTHON_EXEC="$PYTHON_EXEC" AURORA_OVERLAY_PATCHES_DIR="/tmp/overlay_patches" \
+    mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+        bash "$SETUP_SCRIPT"
+fi
+
+if [ "$INSTRUMENTATION" = "1" ]; then
+    echo "[distribute_to_nodes] aurora_src -> $LOCAL_SRC; overlay -> $LOCAL_OVERLAY (${NODE_COUNT} ranks via MPI)"
+else
+    echo "[distribute_to_nodes] aurora_src -> $LOCAL_SRC (${NODE_COUNT} ranks via MPI); overlay disabled"
 fi

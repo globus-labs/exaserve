@@ -43,38 +43,44 @@ def _default_bcast_build_dir() -> Path:
 
 
 def prepare_bcast_tools(build_dir: Path | None = None) -> Path:
-    """Materialize packaged bcast sources into a writable shared build dir."""
+    """Materialize packaged bcast + gather sources into a writable shared build dir."""
     tools_dir = build_dir or _default_bcast_build_dir()
     tools_dir.mkdir(parents=True, exist_ok=True)
     _write_if_changed(tools_dir / "bcast.c", _resource_bytes("bcast.c"))
+    _write_if_changed(tools_dir / "gather.c", _resource_bytes("gather.c"))
     _write_if_changed(tools_dir / "Makefile", _resource_bytes("bcast.Makefile"))
     return tools_dir
 
 
-def compile_bcast(tools_dir: Path | None = None) -> Path:
-    """
-    Build the packaged MPI broadcast helper if the binary is missing or stale.
-    """
-    tools_dir = prepare_bcast_tools(tools_dir)
-    binary_path = tools_dir / "bcast"
-    source_path = tools_dir / "bcast.c"
+def _compile_target(tools_dir: Path, target: str) -> Path:
+    binary_path = tools_dir / target
+    source_path = tools_dir / f"{target}.c"
     makefile_path = tools_dir / "Makefile"
 
     if not source_path.is_file():
-        raise FileNotFoundError(f"Missing bcast source: {source_path}")
+        raise FileNotFoundError(f"Missing {target} source: {source_path}")
     if not makefile_path.is_file():
-        raise FileNotFoundError(f"Missing bcast Makefile: {makefile_path}")
+        raise FileNotFoundError(f"Missing Makefile: {makefile_path}")
 
     binary_mtime = binary_path.stat().st_mtime if binary_path.exists() else -1
     source_mtime = max(source_path.stat().st_mtime, makefile_path.stat().st_mtime)
     if binary_mtime < source_mtime:
         print(f"[ModelBcast] Building {binary_path}...", flush=True)
         subprocess.run(
-            ["make", "-C", str(tools_dir), "bcast"],
+            ["make", "-C", str(tools_dir), target],
             check=True,
         )
-
     return binary_path
+
+
+def compile_bcast(tools_dir: Path | None = None) -> Path:
+    """Build the packaged MPI broadcast helper if the binary is missing or stale."""
+    return _compile_target(prepare_bcast_tools(tools_dir), "bcast")
+
+
+def compile_gather(tools_dir: Path | None = None) -> Path:
+    """Build the packaged MPI log/artifact gather helper if missing or stale."""
+    return _compile_target(prepare_bcast_tools(tools_dir), "gather")
 
 
 def probe_cache_locally(path: Path) -> None:

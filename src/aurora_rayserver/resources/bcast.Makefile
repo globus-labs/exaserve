@@ -1,10 +1,15 @@
 CC=mpicc
+CFLAGS=-O2 -Wall
 
-bcast: bcast.o
-all: bcast
+.PHONY: all clean
+all: bcast gather
 
-.PHONY: clean
+bcast: bcast.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+gather: gather.c
+	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
-	rm -f bcast *.o
+	rm -f bcast gather *.o
 	rm -rf *.dSYM
