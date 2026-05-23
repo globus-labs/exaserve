@@ -1,40 +1,34 @@
 name: longctx_v1
-# Experiment F: long-context sweep. Stresses prefill (quadratic in input_len)
-# vs decode (linear). max_model_len=8192 stays within Llama-3-8B's native
-# context. For true 32K/64K context, swap in a long-context model.
-#
-# rate_per_node scales DOWN with input_len because prefill compute grows
-# quadratically. Uses combine=zip so num_nodes runs in cartesian with the
-# zipped (input_len, rate_per_node) pairs.
-#
-# Variants: 2 (num_nodes) x 4 (paired input/rate) = 8.
+# Experiment F: long-context sweep. Preliminary: nodes={1,16,64} x
+# input_len={64,4096} = 6 variants. rate_per_node ramps down with input_len
+# because prefill is quadratic.
 matrix:
   name_template: 'n{num_nodes}_in{input_len}'
-  combine: cartesian
   axes:
   - name: num_nodes
-    values: [8, 32]
+    values: [1, 16, 64]
     targets: [deployment.num_nodes, scheduler.nodes]
     label_template: '{value}_nodes'
   - name: input_len
-    values: [64, 1024, 4096, 7680]
+    values: [64, 4096]
     targets: [workload.input_len]
     label_template: 'in{value}'
   derived:
   - path: client.num_nodes
-    expr: '{num_nodes}'
-  # rate_per_node ramps down quadratically with input_len. Reference points:
-  # in=64 -> 110, in=1024 -> 40, in=4096 -> 10, in=7680 -> 4.
-  # Approximate with: max(4, 110 * (64/input_len)**0.85)
+    expr: 'num_nodes'
   - path: workload.rate_per_node
     expr: 'max(4.0, 110.0 * (64.0 / input_len) ** 0.85)'
+  - path: scheduler.queue
+    expr: '"capacity" if num_nodes <= 16 else "debug-scaling"'
+  - path: scheduler.walltime
+    expr: '"02:00:00" if num_nodes <= 16 else "01:00:00"'
 trace:
   kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 64       # overridden by matrix
+  input_len: 64
   output_len: 64
-  rate_per_node: 110  # overridden by derived
+  rate_per_node: 110
   generation_mode: deterministic
 deployment:
   models:
@@ -48,7 +42,7 @@ deployment:
     max_num_seqs: 32
   replica_max_ongoing_requests: 128
 client:
-  num_runs: 4
+  num_runs: 2
   dest: proxy
   stream: true
   num_go_procs: 4

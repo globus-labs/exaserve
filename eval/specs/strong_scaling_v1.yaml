@@ -1,14 +1,11 @@
 name: strong_scaling_v1
-# Experiment H: strong scaling. Fixed total load (500 RPS), vary node count.
-# Probes coordination/proxy overhead — does latency improve, plateau, or get
-# worse as we throw more nodes at a fixed load?
-#
-# Variants: 5. rate_per_node is derived as total/num_nodes.
+# Experiment H: strong scaling. Fixed total load (500 RPS), vary nodes.
+# Preliminary: nodes={1,16,64} = 3 variants. rate_per_node = 500/N.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
   - name: num_nodes
-    values: [1, 2, 4, 8, 16]
+    values: [1, 16, 64]
     targets: [deployment.num_nodes, scheduler.nodes]
     label_template: '{value}_nodes'
   derived:
@@ -16,13 +13,17 @@ matrix:
     expr: 'num_nodes'
   - path: workload.rate_per_node
     expr: '500.0 / num_nodes'
+  - path: scheduler.queue
+    expr: '"capacity" if num_nodes <= 16 else "debug-scaling"'
+  - path: scheduler.walltime
+    expr: '"02:00:00" if num_nodes <= 16 else "01:00:00"'
 trace:
   kind: weak_scaling
 workload:
   duration: 60.0
   input_len: 64
   output_len: 64
-  rate_per_node: 500.0   # overridden by derived
+  rate_per_node: 500.0
   generation_mode: deterministic
 deployment:
   models:
@@ -36,7 +37,7 @@ deployment:
     max_num_seqs: 64
   replica_max_ongoing_requests: 256
 client:
-  num_runs: 4
+  num_runs: 2
   dest: proxy
   stream: true
   num_go_procs: 4
