@@ -82,7 +82,8 @@ SLO_PRESETS: dict[str, SLOPreset] = {
 # ----------------------------- core compute --------------------------------
 
 def _extract_node_count(name: str) -> int:
-    m = re.match(r"(\d+)[_-]nodes?", name)
+    # Matches: "16_nodes", "16-nodes", "n16", "n16-rps110", "n16_in4096"
+    m = re.match(r"n?(\d+)(?:[_-]|nodes?|$)", name)
     return int(m.group(1)) if m else 0
 
 
