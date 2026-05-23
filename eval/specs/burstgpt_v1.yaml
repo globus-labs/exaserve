@@ -1,0 +1,71 @@
+name: burstgpt_v1
+# Experiment D: BurstGPT/Azure-trace replay at multiple scales.
+# sampling_strategy=peak selects the busiest 1-min window in the trace.
+# Used to demonstrate the system works on real bursty traffic, not just
+# synthetic Poisson.
+#
+# Variants: 3 (num_nodes) x 2 (sampling) x 2 (speedup) = 12.
+# Drop speedup=2.0 or sampling_strategy=random to halve the cost.
+matrix:
+  name_function: 'n{num_nodes}_{sampling_strategy}_x{speedup}'
+  name_template: 'n{num_nodes}_{sampling_strategy}_x{speedup}'
+  axes:
+  - name: num_nodes
+    values: [8, 32, 64]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  - name: sampling_strategy
+    values: [peak, random]
+    targets: [workload.sampling_strategy]
+    label_template: '{value}'
+  - name: speedup
+    values: [1.0, 2.0]
+    targets: [workload.speedup]
+    label_template: 'x{value}'
+  derived:
+  - path: client.num_nodes
+    expr: 'num_nodes'
+trace:
+  kind: azure_trace
+  input_trace_path: /home/wenyiw/agpt/data/input_traces/AzureLLMInferenceTrace_code_1week.csv
+workload:
+  duration: 120.0
+  input_len: 512    # fallback when CSV row has no value
+  output_len: 64
+  rate_per_node: 5.0
+  speedup: 1.0      # overridden by matrix
+  sampling_strategy: peak  # overridden by matrix
+  seed: 42
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 4
+  dest: proxy
+  stream: true
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs

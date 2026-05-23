@@ -1,0 +1,66 @@
+name: smoke_burstgpt_2node
+# Smoke for Azure-trace (BurstGPT-style) replay. The existing azure_trace
+# generator slices a window out of AzureLLMInferenceTrace_code_1week.csv based
+# on sampling_strategy (peak/sparse/random). 2 nodes so MPI bcast/gather
+# matches the prod scaled spec.
+matrix:
+  name_template: '{num_nodes}_nodes'
+  axes:
+  - name: num_nodes
+    values:
+    - 2
+    targets:
+    - deployment.num_nodes
+    - scheduler.nodes
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: '1'
+trace:
+  kind: azure_trace
+  input_trace_path: /home/wenyiw/agpt/data/input_traces/AzureLLMInferenceTrace_code_1week.csv
+workload:
+  duration: 60.0
+  input_len: 512
+  output_len: 64
+  rate_per_node: 5.0
+  speedup: 1.0
+  sampling_strategy: peak
+  seed: 42
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.9
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 128
+client:
+  num_runs: 1
+  num_nodes: 1
+  dest: proxy
+  stream: true
+  num_go_procs: 1
+  num_go_workers: 4
+  go_concurrency: 200
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 50000
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 01:00:00
