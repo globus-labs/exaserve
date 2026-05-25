@@ -1,0 +1,73 @@
+name: longctx_v2_eqsat
+# Long-context, FAIR comparison #2: each input_len at ~80% of its measured
+# per-node capacity. Rate calibration (best estimate from prior runs):
+#   - input=64:   72 rps/N  (slo_curve_v1 showed 60 = green, 110 = saturated;
+#                            so capacity ~= 90, 80% ~= 72)
+#   - input=4096: 16 rps/N  (longctx_v1 ran 4 rps/N under-saturated; ~12
+#                            tiles/node * decode-bound 8B should sustain
+#                            more — 16 is a deliberate stress test;
+#                            adjust after this run if TTFT collapses)
+# Expected reading: BOTH at high load -> TTFT shape comparable, dominated by
+# saturation effects per input length rather than queue depth from rate mismatch.
+matrix:
+  name_template: 'n{num_nodes}_in{input_len}'
+  combine: cartesian
+  axes:
+  - name: num_nodes
+    values: [1, 16, 64]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  - name: input_len
+    values: [64, 4096]
+    targets: [workload.input_len]
+    label_template: 'in{value}'
+  derived:
+  - path: client.num_nodes
+    expr: 'num_nodes'
+  - path: workload.rate_per_node
+    expr: '72.0 if input_len == 64 else 16.0'
+  - path: scheduler.queue
+    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+  - path: scheduler.walltime
+    expr: '"01:00:00"'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 72.0
+  generation_mode: deterministic
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 8192
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 32
+  replica_max_ongoing_requests: 128
+client:
+  num_runs: 2
+  dest: proxy
+  stream: true
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs
