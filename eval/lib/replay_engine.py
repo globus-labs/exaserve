@@ -399,6 +399,10 @@ def _read_go_results(result_path: str, request_map: dict[str, TraceRequest]):
                     record.get("actual_completion_tokens"),
                     record.get("ttft_s"),
                     record.get("first_token_at"),
+                    record.get("tbt_p50_s"),
+                    record.get("tbt_p99_s"),
+                    record.get("tbt_max_s"),
+                    record.get("decode_tokens"),
                 )
             )
     return results, last_fire_time, adjusted_run_t0
@@ -950,7 +954,9 @@ def _save_results(
         successful_latencies = []
         for run_index, run_results in enumerate(all_runs_results):
             for item in run_results:
-                request, latency, success, error_msg, _end_time, actual_prompt_tokens, actual_completion_tokens, ttft_s, first_token_at = item
+                (request, latency, success, error_msg, _end_time, actual_prompt_tokens,
+                 actual_completion_tokens, ttft_s, first_token_at,
+                 tbt_p50_s, tbt_p99_s, tbt_max_s, decode_tokens) = item
                 raw_results.append(
                     {
                         "run_index": run_index,
@@ -966,10 +972,14 @@ def _save_results(
                         "req_id": request.req_id,
                         "ttft_s": ttft_s,
                         "first_token_at": first_token_at,
+                        "tbt_p50_s": tbt_p50_s,
+                        "tbt_p99_s": tbt_p99_s,
+                        "tbt_max_s": tbt_max_s,
+                        "decode_tokens": decode_tokens,
                     }
                 )
         for item in results:
-            request, latency, success, error_msg, _end_time, actual_prompt_tokens, actual_completion_tokens, _ttft_s, _first_token_at = item
+            request, latency, success, error_msg, _end_time, actual_prompt_tokens, actual_completion_tokens, _ttft_s, _first_token_at, *_ = item
             model_groups.setdefault(request.model, []).append(item)
             if success:
                 successful_latencies.append(float(latency))
