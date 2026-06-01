@@ -40,7 +40,7 @@ from .models import (
 from .utils import dump_yaml_file, load_yaml_file, resolve_path
 
 
-SUPPORTED_TRACE_KINDS = {"weak_scaling", "azure_trace"}
+SUPPORTED_TRACE_KINDS = {"weak_scaling", "azure_trace", "dataset_replay"}
 SUPPORTED_BACKENDS = {"ray", "mock"}
 
 
@@ -108,6 +108,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         speedup=float(workload_raw.get("speedup", 1.0)),
         sampling_strategy=str(workload_raw.get("sampling_strategy", "peak")),
         generation_mode=str(workload_raw.get("generation_mode", "deterministic")),
+        arrival=str(workload_raw.get("arrival", "fixed")),
         seed=int(workload_raw.get("seed", 42)),
         modes={
             str(key): int(value)

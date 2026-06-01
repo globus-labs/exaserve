@@ -103,6 +103,7 @@ class WorkloadSpec:
     speedup: float = 1.0
     sampling_strategy: str = "peak"
     generation_mode: str = "deterministic"
+    arrival: str = "fixed"  # "fixed" (constant interval) or "poisson" (exponential)
     seed: int = 42
     modes: dict[str, int] = field(default_factory=lambda: {"chat": 1, "completion": 0})
 

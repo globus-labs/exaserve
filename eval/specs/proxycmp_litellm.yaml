@@ -1,0 +1,54 @@
+name: proxycmp_litellm
+# EXP SET 1 (proxy comparison) — LiteLLM dispatcher. Same baseline as
+# proxycmp_haproxy; stream=true for P99 TTFT/TBT.
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [1, 4, 16, 64]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: 'num_nodes'
+  - path: scheduler.queue
+    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+  - path: scheduler.walltime
+    expr: '"01:00:00"'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 4
+  dest: proxy
+  stream: true
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: litellm
+        num_workers: 8
+scheduler:
+  type: pbs

@@ -1,0 +1,59 @@
+name: smoke_slo_stream_direct_1node
+# Diagnostic twin of smoke_slo_stream_1node, but dest=direct (client -> local
+# Ray Serve port 8000, NO HAProxy). Compare per-request TBT distributions
+# between the two to localize where token streaming gets batched:
+#   - direct smooth + proxy bursty  -> HAProxy buffering
+#   - both bursty                   -> upstream (Ray Serve proxy or vLLM cadence)
+matrix:
+  name_template: '{num_nodes}_nodes'
+  axes:
+  - name: num_nodes
+    values:
+    - 1
+    targets:
+    - deployment.num_nodes
+    - scheduler.nodes
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: '1'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 30.0
+  input_len: 256
+  output_len: 64
+  rate_per_node: 30.0
+  generation_mode: deterministic
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.9
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 128
+client:
+  num_runs: 1
+  num_nodes: 1
+  dest: direct
+  stream: true
+  num_go_procs: 1
+  num_go_workers: 4
+  go_concurrency: 200
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: none
+        backend_port: 8000
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 01:00:00

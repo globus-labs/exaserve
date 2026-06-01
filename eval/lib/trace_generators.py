@@ -34,6 +34,8 @@ def generate_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
         return generate_weak_scaling_rows(spec)
     if spec.trace.kind == "azure_trace":
         return generate_azure_rows(spec)
+    if spec.trace.kind == "dataset_replay":
+        return generate_dataset_replay_rows(spec)
     raise ValueError(f"Unsupported trace.kind: {spec.trace.kind}")
 
 
@@ -177,6 +179,25 @@ def _choose_prompt(prompt_bank: list[str], seed: int, target_len: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _arrival_times(spec: ExperimentSpec, total_qps: float, total_requests: int) -> list[float]:
+    """Per-request arrival offsets (seconds from t0).
+
+    arrival="fixed"   -> evenly spaced at 1/total_qps (constant rate).
+    arrival="poisson" -> exponential inter-arrivals, mean 1/total_qps, seeded.
+    """
+    if total_qps <= 0 or total_requests <= 0:
+        return [0.0] * max(0, total_requests)
+    if getattr(spec.workload, "arrival", "fixed") == "poisson":
+        rng = random.Random(spec.workload.seed)
+        times, t = [], 0.0
+        for _ in range(total_requests):
+            t += rng.expovariate(total_qps)
+            times.append(t)
+        return times
+    inter = 1.0 / total_qps
+    return [(i + 1) * inter for i in range(total_requests)]
+
+
 def generate_weak_scaling_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
     prompt_bank = load_prompt_bank(spec.trace.input_prompt_path)
     tokenizers = build_tokenizer_map(spec)
@@ -189,7 +210,7 @@ def generate_weak_scaling_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
     }
     total_qps = spec.deployment.num_nodes * spec.workload.rate_per_node
     total_requests = int(total_qps * spec.workload.duration)
-    inter_arrival = (1.0 / total_qps) if total_qps > 0 else 0.0
+    arrival_times = _arrival_times(spec, total_qps, total_requests)
 
     def build_chunk(start: int, end: int) -> list[dict[str, Any]]:
         rows = []
@@ -217,7 +238,7 @@ def generate_weak_scaling_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
             )
             rows.append(
                 {
-                    "timestamp": float(f"{(index + 1) * inter_arrival:.6f}"),
+                    "timestamp": round(arrival_times[index], 6),
                     "model": model_id,
                     "mode": "chat",
                     "prompt": prompt_text,
@@ -285,8 +306,8 @@ def generate_azure_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
 
     column_names = list(normalized[0])
     ts_col = next((name for name in column_names if "timestamp" in name), None)
-    in_col = next((name for name in column_names if "context" in name), None)
-    out_col = next((name for name in column_names if "generated" in name), None)
+    in_col = next((name for name in column_names if "context" in name or "request" in name), None)
+    out_col = next((name for name in column_names if "generated" in name or "response" in name), None)
     if ts_col is None:
         raise ValueError(f"Could not find timestamp column in {column_names}")
 
@@ -379,3 +400,67 @@ def generate_azure_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
             }
         )
     return output_rows
+
+
+# ---------------------------------------------------------------------------
+# Dataset replay (HumanEval / CNN-DailyMail / natural ShareGPT)
+# ---------------------------------------------------------------------------
+
+
+def generate_dataset_replay_rows(spec: ExperimentSpec) -> list[dict[str, Any]]:
+    """Replay a normalized dataset JSONL (eval/tools/fetch_paper_datasets.py).
+
+    Each line: {"prompt": str, "output_len": int, "input_len": int|null, ...}.
+    Prompts are sent verbatim (the serving tokenizer truncates against
+    max_model_len); per-row output_len is honoured (variable for natural
+    ShareGPT) and capped so prompt+output fit the model. Arrival follows
+    workload.arrival (fixed|poisson) at rate_per_node, like weak_scaling.
+    """
+    path = spec.trace.input_prompt_path
+    if not path or not os.path.exists(path):
+        raise ValueError(
+            f"dataset_replay needs trace.input_prompt_path to point at a dataset "
+            f"JSONL (got {path!r}); see eval/tools/fetch_paper_datasets.py"
+        )
+    records: list[dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    if not records:
+        return []
+
+    model_ids = [model.model_id for model in spec.deployment.models]
+    tp_by_model = {m.model_id: m.tensor_parallel_size for m in spec.deployment.models}
+    max_len_by_model = {m.model_id: m.max_model_len for m in spec.deployment.models}
+
+    total_qps = spec.deployment.num_nodes * spec.workload.rate_per_node
+    total_requests = int(total_qps * spec.workload.duration)
+    if total_requests <= 0:
+        return []
+    arrival_times = _arrival_times(spec, total_qps, total_requests)
+
+    rows = []
+    for index in range(total_requests):
+        rec = records[index % len(records)]
+        model_id = model_ids[index % len(model_ids)]
+        prompt_text = str(rec.get("prompt") or "")
+        out_len = int(rec.get("output_len") or spec.workload.output_len)
+        out_cap = max(1, max_len_by_model[model_id] - _CHAT_TEMPLATE_MARGIN - 1)
+        out_len = max(1, min(out_len, out_cap))
+        in_len = rec.get("input_len")
+        if in_len is None:
+            in_len = len(prompt_text.split())  # rough; server tokenizes for real
+        rows.append(
+            {
+                "timestamp": round(arrival_times[index], 6),
+                "model": model_id,
+                "mode": "chat",
+                "prompt": prompt_text,
+                "input_len": int(in_len),
+                "output_len": out_len,
+                "tensor_parallel_size": tp_by_model[model_id],
+            }
+        )
+    return rows
