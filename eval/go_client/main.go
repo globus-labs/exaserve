@@ -74,6 +74,12 @@ type resultRecord struct {
 	FirstTokenAt           float64 `json:"first_token_at,omitempty"`
 	BodyDoneAt             float64 `json:"body_done_at,omitempty"`
 	TTFT                   float64 `json:"ttft_s,omitempty"`
+	// Per-request inter-token latency summary (streaming only). The paper's SLO
+	// is defined on TBTp99 (P99 time-between-tokens), not mean TPOT.
+	TBTp50       float64 `json:"tbt_p50_s,omitempty"`
+	TBTp99       float64 `json:"tbt_p99_s,omitempty"`
+	TBTMax       float64 `json:"tbt_max_s,omitempty"`
+	DecodeTokens int     `json:"decode_tokens,omitempty"`
 }
 
 type dispatchDoneMeta struct {
@@ -807,6 +813,14 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 			if collector != nil {
 				collector.ObserveTTFT(sse.TTFT)
 			}
+		}
+		if sse.NumChunks > 0 {
+			rec.DecodeTokens = sse.NumChunks
+		}
+		if sse.TBTp99 > 0 {
+			rec.TBTp50 = sse.TBTp50.Seconds()
+			rec.TBTp99 = sse.TBTp99.Seconds()
+			rec.TBTMax = sse.TBTMax.Seconds()
 		}
 
 		if collector != nil {

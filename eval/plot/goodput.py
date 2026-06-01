@@ -53,6 +53,11 @@ class SLOPreset:
     tpot_s: Optional[float]
     e2e_s: Optional[float]
     description: str
+    # P99 time-between-tokens bound (seconds). When set, the request must carry
+    # a per-request `tbt_p99_s` field (Go client streaming path) and that value
+    # must satisfy the bound. This is the paper's decode-phase metric and is
+    # preferred over the mean-TPOT approximation in `tpot_s`.
+    tbt_p99_s: Optional[float] = None
 
 
 SLO_PRESETS: dict[str, SLOPreset] = {
@@ -75,6 +80,12 @@ SLO_PRESETS: dict[str, SLOPreset] = {
         name="e2e_2s",
         ttft_s=None, tpot_s=None, e2e_s=2.0,
         description="End-to-end<=2s (compatible with current non-streaming weakscaling)",
+    ),
+    "paper": SLOPreset(
+        name="paper",
+        ttft_s=1.0, tpot_s=None, e2e_s=None, tbt_p99_s=0.250,
+        description="Paper SLO: TTFT<=1s, P99 TBT<=250ms (Sarathi-Serve style; "
+                    "needs client.stream=true + per-request tbt_p99_s)",
     ),
 }
 
@@ -112,11 +123,19 @@ def _request_meets_slo(req: dict, preset: SLOPreset) -> bool:
             tpot = (lat - ttft) / (out_tok - 1)
             if tpot > preset.tpot_s:
                 return False
+    if preset.tbt_p99_s is not None:
+        tbt = req.get("tbt_p99_s")
+        if tbt is not None and tbt > preset.tbt_p99_s:
+            return False
     return True
 
 
 def _has_ttft(reqs: list[dict]) -> bool:
     return any(r.get("ttft_s") is not None for r in reqs[:200])
+
+
+def _has_tbt(reqs: list[dict]) -> bool:
+    return any(r.get("tbt_p99_s") is not None for r in reqs[:200])
 
 
 def _compute_goodput(result: dict, preset: SLOPreset) -> dict:
@@ -125,11 +144,12 @@ def _compute_goodput(result: dict, preset: SLOPreset) -> dict:
     rps = overall.get("rps", 0.0)
     if not requests:
         return {"rps": rps, "attainment": float("nan"), "goodput": float("nan"),
-                "n_requests": 0, "has_ttft": False}
+                "n_requests": 0, "has_ttft": False, "has_tbt": False}
     meets = sum(1 for r in requests if _request_meets_slo(r, preset))
     attainment = meets / len(requests)
     has_ttft = _has_ttft(requests)
-    needs_stream = (preset.ttft_s is not None) or (preset.tpot_s is not None)
+    needs_stream = (preset.ttft_s is not None) or (preset.tpot_s is not None) \
+        or (preset.tbt_p99_s is not None)
     if needs_stream and not has_ttft:
         # The preset has a TTFT/TPOT term but the run was non-streaming.
         # Caller should warn; we still report attainment based only on E2E
@@ -141,6 +161,7 @@ def _compute_goodput(result: dict, preset: SLOPreset) -> dict:
         "goodput": rps * attainment,
         "n_requests": len(requests),
         "has_ttft": has_ttft,
+        "has_tbt": _has_tbt(requests),
     }
 
 
@@ -230,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict] = []
     ttft_missing_for: set[str] = set()
+    tbt_missing_for: set[str] = set()
     for n_nodes, rfile in pairs:
         with open(rfile, "r") as fh:
             data = json.load(fh)
@@ -244,9 +266,12 @@ def main(argv: list[str] | None = None) -> int:
                 "file": str(rfile.relative_to(run_group_dir)),
             })
             rows.append(stats)
-            needs_stream = (preset.ttft_s is not None) or (preset.tpot_s is not None)
+            needs_stream = (preset.ttft_s is not None) or (preset.tpot_s is not None) \
+                or (preset.tbt_p99_s is not None)
             if needs_stream and not stats["has_ttft"]:
                 ttft_missing_for.add(preset.name)
+            if preset.tbt_p99_s is not None and not stats.get("has_tbt"):
+                tbt_missing_for.add(preset.name)
 
     # Print a compact table.
     print()
@@ -264,6 +289,14 @@ def main(argv: list[str] | None = None) -> int:
         print("WARNING: TTFT/TPOT data missing for presets: "
               f"{sorted(ttft_missing_for)}. These presets only checked success+E2E. "
               "Re-run with client.stream=true to get TTFT.")
+        if args.ttft_required:
+            return 2
+    if tbt_missing_for:
+        print()
+        print("WARNING: P99-TBT data missing for presets: "
+              f"{sorted(tbt_missing_for)}. Reported attainment IGNORES the TBT bound "
+              "(decode-phase SLO UNVERIFIED) — do not trust these numbers. Re-run with a "
+              "go_dispatch built from the TBT-capture commit so per-request tbt_p99_s is emitted.")
         if args.ttft_required:
             return 2
 
