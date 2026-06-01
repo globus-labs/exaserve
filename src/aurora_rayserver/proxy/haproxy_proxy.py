@@ -77,6 +77,11 @@ class HAProxyProxy(ProxyBackend):
 
             defaults
                 mode http
+                # Forward each SSE token chunk immediately instead of coalescing,
+                # so per-request TBT reflects true decode cadence. Without this
+                # HAProxy bursts the token stream (~230ms flush vs ~22ms/token
+                # observed via the Ray Serve native proxy in the TBT diagnostic).
+                option http-no-delay
                 timeout connect 5s
                 timeout client  330s
                 timeout server  330s
