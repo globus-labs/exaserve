@@ -194,6 +194,10 @@ class RayBackendAdapter(BackendAdapter):
             # Stages the Ray Serve overlay probes (GetActorInfo counts, per-proxy
             # ray.get_actor timing) read by launch_cluster.sh. Needed for EXP SET 3.
             exports["AURORA_INSTRUMENTATION"] = "1"
+        if bool(launch_settings.get("clean_stage", False)):
+            # Wipe node-local artifacts before staging so Phase-2 MPI weight
+            # broadcast is re-done and timed every run (resources/cleanup_run.sh).
+            exports["AURORA_CLEAN_STAGE"] = "1"
         return RuntimeEnvSpec(env_script=env_script, exports=exports)
 
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:

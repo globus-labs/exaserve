@@ -309,6 +309,17 @@ export RAY_SERVE_THROUGHPUT_OPTIMIZED="${RAY_SERVE_THROUGHPUT_OPTIMIZED:-1}"
 
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 
+# Optional per-run clean stage (experiment flag launch.clean_stage ->
+# AURORA_CLEAN_STAGE): wipe node-local artifacts BEFORE staging so the MPI
+# weight broadcast (Phase 2) is exercised + timed every run, and the node
+# starts from a clean slate. See resources/cleanup_run.sh.
+if [ "${AURORA_CLEAN_STAGE:-0}" = "1" ]; then
+    echo "[System] CLEAN-STAGE: wiping per-node run artifacts before staging"
+    timeout 180 mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+        bash "$SCRIPT_DIR/cleanup_run.sh" \
+        || echo "[System] WARN: clean-stage cleanup reported errors (continuing)"
+fi
+
 AURORA_MODEL_BCAST_TIMING=""
 if [ "${AURORA_NULL_COMPUTE:-0}" = "1" ]; then
     echo "[System] NULL-COMPUTE mode enabled; skipping model staging"
