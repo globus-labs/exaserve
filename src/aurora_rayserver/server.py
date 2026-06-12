@@ -697,9 +697,12 @@ class VLLMWorker:
                     "Installed vLLM build does not expose pipeline_parallel_size on "
                     "AsyncEngineArgs. Validate the Aurora runtime before using PP."
                 )
-            if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
-                os.environ.setdefault("AURORA_VLLM_DISABLE_RAY_COMPILED_DAG", "1")
-                os.environ.setdefault("AURORA_VLLM_FORCE_RAY_CHANNEL_TYPE", "auto")
+            # Unconditional: the VLLM_TARGET_DEVICE gate silently skipped this
+            # when the env var was absent, leaving the compiled DAG enabled —
+            # which crashes XPU workers in Ray's accelerator context at first
+            # inference. We only deploy on XPU.
+            os.environ.setdefault("AURORA_VLLM_DISABLE_RAY_COMPILED_DAG", "1")
+            os.environ.setdefault("AURORA_VLLM_FORCE_RAY_CHANNEL_TYPE", "auto")
             master_addr = get_ray_node_ip() or get_hsn_ip()
             bind_host = "0.0.0.0"
             os.environ["VLLM_HOST_IP"] = master_addr

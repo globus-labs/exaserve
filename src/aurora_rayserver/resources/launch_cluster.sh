@@ -337,6 +337,12 @@ export AURORA_MODEL_BCAST_TIMING
 
 export AURORA_VLLM_PATCH_PP_LAYER_FILTER="${AURORA_VLLM_PATCH_PP_LAYER_FILTER:-1}"
 
+# Ray's compiled-DAG channels crash in the RayWorkerWrapper accelerator
+# context on XPU (ONEAPI_DEVICE_SELECTOR device-id mapping), so PP>1 must use
+# the uncompiled Ray executor fallback from _sitecustomize. Only affects
+# pipeline_parallel_size > 1; TP-only paths never consult this flag.
+export AURORA_VLLM_DISABLE_RAY_COMPILED_DAG="${AURORA_VLLM_DISABLE_RAY_COMPILED_DAG:-1}"
+
 # Scaling trace instrumentation: collects per-replica init timing and
 # driver phases via Ray object store (no Lustre file I/O).  Safe at any
 # scale.  Set AURORA_SCALING_TRACE=0 to fully disable.
