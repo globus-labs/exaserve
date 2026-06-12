@@ -29,6 +29,43 @@ resolves by filename stem), hence the `_val` suffix convention.
 - **Multi-node PP:** demonstration row = `smokes/pp405b_verify_2node` (verified);
   optional OAT-style rate via `calibration/sat_405b_pp2`.
 
+## Run checklist (per folder)
+
+### calibration/ — 6 of 8 done
+- [x] `sat_8b_64x64` — 109 rps/node → OAT rate **98**
+- [x] `sat_8b_2kx2k` — 4 → **3.6**
+- [x] `sat_8b_4kx4k` — 2 → **1.8**
+- [x] `sat_8b_code` — 6 → **5.4**
+- [x] `sat_8b_chat` — 12 → **10.8**
+- [x] `sat_8b_summary` — 12 → **10.8**
+- [ ] `sat_120b_64x64` — next 1-node window; fills the `oat_120b` placeholder rate
+- [ ] `sat_405b_pp2` — 2 nodes, ≥90 min window; only needed if the PP row joins the OAT table
+
+### validation/ — 0 of 15 done (the pilot sweep has not started)
+- [ ] `oat_8b_{baseline,poisson,2kx2k,4kx4k,code,chat,summary,burstgpt}_val` (9 incl. 120b below)
+      — N=1 cells fit debug; N=64 cells fit debug-scaling (≤1 h each)
+- [ ] `oat_120b_val` — ⚠ blocked on `sat_120b_64x64` (placeholder rate)
+- [ ] `proxycmp_{haproxy,envoy,litellm,rayserve,direct}_val` — N ∈ {1,4,16,64}
+- [ ] `nullcompute_scaling_val` — the single `n256_r12` cell; **capacity only**
+
+### full/ — 0 of 15 done (gated on the validation sweep + budget)
+- [ ] `oat_8b_*` ×8 + `oat_120b` (⚠ placeholder rate) — N ∈ {1,64}; baseline also N=256
+- [ ] `proxycmp_*` ×5 — N ∈ {1,4,16,64}; haproxy+direct extended to 256 (capacity)
+- [ ] `nullcompute_scaling` — full (N,R) matrix to 1024; approve per-cell (cost!)
+
+### smokes/ — 7 of 9 exercised, all passing
+- [x] `smoke_slo_stream_1node` — HAProxy + stream + TBT + goodput (run repeatedly)
+- [x] `smoke_slo_stream_rayserve_1node` — Ray-native proxy; the TBT-buffering diagnostic
+- [x] `smoke_slo_stream_direct_1node` — dest=direct, verified post-fix (`ea2c5e9`)
+- [x] `dataset_replay_smoke_humaneval` — dataset_replay + Poisson end-to-end
+- [x] `nullcompute_smoke_1node` — null-compute + instrumentation probes
+- [x] `pp405b_verify_2node` — **the multi-node-PP demonstration: 30/30 streaming** ✓
+- [x] `pp2_verify_2node` — diagnostic; documents the small-TP auto-pack/over-density failure
+- [ ] `pp2_serve_2node` — small-TP multi-replica PP; known-failing (tile co-location OOM);
+      revisit only with the whole-node-rounding guard or ≥4 nodes
+- [ ] `clean_stage_check_1node` — clean-stage flag check (added with `884e1a0`; not run in
+      the eval sessions — run after any staging-path change)
+
 ## Machine-time estimate (coarse, queue wait excluded)
 
 Per-cell model from measured runs: bring-up ≈ 4 min (8B) / 7 min (120B) /
