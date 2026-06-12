@@ -21,6 +21,8 @@ patterns=(
   /tmp/aurora_inst        # instrumentation probe outputs
   /tmp/aurora_overlay     # Ray Serve overlay (instrumentation builds)
   /tmp/ray/session_*      # Ray session scratch (Ray usually clears on stop)
+  /tmp/replay_rank*       # replay client per-run Go JSONL scratch (mkdtemp, never self-removed)
+  /tmp/aurora_pp_shim     # PP sitecustomize shim dir written by VLLMWorker.__init__
 )
 patterns+=("$@")
 
