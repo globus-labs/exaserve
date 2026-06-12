@@ -26,6 +26,14 @@ resolver falls back to flat `runs/<name>/` for anything never relocated.
 Invariant: `runs/sc26workshop/` contains only folders that mirror this spec
 tree, and a folder there means real data from that suite stage.
 
+All `validation/` and `full/` specs set `launch.clean_stage: true`: node-local
+artifacts (staged weights, instrumentation, scratch) are wiped before staging,
+so the bring-up/lifecycle numbers (Phase 2 included) are cold-start regardless
+of whether cells run as fresh PBS jobs or back-to-back on a reused allocation.
+Serving metrics are unaffected (staging precedes the replay; the in-group
+warm-up protocol is unchanged). `calibration/` and `smokes/` leave it off for
+iteration speed.
+
 ## Suite contents (mirror of plan_exp.md §9)
 
 - **Set 1 — proxy comparison:** `proxycmp_{haproxy,envoy,litellm,rayserve,direct}`,

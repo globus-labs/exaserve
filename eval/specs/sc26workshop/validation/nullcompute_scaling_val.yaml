@@ -71,6 +71,7 @@ backend:
     ray:
       launch:
         ray_node_cpus: 64
+        clean_stage: true
         null_compute: true
         instrumentation: true
       proxy:
