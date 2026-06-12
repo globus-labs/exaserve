@@ -272,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         run_group_dir = Path(args.run_group)
     else:
         run_group_dir = Path(resolve_run_group_dir(args.experiment,
-                                                  run_group=args.run_group_name))
+                                                  run_group=args.run_group_name or "latest"))
     if not run_group_dir.is_dir():
         parser.error(f"Run group dir not found: {run_group_dir}")
     print(f"Run group : {run_group_dir}")

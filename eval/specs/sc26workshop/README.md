@@ -16,6 +16,13 @@ every checklist run-item has exactly one spec here.
 Spec names must be unique across the whole `eval/specs/` tree (the catalog
 resolves by filename stem), hence the `_val` suffix convention.
 
+**Results mirror this layout**: run groups land under
+`<experiments_root>/runs/<spec-folder>/<spec-name>/runN/` (e.g.
+`runs/sc26workshop/full/oat_8b_baseline/run0/`), derived automatically from the
+spec's location (`spec_runs_dir` in `eval/lib/run_planner.py`). Pre-existing
+flat result dirs were relocated with symlinks left at the old paths, and the
+resolver falls back to flat `runs/<name>/` for anything never relocated.
+
 ## Suite contents (mirror of plan_exp.md §9)
 
 - **Set 1 — proxy comparison:** `proxycmp_{haproxy,envoy,litellm,rayserve,direct}`,

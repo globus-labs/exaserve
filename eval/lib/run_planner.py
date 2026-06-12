@@ -46,6 +46,7 @@ from .models import (
     WorkloadSpec,
 )
 from .schedulers.pbs import default_queue_and_walltime, render_pbs_job
+from .catalog import spec_group_relpath
 from .spec_io import load_experiment_spec
 from .trace_store import materialize_trace_artifact
 from .utils import dump_json_file, dump_yaml_file, ensure_dir, load_yaml_file, slugify, utc_timestamp
@@ -61,7 +62,19 @@ def runs_root(root: str | None = None) -> str:
 
 
 def spec_runs_dir(spec_name: str, *, experiments_root: str | None = None) -> str:
-    return os.path.join(runs_root(experiments_root), spec_name)
+    """Run-group root for a spec, mirroring the spec's folder under eval/specs.
+
+    A spec at eval/specs/sc26workshop/full/foo.yaml maps to
+    runs/sc26workshop/full/foo/. Falls back to the legacy flat runs/<name>/
+    when the mirrored path does not exist yet but flat results do (pre-existing
+    experiments whose result dirs were never relocated).
+    """
+    root = runs_root(experiments_root)
+    canonical = os.path.join(root, spec_group_relpath(spec_name), spec_name)
+    legacy = os.path.join(root, spec_name)
+    if canonical != legacy and not os.path.isdir(canonical) and os.path.isdir(legacy):
+        return legacy
+    return canonical
 
 
 def list_run_group_ids(spec_name: str, *, experiments_root: str | None = None) -> list[str]:

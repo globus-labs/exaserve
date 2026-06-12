@@ -29,6 +29,21 @@ def list_spec_names() -> list[str]:
     return sorted(set(names))
 
 
+def spec_group_relpath(name_or_path: str) -> str:
+    """Directory of a spec relative to eval/specs ('' for flat or unknown specs).
+
+    Lets the results tree mirror the spec tree: a spec living at
+    eval/specs/sc26workshop/full/foo.yaml gets its run groups under
+    runs/sc26workshop/full/foo/ instead of the flat runs/foo/.
+    """
+    try:
+        spec_path = find_spec_path(name_or_path)
+    except (FileNotFoundError, RuntimeError):
+        return ""
+    rel = os.path.relpath(os.path.dirname(spec_path), spec_root())
+    return "" if rel == "." else rel
+
+
 def find_spec_path(name_or_path: str) -> str:
     if os.path.isfile(name_or_path):
         return os.path.abspath(name_or_path)
