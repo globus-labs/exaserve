@@ -703,6 +703,35 @@ class VLLMWorker:
             # inference. We only deploy on XPU.
             os.environ.setdefault("AURORA_VLLM_DISABLE_RAY_COMPILED_DAG", "1")
             os.environ.setdefault("AURORA_VLLM_FORCE_RAY_CHANNEL_TYPE", "auto")
+            # The EngineCore is a multiprocessing-spawn child that never
+            # imports aurora_rayserver, so the vLLM executor patches in
+            # _sitecustomize (incl. the uncompiled-PP fallback these env vars
+            # select) are otherwise inert exactly where the Ray executor
+            # lives. Prepend a node-local sitecustomize shim so the spawned
+            # interpreter applies them at startup.
+            shim_dir = "/tmp/aurora_pp_shim"
+            try:
+                os.makedirs(shim_dir, exist_ok=True)
+                shim_path = os.path.join(shim_dir, "sitecustomize.py")
+                if not os.path.exists(shim_path):
+                    with open(shim_path, "w", encoding="utf-8") as shim_fh:
+                        shim_fh.write(
+                            "try:\n"
+                            "    import aurora_rayserver._sitecustomize  # noqa: F401\n"
+                            "except Exception:\n"
+                            "    pass\n"
+                        )
+                existing_pp = os.environ.get("PYTHONPATH", "")
+                if shim_dir not in existing_pp.split(os.pathsep):
+                    os.environ["PYTHONPATH"] = (
+                        shim_dir + (os.pathsep + existing_pp if existing_pp else "")
+                    )
+            except OSError as shim_exc:
+                print(
+                    f"[VLLMWorker pid={pid}] WARNING: PP sitecustomize shim "
+                    f"setup failed: {shim_exc}",
+                    flush=True,
+                )
             master_addr = get_ray_node_ip() or get_hsn_ip()
             bind_host = "0.0.0.0"
             os.environ["VLLM_HOST_IP"] = master_addr
