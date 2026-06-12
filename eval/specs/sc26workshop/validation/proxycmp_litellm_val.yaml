@@ -1,5 +1,5 @@
-name: proxycmp_envoy
-# EXP SET 1 (proxy comparison) — Envoy dispatcher. Same baseline as
+name: proxycmp_litellm_val
+# EXP SET 1 (proxy comparison) — LiteLLM dispatcher. Same baseline as
 # proxycmp_haproxy; stream=true for P99 TTFT/TBT.
 matrix:
   name_template: 'n{num_nodes}'
@@ -37,7 +37,7 @@ deployment:
   replica_max_ongoing_requests: 256
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 2
   dest: proxy
   stream: true
   num_go_procs: 4
@@ -49,13 +49,7 @@ backend:
       launch:
         ray_node_cpus: 64
       proxy:
-        type: envoy
-        port: 4001
-        backend_port: 8000
-        options:
-          lb_policy: LEAST_REQUEST
-          admin_port: 9902
-          concurrency: 0
-          max_connections: 50000
+        type: litellm
+        num_workers: 8
 scheduler:
   type: pbs

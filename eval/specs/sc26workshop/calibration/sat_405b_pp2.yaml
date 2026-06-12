@@ -1,0 +1,71 @@
+name: sat_405b_pp2
+# Rate calibration for the multi-node-PP row: Llama-3.1-405B TP=8 x PP=2 on 2
+# whole nodes (same deployment as smokes/pp405b_verify_2node, incl. the
+# Lustre-direct staging symlink). Binary-searches single-REPLICA saturation;
+# the verify run suggests the knee is well under 1 req/s, so the search starts
+# at 1 and the 15 s steps keep the sweep short. Expect a long bring-up
+# (~21 min weights from Lustre) before the search even starts -> 1 h walltime
+# is tight; prefer a >=90 min window or capacity.
+matrix:
+  name_template: baseline
+  axes:
+  - name: num_nodes
+    values: [2]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}n'
+  derived:
+  - path: client.num_nodes
+    expr: '2'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 5.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 1000.0
+deployment:
+  num_nodes: 2
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  models:
+  - model_id: meta-llama/Llama-3.1-405B-Instruct
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    num_replicas: 1
+    max_model_len: 4096
+    size: 405
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 8
+  replica_max_ongoing_requests: 16
+client:
+  dest: proxy
+  num_go_procs: 1
+  num_go_workers: 4
+  saturation:
+    enabled: true
+    initial_rate: 1
+    search_mode: binary
+    step_duration_s: 15
+    stream: true
+    tolerance: 0.05
+    warmup_duration_s: 5
+    plateau_ratio: 0.75
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 50000
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 01:00:00

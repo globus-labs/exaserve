@@ -1,9 +1,8 @@
-name: oat_8b_chat
-# EXP SET 2 (OAT) - workload perturbation: Chat (ShareGPT-natural) via
-# dataset_replay (real variable-length prompts + per-row output_len). Fixed-
-# interval at 90% of saturation measured with the representative shape
-# (12 -> 10.8 rps/node). Note: real outputs have a long tail; if goodput
-# attainment < ~90% at this rate, lower it.
+name: oat_8b_summary_val
+# EXP SET 2 (OAT) - workload perturbation: Summarization (CNN-DailyMail) via
+# dataset_replay (real long articles + 256-token summaries). Fixed-interval at
+# 90% of saturation measured with the representative shape (12 -> 10.8 rps/node).
+# max_model_len 8192 to fit long articles.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -20,10 +19,10 @@ matrix:
     expr: '"01:00:00"'
 trace:
   kind: dataset_replay
-  input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/paper_datasets/sharegpt_natural.jsonl
+  input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/paper_datasets/cnn_dailymail.jsonl
 workload:
   duration: 60.0
-  input_len: 256
+  input_len: 768
   output_len: 256
   rate_per_node: 10.8
   arrival: fixed
@@ -33,7 +32,7 @@ deployment:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    max_model_len: 4096
+    max_model_len: 8192
     size: 8
     gpu_memory_utilization: 0.90
     enforce_eager: true
@@ -41,7 +40,7 @@ deployment:
   replica_max_ongoing_requests: 256
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 2
   dest: proxy
   stream: true
   num_go_procs: 4

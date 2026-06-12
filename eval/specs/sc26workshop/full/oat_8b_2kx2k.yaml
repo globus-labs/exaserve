@@ -1,7 +1,6 @@
-name: oat_8b_poisson
-# EXP SET 2 (OAT) - arrival perturbation: Poisson at the baseline mean rate.
-# Identical to oat_8b_baseline except workload.arrival: poisson. Tests whether
-# the headline efficiency survives bursty (non-deterministic) arrivals.
+name: oat_8b_2kx2k
+# EXP SET 2 (OAT) - workload perturbation: ShareGPT 2K/2K (2048 in / 2048 out),
+# fixed-interval at 90% of its single-node saturation (4 -> 3.6 rps/node).
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -20,25 +19,25 @@ trace:
   kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 64
-  output_len: 64
-  rate_per_node: 98.0
-  arrival: poisson
+  input_len: 2048
+  output_len: 2048
+  rate_per_node: 3.6
+  arrival: fixed
   generation_mode: deterministic
 deployment:
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    max_model_len: 4096
+    max_model_len: 8192
     size: 8
     gpu_memory_utilization: 0.90
     enforce_eager: true
-    max_num_seqs: 64
-  replica_max_ongoing_requests: 256
+    max_num_seqs: 32
+  replica_max_ongoing_requests: 128
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 6
   dest: proxy
   stream: true
   num_go_procs: 4

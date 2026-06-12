@@ -1,6 +1,7 @@
-name: oat_8b_4kx4k
-# EXP SET 2 (OAT) - workload perturbation: long-context 4K/4K (4096 in / 2048 out),
-# fixed-interval at 90% of its single-node saturation (2 -> 1.8 rps/node).
+name: oat_8b_burstgpt_val
+# EXP SET 2 (OAT) - arrival perturbation: real BurstGPT trace replay (production
+# bursty arrivals + per-request token counts via the azure_trace column-map for
+# 'Request tokens'/'Response tokens'). Densest 60s window (sampling=peak).
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -16,28 +17,30 @@ matrix:
   - path: scheduler.walltime
     expr: '"01:00:00"'
 trace:
-  kind: weak_scaling
+  kind: azure_trace
+  input_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/BurstGPT_without_fails_1.csv
 workload:
   duration: 60.0
-  input_len: 4096
-  output_len: 2048
-  rate_per_node: 1.8
-  arrival: fixed
-  generation_mode: deterministic
+  input_len: 512
+  output_len: 64
+  rate_per_node: 5.0
+  speedup: 1.0
+  sampling_strategy: peak
+  seed: 42
 deployment:
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    max_model_len: 8192
+    max_model_len: 4096
     size: 8
     gpu_memory_utilization: 0.90
     enforce_eager: true
-    max_num_seqs: 32
-  replica_max_ongoing_requests: 128
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 2
   dest: proxy
   stream: true
   num_go_procs: 4

@@ -1,7 +1,10 @@
-name: oat_8b_code
-# EXP SET 2 (OAT) - workload perturbation: Code (HumanEval) via dataset_replay
-# (real prompts, per-row output_len). Fixed-interval at 90% of single-node
-# saturation measured with the representative shape (6 -> 5.4 rps/node).
+name: oat_120b_val
+# EXP SET 2 (OAT) - model perturbation: GPT-OSS-120B (MXFP4, 122 GB) from the
+# shared hub, TP=8 (8/12 tiles, 4 idle), planner auto-packs 1 replica/node.
+#
+# !!! PLACEHOLDER RATE !!! rate_per_node MUST be replaced with 90% of the
+# measured single-node saturation from calibration/sat_120b_64x64 before any
+# real run. The 8.0 below is a guess and will produce misleading SLO numbers.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -17,29 +20,29 @@ matrix:
   - path: scheduler.walltime
     expr: '"01:00:00"'
 trace:
-  kind: dataset_replay
-  input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/paper_datasets/humaneval.jsonl
+  kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 256
-  output_len: 512
-  rate_per_node: 5.4
+  input_len: 64
+  output_len: 64
+  rate_per_node: 8.0
   arrival: fixed
   generation_mode: deterministic
 deployment:
+  model_storage_path: /flare/datasets/model-weights/hub
   models:
-  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
-    tensor_parallel_size: 1
+  - model_id: openai/gpt-oss-120b
+    tensor_parallel_size: 8
     pipeline_parallel_size: 1
     max_model_len: 4096
-    size: 8
+    size: 120
     gpu_memory_utilization: 0.90
     enforce_eager: true
     max_num_seqs: 64
-  replica_max_ongoing_requests: 256
+  replica_max_ongoing_requests: 128
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 2
   dest: proxy
   stream: true
   num_go_procs: 4

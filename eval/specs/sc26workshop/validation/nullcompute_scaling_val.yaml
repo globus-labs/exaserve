@@ -1,0 +1,86 @@
+name: nullcompute_scaling_val
+# EXP SET 3 — control-plane null-compute, push past 256 nodes.
+# Replicas short-circuit the forward pass (null_compute), isolating serve.run's
+# control plane from model loading. startup_only=true (no replay); the data is
+# the bring-up itself. instrumentation=true stages the overlay probes so we get
+# GetActorInfo counts + per-proxy ray.get_actor timing alongside scaling_trace's
+# wait_proxies / deploy_apps.
+#
+# Primary axis  N in {256,384,512,768,1024}  (upper points likely FAIL at the
+#               single-head GCS ceiling; the failure mode IS the result).
+# Secondary axis R = replicas/node in {12,24,48} via num_gpus_per_node, to test
+#               whether the O(N^2) constant scales with R.
+#
+# !!! READ BEFORE SUBMITTING !!!
+#  - CAPACITY ONLY: every cell exceeds debug-scaling's 1h cap (256n serve.run is
+#    ~31min and grows superlinearly). Submit on a capacity allocation with a
+#    multi-hour walltime; never submit the whole matrix at once.
+#  - VALIDATE n256_r12 FIRST. Only after it succeeds, run larger N.
+#  - R>12 OVERSUBSCRIBES the 12 physical tiles. It is only meaningful under
+#    null-compute (no real device use) and requires the replica to request 0
+#    GPUs; num_cpus_per_replica=1 keeps 48 replicas within 64 CPUs. Confirm the
+#    replica GPU request is 0 before running the r24/r48 cells.
+matrix:
+  name_template: 'n{num_nodes}_r{num_gpus_per_node}'
+  combine: cartesian
+  axes:
+  - name: num_nodes
+    values: [256]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: 'n{value}'
+  - name: num_gpus_per_node
+    values: [12]
+    targets: [deployment.num_gpus_per_node]
+    label_template: 'r{value}'
+  derived:
+  - path: client.num_nodes
+    expr: 'num_nodes'
+  - path: scheduler.walltime
+    expr: '"03:00:00"'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 1.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 1.0
+  generation_mode: deterministic
+deployment:
+  num_gpus_per_node: 12
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    num_cpus_per_replica: 1
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 1
+  startup_only: true
+  dest: proxy
+  stream: false
+  num_go_procs: 1
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        null_compute: true
+        instrumentation: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs
+  queue: debug-scaling

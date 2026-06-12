@@ -37,7 +37,7 @@ deployment:
   replica_max_ongoing_requests: 256
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 6
   dest: proxy
   stream: true
   num_go_procs: 4

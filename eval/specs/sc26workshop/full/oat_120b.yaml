@@ -1,7 +1,10 @@
-name: oat_8b_burstgpt
-# EXP SET 2 (OAT) - arrival perturbation: real BurstGPT trace replay (production
-# bursty arrivals + per-request token counts via the azure_trace column-map for
-# 'Request tokens'/'Response tokens'). Densest 60s window (sampling=peak).
+name: oat_120b
+# EXP SET 2 (OAT) - model perturbation: GPT-OSS-120B (MXFP4, 122 GB) from the
+# shared hub, TP=8 (8/12 tiles, 4 idle), planner auto-packs 1 replica/node.
+#
+# !!! PLACEHOLDER RATE !!! rate_per_node MUST be replaced with 90% of the
+# measured single-node saturation from calibration/sat_120b_64x64 before any
+# real run. The 8.0 below is a guess and will produce misleading SLO numbers.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -17,30 +20,29 @@ matrix:
   - path: scheduler.walltime
     expr: '"01:00:00"'
 trace:
-  kind: azure_trace
-  input_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/BurstGPT_without_fails_1.csv
+  kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 512
+  input_len: 64
   output_len: 64
-  rate_per_node: 5.0
-  speedup: 1.0
-  sampling_strategy: peak
-  seed: 42
+  rate_per_node: 8.0
+  arrival: fixed
+  generation_mode: deterministic
 deployment:
+  model_storage_path: /flare/datasets/model-weights/hub
   models:
-  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
-    tensor_parallel_size: 1
+  - model_id: openai/gpt-oss-120b
+    tensor_parallel_size: 8
     pipeline_parallel_size: 1
     max_model_len: 4096
-    size: 8
+    size: 120
     gpu_memory_utilization: 0.90
     enforce_eager: true
     max_num_seqs: 64
-  replica_max_ongoing_requests: 256
+  replica_max_ongoing_requests: 128
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 6
   dest: proxy
   stream: true
   num_go_procs: 4

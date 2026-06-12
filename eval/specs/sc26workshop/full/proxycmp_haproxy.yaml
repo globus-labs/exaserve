@@ -1,6 +1,8 @@
-name: proxycmp_litellm
-# EXP SET 1 (proxy comparison) — LiteLLM dispatcher. Same baseline as
-# proxycmp_haproxy; stream=true for P99 TTFT/TBT.
+name: proxycmp_haproxy
+# EXP SET 1 (proxy comparison at scale) — HAProxy dispatcher.
+# Baseline workload, stream=true so P99 TTFT and P99 TBT are captured per proxy.
+# Scale axis is [1,4,16,64] (each fits debug-scaling 1h). To extend to 256n
+# (HAProxy plateau finding), run on capacity with a longer walltime.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -37,7 +39,7 @@ deployment:
   replica_max_ongoing_requests: 256
   collect_stats: true
 client:
-  num_runs: 4
+  num_runs: 6
   dest: proxy
   stream: true
   num_go_procs: 4
@@ -49,7 +51,12 @@ backend:
       launch:
         ray_node_cpus: 64
       proxy:
-        type: litellm
-        num_workers: 8
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
 scheduler:
   type: pbs
