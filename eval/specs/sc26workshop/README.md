@@ -24,11 +24,7 @@ flat result dirs were relocated with symlinks left at the old paths, and the
 resolver falls back to flat `runs/<name>/` for anything never relocated.
 
 Invariant: `runs/sc26workshop/` contains only folders that mirror this spec
-tree, and a folder there means real data from that suite stage. The pre-reorg
-1-node validation runs of `oat_8b_burstgpt` / `proxycmp_envoy` /
-`proxycmp_litellm` therefore live as plain legacy dirs in the flat `runs/`
-area (the resolver's flat fallback finds them by name until real `full/`
-data is materialized, after which the mirrored path takes precedence).
+tree, and a folder there means real data from that suite stage.
 
 ## Suite contents (mirror of plan_exp.md §9)
 
