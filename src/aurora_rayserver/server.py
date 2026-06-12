@@ -27,6 +27,10 @@ from typing import Optional, List, Dict, Any
 # import, so monkey-patching after the fact is too late. The launcher
 # arranges PYTHONPATH so the overlay tree wins import precedence; the
 # vLLM monkey-patches in aurora_rayserver._sitecustomize are applied here.
+# NOTE: this covers the server and Serve replica processes only. The vLLM
+# EngineCore (a multiprocessing-spawn child) never imports this package;
+# for PP it gets the patches via the PYTHONPATH sitecustomize shim written
+# in VLLMWorker.__init__.
 from .patches import apply_all as _apply_all  # noqa: I001
 _apply_all()
 
@@ -394,10 +398,12 @@ def build_planner_placement_group(
     """
     Build placement-group bundles that match the planner's capacity model.
 
-    For PP, the coordinator shares the stage-0 bundle so the vLLM driver stays
-    colocated with its first stage. The remaining bundles are one multi-GPU
-    stage each. For TP-only, the actor directly consumes a single CPU+GPU
-    bundle.
+    For PP, bundle 0 is a CPU-only coordinator bundle and the rest are one
+    single-GPU bundle per worker (vLLM 0.15 rejects bundles with >1 GPU).
+    These bundles carry no node resource keys so Serve can reuse the template
+    across replicas; single-replica PP instead uses the node-pinned layout
+    from build_pp_placement_group_bundles (see deploy_model). For TP-only,
+    the actor directly consumes a single CPU+GPU bundle.
     """
     if model_config.pipeline_parallel_size > 1:
         # vLLM 0.15's Ray executor rejects bundles with more than 1 GPU

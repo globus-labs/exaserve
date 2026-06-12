@@ -656,6 +656,12 @@ _install_vllm_gpu_model_runner_import_hook()
 
 
 def _patch_vllm_ray_multigpu_bundles() -> None:
+    # STATUS: written to let multi-GPU per-stage bundles pass vLLM 0.15's
+    # one-GPU-per-bundle check, but server.py now emits per-GPU bundles
+    # (commit 17b88be) which pass the upstream check unpatched — so this is
+    # likely redundant. It only loads in the EngineCore at all since the
+    # PYTHONPATH sitecustomize shim (commit 4d9d846). Kept because the
+    # verified 405B PP run had it loaded; removal needs a PP re-test.
     if os.getenv("AURORA_VLLM_PATCH_PP_LAYER_FILTER") != "1":
         return
 
@@ -847,6 +853,12 @@ _patch_vllm_ray_multigpu_bundles()
 
 
 def _patch_vllm_ray_executor_bundle_indices() -> None:
+    # STATUS: written to allow duplicate VLLM_RAY_BUNDLE_INDICES (multiple
+    # workers sharing a multi-GPU stage bundle). server.py no longer sets
+    # that env var and emits per-GPU bundles (commit 17b88be), so the
+    # default no-env path here matches upstream behavior — likely redundant.
+    # Same caveat as _patch_vllm_ray_multigpu_bundles: loaded during the
+    # verified 405B PP run via the 4d9d846 shim; removal needs a PP re-test.
     if os.getenv("AURORA_VLLM_PATCH_PP_LAYER_FILTER") != "1":
         return
 

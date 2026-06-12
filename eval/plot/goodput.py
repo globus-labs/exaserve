@@ -295,8 +295,9 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print("WARNING: P99-TBT data missing for presets: "
               f"{sorted(tbt_missing_for)}. Reported attainment IGNORES the TBT bound "
-              "(decode-phase SLO UNVERIFIED) — do not trust these numbers. Re-run with a "
-              "go_dispatch built from the TBT-capture commit so per-request tbt_p99_s is emitted.")
+              "(decode-phase SLO UNVERIFIED) — do not trust these numbers. Re-run with "
+              "client.stream=true and a current go_dispatch build (eval/go_client) so "
+              "per-request tbt_p99_s is emitted.")
         if args.ttft_required:
             return 2
 
