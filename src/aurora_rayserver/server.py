@@ -343,16 +343,6 @@ def get_tp_replica_capacity(
     return config.num_nodes * per_node_cap, per_node_cap
 
 
-def get_pp_bundle_indices(model_config: ModelConfig) -> str:
-    """Map TP workers to stage bundles: [0]*tp + [1]*tp + ..."""
-    bundle_indices: list[str] = []
-    for stage_bundle_index in range(model_config.pipeline_parallel_size):
-        bundle_indices.extend(
-            [str(stage_bundle_index)] * model_config.tensor_parallel_size
-        )
-    return ",".join(bundle_indices)
-
-
 def build_pp_placement_group_bundles(
     model_config: ModelConfig,
     config: DeploymentConfig,
@@ -410,17 +400,19 @@ def build_planner_placement_group(
     bundle.
     """
     if model_config.pipeline_parallel_size > 1:
-        bundles = [
-            {
-                "CPU": float(model_config.num_cpus_per_replica),
-                "GPU": float(model_config.tensor_parallel_size),
-            }
-        ]
+        # vLLM 0.15's Ray executor rejects bundles with more than 1 GPU
+        # (ray_utils.initialize_ray_cluster), so PP must use one bundle per
+        # GPU worker. Without node resource keys all replicas can share this
+        # template, but a stage's TP group may straddle nodes under PACK.
+        bundles = [{"CPU": float(model_config.num_cpus_per_replica)}]
         bundles.extend(
-            {"GPU": float(model_config.tensor_parallel_size)}
-            for _ in range(model_config.pipeline_parallel_size - 1)
+            {"GPU": 1.0}
+            for _ in range(
+                model_config.pipeline_parallel_size
+                * model_config.tensor_parallel_size
+            )
         )
-        return bundles, "SPREAD", 0
+        return bundles, "PACK", 0
 
     bundles = [
         {
@@ -1121,17 +1113,36 @@ def deploy_model(
 
     if use_global_planner:
         if model_config.pipeline_parallel_size > 1:
-            placement_group_bundles, placement_group_strategy, actor_num_gpus = (
-                build_planner_placement_group(model_config)
-            )
-            extra_env_vars["VLLM_RAY_BUNDLE_INDICES"] = get_pp_bundle_indices(
-                model_config
-            )
-            print(
-                f"[AuroraServe] Planner placement for {model_id}: "
-                f"strategy={placement_group_strategy}, bundles={placement_group_bundles}",
-                flush=True,
-            )
+            if num_replicas == 1:
+                # Node-pinned per-GPU bundles: each stage's TP group stays on
+                # one node. Only valid for a single replica — Serve shares one
+                # bundle template across replicas, so pinned bundles would make
+                # multiple replicas contend for the same nodes.
+                placement_group_bundles, stage_node_ips = (
+                    build_pp_placement_group_bundles(model_config, config)
+                )
+                placement_group_strategy = "PACK"
+                actor_num_gpus = 0
+                print(
+                    f"[AuroraServe] Planner PP placement for {model_id}: "
+                    f"stage nodes={stage_node_ips}, "
+                    f"bundles={len(placement_group_bundles)} "
+                    f"(1 coordinator + {model_config.pipeline_parallel_size}"
+                    f" x {model_config.tensor_parallel_size} GPU workers)",
+                    flush=True,
+                )
+            else:
+                placement_group_bundles, placement_group_strategy, actor_num_gpus = (
+                    build_planner_placement_group(model_config)
+                )
+                print(
+                    f"[AuroraServe] Planner placement for {model_id}: "
+                    f"strategy={placement_group_strategy}, "
+                    f"bundles={placement_group_bundles}; WARNING: multi-replica "
+                    "PP uses location-agnostic bundles — a stage's TP group may "
+                    "straddle nodes",
+                    flush=True,
+                )
         else:
             actor_num_gpus = model_config.tensor_parallel_size
             print(
