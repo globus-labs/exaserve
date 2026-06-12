@@ -1,0 +1,64 @@
+name: sat_8b_64x64
+# Set 2 saturation finder - baseline workload (8B, 64 in / 64 out), 1 node.
+# Binary-searches single-node saturation rate (90% of it -> OAT rate).
+# Mirrors the paper's baseline config (max_num_seqs=64, mor=256; ~118 req/s/node).
+matrix:
+  name_template: baseline
+  axes:
+  - name: num_nodes
+    values: [1]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}n'
+  derived:
+  - path: client.num_nodes
+    expr: '1'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 5.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 1000.0
+deployment:
+  num_nodes: 1
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  dest: proxy
+  num_go_procs: 1
+  num_go_workers: 4
+  saturation:
+    enabled: true
+    initial_rate: 100
+    search_mode: binary
+    step_duration_s: 15
+    stream: true
+    tolerance: 0.05
+    warmup_duration_s: 5
+    plateau_ratio: 0.75
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 01:00:00

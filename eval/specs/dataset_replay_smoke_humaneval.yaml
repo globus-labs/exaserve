@@ -1,0 +1,64 @@
+name: dataset_replay_smoke_humaneval
+# Validate the dataset_replay trace kind end-to-end (serve + replay) on 1 node
+# with the HumanEval JSONL (code workload). Also exercises Poisson arrival and
+# the http-no-delay HAProxy streaming fix in one shot.
+matrix:
+  name_template: '{num_nodes}_nodes'
+  axes:
+  - name: num_nodes
+    values:
+    - 1
+    targets:
+    - deployment.num_nodes
+    - scheduler.nodes
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: '1'
+trace:
+  kind: dataset_replay
+  input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/paper_datasets/humaneval.jsonl
+workload:
+  duration: 30.0
+  input_len: 256
+  output_len: 64
+  rate_per_node: 10.0
+  arrival: poisson
+  generation_mode: deterministic
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.9
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 128
+client:
+  num_runs: 1
+  num_nodes: 1
+  dest: proxy
+  stream: true
+  num_go_procs: 1
+  num_go_workers: 4
+  go_concurrency: 200
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 01:00:00

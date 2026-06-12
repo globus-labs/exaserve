@@ -1,0 +1,71 @@
+name: pp405b_verify_2node
+# Multi-node PP row (option c): Llama-3.1-405B-Instruct (bf16, 756 GB) GENUINELY
+# requires >1 node: legal TP is {1,2,4,8} (128 heads; TP=12 illegal per vLLM
+# head-divisibility) and a TP=8 stage has ~420 GiB usable -> 756 GB needs PP>=2.
+# Config: TP=8 x PP=2 = one replica spanning 2 whole nodes (8/12 tiles each);
+# TP=8 stages cannot co-locate (8+8>12) -> no tile sharing -> no load-OOM.
+#
+# STAGING: NO BCAST. 756 GB exceeds node tmpfs (~504 GB) and a failed bcast
+# poisons node state. Instead model_storage_path == local_stage_path points at
+# Lustre where a flat-form SYMLINK (meta-llama--Llama-3.1-405B-Instruct ->
+# shared hub snapshot) reads "complete" on every node -> cache reused -> vLLM
+# loads weights directly from Lustre. Expect a long Phase-2/engine load
+# (16 workers x ~47 GB from Lustre); debug 1h walltime is tight but viable.
+matrix:
+  name_template: '{num_nodes}_nodes'
+  axes:
+  - name: num_nodes
+    values: [2]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: '2'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 30.0
+  input_len: 128
+  output_len: 32
+  rate_per_node: 0.5
+  generation_mode: deterministic
+deployment:
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  models:
+  - model_id: meta-llama/Llama-3.1-405B-Instruct
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    num_replicas: 1
+    max_model_len: 4096
+    size: 405
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 8
+  replica_max_ongoing_requests: 16
+client:
+  num_runs: 1
+  num_nodes: 2
+  dest: proxy
+  stream: true
+  num_go_procs: 1
+  num_go_workers: 4
+  go_concurrency: 16
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 50000
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 01:00:00
