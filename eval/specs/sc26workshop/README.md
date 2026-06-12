@@ -23,11 +23,12 @@ spec's location (`spec_runs_dir` in `eval/lib/run_planner.py`). Pre-existing
 flat result dirs were relocated with symlinks left at the old paths, and the
 resolver falls back to flat `runs/<name>/` for anything never relocated.
 
-`runs/sc26workshop/prevalidation/` holds the pre-reorg 1-node validation runs
-of `oat_8b_burstgpt` / `proxycmp_envoy` / `proxycmp_litellm` — kept out of
-`full/` so a folder there always means real full-sweep data. They stay
-reachable by name via the flat symlinks until real `full/` data is
-materialized (at which point the mirrored path takes precedence).
+Invariant: `runs/sc26workshop/` contains only folders that mirror this spec
+tree, and a folder there means real data from that suite stage. The pre-reorg
+1-node validation runs of `oat_8b_burstgpt` / `proxycmp_envoy` /
+`proxycmp_litellm` therefore live as plain legacy dirs in the flat `runs/`
+area (the resolver's flat fallback finds them by name until real `full/`
+data is materialized, after which the mirrored path takes precedence).
 
 ## Suite contents (mirror of plan_exp.md §9)
 
