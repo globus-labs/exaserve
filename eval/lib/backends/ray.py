@@ -266,16 +266,29 @@ class RayBackendAdapter(BackendAdapter):
     ) -> list[str]:
         run_plan = run_ctx.run_plan
         if run_plan.client.dest == "direct":
-            nodefile = os.environ.get("PBS_NODEFILE")
-            if not nodefile or not os.path.isfile(nodefile):
-                raise RuntimeError("PBS_NODEFILE is required for direct-mode Ray execution")
-            with open(nodefile, "r", encoding="utf-8") as handle:
-                nodes = []
-                for line in handle:
-                    node = line.strip()
-                    if node and node not in nodes:
-                        nodes.append(node)
             backend_port = int(launched.metadata.get("backend_port", 8000))
+            # Prefer the per-node Ray IPs the server wrote (NodeManagerAddress):
+            # the PBS .hsn. FQDN resolves to an address whose :8000 returns 503,
+            # while the Ray-bound IP serves /health. Fall back to PBS hostnames.
+            nodes: list[str] = []
+            ips_path = os.path.join(
+                os.path.dirname(run_plan.runtime_manifest_path), "ray_node_ips.txt"
+            )
+            if os.path.isfile(ips_path):
+                with open(ips_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        ip = line.strip()
+                        if ip and ip not in nodes:
+                            nodes.append(ip)
+            if not nodes:
+                nodefile = os.environ.get("PBS_NODEFILE")
+                if not nodefile or not os.path.isfile(nodefile):
+                    raise RuntimeError("PBS_NODEFILE is required for direct-mode Ray execution")
+                with open(nodefile, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        node = line.strip()
+                        if node and node not in nodes:
+                            nodes.append(node)
             return [f"http://{node}:{backend_port}" for node in nodes]
 
         port_file = str(launched.metadata["proxy_port_file"])

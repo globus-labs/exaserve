@@ -1487,6 +1487,19 @@ if __name__ == "__main__":
             flush=True,
         )
 
+    # Write per-node Ray IPs (NodeManagerAddress) next to the config so the eval
+    # backend's direct-mode discover_targets can reach the per-node Ray Serve proxy
+    # by IP. The PBS .hsn. FQDN resolves to an address whose :8000 returns 503;
+    # only the Ray-bound IP serves /health=200. See discover_targets in eval/lib/backends/ray.py.
+    try:
+        _ray_ips = [n["ip"] for n in get_alive_ray_gpu_nodes() if n.get("ip")]
+        _ips_path = os.path.join(os.path.dirname(config_path), "ray_node_ips.txt")
+        with open(_ips_path, "w", encoding="utf-8") as _fh:
+            _fh.write("\n".join(_ray_ips) + "\n")
+        print(f"[AuroraServe] Wrote {len(_ray_ips)} Ray node IP(s) -> {_ips_path}", flush=True)
+    except Exception as _e:  # noqa: BLE001
+        print(f"[AuroraServe] WARNING: failed to write ray_node_ips.txt: {_e}", flush=True)
+
     # ---- Model Resolution: resolve staged local models ---------------------
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
     if null_compute:
