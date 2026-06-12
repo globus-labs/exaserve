@@ -10,6 +10,11 @@ where the SLO is one or more of (TTFT_SLO, TPOT_SLO, E2E_SLO). TTFT/TPOT are
 only available when the run was executed with client.stream=true (the Go
 client populates `ttft_s` on per-request records).
 
+Warm-up handling: when a result file contains multiple runs, run 0 is the
+warm-up run (v2 protocol) and is DROPPED by default — both from attainment and
+from the rps used for goodput. Pass --include-warmup to keep it. Single-run
+files are used as-is.
+
 Outputs:
   - A summary table (stdout): per node count and per SLO preset.
   - Optional plot: --plot saves a goodput-vs-num_nodes line plot.
@@ -130,6 +135,32 @@ def _request_meets_slo(req: dict, preset: SLOPreset) -> bool:
     return True
 
 
+def _strip_warmup(result: dict) -> tuple[dict, int]:
+    """Drop run 0 — the warm-up run per the v2 protocol — when the result file
+    contains multiple runs. Returns (filtered view, dropped request count).
+
+    Single-run files are returned unchanged (their only run IS run 0, e.g.
+    smokes). The view's overall.rps is recomputed from the surviving per_run
+    summaries so goodput = rps x attainment stays self-consistent.
+    """
+    per_run = result.get("per_run") or []
+    max_run = max((int(r.get("run_index", 0)) for r in per_run), default=0)
+    if max_run < 1:
+        return result, 0
+    requests = result.get("requests") or []
+    kept = [r for r in requests if int(r.get("run_index", 0)) >= 1]
+    keep_runs = [r for r in per_run if int(r.get("run_index", 0)) >= 1]
+    total_completed = sum(int(r.get("requests_completed", 0)) for r in keep_runs)
+    total_duration = sum(float(r.get("duration_s", 0.0)) for r in keep_runs)
+    view = dict(result)
+    view["requests"] = kept
+    view["overall"] = dict(result.get("overall") or {})
+    view["overall"]["rps"] = (
+        total_completed / total_duration if total_duration > 0 else 0.0
+    )
+    return view, len(requests) - len(kept)
+
+
 def _has_ttft(reqs: list[dict]) -> bool:
     return any(r.get("ttft_s") is not None for r in reqs[:200])
 
@@ -225,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Save a goodput-vs-num_nodes plot at this path")
     parser.add_argument("--ttft-required", action="store_true",
                         help="Exit non-zero if any preset needs TTFT but data is missing")
+    parser.add_argument("--include-warmup", action="store_true",
+                        help="Keep run 0 (the warm-up run) instead of dropping it. "
+                             "By default multi-run results drop run 0 per the v2 protocol.")
     args = parser.parse_args(argv)
 
     # Resolve presets.
@@ -255,6 +289,11 @@ def main(argv: list[str] | None = None) -> int:
     for n_nodes, rfile in pairs:
         with open(rfile, "r") as fh:
             data = json.load(fh)
+        if not args.include_warmup:
+            data, dropped = _strip_warmup(data)
+            if dropped:
+                print(f"  {rfile.name} ({n_nodes} nodes): dropped {dropped} "
+                      "warm-up requests (run 0; --include-warmup to keep)")
         for preset in presets:
             stats = _compute_goodput(data, preset)
             stats.update({

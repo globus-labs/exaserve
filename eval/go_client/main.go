@@ -82,6 +82,17 @@ type resultRecord struct {
 	DecodeTokens int     `json:"decode_tokens,omitempty"`
 }
 
+// latencyAnchor is the timestamp end-to-end latency is measured from:
+// request_start_at (taken immediately before the HTTP call), matching the
+// TTFT anchor so latency excludes client-side dispatch/queue wait. Falls
+// back to enqueued_at for failures before the request was issued.
+func latencyAnchor(rec *resultRecord) float64 {
+	if rec.RequestStartAt > 0 {
+		return rec.RequestStartAt
+	}
+	return rec.EnqueuedAt
+}
+
 type dispatchDoneMeta struct {
 	Type               string  `json:"__type__"`
 	LastFireTime       float64 `json:"last_fire_time"`
@@ -729,7 +740,7 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 		rec.ErrorClass = "build"
 		rec.BodyDoneAt = nowSeconds()
 		rec.EndTime = rec.BodyDoneAt
-		rec.Latency = rec.EndTime - rec.EnqueuedAt
+		rec.Latency = rec.EndTime - latencyAnchor(&rec)
 		if sampledTrace != nil {
 			sampledTrace.BodyDoneAt = rec.BodyDoneAt
 			sampledTrace.ErrorClass = rec.ErrorClass
@@ -782,7 +793,7 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 		rec.ErrorClass = classifyRequestError(err, ctx.Err())
 		rec.BodyDoneAt = nowSeconds()
 		rec.EndTime = rec.BodyDoneAt
-		rec.Latency = rec.EndTime - rec.EnqueuedAt
+		rec.Latency = rec.EndTime - latencyAnchor(&rec)
 		if sampledTrace != nil {
 			sampledTrace.BodyDoneAt = rec.BodyDoneAt
 			sampledTrace.BodyReadS = 0
@@ -805,7 +816,7 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 		bodyDone := time.Now()
 		rec.BodyDoneAt = float64(bodyDone.UnixNano()) / 1e9
 		rec.EndTime = rec.BodyDoneAt
-		rec.Latency = rec.EndTime - rec.EnqueuedAt
+		rec.Latency = rec.EndTime - latencyAnchor(&rec)
 
 		if !sse.FirstTokenAt.IsZero() {
 			rec.FirstTokenAt = float64(sse.FirstTokenAt.UnixNano()) / 1e9
@@ -867,7 +878,7 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 	bodyDone := time.Now()
 	rec.BodyDoneAt = float64(bodyDone.UnixNano()) / 1e9
 	rec.EndTime = rec.BodyDoneAt
-	rec.Latency = rec.EndTime - rec.EnqueuedAt
+	rec.Latency = rec.EndTime - latencyAnchor(&rec)
 
 	if collector != nil {
 		collector.ObserveBodyRead(bodyDone.Sub(headersAt))

@@ -35,6 +35,7 @@ deployment:
     enforce_eager: true
     max_num_seqs: 64
   replica_max_ongoing_requests: 256
+  collect_stats: true
 client:
   num_runs: 4
   dest: proxy
