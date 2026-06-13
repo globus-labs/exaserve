@@ -67,7 +67,7 @@ iteration speed.
       — N=1 cells fit debug; N=64 cells fit debug-scaling (≤1 h each)
 - [ ] `oat_120b_val` — rate filled (17.1)
 - [ ] `proxycmp_{haproxy,envoy,litellm,rayserve,direct}_val` — N ∈ {1,4,16,64}
-- [ ] `nullcompute_scaling_val` — the single `n256_r12` cell; **capacity only**
+- [ ] `nullcompute_scaling_val` — the single `n256_r12` cell; **prod queue, HELD**
 
 ### full/ — 0 of 15 done (gated on the validation sweep + budget)
 - [ ] `oat_8b_*` ×8 + `oat_120b` (rate 17.1) — N ∈ {1,64}; baseline also N=256
@@ -106,7 +106,9 @@ cell ≈ bring-up + 13.5 min. Each cell is its own PBS job (no cluster reuse).
 | **Total** | **~300 node·h** | **~1 k node·h ex-Set 3; 3–5 k with Set 3** |
 
 Debug/debug-scaling fits: N=1 and N≤64 validation cells (≤1 h each).
-Capacity needed for: anything ≥256n, and the full sweep's volume.
+Anything ≥256n must be submitted to the **prod** queue (the keepalive
+"capacity" job is small interactive headroom, not 256 nodes) — held until the
+sub-256n sweep is done.
 
 ## How to run
 
