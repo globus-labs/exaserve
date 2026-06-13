@@ -49,7 +49,7 @@ iteration speed.
 
 ## Run checklist (per folder)
 
-### calibration/ — 7 of 8 done
+### calibration/ — 8 of 8 done
 - [x] `sat_8b_64x64` — 109 rps/node → OAT rate **98**
 - [x] `sat_8b_2kx2k` — 4 → **3.6**
 - [x] `sat_8b_4kx4k` — 2 → **1.8**
@@ -57,7 +57,10 @@ iteration speed.
 - [x] `sat_8b_chat` — 12 → **10.8**
 - [x] `sat_8b_summary` — 12 → **10.8**
 - [x] `sat_120b_64x64` — 19 rps/node → OAT rate **17.1** (READY in 203 s)
-- [ ] `sat_405b_pp2` — 2 nodes, ≥90 min window; only needed if the PP row joins the OAT table
+- [x] `sat_405b_pp2` — replica ceiling BELOW the finder's 1 rps floor: offered 1 -> achieved
+      0.31 rps, p99 TTFT 25 s (verify run: ~0.5 rps with growing queue). Conclusion: treat the
+      405B row as a demonstration (raw TTFT/TBT); an OAT-style rate would be ~0.25-0.3 rps/replica
+      and needs longer windows for stable P99 stats.
 
 ### validation/ — 0 of 15 done (the pilot sweep has not started)
 - [ ] `oat_8b_{baseline,poisson,2kx2k,4kx4k,code,chat,summary,burstgpt}_val` (9 incl. 120b below)
