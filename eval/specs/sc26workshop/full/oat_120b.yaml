@@ -1,10 +1,8 @@
 name: oat_120b
 # EXP SET 2 (OAT) - model perturbation: GPT-OSS-120B (MXFP4, 122 GB) from the
 # shared hub, TP=8 (8/12 tiles, 4 idle), planner auto-packs 1 replica/node.
-#
-# !!! PLACEHOLDER RATE !!! rate_per_node MUST be replaced with 90% of the
-# measured single-node saturation from calibration/sat_120b_64x64 before any
-# real run. The 8.0 below is a guess and will produce misleading SLO numbers.
+# Rate: 90% of measured single-node saturation (calibration/sat_120b_64x64:
+# 19 req/s/node -> 17.1).
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -25,7 +23,7 @@ workload:
   duration: 60.0
   input_len: 64
   output_len: 64
-  rate_per_node: 8.0
+  rate_per_node: 17.1
   arrival: fixed
   generation_mode: deterministic
 deployment:
