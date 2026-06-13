@@ -62,12 +62,28 @@ iteration speed.
       405B row as a demonstration (raw TTFT/TBT); an OAT-style rate would be ~0.25-0.3 rps/replica
       and needs longer windows for stable P99 stats.
 
-### validation/ — 0 of 15 done (the pilot sweep has not started)
-- [ ] `oat_8b_{baseline,poisson,2kx2k,4kx4k,code,chat,summary,burstgpt}_val` (9 incl. 120b below)
-      — N=1 cells fit debug; N=64 cells fit debug-scaling (≤1 h each)
-- [ ] `oat_120b_val` — rate filled (17.1)
-- [ ] `proxycmp_{haproxy,envoy,litellm,rayserve,direct}_val` — N ∈ {1,4,16,64}
-- [ ] `nullcompute_scaling_val` — the single `n256_r12` cell; **prod queue, HELD**
+### validation/ — 14 of 39 cells done (all N=1; results in run0)
+Counted by CELL (a spec spans several N). Attainment = paper SLO (TTFT≤1s ∧
+P99-TBT≤250ms), run0=warm-up dropped.
+
+**N=1 cells — DONE (14/14):**
+- [x] `oat_8b_baseline_val` n1 — attain **0.994** ✅
+- [x] `oat_8b_2kx2k_val` n1 — 0.991 ✅   · [x] `oat_8b_4kx4k_val` n1 — 1.000 ✅
+- [x] `oat_8b_code_val` n1 — 1.000 ✅   · [x] `oat_8b_chat_val` n1 — 0.995 ✅
+- [x] `oat_8b_summary_val` n1 — 1.000 ✅ · [x] `oat_8b_burstgpt_val` n1 — 1.000 ✅
+- [x] `oat_8b_poisson_val` n1 — 0.761 (burst sensitivity = the intended result; keep rate)
+- [x] `oat_120b_val` n1 — **0.139 ⚠ rate 17.1 too hot for paper SLO** (TTFT p50 3.9s,
+      TBT p99 568ms). Re-calibrate to ~10–12 before its N=64. HELD from scaling.
+- [x] `proxycmp_{haproxy,envoy,litellm,rayserve,direct}_val` n1 — attain 0.19–0.63
+      (EXPECTED: rate 110 ≈ 8B knee → TTFT-bound; Set 1's metric is RPS/η at scale,
+      not n1 attainment — n1 is just the linear-baseline anchor)
+
+**N>1 cells — PENDING (24/24), debug-scaling via submit-all:**
+- [ ] `oat_8b_*` ×8 + `oat_8b_poisson` — N=64 (8 cells; 120b N=64 held pending re-cal)
+- [ ] `proxycmp_*` ×5 — N ∈ {4,16,64} (15 cells)
+
+**HELD (prod queue):**
+- [ ] `nullcompute_scaling_val` — the single `n256_r12` cell
 
 ### full/ — 0 of 15 done (gated on the validation sweep + budget)
 - [ ] `oat_8b_*` ×8 + `oat_120b` (rate 17.1) — N ∈ {1,64}; baseline also N=256
