@@ -49,44 +49,50 @@ iteration speed.
 
 ## Run checklist (per folder)
 
-### calibration/ — 8 of 8 done
+### calibration/ — 9 of 9 done
 - [x] `sat_8b_64x64` — 109 rps/node → OAT rate **98**
 - [x] `sat_8b_2kx2k` — 4 → **3.6**
 - [x] `sat_8b_4kx4k` — 2 → **1.8**
 - [x] `sat_8b_code` — 6 → **5.4**
 - [x] `sat_8b_chat` — 12 → **10.8**
 - [x] `sat_8b_summary` — 12 → **10.8**
-- [x] `sat_120b_64x64` — 19 rps/node → OAT rate **17.1** (READY in 203 s)
+- [x] `sat_120b_64x64` — throughput knee 19 rps/node → 17.1, but SUPERSEDED: 17.1 busted
+      the paper SLO at sustained load (attain 0.14). See `sat_120b_paper_recal`.
+- [x] `sat_120b_paper_recal` — fixed-rate sweep vs paper SLO: r9 attain **1.000** (TBT p99
+      175ms), r12 0.94 (382ms), r15 0.93. → **120B OAT rate = 9** (committed `0d62a97`).
 - [x] `sat_405b_pp2` — replica ceiling BELOW the finder's 1 rps floor: offered 1 -> achieved
       0.31 rps, p99 TTFT 25 s (verify run: ~0.5 rps with growing queue). Conclusion: treat the
       405B row as a demonstration (raw TTFT/TBT); an OAT-style rate would be ~0.25-0.3 rps/replica
       and needs longer windows for stable P99 stats.
 
-### validation/ — 14 of 39 cells done (all N=1; results in run0)
-Counted by CELL (a spec spans several N). Attainment = paper SLO (TTFT≤1s ∧
-P99-TBT≤250ms), run0=warm-up dropped.
+### validation/ — 32 of 39 cells done (N=1 complete; N>1 mostly done)
+Counted by CELL. Attainment = paper SLO (TTFT≤1s ∧ P99-TBT≤250ms), warm-up dropped.
 
-**N=1 cells — DONE (14/14):**
-- [x] `oat_8b_baseline_val` n1 — attain **0.994** ✅
-- [x] `oat_8b_2kx2k_val` n1 — 0.991 ✅   · [x] `oat_8b_4kx4k_val` n1 — 1.000 ✅
-- [x] `oat_8b_code_val` n1 — 1.000 ✅   · [x] `oat_8b_chat_val` n1 — 0.995 ✅
-- [x] `oat_8b_summary_val` n1 — 1.000 ✅ · [x] `oat_8b_burstgpt_val` n1 — 1.000 ✅
-- [x] `oat_8b_poisson_val` n1 — 0.761 (burst sensitivity = the intended result; keep rate)
-- [x] `oat_120b_val` n1 — **0.139 ⚠ rate 17.1 too hot for paper SLO** (TTFT p50 3.9s,
-      TBT p99 568ms). Re-calibrate to ~10–12 before its N=64. HELD from scaling.
-- [x] `proxycmp_{haproxy,envoy,litellm,rayserve,direct}_val` n1 — attain 0.19–0.63
-      (EXPECTED: rate 110 ≈ 8B knee → TTFT-bound; Set 1's metric is RPS/η at scale,
-      not n1 attainment — n1 is just the linear-baseline anchor)
+**N=1 (14/14 done):** 8B fixed-shape rows ≥0.99 (baseline 0.994, 2kx2k 0.991, 4kx4k/code/
+summary/burstgpt 1.000, chat 0.995); poisson 0.761 (burst sensitivity, intended); proxies
+0.19–0.63 (rate 110 ≈ knee → TTFT-bound; Set 1 scored by RPS/η, not n1 attainment).
 
-**N>1 cells — PENDING (24/24), debug-scaling via submit-all:**
-- [ ] `oat_8b_*` ×8 + `oat_8b_poisson` — N=64 (8 cells; 120b N=64 held pending re-cal)
-- [ ] `proxycmp_*` ×5 — N ∈ {4,16,64} (15 cells)
+**N=64 OAT (8/9 done) — KEY FINDING: high-rate `dest=proxy` rows collapse at scale while
+throughput stays ~linear:**
+- [x] `oat_8b_baseline_val` n64 — rps **5776** (η≈0.92) but attain **0.236** (TTFT p99 2.66s, TBT p99 940ms)
+- [x] `oat_8b_poisson_val` n64 — rps 5857, attain **0.375**
+- [x] `oat_8b_2kx2k_val` 0.943 · [x] `4kx4k` 0.995 · [x] `code` 1.000 · [x] `chat` 0.996 ·
+      [x] `summary` 1.000 · [x] `burstgpt` (low-rate rows hold — don't stress the proxy funnel)
+- [ ] `oat_120b_val` n1+n64 @ **rate 9** — re-materialized run1; submitting now (old 17.1 run0 superseded)
+
+**Set 1 proxy N∈{4,16,64} (12/15 done) — throughput η ~0.9 but n64 attainment craters:**
+- [x] `proxycmp_haproxy_val` n4/16/64 — η .98/.97/.93, n64 attain **0.04**
+- [x] `proxycmp_envoy_val` n4/16/64 — η 1.0/.97/.85, n64 attain **0.04**
+- [x] `proxycmp_rayserve_val` n4/16 · [ ] n64 (`8541790`, draining)
+- [x] `proxycmp_direct_val` n4/16 · [ ] **n64 (`8541577`, draining) ← decisive proxy-funnel test**
+- [x] `proxycmp_litellm_val` n16 · [ ] **n4, n64 — GAP:** cleanup submit-all timed out twice
+      (debug-scaling backlog); needs another submit pass
 
 **HELD (prod queue):**
 - [ ] `nullcompute_scaling_val` — the single `n256_r12` cell
 
 ### full/ — 0 of 15 done (gated on the validation sweep + budget)
-- [ ] `oat_8b_*` ×8 + `oat_120b` (rate 17.1) — N ∈ {1,64}; baseline also N=256
+- [ ] `oat_8b_*` ×8 + `oat_120b` (rate **9**, paper-SLO recal) — N ∈ {1,64}; baseline also N=256
 - [ ] `proxycmp_*` ×5 — N ∈ {1,4,16,64}; haproxy+direct extended to 256 (capacity)
 - [ ] `nullcompute_scaling` — full (N,R) matrix to 1024; approve per-cell (cost!)
 
