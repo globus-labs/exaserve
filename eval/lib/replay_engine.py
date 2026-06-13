@@ -7,6 +7,7 @@ import json
 import math
 import os
 import pathlib
+import pickle
 import shutil
 import signal
 import statistics
@@ -66,6 +67,74 @@ def _mpi_gather(comm, value, root=0):
     if comm is not None and comm.Get_size() > 1:
         return comm.gather(value, root=root)
     return [value]
+
+
+def _gather_results_via_shards(
+    comm,
+    local_results,
+    *,
+    run_index,
+    shard_dir,
+    rank,
+    mpi_size,
+    is_root,
+    timeout_s=600.0,
+):
+    """Robust replacement for a single-root MPI collective gather of large
+    per-request result sets (dest=direct, multi-node).
+
+    The collective ``comm.gather`` pickles every rank's records onto root in
+    one all-ranks operation; at 64 nodes (~hundreds of thousands of records)
+    it is slow, memory-heavy on root, and — being a barrier — hangs forever if
+    any node slows or drops ("Application not found"), so root never writes
+    results. Instead, each rank writes its shard to shared storage
+    independently (atomic rename, no collective), and root polls for the
+    shards, reading whatever arrives within ``timeout_s`` and logging any
+    ranks that never showed (their data is dropped, not the whole run).
+
+    For ``mpi_size <= 1`` (proxy mode: single client) this is a no-op that
+    returns ``[local_results]`` — identical to the old path.
+    """
+    if comm is None or mpi_size <= 1:
+        return [local_results]
+
+    os.makedirs(shard_dir, exist_ok=True)
+    shard = os.path.join(shard_dir, f"run{run_index}_rank{rank}.pkl")
+    tmp = f"{shard}.tmp.{os.getpid()}"
+    with open(tmp, "wb") as handle:
+        pickle.dump(local_results, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, shard)  # atomic: root never reads a half-written shard
+
+    if not is_root:
+        return None
+
+    # Root already holds its own shard in memory; poll only for the others.
+    collected = {rank: local_results}
+    deadline = time.time() + timeout_s
+    while len(collected) < mpi_size and time.time() < deadline:
+        for other in range(mpi_size):
+            if other in collected:
+                continue
+            path = os.path.join(shard_dir, f"run{run_index}_rank{other}.pkl")
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "rb") as handle:
+                    collected[other] = pickle.load(handle)
+            except (EOFError, pickle.UnpicklingError, OSError):
+                pass  # mid-write / FS lag — retry on the next sweep
+        if len(collected) < mpi_size:
+            time.sleep(1.0)
+
+    missing = [r for r in range(mpi_size) if r not in collected]
+    if missing:
+        print(
+            f"[replay_engine] WARNING: run {run_index} gather collected "
+            f"{len(collected)}/{mpi_size} rank shards after {timeout_s:.0f}s; "
+            f"missing ranks {missing} — their requests are dropped from this run.",
+            flush=True,
+        )
+    return [collected[r] for r in sorted(collected)]
 
 
 class TraceRequest(object):
@@ -806,8 +875,24 @@ async def replay_from_manifest(
                         "overhead_s": actual_dispatch_s - trace_span,
                     }
                 )
-            _mpi_barrier(comm)
-            gathered = _mpi_gather(comm, local_results, root=0)
+            # Persist per-rank shards to shared storage and let root read them,
+            # rather than a single-root MPI collective over large per-request
+            # data (it hung / lost all results at 64 nodes when a node dropped).
+            # No-op for proxy mode (mpi_size == 1). See _gather_results_via_shards.
+            _shard_base = (
+                str(exp_config.pbs_result_dir)
+                if exp_config.pbs_result_dir
+                else os.path.join(str(exp_config.pbs_working_dir), "results")
+            )
+            gathered = _gather_results_via_shards(
+                comm,
+                local_results,
+                run_index=run_index,
+                shard_dir=os.path.join(_shard_base, "_shards"),
+                rank=rank,
+                mpi_size=mpi_size,
+                is_root=is_root,
+            )
             if is_root and isinstance(local_results, dict):
                 merged = {
                     "requests_completed": 0,
