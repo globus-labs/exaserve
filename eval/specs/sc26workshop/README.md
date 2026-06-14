@@ -65,7 +65,7 @@ iteration speed.
       405B row as a demonstration (raw TTFT/TBT); an OAT-style rate would be ~0.25-0.3 rps/replica
       and needs longer windows for stable P99 stats.
 
-### validation/ — 37 of 38 cells done (pilot complete; 1 walltime casualty, n256 held)
+### validation/ — 38 of 38 sub-256 cells done (pilot complete); n256_r12 now on prod
 Counted by CELL. Attainment = paper SLO (TTFT≤1s ∧ P99-TBT≤250ms), warm-up dropped.
 
 **Set 2 OAT (18/18 done) — KEY FINDING: high-rate `dest=proxy` rows collapse at N=64 while
@@ -82,14 +82,21 @@ absolute attain is a saturation stress test; the SCALING trend is the result):**
 - [x] `haproxy` — η .98/.97/.93, attain 0.20/0.18/**0.04** (5× drop)
 - [x] `envoy` — η 1.0/.97/.85, attain 0.16/0.18/**0.04**
 - [x] `rayserve` — η ~0.43 (half), attain ~**0.01**
-- [x] `litellm` n16/n64 — η ~0.43, attain ~0.01, drops 80–95% of reqs ·
-      [ ] **n4 = walltime casualty** (LiteLLM drain > 1 h at rate 110; not resubmitted — needs prod-walltime/lower rate)
+- [x] `litellm` n4/n16/n64 — η ~0.43, attain ~0.01, drops ~25–95% of reqs (worse at scale).
+      n4 first failed 3× to a **transient process-startup hang on one rank** that stalled the
+      whole MPI run to walltime (a load-client robustness gap, NOT litellm-specific);
+      recovered after the fixes below (run2/run3 clean: rps~180, success ~74%).
 - iso-SLO goodput @ n64 (rps×attain): **direct ≈800 ≫ haproxy 234 > envoy 212 ≫ rayserve/litellm ≈27**
 - NOTE: `direct` n64 only exists because of the gather fix (commit 570d727) — the old MPI
   collective lost this exact cell. Re-run lives in `proxycmp_direct_val/run1`.
+- ROBUSTNESS (from the litellm n4 dig): one wedged/stuck connection could hang a whole
+  multi-node run to walltime (overall timeout = walltime, no SSE stall deadline, untimed
+  wait loop). Fixed: replay drain cap (`0cfb17a`) + go-client SSE stall deadline
+  `--stall-timeout` (default 120s, `d72196d`); validated zero false stalls. For sweeps set
+  `AURORA_REPLAY_TIMEOUT_S` < walltime, or rely on the stall deadline.
 
-**HELD (prod queue):**
-- [ ] `nullcompute_scaling_val` — the single `n256_r12` cell
+**Set 3 (prod queue):**
+- [ ] `nullcompute_scaling_val` n256_r12 — SUBMITTED to prod (job 8542241, queued; was held)
 
 ### full/ — 0 of 15 done (gated on the validation sweep + budget)
 - [ ] `oat_8b_*` ×8 + `oat_120b` (rate **9**, paper-SLO recal) — N ∈ {1,64}; baseline also N=256
