@@ -84,4 +84,4 @@ backend:
           maxconn: 100000
 scheduler:
   type: pbs
-  queue: debug-scaling
+  queue: prod
