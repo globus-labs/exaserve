@@ -60,7 +60,7 @@ func percentileIndex(n int, q float64) int {
 // timestamp of the first token (first chunk with non-empty content), the gaps
 // between every subsequent content chunk (summarised as P50/P99/max TBT), and
 // extracts usage from the final chunk. requestStart is used to compute TTFT.
-func parseSSEStream(body io.Reader, requestStart time.Time) sseResult {
+func parseSSEStream(body io.Reader, requestStart time.Time, progress chan<- struct{}) sseResult {
 	scanner := bufio.NewScanner(body)
 	// Increase buffer for potentially large SSE lines.
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
@@ -72,6 +72,14 @@ func parseSSEStream(body io.Reader, requestStart time.Time) sseResult {
 	var gaps []time.Duration
 
 	for scanner.Scan() {
+		// Signal liveness to the stall watchdog on every line received (data or
+		// keep-alive), so only a genuinely silent connection trips the deadline.
+		if progress != nil {
+			select {
+			case progress <- struct{}{}:
+			default:
+			}
+		}
 		line := scanner.Text()
 
 		// SSE format: "data: <json>" or "data: [DONE]"

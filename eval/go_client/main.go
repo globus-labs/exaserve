@@ -31,9 +31,16 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// gStallTimeout is the per-stream idle deadline: if a streaming response sends
+// no bytes for this long it's treated as a wedged/half-open connection and
+// fast-failed as a "stall" error, instead of blocking until the (deliberately
+// long) overall client timeout. Set from --stall-timeout in main; 0 disables.
+var gStallTimeout time.Duration
 
 type traceRequest struct {
 	Timestamp        float64 `json:"timestamp"`
@@ -304,6 +311,7 @@ func run() int {
 	warmupRPS := flag.Int("warmup-rps", 0, "Warm-up requests per second (0 = no warmup)")
 	warmupDuration := flag.Float64("warmup-duration", 0, "Warm-up duration in seconds")
 	streamMode := flag.Bool("stream", false, "Enable streaming responses for TTFT measurement")
+	stallTimeoutSec := flag.Float64("stall-timeout", 120.0, "Streaming idle deadline (s): fast-fail a stream that sends no bytes for this long (wedged connection); 0 disables. Must exceed worst legit TTFT/inter-token gap.")
 	cpuprofileFlag := flag.String("cpuprofile", "", "Write CPU profile to this file")
 
 	// Mode selection
@@ -332,6 +340,10 @@ func run() int {
 	satMaxP99TTFT := flag.Float64("sat-max-p99-ttft", 0.0, "SLO: max acceptable p99 TTFT in seconds (0=disabled)")
 
 	flag.Parse()
+
+	if *stallTimeoutSec > 0 {
+		gStallTimeout = time.Duration(*stallTimeoutSec * float64(time.Second))
+	}
 
 	if *cpuprofileFlag != "" {
 		profileFile, err := os.Create(*cpuprofileFlag)
@@ -811,8 +823,40 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 	rec.StatusCode = resp.StatusCode
 
 	if item.stream && resp.StatusCode == http.StatusOK {
-		// Streaming path: parse SSE events, extract TTFT and usage.
-		sse := parseSSEStream(resp.Body, requestStart)
+		// Streaming path: parse SSE events, extract TTFT and usage. A stall
+		// watchdog closes the body if no bytes arrive for gStallTimeout, so a
+		// wedged/half-open connection fast-fails as a "stall" instead of
+		// blocking until the long overall client timeout. Legitimately slow
+		// streams keep arriving lines, which reset the timer.
+		var stalled atomic.Bool
+		progress := make(chan struct{}, 1)
+		stopWatchdog := make(chan struct{})
+		if gStallTimeout > 0 {
+			go func() {
+				timer := time.NewTimer(gStallTimeout)
+				defer timer.Stop()
+				for {
+					select {
+					case <-stopWatchdog:
+						return
+					case <-progress:
+						if !timer.Stop() {
+							select {
+							case <-timer.C:
+							default:
+							}
+						}
+						timer.Reset(gStallTimeout)
+					case <-timer.C:
+						stalled.Store(true)
+						resp.Body.Close() // unblocks parseSSEStream's blocked read
+						return
+					}
+				}
+			}()
+		}
+		sse := parseSSEStream(resp.Body, requestStart, progress)
+		close(stopWatchdog)
 		bodyDone := time.Now()
 		rec.BodyDoneAt = float64(bodyDone.UnixNano()) / 1e9
 		rec.EndTime = rec.BodyDoneAt
@@ -848,8 +892,13 @@ func doRequest(ctx context.Context, client *http.Client, item workItem, collecto
 		}
 
 		if sse.Err != nil {
-			rec.Error = fmt.Sprintf("SSE read error: %v", sse.Err)
-			rec.ErrorClass = "body_read"
+			if stalled.Load() {
+				rec.ErrorClass = "stall"
+				rec.Error = fmt.Sprintf("stream idle >%.0fs (no bytes); connection wedged", gStallTimeout.Seconds())
+			} else {
+				rec.ErrorClass = "body_read"
+				rec.Error = fmt.Sprintf("SSE read error: %v", sse.Err)
+			}
 			if sampledTrace != nil {
 				sampledTrace.ErrorClass = rec.ErrorClass
 			}
