@@ -103,7 +103,7 @@ absolute attain is a saturation stress test; the SCALING trend is the result):**
 - [ ] `proxycmp_*` ×5 — N ∈ {1,4,16,64}; haproxy+direct extended to 256 (capacity)
 - [ ] `nullcompute_scaling` — full (N,R) matrix to 1024; approve per-cell (cost!)
 
-### smokes/ — 7 of 9 exercised, all passing
+### smokes/ — 9 of 9 passing
 - [x] `smoke_slo_stream_1node` — HAProxy + stream + TBT + goodput (run repeatedly)
 - [x] `smoke_slo_stream_rayserve_1node` — Ray-native proxy; the TBT-buffering diagnostic
 - [x] `smoke_slo_stream_direct_1node` — dest=direct, verified post-fix (`ea2c5e9`)
@@ -111,10 +111,11 @@ absolute attain is a saturation stress test; the SCALING trend is the result):**
 - [x] `nullcompute_smoke_1node` — null-compute + instrumentation probes
 - [x] `pp405b_verify_2node` — **the multi-node-PP demonstration: 30/30 streaming** ✓
 - [x] `pp2_verify_2node` — diagnostic; documents the small-TP auto-pack/over-density failure
-- [ ] `pp2_serve_2node` — small-TP multi-replica PP; known-failing (tile co-location OOM);
-      revisit only with the whole-node-rounding guard or ≥4 nodes
-- [ ] `clean_stage_check_1node` — clean-stage flag check (added with `884e1a0`; not run in
-      the eval sessions — run after any staging-path change)
+- [x] `pp2_serve_2node` — small-TP **multi-replica PP now SERVES** (req=2/assigned=2, READY 79s,
+      300 reqs, TBT 300/300, no OOM). The earlier tile-co-location OOM was resolved by the
+      per-GPU bundle fix (`17b88be`): each of the 4 workers gets a distinct single-GPU bundle.
+- [x] `clean_stage_check_1node` — clean-stage flag verified: `CLEAN-STAGE: wiping` → fresh
+      `Broadcast complete` (not "Reusing") → READY (66.8s). Run after any staging-path change.
 
 ## Machine-time estimate (coarse, queue wait excluded)
 
