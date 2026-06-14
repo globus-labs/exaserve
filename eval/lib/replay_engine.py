@@ -94,6 +94,21 @@ def _gather_results_via_shards(
 
     For ``mpi_size <= 1`` (proxy mode: single client) this is a no-op that
     returns ``[local_results]`` — identical to the old path.
+
+    Design note — why not reuse ``gather.c`` (the log-archive gather): it is a
+    standalone MPI binary (``mpiexec gather ...``) run post-replay by
+    launch_cluster's EXIT trap. It cannot be called here because this gather
+    runs INSIDE the replay, which is itself ``mpiexec -n N python
+    replay_client``, and PALS does not support nested mpiexec (a likely source
+    of the original "Application not found"). The replay client also holds no
+    Ray handle, so the scaling-trace collection path (Ray, server-side) is
+    unavailable. This shard write therefore reproduces gather.c's own
+    sanctioned data path — per its header, "rank -> Lustre (N concurrent
+    distinct-name creates; MDS handles this fine); no rank-0 buffer
+    collection" — using the replay's existing ranks instead of a fresh,
+    un-nestable mpiexec. Keep it this way unless results are restructured into
+    a post-replay gather.c artifact (which would move merge/summary out of
+    replay_engine into a new post-finalize step).
     """
     if comm is None or mpi_size <= 1:
         return [local_results]
