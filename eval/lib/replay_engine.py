@@ -38,7 +38,14 @@ except ImportError:  # pragma: no cover - optional dependency
     _MPI_AVAILABLE = False
 
 
-TIMEOUT_S = 3600
+TIMEOUT_S = float(os.environ.get("AURORA_REPLAY_TIMEOUT_S", "3600"))
+# Cap on how long a rank waits for its go procs to exit after dispatch. A wedged
+# backend connection (open, no response, no EOF) can hang a go proc past its own
+# --timeout; killing stragglers shortly after stops one wedged rank from stalling
+# the whole MPI run to the PBS walltime. Override via env for live debugging.
+DRAIN_WAIT_TIMEOUT_S = float(
+    os.environ.get("AURORA_REPLAY_DRAIN_WAIT_TIMEOUT_S", str(TIMEOUT_S + 180.0))
+)
 DIRECT_TARGET_READY_TIMEOUT_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_TIMEOUT_S", "300"))
 DIRECT_TARGET_READY_PROBE_TIMEOUT_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_PROBE_TIMEOUT_S", "2"))
 DIRECT_TARGET_READY_INTERVAL_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_INTERVAL_S", "5"))
@@ -507,6 +514,7 @@ def _send_run_t0_and_wait(
         process.stdin.flush()
         process.stdin.close()
 
+    drain_deadline = time.monotonic() + DRAIN_WAIT_TIMEOUT_S
     while alive:
         for proc_index, process in processes:
             if proc_index not in alive:
@@ -520,6 +528,25 @@ def _send_run_t0_and_wait(
             for proc_index, process in processes:
                 if proc_index in alive:
                     process.send_signal(signal.SIGTERM)
+            break
+        if alive and time.monotonic() > drain_deadline:
+            # A go proc that never exits means a wedged backend connection
+            # (open, no response, no EOF) outlasting its own --timeout. Kill the
+            # stragglers so one wedged rank can't stall the whole MPI run to the
+            # PBS walltime; their in-flight requests are dropped from this rank.
+            print(
+                f"[replay_engine rank {rank}] DRAIN-WAIT TIMEOUT after "
+                f"{DRAIN_WAIT_TIMEOUT_S:.0f}s: go procs {sorted(alive)} never exited "
+                f"(wedged backend connection?) — killing and proceeding.",
+                flush=True,
+            )
+            for proc_index, process in processes:
+                if proc_index in alive:
+                    process.send_signal(signal.SIGTERM)
+            time.sleep(5)
+            for proc_index, process in processes:
+                if proc_index in alive and process.poll() is None:
+                    process.kill()
             break
 
     all_results = []
