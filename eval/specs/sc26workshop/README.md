@@ -65,28 +65,28 @@ iteration speed.
       405B row as a demonstration (raw TTFT/TBT); an OAT-style rate would be ~0.25-0.3 rps/replica
       and needs longer windows for stable P99 stats.
 
-### validation/ — 32 of 39 cells done (N=1 complete; N>1 mostly done)
+### validation/ — 37 of 38 cells done (pilot complete; 1 walltime casualty, n256 held)
 Counted by CELL. Attainment = paper SLO (TTFT≤1s ∧ P99-TBT≤250ms), warm-up dropped.
 
-**N=1 (14/14 done):** 8B fixed-shape rows ≥0.99 (baseline 0.994, 2kx2k 0.991, 4kx4k/code/
-summary/burstgpt 1.000, chat 0.995); poisson 0.761 (burst sensitivity, intended); proxies
-0.19–0.63 (rate 110 ≈ knee → TTFT-bound; Set 1 scored by RPS/η, not n1 attainment).
+**Set 2 OAT (18/18 done) — KEY FINDING: high-rate `dest=proxy` rows collapse at N=64 while
+throughput stays ~linear; low-rate rows hold.**
+- [x] `oat_8b_baseline` n1 0.994 → n64 rps **5776** (η≈0.92) attain **0.236** (TTFT-dominant)
+- [x] `oat_8b_poisson` n1 0.761 → n64 0.375 (burst sensitivity, intended)
+- [x] `oat_8b_2kx2k` n64 0.943 · `4kx4k` 0.995 · `code` 1.000 · `chat` 0.996 · `summary` 1.000 ·
+      `burstgpt` (low aggregate rps → proxy funnel not stressed → hold)
+- [x] `oat_120b` @ **rate 9** — n1 1.000 → n64 **0.987** (η≈1.0; ~544 rps stays under the funnel)
 
-**N=64 OAT (8/9 done) — KEY FINDING: high-rate `dest=proxy` rows collapse at scale while
-throughput stays ~linear:**
-- [x] `oat_8b_baseline_val` n64 — rps **5776** (η≈0.92) but attain **0.236** (TTFT p99 2.66s, TBT p99 940ms)
-- [x] `oat_8b_poisson_val` n64 — rps 5857, attain **0.375**
-- [x] `oat_8b_2kx2k_val` 0.943 · [x] `4kx4k` 0.995 · [x] `code` 1.000 · [x] `chat` 0.996 ·
-      [x] `summary` 1.000 · [x] `burstgpt` (low-rate rows hold — don't stress the proxy funnel)
-- [ ] `oat_120b_val` n1+n64 @ **rate 9** — re-materialized run1; submitting now (old 17.1 run0 superseded)
-
-**Set 1 proxy N∈{4,16,64} (12/15 done) — throughput η ~0.9 but n64 attainment craters:**
-- [x] `proxycmp_haproxy_val` n4/16/64 — η .98/.97/.93, n64 attain **0.04**
-- [x] `proxycmp_envoy_val` n4/16/64 — η 1.0/.97/.85, n64 attain **0.04**
-- [x] `proxycmp_rayserve_val` n4/16 · [ ] n64 (`8541790`, draining)
-- [x] `proxycmp_direct_val` n4/16 · [ ] **n64 (`8541577`, draining) ← decisive proxy-funnel test**
-- [x] `proxycmp_litellm_val` n16 · [ ] **n4, n64 — GAP:** cleanup submit-all timed out twice
-      (debug-scaling backlog); needs another submit pass
+**Set 1 proxy (19/20 done) — throughput η vs paper attainment at n64 (rate 110 ≈ 8B knee, so
+absolute attain is a saturation stress test; the SCALING trend is the result):**
+- [x] `direct` n4/16/64 — η 1.02/1.02/**0.91**, attain **scale-invariant** 0.41/0.22/**0.15**
+- [x] `haproxy` — η .98/.97/.93, attain 0.20/0.18/**0.04** (5× drop)
+- [x] `envoy` — η 1.0/.97/.85, attain 0.16/0.18/**0.04**
+- [x] `rayserve` — η ~0.43 (half), attain ~**0.01**
+- [x] `litellm` n16/n64 — η ~0.43, attain ~0.01, drops 80–95% of reqs ·
+      [ ] **n4 = walltime casualty** (LiteLLM drain > 1 h at rate 110; not resubmitted — needs prod-walltime/lower rate)
+- iso-SLO goodput @ n64 (rps×attain): **direct ≈800 ≫ haproxy 234 > envoy 212 ≫ rayserve/litellm ≈27**
+- NOTE: `direct` n64 only exists because of the gather fix (commit 570d727) — the old MPI
+  collective lost this exact cell. Re-run lives in `proxycmp_direct_val/run1`.
 
 **HELD (prod queue):**
 - [ ] `nullcompute_scaling_val` — the single `n256_r12` cell
