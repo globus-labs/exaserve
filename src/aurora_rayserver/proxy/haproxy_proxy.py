@@ -60,6 +60,7 @@ class HAProxyProxy(ProxyBackend):
         check_rise = int(options.get("check_rise", 2))
         stats_port = int(options.get("stats_port", 9999))
         maxconn = int(options.get("maxconn", 50000))
+        http_no_delay = bool(options.get("http_no_delay", True))
 
         # Group endpoints by model_id so each model gets its own backend section
         from collections import defaultdict
@@ -70,18 +71,21 @@ class HAProxyProxy(ProxyBackend):
         lines: list[str] = []
 
         # --- global section ---
+        # `option http-no-delay` forwards each SSE token chunk immediately instead
+        # of coalescing, so per-request TBT reflects true decode cadence (without
+        # it HAProxy bursts the token stream ~230ms vs ~22ms/token). It lives in
+        # `defaults`, so it also applies to NON-streaming traffic and disables
+        # output coalescing for every response. Set `http_no_delay: false` to drop
+        # it (e.g. non-streaming throughput tests, where coalescing matters at
+        # scale). Default True preserves the streaming-SLO behavior.
+        no_delay = "\n                option http-no-delay" if http_no_delay else ""
         lines.append(dedent(f"""\
             global
                 maxconn {maxconn}
                 log stdout format raw local0 info
 
             defaults
-                mode http
-                # Forward each SSE token chunk immediately instead of coalescing,
-                # so per-request TBT reflects true decode cadence. Without this
-                # HAProxy bursts the token stream (~230ms flush vs ~22ms/token
-                # observed via the Ray Serve native proxy in the TBT diagnostic).
-                option http-no-delay
+                mode http{no_delay}
                 timeout connect 5s
                 timeout client  330s
                 timeout server  330s
