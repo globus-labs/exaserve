@@ -606,10 +606,84 @@ class CollectingStatLogger:
     def record_sleep_state(self, is_awake=0, level=0):
         pass
 
-    def to_dict(self):
+    @staticmethod
+    def _pct(sorted_vals, q):
+        if not sorted_vals:
+            return None
+        if len(sorted_vals) == 1:
+            return sorted_vals[0]
+        idx = min(len(sorted_vals) - 1, max(0, int(round(q * (len(sorted_vals) - 1)))))
+        return sorted_vals[idx]
+
+    def summary(self):
+        """Per-replica server-side metrics, immune to proxy/delivery effects.
+
+        server-TTFT = queued_time + prefill_time (arrival -> first token GENERATED).
+        server-TBT  = decode_time / (gen_tokens - 1)  (true per-request decode cadence).
+        These are what the decode SLO is really about; client-side TBT can be
+        distorted by proxy coalescing (http-no-delay off), these cannot.
+        """
+        fr = self.finished_requests
+        ttft, tbt, e2e, dec, pre, que = [], [], [], [], [], []
+        for r in fr:
+            q = float(r.get("queued_time", 0.0) or 0.0)
+            p = float(r.get("prefill_time", 0.0) or 0.0)
+            d = float(r.get("decode_time", 0.0) or 0.0)
+            n = int(r.get("num_generation_tokens", 0) or 0)
+            ttft.append(q + p); que.append(q); pre.append(p); dec.append(d)
+            e2e.append(float(r.get("e2e_latency", 0.0) or 0.0))
+            if n > 1:
+                tbt.append(d / (n - 1))
+        run = [s.get("running", 0) for s in self.scheduler_snapshots]
+        kv = [s.get("kv_cache_usage", 0.0) for s in self.scheduler_snapshots]
+
+        def stats(v):
+            if not v:
+                return {"n": 0}
+            s = sorted(v)
+            return {"n": len(s), "mean": sum(s) / len(s),
+                    "p50": self._pct(s, 0.50), "p90": self._pct(s, 0.90),
+                    "p99": self._pct(s, 0.99), "max": s[-1]}
         return {
-            "scheduler_snapshots": self.scheduler_snapshots,
-            "finished_requests": self.finished_requests,
+            "total_requests": len(fr),
+            "server_ttft": stats(ttft),     # queued+prefill
+            "server_tbt": stats(tbt),       # decode/(gen-1)
+            "e2e": stats(e2e),
+            "queued_time": stats(que),
+            "prefill_time": stats(pre),
+            "decode_time": stats(dec),
+            "mean_batch_size": (sum(run) / len(run)) if run else 0,
+            "max_batch_size": max(run) if run else 0,
+            "kv_cache_peak": max(kv) if kv else 0.0,
+        }
+
+    def sample(self, cap=4000):
+        """A bounded, evenly-strided per-request sample for fleet-wide pooled
+        percentiles (computing exact pooled p99 needs raw values; this caps the
+        wire payload at ~cap/replica while staying representative across the run)."""
+        fr = self.finished_requests
+        if not fr:
+            return []
+        step = max(1, len(fr) // cap)
+        out = []
+        for r in fr[::step][:cap]:
+            n = int(r.get("num_generation_tokens", 0) or 0)
+            d = float(r.get("decode_time", 0.0) or 0.0)
+            out.append({
+                "ttft": float(r.get("queued_time", 0.0) or 0.0) + float(r.get("prefill_time", 0.0) or 0.0),
+                "tbt": (d / (n - 1)) if n > 1 else None,
+                "e2e": float(r.get("e2e_latency", 0.0) or 0.0),
+            })
+        return out
+
+    def to_dict(self):
+        # Ship the per-replica summary + a capped sample (for pooled fleet
+        # percentiles) + the scheduler trace. The full per-request array is NOT
+        # shipped (unbounded at 256n); summary+sample preserve what we report.
+        return {
+            "summary": self.summary(),
+            "sample": self.sample(),
+            "scheduler_snapshots": self.scheduler_snapshots[:2000],
         }
 
     @classmethod

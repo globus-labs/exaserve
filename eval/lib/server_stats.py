@@ -23,6 +23,17 @@ def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
     from ray import serve
     from ray.serve._private.constants import SERVE_NAMESPACE
 
+    # run_executor (the orchestrator) is NOT inside the Ray driver, so connect to
+    # the running head-node cluster first. Without this, serve.status() raises and
+    # the whole collection silently no-ops.
+    if not ray.is_initialized():
+        try:
+            ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False)
+            print("[server_stats] connected to Ray (address=auto)", flush=True)
+        except Exception as e:
+            print(f"[server_stats] ERROR: could not connect to Ray: {e}", flush=True)
+            return {"error": f"ray connect failed: {e}", "replicas": []}
+
     status = serve.status()
     if app_name not in status.applications:
         print(f"[server_stats] WARNING: app '{app_name}' not found in serve.status()", flush=True)
@@ -79,32 +90,62 @@ def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
     return aggregate
 
 
+def _pct(sorted_vals, q):
+    if not sorted_vals:
+        return None
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    idx = min(len(sorted_vals) - 1, max(0, int(round(q * (len(sorted_vals) - 1)))))
+    return sorted_vals[idx]
+
+
 def aggregate_replica_stats(all_stats: dict) -> dict:
-    """Aggregate per-replica stats into a summary."""
+    """Aggregate per-replica stats into a fleet summary.
+
+    Per-replica `summary` (server-TTFT/TBT/e2e/batch) comes from the replica.
+    Fleet-wide percentiles are computed from the pooled per-request `sample`
+    (capped/strided per replica) so they are true pooled percentiles, not an
+    average-of-percentiles. server-TTFT/TBT are proxy-immune by construction.
+    """
     replicas = []
+    pool_ttft, pool_tbt, pool_e2e = [], [], []
     for replica_id, stats in all_stats.items():
-        if "error" in stats and "summary" not in stats:
+        summ = stats.get("summary")
+        if not summ:
             continue
-        summary = stats.get("summary", {})
         replicas.append({
             "replica_id": replica_id,
             "pid": stats.get("pid"),
             "node_ip": stats.get("node_ip"),
-            "total_requests": summary.get("total_requests", 0),
-            "mean_batch_size": summary.get("mean_batch_size", 0),
-            "max_batch_size": summary.get("max_batch_size", 0),
-            "mean_e2e_latency": summary.get("mean_e2e_latency", 0),
-            "mean_queued_time": summary.get("mean_queued_time", 0),
-            "mean_prefill_time": summary.get("mean_prefill_time", 0),
-            "kv_cache_peak": summary.get("kv_cache_peak", 0),
+            "total_requests": summ.get("total_requests", 0),
+            "mean_batch_size": summ.get("mean_batch_size", 0),
+            "max_batch_size": summ.get("max_batch_size", 0),
+            "server_ttft_p99": (summ.get("server_ttft") or {}).get("p99"),
+            "server_tbt_p99": (summ.get("server_tbt") or {}).get("p99"),
+            "e2e_p99": (summ.get("e2e") or {}).get("p99"),
+            "kv_cache_peak": summ.get("kv_cache_peak", 0),
         })
+        for s in stats.get("sample", []) or []:
+            if s.get("ttft") is not None:
+                pool_ttft.append(s["ttft"])
+            if s.get("tbt") is not None:
+                pool_tbt.append(s["tbt"])
+            if s.get("e2e") is not None:
+                pool_e2e.append(s["e2e"])
 
     req_counts = [r["total_requests"] for r in replicas if r["total_requests"] > 0]
     total = sum(req_counts) if req_counts else 0
     imbalance = max(req_counts) / max(min(req_counts), 1) if len(req_counts) >= 2 else 1.0
 
+    def fleet(v):
+        if not v:
+            return {"n": 0}
+        s = sorted(v)
+        return {"n": len(s), "mean": sum(s) / len(s),
+                "p50": _pct(s, 0.50), "p90": _pct(s, 0.90),
+                "p99": _pct(s, 0.99), "max": s[-1]}
+
     return {
-        "replicas": replicas,
         "replica_count": len(replicas),
         "total_requests": total,
         "load_imbalance_ratio": imbalance,
@@ -112,4 +153,9 @@ def aggregate_replica_stats(all_stats: dict) -> dict:
         "mean_batch_size_across_replicas": (
             sum(r["mean_batch_size"] for r in replicas) / max(len(replicas), 1)
         ),
+        # Fleet-wide, proxy-immune server-side distributions (pooled sample).
+        "server_ttft": fleet(pool_ttft),   # queued+prefill, s
+        "server_tbt": fleet(pool_tbt),     # decode/(gen-1), s  (true decode cadence)
+        "server_e2e": fleet(pool_e2e),
+        "replicas": replicas,
     }
