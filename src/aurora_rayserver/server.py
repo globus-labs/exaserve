@@ -728,13 +728,18 @@ def get_or_create_serving_collector():
     ).remote()
 
 
-def _serving_stats_push_loop(period_s=8.0):
+def _serving_stats_push_loop(period_s=None):
     """Daemon-thread loop in the replica process: every period_s, compute this
     replica's server-side summary+sample and push to the head collector. The
     last push before teardown carries near-complete data. Logs the buffered
-    request count once so we can confirm the logger is actually recording."""
+    request count once so we can confirm the logger is actually recording.
+
+    Scale-safe: at 256n there are ~3072 replicas pushing to one actor, so the
+    period and sample cap are env-tunable (defaults sized for 256n: ~256 pushes/s
+    of ~1k-sample payloads). AURORA_SS_PERIOD, AURORA_SS_SAMPLE_CAP."""
     import ray
-    import threading
+    period_s = period_s or float(os.environ.get("AURORA_SS_PERIOD", "10"))
+    sample_cap = int(os.environ.get("AURORA_SS_SAMPLE_CAP", "1500"))
     try:
         node_ip = ray.util.get_node_ip_address()
     except Exception:
@@ -757,7 +762,7 @@ def _serving_stats_push_loop(period_s=8.0):
             if n and not logged_records:
                 print(f"[serving-stats] {key}: recording ({n} reqs buffered)", flush=True)
                 logged_records = True
-            payload = {"summary": logger.summary(), "sample": logger.sample(),
+            payload = {"summary": logger.summary(), "sample": logger.sample(sample_cap),
                        "node_ip": node_ip, "pid": os.getpid(), "n": n}
             if collector is None:
                 collector = get_or_create_serving_collector()
