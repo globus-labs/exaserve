@@ -62,6 +62,11 @@ class HAProxyProxy(ProxyBackend):
         stats_port = int(options.get("stats_port", 9999))
         maxconn = int(options.get("maxconn", 50000))
         http_no_delay = bool(options.get("http_no_delay", True))
+        # HAProxy parallelism = threads (modern HAProxy is threaded, not multi-proc).
+        # 0/unset -> omit nbthread (HAProxy auto-detects = bound CPUs). Set
+        # options.nbthread (alias: num_workers) to pin more accept/processing threads
+        # — relevant to the 256n connection-bound streaming case.
+        nbthread = int(options.get("nbthread", options.get("num_workers", 0)) or 0)
 
         # Group endpoints by model_id so each model gets its own backend section
         from collections import defaultdict
@@ -80,9 +85,10 @@ class HAProxyProxy(ProxyBackend):
         # it (e.g. non-streaming throughput tests, where coalescing matters at
         # scale). Default True preserves the streaming-SLO behavior.
         no_delay = "\n                option http-no-delay" if http_no_delay else ""
+        nbthread_line = f"\n                nbthread {nbthread}" if nbthread > 0 else ""
         lines.append(dedent(f"""\
             global
-                maxconn {maxconn}
+                maxconn {maxconn}{nbthread_line}
                 log stdout format raw local0 info
 
             defaults

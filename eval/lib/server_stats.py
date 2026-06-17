@@ -13,6 +13,31 @@ import os
 from pathlib import Path
 
 
+def _head_address_from_runtime(results_dir: str):
+    """Read head_ip:port from the run's runtime/ray_runtime.yaml (sibling of
+    results/). Returns 'ip:port' or None. Avoids a yaml dep with a tiny parser."""
+    rt = Path(results_dir).parent / "runtime" / "ray_runtime.yaml"
+    if not rt.is_file():
+        return None
+    # NOTE: the yaml has several `port:` keys (proxy 4001, backend 8000, ray GCS
+    # 6379). Take the one that FOLLOWS head_ip (the ray cluster port); default 6379.
+    head_ip = port = None
+    try:
+        seen_head = False
+        for line in rt.read_text().splitlines():
+            s = line.strip()
+            if s.startswith("head_ip:"):
+                head_ip = s.split(":", 1)[1].strip().strip("'\"")
+                seen_head = True
+            elif s.startswith("port:") and seen_head and port is None:
+                port = s.split(":", 1)[1].strip().strip("'\"")
+        if head_ip:
+            return f"{head_ip}:{port or '6379'}"
+    except Exception:
+        pass
+    return None
+
+
 def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
     """Fan out to all replicas via Ray actor handles, collect stats exactly once each.
 
@@ -22,13 +47,20 @@ def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
     import ray
 
     # run_executor (the orchestrator) is NOT inside the Ray driver, so connect to
-    # the running head-node cluster first.
+    # the running head-node cluster first. address="auto" only discovers a cluster
+    # whose Ray session dir is on the LOCAL node — true at n1 (run_executor shares
+    # the head node) but NOT at multi-node (the head GCS is a specific node). So use
+    # the EXPLICIT head_ip:port from the run's ray_runtime.yaml (same address the
+    # driver uses), falling back to auto.
+    explicit = _head_address_from_runtime(results_dir)
+    addr = explicit or "auto"
     if not ray.is_initialized():
         try:
-            ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False)
-            print("[server_stats] connected to Ray (address=auto)", flush=True)
+            ray.init(address=addr, ignore_reinit_error=True, log_to_driver=False)
+            print(f"[server_stats] connected to Ray (address={addr})", flush=True)
         except Exception as e:
-            print(f"[server_stats] ERROR: could not connect to Ray: {e}", flush=True)
+            print(f"[server_stats] ERROR: could not connect to Ray (address={addr}): {e}",
+                  flush=True)
             return {"error": f"ray connect failed: {e}", "replicas": []}
 
     # Replicas push their server-side summaries to a named head actor (see
