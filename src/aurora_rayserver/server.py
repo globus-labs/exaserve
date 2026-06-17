@@ -625,7 +625,7 @@ class CollectingStatLogger:
         These are what the decode SLO is really about; client-side TBT can be
         distorted by proxy coalescing (http-no-delay off), these cannot.
         """
-        fr = self.finished_requests
+        fr = list(self.finished_requests)  # snapshot: record() appends concurrently
         ttft, tbt, e2e, dec, pre, que = [], [], [], [], [], []
         for r in fr:
             q = float(r.get("queued_time", 0.0) or 0.0)
@@ -636,8 +636,9 @@ class CollectingStatLogger:
             e2e.append(float(r.get("e2e_latency", 0.0) or 0.0))
             if n > 1:
                 tbt.append(d / (n - 1))
-        run = [s.get("running", 0) for s in self.scheduler_snapshots]
-        kv = [s.get("kv_cache_usage", 0.0) for s in self.scheduler_snapshots]
+        snaps = list(self.scheduler_snapshots)
+        run = [s.get("running", 0) for s in snaps]
+        kv = [s.get("kv_cache_usage", 0.0) for s in snaps]
 
         def stats(v):
             if not v:
@@ -663,7 +664,7 @@ class CollectingStatLogger:
         """A bounded, evenly-strided per-request sample for fleet-wide pooled
         percentiles (computing exact pooled p99 needs raw values; this caps the
         wire payload at ~cap/replica while staying representative across the run)."""
-        fr = self.finished_requests
+        fr = list(self.finished_requests)  # snapshot
         if not fr:
             return []
         step = max(1, len(fr) // cap)
@@ -692,6 +693,77 @@ class CollectingStatLogger:
     @classmethod
     def get_instance(cls):
         return cls._instances.get(os.getpid())
+
+
+# --- Serving-stats collection: replicas PUSH summaries to a named head actor ---
+# Avoids serve.status() replica enumeration (no per-replica handles in this Ray
+# version) and Lustre MDS load (no per-replica files). Independent of the
+# AURORA_SCALING_TRACE gating used by the init-stats collector.
+_SERVING_STATS_ACTOR = "ServingStatsCollector"
+_SERVING_STATS_NS = "serve"
+
+
+class _ServingStatsCollectorImpl:
+    """Head-node in-memory sink; keeps the latest payload per replica key."""
+
+    def __init__(self):
+        self._data = {}
+
+    def report(self, key, payload):
+        self._data[str(key)] = payload
+
+    def get_all(self):
+        return self._data
+
+    def count(self):
+        return len(self._data)
+
+
+def get_or_create_serving_collector():
+    import ray
+    cls = ray.remote(_ServingStatsCollectorImpl)
+    return cls.options(
+        name=_SERVING_STATS_ACTOR, namespace=_SERVING_STATS_NS,
+        lifetime="detached", num_cpus=0, get_if_exists=True,
+    ).remote()
+
+
+def _serving_stats_push_loop(period_s=8.0):
+    """Daemon-thread loop in the replica process: every period_s, compute this
+    replica's server-side summary+sample and push to the head collector. The
+    last push before teardown carries near-complete data. Logs the buffered
+    request count once so we can confirm the logger is actually recording."""
+    import ray
+    import threading
+    try:
+        node_ip = ray.util.get_node_ip_address()
+    except Exception:
+        node_ip = "?"
+    key = f"{node_ip}:{os.getpid()}"
+    collector = None
+    logged_records = False
+    logged_none = False
+    while True:
+        time.sleep(period_s)
+        logger = CollectingStatLogger.get_instance()
+        if logger is None:
+            if not logged_none:
+                print(f"[serving-stats] {key}: logger get_instance()=None "
+                      "(stat logger not in this process)", flush=True)
+                logged_none = True
+            continue
+        try:
+            n = len(logger.finished_requests)
+            if n and not logged_records:
+                print(f"[serving-stats] {key}: recording ({n} reqs buffered)", flush=True)
+                logged_records = True
+            payload = {"summary": logger.summary(), "sample": logger.sample(),
+                       "node_ip": node_ip, "pid": os.getpid(), "n": n}
+            if collector is None:
+                collector = get_or_create_serving_collector()
+            collector.report.remote(key, payload)
+        except Exception as e:
+            print(f"[serving-stats] {key}: push failed: {e}", flush=True)
 
 
 @serve.deployment
@@ -872,6 +944,13 @@ class VLLMWorker:
                 print(f"[VLLMWorker pid={pid}] Stats collection enabled", flush=True)
             else:
                 print(f"[VLLMWorker pid={pid}] WARNING: CollectingStatLogger not instantiated by engine", flush=True)
+            # Start the head-ward serving-stats push (daemon; best-effort).
+            try:
+                import threading
+                threading.Thread(target=_serving_stats_push_loop, daemon=True).start()
+                print(f"[VLLMWorker pid={pid}] serving-stats push thread started", flush=True)
+            except Exception as _e:
+                print(f"[VLLMWorker pid={pid}] serving-stats push thread failed: {_e}", flush=True)
 
         total_s = time.monotonic() - init_mono
         print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")

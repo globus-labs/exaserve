@@ -20,12 +20,9 @@ def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
     Must be called BEFORE the cluster is torn down.
     """
     import ray
-    from ray import serve
-    from ray.serve._private.constants import SERVE_NAMESPACE
 
     # run_executor (the orchestrator) is NOT inside the Ray driver, so connect to
-    # the running head-node cluster first. Without this, serve.status() raises and
-    # the whole collection silently no-ops.
+    # the running head-node cluster first.
     if not ray.is_initialized():
         try:
             ray.init(address="auto", ignore_reinit_error=True, log_to_driver=False)
@@ -34,35 +31,28 @@ def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
             print(f"[server_stats] ERROR: could not connect to Ray: {e}", flush=True)
             return {"error": f"ray connect failed: {e}", "replicas": []}
 
-    status = serve.status()
-    if app_name not in status.applications:
-        print(f"[server_stats] WARNING: app '{app_name}' not found in serve.status()", flush=True)
-        return {"error": f"app {app_name} not found", "replicas": []}
+    # Replicas push their server-side summaries to a named head actor (see
+    # server.py:_serving_stats_push_loop). We read that, instead of enumerating
+    # replica actor handles (serve.status() exposes no handles in this Ray ver).
+    try:
+        actor = ray.get_actor("ServingStatsCollector", namespace="serve")
+        pushed = ray.get(actor.get_all.remote(), timeout=60)
+    except Exception as e:
+        print(f"[server_stats] WARNING: no ServingStatsCollector actor "
+              f"(no replica pushed? collect_stats off / logger not recording?): {e}", flush=True)
+        return {"error": f"no serving-stats actor: {e}", "replicas": []}
 
-    app_status = status.applications[app_name]
     all_stats = {}
-
-    for dep_name, dep_status in app_status.deployments.items():
-        for replica in dep_status.replicas:
-            if replica.state != "RUNNING":
-                continue
-            try:
-                handle = ray.get_actor(replica.actor_name, namespace=SERVE_NAMESPACE)
-                stats = ray.get(handle.collect_stats.remote(), timeout=30)
-                all_stats[replica.replica_id] = {
-                    "replica_id": replica.replica_id,
-                    "node_id": replica.node_id,
-                    "node_ip": replica.node_ip,
-                    "pid": replica.pid,
-                    **stats,
-                }
-            except Exception as e:
-                print(f"[server_stats] WARNING: failed to collect from {replica.replica_id}: {e}", flush=True)
-                all_stats[replica.replica_id] = {
-                    "replica_id": replica.replica_id,
-                    "pid": replica.pid,
-                    "error": str(e),
-                }
+    for key, payload in (pushed or {}).items():
+        all_stats[key] = {
+            "replica_id": key,
+            "node_ip": payload.get("node_ip"),
+            "pid": payload.get("pid"),
+            "summary": payload.get("summary"),
+            "sample": payload.get("sample"),
+        }
+    print(f"[server_stats] read {len(all_stats)} replica summaries from ServingStatsCollector",
+          flush=True)
 
     # Write per-replica files. Use replica_id (globally unique) instead of PID
     # since PIDs can collide across nodes.
