@@ -222,6 +222,11 @@ class HAProxyProxy(ProxyBackend):
             '  nstat -as 2>/dev/null | grep -iE '
             '"ListenOverflow|ListenDrop|ReqQFull|BacklogDrop|Syncookie|TimeWaitOverflow|RetransSegs|TCPAbort"; '
             '  ss -s 2>/dev/null | head -2; '
+            # NIC-level drops/errors via sysfs (no privileges, unlike ethtool -S on HSN):
+            # closes the gap between "TCP retransmit storm" and "the NIC is the wall".
+            '  for IF in $(ls /sys/class/net | grep -E "hsn"); do echo -n "nic $IF: "; '
+            '    for k in rx_dropped tx_dropped rx_errors rx_missed_errors rx_fifo_errors rx_over_errors; do '
+            '      echo -n "$k=$(cat /sys/class/net/$IF/statistics/$k 2>/dev/null) "; done; echo; done; '
             '  sleep 3; '
             'done; echo "[diag] haproxy pid {pid} gone at ts=$(date +%s)"'
         ).format(pid=haproxy_pid)
