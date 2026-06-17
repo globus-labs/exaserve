@@ -585,8 +585,10 @@ class CollectingStatLogger:
                 "kv_cache_usage": getattr(scheduler_stats, "kv_cache_usage", 0.0),
             })
         if iteration_stats is not None:
+            now = time.time()
             for req in getattr(iteration_stats, "finished_requests", []):
                 self.finished_requests.append({
+                    "finished_at": now,  # wall-clock; lets analysis drop warm-up-run requests
                     "e2e_latency": getattr(req, "e2e_latency", 0.0),
                     "queued_time": getattr(req, "queued_time", 0.0),
                     "prefill_time": getattr(req, "prefill_time", 0.0),
@@ -670,6 +672,7 @@ class CollectingStatLogger:
             n = int(r.get("num_generation_tokens", 0) or 0)
             d = float(r.get("decode_time", 0.0) or 0.0)
             out.append({
+                "finished_at": r.get("finished_at"),
                 "ttft": float(r.get("queued_time", 0.0) or 0.0) + float(r.get("prefill_time", 0.0) or 0.0),
                 "tbt": (d / (n - 1)) if n > 1 else None,
                 "e2e": float(r.get("e2e_latency", 0.0) or 0.0),
