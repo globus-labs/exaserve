@@ -54,17 +54,14 @@ def collect_server_stats(results_dir: str, app_name: str = "default") -> dict:
     print(f"[server_stats] read {len(all_stats)} replica summaries from ServingStatsCollector",
           flush=True)
 
-    # Write per-replica files. Use replica_id (globally unique) instead of PID
-    # since PIDs can collide across nodes.
+    # Write ONE combined per-replica file (NOT one-per-replica: 3072 small files
+    # at 256n would storm the Lustre MDS, ~5s/file under contention).
     results_path = Path(results_dir)
     results_path.mkdir(parents=True, exist_ok=True)
-    for replica_id, stats in all_stats.items():
-        safe_id = str(replica_id).replace("/", "_").replace(":", "_")
-        path = results_path / f"replica_stats_{safe_id}.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(stats, f, indent=2)
+    with open(results_path / "replica_stats_all.json", "w", encoding="utf-8") as f:
+        json.dump(all_stats, f)
 
-    # Aggregate
+    # Aggregate (pooled over the whole job AND data-run-only via the cooldown gap).
     aggregate = aggregate_replica_stats(all_stats)
     agg_path = results_path / "server_stats.json"
     with open(agg_path, "w", encoding="utf-8") as f:
@@ -98,7 +95,7 @@ def aggregate_replica_stats(all_stats: dict) -> dict:
     average-of-percentiles. server-TTFT/TBT are proxy-immune by construction.
     """
     replicas = []
-    pool_ttft, pool_tbt, pool_e2e = [], [], []
+    pool = []  # (finished_at, ttft, tbt, e2e) across all replicas, for run split
     for replica_id, stats in all_stats.items():
         summ = stats.get("summary")
         if not summ:
@@ -116,25 +113,37 @@ def aggregate_replica_stats(all_stats: dict) -> dict:
             "kv_cache_peak": summ.get("kv_cache_peak", 0),
         })
         for s in stats.get("sample", []) or []:
-            if s.get("ttft") is not None:
-                pool_ttft.append(s["ttft"])
-            if s.get("tbt") is not None:
-                pool_tbt.append(s["tbt"])
-            if s.get("e2e") is not None:
-                pool_e2e.append(s["e2e"])
+            pool.append((s.get("finished_at"), s.get("ttft"), s.get("tbt"), s.get("e2e")))
 
     req_counts = [r["total_requests"] for r in replicas if r["total_requests"] > 0]
     total = sum(req_counts) if req_counts else 0
     imbalance = max(req_counts) / max(min(req_counts), 1) if len(req_counts) >= 2 else 1.0
 
-    def fleet(v):
-        if not v:
-            return {"n": 0}
-        s = sorted(v)
-        return {"n": len(s), "mean": sum(s) / len(s),
-                "p50": _pct(s, 0.50), "p90": _pct(s, 0.90),
-                "p99": _pct(s, 0.99), "max": s[-1]}
+    def fleet(rows):
+        out = {}
+        for i, name in ((1, "ttft"), (2, "tbt"), (3, "e2e")):
+            v = sorted(r[i] for r in rows if r[i] is not None)
+            out[name] = ({"n": len(v), "mean": sum(v) / len(v), "p50": _pct(v, 0.50),
+                          "p90": _pct(v, 0.90), "p99": _pct(v, 0.99), "max": v[-1]}
+                         if v else {"n": 0})
+        return out
 
+    # Data-run-only: warm-up (run 0) and data (run 1) are separated by the fixed
+    # 75 s cooldown, so the finished_at stream has a >~40 s gap with no finishes.
+    # Split there and keep the LAST segment (the data run). Reviewer-proof: server
+    # metrics then exclude the cold warm-up run.
+    ts = sorted(t for (t, *_ ) in pool if t)
+    data_rows = pool
+    split_at = None
+    if len(ts) > 10:
+        gaps = [(ts[i + 1] - ts[i], ts[i + 1]) for i in range(len(ts) - 1)]
+        big = max(gaps, key=lambda g: g[0]) if gaps else (0, None)
+        if big[0] >= 40.0:  # cooldown gap detected
+            split_at = big[1]
+            data_rows = [r for r in pool if r[0] and r[0] >= split_at]
+
+    all_fleet = fleet(pool)
+    data_fleet = fleet(data_rows)
     return {
         "replica_count": len(replicas),
         "total_requests": total,
@@ -143,9 +152,14 @@ def aggregate_replica_stats(all_stats: dict) -> dict:
         "mean_batch_size_across_replicas": (
             sum(r["mean_batch_size"] for r in replicas) / max(len(replicas), 1)
         ),
-        # Fleet-wide, proxy-immune server-side distributions (pooled sample).
-        "server_ttft": fleet(pool_ttft),   # queued+prefill, s
-        "server_tbt": fleet(pool_tbt),     # decode/(gen-1), s  (true decode cadence)
-        "server_e2e": fleet(pool_e2e),
+        "run_split_detected": split_at is not None,
+        # DATA-RUN-only fleet distributions (warm-up dropped) — use these.
+        "server_ttft_data": data_fleet["ttft"],
+        "server_tbt_data": data_fleet["tbt"],
+        "server_e2e_data": data_fleet["e2e"],
+        # Pooled-over-job (incl. warm-up) — kept for reference.
+        "server_ttft": all_fleet["ttft"],   # queued+prefill, s
+        "server_tbt": all_fleet["tbt"],     # decode/(gen-1), s  (true decode cadence)
+        "server_e2e": all_fleet["e2e"],
         "replicas": replicas,
     }
