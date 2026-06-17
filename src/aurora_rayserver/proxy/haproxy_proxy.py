@@ -13,6 +13,7 @@ If you need those features, use LiteLLMProxy instead.
 haproxy must be installed and on PATH.
 """
 
+import os
 import signal
 import socket
 import subprocess
@@ -193,7 +194,47 @@ class HAProxyProxy(ProxyBackend):
         print(f"[HAProxyProxy] Starting: {' '.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd)
         print(f"[HAProxyProxy] Process started (pid={proc.pid}, port={port})", flush=True)
+        self._start_diag_sampler(proc.pid, config_path.parent)
         return proc, port
+
+    def _start_diag_sampler(self, haproxy_pid: int, out_dir: Path) -> None:
+        """Spawn a lightweight head-node sampler (opt out: AURORA_HAPROXY_DIAG=0).
+
+        Every 3s while HAProxy is alive, append the TCP/socket + process counters
+        that disambiguate why new connections get ECONNREFUSED under load:
+          - TcpExtListenOverflows / ListenDrops / TCPReqQFullDoCookies: accept-queue
+            overflow (HAProxy too CPU-busy to accept()) -> the classic ECONNREFUSED.
+          - /proc/net/sockstat 'tw' + TCPTimeWait: TIME_WAIT / ephemeral-port churn
+            from option http-server-close closing millions of short connections.
+          - haproxy %cpu: is the proxy pegged at one core?
+        Written to <proxy_out>/haproxy_diag.log so it is gathered with the run.
+        """
+        if os.environ.get("AURORA_HAPROXY_DIAG", "1") == "0":
+            return
+        diag_path = out_dir / "haproxy_diag.log"
+        script = (
+            'echo "[diag] sampling haproxy pid={pid} every 3s -> $0"; '
+            'while kill -0 {pid} 2>/dev/null; do '
+            '  echo "=== ts=$(date +%s) ==="; '
+            '  ps -o pid=,%cpu=,%mem=,rss=,nlwp= -p {pid} 2>/dev/null '
+            '    | sed "s/^/haproxy_proc: /"; '
+            '  grep -E "TCP:|sockets:" /proc/net/sockstat 2>/dev/null; '
+            '  nstat -as 2>/dev/null | grep -iE '
+            '"ListenOverflow|ListenDrop|ReqQFull|BacklogDrop|Syncookie|TimeWaitOverflow|RetransSegs|TCPAbort"; '
+            '  ss -s 2>/dev/null | head -2; '
+            '  sleep 3; '
+            'done; echo "[diag] haproxy pid {pid} gone at ts=$(date +%s)"'
+        ).format(pid=haproxy_pid)
+        try:
+            with open(diag_path, "a") as fh:
+                subprocess.Popen(
+                    ["bash", "-c", script, str(diag_path)],
+                    stdout=fh, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            print(f"[HAProxyProxy] Diag sampler -> {diag_path}", flush=True)
+        except Exception as exc:  # diagnostics must never break the run
+            print(f"[HAProxyProxy] Diag sampler failed to start: {exc}", flush=True)
 
     def health_check(
         self,
