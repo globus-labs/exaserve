@@ -279,6 +279,20 @@ def plot_set1(stats: dict[tuple[str, int], CellStats]) -> Path:
         iy = [v for _, v in ideal]
         axes[0].plot(ix, iy, "k--", alpha=0.5, label="ideal linear\n(direct n1×N)")
 
+    # Overlay NON-streaming haproxy (n64, n256-corrected-client=4) on the throughput
+    # panel: shows the headline — streaming collapses at 256n while non-streaming
+    # scales (27k). Non-stream has no TTFT/TBT so it's throughput-panel only.
+    ns_pts = []
+    for n, stem in [(64, "proxycmp_haproxy_nostream"),
+                    (256, "proxycmp_haproxy_nostream_c4_256")]:
+        st = extract_cell(stem, n, keep_arrays=False, refresh=False)
+        if st:
+            ns_pts.append((n, st.rps * st.success_rate))
+    if ns_pts:
+        axes[0].plot([p[0] for p in ns_pts], [p[1] for p in ns_pts], "D--",
+                     color=COLORS["haproxy"], alpha=0.6, markersize=9, markerfacecolor="none",
+                     label="haproxy NON-stream\n(27k @256n — scales)")
+
     axes[0].set(title="Successful throughput vs cluster size",
                 xlabel="nodes (= replicas, TP=1)", ylabel="successful requests/s")
     axes[0].set_yscale("log", base=10)
