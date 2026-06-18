@@ -218,8 +218,18 @@ class HAProxyProxy(ProxyBackend):
         if os.environ.get("AURORA_HAPROXY_DIAG", "1") == "0":
             return
         diag_path = out_dir / "haproxy_diag.log"
+        # 5s interval (vs 3s) keeps the sampler's own fork footprint small on a
+        # resource-stressed head node — Aurora kills/refuses procs with EAGAIN
+        # ("resource temporarily unavailable") under nproc/thread/fd/mem pressure,
+        # and we don't want the sampler to be a contributor or a victim.
         script = (
-            'echo "[diag] sampling haproxy pid={pid} every 3s -> $0"; '
+            'echo "[diag] sampling haproxy pid={pid} every 5s -> $0"; '
+            # one-time: the LIMITS that EAGAIN-kills hit, + HAProxy soft limits.
+            'echo "[limits] threads-max=$(cat /proc/sys/kernel/threads-max 2>/dev/null)'
+            ' pid_max=$(cat /proc/sys/kernel/pid_max 2>/dev/null)'
+            ' file-max=$(cat /proc/sys/fs/file-max 2>/dev/null)"; '
+            'grep -iE "Max processes|Max open files" /proc/{pid}/limits 2>/dev/null'
+            '  | sed "s/^/[limits] haproxy /"; '
             'while kill -0 {pid} 2>/dev/null; do '
             '  echo "=== ts=$(date +%s) ==="; '
             '  ps -o pid=,%cpu=,%mem=,rss=,nlwp= -p {pid} 2>/dev/null '
@@ -228,13 +238,26 @@ class HAProxyProxy(ProxyBackend):
             '  nstat -as 2>/dev/null | grep -iE '
             '"ListenOverflow|ListenDrop|ReqQFull|BacklogDrop|Syncookie|TimeWaitOverflow|RetransSegs|TCPAbort"; '
             '  ss -s 2>/dev/null | head -2; '
-            # NIC-level drops/errors via sysfs (no privileges, unlike ethtool -S on HSN):
-            # closes the gap between "TCP retransmit storm" and "the NIC is the wall".
+            # NIC-level drops/errors via sysfs (no privileges, unlike ethtool -S on HSN).
             '  for IF in $(ls /sys/class/net | grep -E "hsn"); do echo -n "nic $IF: "; '
             '    for k in rx_dropped tx_dropped rx_errors rx_missed_errors rx_fifo_errors rx_over_errors; do '
             '      echo -n "$k=$(cat /sys/class/net/$IF/statistics/$k 2>/dev/null) "; done; echo; done; '
-            '  sleep 3; '
-            'done; echo "[diag] haproxy pid {pid} gone at ts=$(date +%s)"'
+            # RESOURCE-EXHAUSTION evidence (the EAGAIN-kill hypothesis): node memory,
+            # system-wide threads/procs vs limit, open-fd vs limit, HAProxy fd count.
+            '  echo "res: $(awk \'/^MemAvailable|^MemFree/{print $1$2}\' /proc/meminfo 2>/dev/null | tr \'\\n\' \' \')'
+            'loadavg=$(cut -d\' \' -f1-3,4 /proc/loadavg 2>/dev/null) '
+            'sys_threads=$(cat /proc/sys/kernel/threads-max 2>/dev/null)/used=$(ls /proc 2>/dev/null | grep -c \'^[0-9]\') '
+            'file_nr=$(cat /proc/sys/fs/file-nr 2>/dev/null) '
+            'ha_fds=$(ls /proc/{pid}/fd 2>/dev/null | wc -l)"; '
+            # CANARY: try a trivial fork; if it returns EAGAIN, log it — direct proof
+            # the node is refusing new procs ("resource temporarily unavailable").
+            '  ( /bin/true ) 2>/tmp/.diag_fork_$$ || echo "FORK-CANARY-FAILED: $(cat /tmp/.diag_fork_$$ 2>/dev/null)"; '
+            '  sleep 5; '
+            'done; '
+            'echo "[diag] haproxy pid {pid} gone at ts=$(date +%s)"; '
+            # smoking gun on death: OOM-killer / kill evidence from the kernel ring buffer.
+            'echo "[diag] dmesg tail (OOM/kill evidence, may be empty w/o priv):"; '
+            'dmesg -T 2>/dev/null | tail -25 | grep -iE "oom|kill|haproxy|memory|fork|cannot" | sed "s/^/[dmesg] /" || true'
         ).format(pid=haproxy_pid)
         try:
             with open(diag_path, "a") as fh:
