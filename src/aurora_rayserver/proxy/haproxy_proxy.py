@@ -288,7 +288,7 @@ class HAProxyProxy(ProxyBackend):
         while time.monotonic() < deadline:
             if process is not None and process.poll() is not None:
                 print(
-                    f"[HAProxyProxy] Process exited with code {process.returncode} "
+                    f"[HAProxyProxy] Process {self._describe_exit(process.returncode)} "
                     f"before becoming healthy.",
                     flush=True,
                 )
@@ -313,9 +313,40 @@ class HAProxyProxy(ProxyBackend):
         )
         return False
 
+    @staticmethod
+    def _describe_exit(rc) -> str:
+        """Human-readable cause from a Popen returncode. A negative code means the
+        OS killed the proxy with that signal -- the smoking gun for the 256n death:
+        SIGKILL=OOM-killer/external resource kill ('resource temporarily unavailable'),
+        SIGSEGV=crash. A non-negative code means HAProxy exited on its own."""
+        if rc is None:
+            return "still running"
+        if rc < 0:
+            try:
+                name = signal.Signals(-rc).name
+            except (ValueError, AttributeError):
+                name = f"signal {-rc}"
+            hint = {
+                signal.SIGKILL: " (OOM-killer or external/resource kill, e.g. EAGAIN 'resource temporarily unavailable')",
+                signal.SIGSEGV: " (segfault/crash)",
+                signal.SIGABRT: " (abort -- fatal internal error)",
+                signal.SIGBUS: " (bus error)",
+            }.get(-rc, "")
+            return f"KILLED BY {name}{hint} (returncode={rc})"
+        return f"exited with code {rc}" + (" (clean)" if rc == 0 else " (self-terminated/error)")
+
     def stop(self, process: subprocess.Popen) -> None:
         """Send SIGTERM for graceful drain, then SIGKILL after 15s."""
-        if process.poll() is not None:
+        rc = process.poll()
+        if rc is not None:
+            # The proxy already exited BEFORE teardown -> it died DURING the run.
+            # Log HOW (the signal is the smoking gun). This used to return silently,
+            # which is exactly why every 256n proxy death had no recorded cause.
+            print(
+                f"[HAProxyProxy] *** PROXY DIED DURING RUN: pid={process.pid} "
+                f"{self._describe_exit(rc)} ***",
+                flush=True,
+            )
             return
         print(f"[HAProxyProxy] Stopping proxy (pid={process.pid})", flush=True)
         process.send_signal(signal.SIGTERM)
