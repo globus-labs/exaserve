@@ -258,7 +258,7 @@ class HAProxyProxy(ProxyBackend):
             # smoking gun on death: OOM-killer / kill evidence from the kernel ring buffer.
             'echo "[diag] dmesg tail (OOM/kill evidence, may be empty w/o priv):"; '
             'dmesg -T 2>/dev/null | tail -25 | grep -iE "oom|kill|haproxy|memory|fork|cannot" | sed "s/^/[dmesg] /" || true'
-        ).format(pid=haproxy_pid)
+        ).replace("{pid}", str(haproxy_pid))  # NOT .format(): the script has literal awk {…} braces
         try:
             with open(diag_path, "a") as fh:
                 subprocess.Popen(
