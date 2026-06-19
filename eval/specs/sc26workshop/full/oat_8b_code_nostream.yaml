@@ -1,0 +1,63 @@
+name: oat_8b_code_nostream
+# EXP SET 2 (OAT) - workload perturbation: Code (HumanEval) via dataset_replay
+# (real prompts, per-row output_len). Fixed-interval at 90% of single-node
+# saturation measured with the representative shape (6 -> 5.4 rps/node).
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [1, 64]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: 'min(num_nodes, 4)'
+  - path: scheduler.queue
+    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+  - path: scheduler.walltime
+    expr: '"01:00:00"'
+trace:
+  kind: dataset_replay
+  input_prompt_path: /lus/flare/projects/AuroraGPT/wenyiw/data/paper_datasets/humaneval.jsonl
+workload:
+  duration: 60.0
+  input_len: 256
+  output_len: 512
+  rate_per_node: 5.4
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+  collect_stats: true
+client:
+  num_runs: 6
+  dest: proxy
+  stream: false
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs

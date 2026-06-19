@@ -1,0 +1,66 @@
+name: oat_120b_nostream
+# EXP SET 2 (OAT) - model perturbation: GPT-OSS-120B (MXFP4, 122 GB) from the
+# shared hub, TP=8 (8/12 tiles, 4 idle), planner auto-packs 1 replica/node.
+# Rate: 9 rps/node — highest fixed rate meeting the PAPER SLO (p99 TBT<=250ms)
+# per calibration/sat_120b_paper_recal (r9: attain 1.000, aggregate TBT p99
+# 175ms; r12: 0.94 but TBT p99 382ms). The throughput-knee rate (17.1, from
+# sat_120b_64x64) busted the SLO at sustained load (attain 0.14).
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [1, 64]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: 'min(num_nodes, 4)'
+  - path: scheduler.queue
+    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+  - path: scheduler.walltime
+    expr: '"01:00:00"'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 9
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  model_storage_path: /flare/datasets/model-weights/hub
+  models:
+  - model_id: openai/gpt-oss-120b
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 120
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 128
+  collect_stats: true
+client:
+  num_runs: 6
+  dest: proxy
+  stream: false
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs
