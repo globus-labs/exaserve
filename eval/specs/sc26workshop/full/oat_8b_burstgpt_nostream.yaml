@@ -13,9 +13,9 @@ matrix:
   - path: client.num_nodes
     expr: 'min(num_nodes, 4)'
   - path: scheduler.queue
-    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
   - path: scheduler.walltime
-    expr: '"01:00:00"'
+    expr: '"02:00:00" if num_nodes <= 16 else ("06:00:00" if num_nodes >= 256 else "01:00:00")'
 trace:
   kind: azure_trace
   input_trace_path: /lus/flare/projects/AuroraGPT/wenyiw/data/input_traces/BurstGPT_without_fails_1.csv
