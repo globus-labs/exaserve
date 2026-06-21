@@ -34,8 +34,14 @@ OUT = Path(__file__).resolve().parent / "output" / "sc26_full"
 OUT.mkdir(parents=True, exist_ok=True)
 
 PROXIES = ["direct", "haproxy", "envoy", "rayserve", "litellm"]
-PNODES = [1, 4, 16, 64]
+PNODES = [1, 4, 16, 64]              # full-sweep proxycmp_<p>
+ALLNODES = [1, 4, 16, 64, 128, 256]  # + proxycmp_<p>_scale for n>=128
 COLORS = P.COLORS
+
+
+def pstem(p, n):
+    """128n/256n live in proxycmp_<p>_scale; <=64 in the full-sweep spec."""
+    return f"proxycmp_{p}_scale" if n >= 128 else f"proxycmp_{p}"
 OAT = [("oat_8b_baseline","baseline"),("oat_8b_poisson","poisson"),
        ("oat_8b_2kx2k","2k×2k"),("oat_8b_4kx4k","4k×4k"),("oat_8b_code","code"),
        ("oat_8b_chat","chat"),("oat_8b_summary","summary"),("oat_8b_burstgpt","burstgpt")]
@@ -51,11 +57,12 @@ def cell(stem, n, refresh=False):
 
 def build(refresh=False):
     """Extract every cell once (cached). Returns nested dicts."""
-    S = {}  # streaming: (proxy,n) -> CellStats
-    NS = {}  # nostream:  (proxy,n) -> CellStats
+    S = {}  # streaming: (proxy,n) -> CellStats  (incl. 128/256 from _scale)
+    NS = {}  # nostream:  (proxy,n) -> CellStats  (only <=64; no nostream scale runs)
     for p in PROXIES:
+        for n in ALLNODES:
+            S[(p, n)] = cell(pstem(p, n), n, refresh)
         for n in PNODES:
-            S[(p, n)] = cell(f"proxycmp_{p}", n, refresh)
             NS[(p, n)] = cell(f"proxycmp_{p}_nostream", n, refresh)
     O = {}   # oat streaming/(stem,n); ONS nostream
     ONS = {}
@@ -80,7 +87,7 @@ def fig1_proxy_scaling(S):
     fig, ax = plt.subplots(3, 1, figsize=(11, 14))
     for p in PROXIES:
         xs, sr, suc, att = [], [], [], []
-        for n in PNODES:
+        for n in ALLNODES:
             st = S.get((p, n))
             if not st or np.isnan(st.rps): continue
             xs.append(n); sr.append(st.rps * st.success_rate)
@@ -90,7 +97,7 @@ def fig1_proxy_scaling(S):
         ax[0].plot(xs, sr, "o-", color=c, label=p, lw=2)
         ax[1].plot(xs, suc, "o-", color=c, label=p, lw=2)
         ax[2].plot(xs, att, "o-", color=c, label=p, lw=2)
-    for a in ax: a.set_xscale("log", base=2); a.set_xticks(PNODES); a.set_xticklabels(PNODES); a.grid(alpha=.3); a.legend(fontsize=9)
+    for a in ax: a.set_xscale("log", base=2); a.set_xticks(ALLNODES); a.set_xticklabels(ALLNODES); a.grid(alpha=.3); a.legend(fontsize=9)
     ax[0].set_ylabel("successful throughput (req/s)"); ax[0].set_title("Streaming proxy comparison — successful throughput vs nodes")
     ax[1].set_ylabel("success rate (%)"); ax[1].set_title("Request success rate (litellm/rayserve saturate)"); ax[1].set_ylim(-5, 105)
     ax[2].set_ylabel("paper SLO attainment"); ax[2].set_title("SLO attainment (TTFT≤1s ∧ P99-TBT≤250ms)"); ax[2].set_xlabel("nodes")
