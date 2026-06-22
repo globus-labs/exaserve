@@ -55,6 +55,47 @@ def cell(stem, n, refresh=False):
         return None
 
 
+def extract_run(stem, n, good):
+    """Like extract_cell but from a SPECIFIC set of data run_index values — used
+    to drop node-failure-killed runs (full 0%-success deaths that are infra, not
+    proxy behavior) so a cell's point reflects its healthy run(s)."""
+    import ijson
+    from sc26_preview import CellStats
+    src = P.resolve_cell(stem, n)
+    if src is None:
+        return None
+    completed = duration = 0.0
+    with open(src, "rb") as fh:
+        for pr in ijson.items(fh, "per_run.item"):
+            if int(pr.get("run_index", 0)) in good:
+                completed += float(pr.get("requests_completed", 0) or 0)
+                duration += float(pr.get("duration_s", 0) or 0)
+    rps = completed / duration if duration > 0 else float("nan")
+    ttft = []; tbt = []; lat = []; dec = []; nreq = nsucc = nmeet = 0
+    with open(src, "rb") as fh:
+        for r in ijson.items(fh, "requests.item"):
+            if int(r.get("run_index", 0)) not in good:
+                continue
+            nreq += 1; ok = bool(r.get("success", True))
+            t = r.get("ttft_s"); b = r.get("tbt_p99_s"); l = r.get("latency")
+            t = float(t) if t is not None else float("nan")
+            b = float(b) if b is not None else float("nan")
+            l = float(l) if l is not None else float("nan")
+            if ok:
+                nsucc += 1; ttft.append(t); tbt.append(b); lat.append(l); dec.append(l - t)
+            if ok and not np.isnan(t) and t <= P.TTFT_SLO_S and not np.isnan(b) and b <= P.TBT_P99_SLO_S:
+                nmeet += 1
+    arr = lambda x: np.asarray(x, dtype=np.float32)
+    _p = lambda a, q: float(np.nanpercentile(a, q)) if a.size else float("nan")
+    ta, ba, la, da = arr(ttft), arr(tbt), arr(lat), arr(dec)
+    att = nmeet / nreq if nreq else float("nan")
+    return CellStats(spec=stem, node=n, src=str(src), n_req=nreq, n_success=nsucc, rps=rps,
+                     attainment=att, goodput=rps * att,
+                     success_rate=(nsucc / nreq if nreq else float("nan")),
+                     ttft_p50=_p(ta, 50), ttft_p99=_p(ta, 99), tbt_p50=_p(ba, 50), tbt_p99=_p(ba, 99),
+                     e2e_p50=_p(la, 50), e2e_p99=_p(la, 99), decode_p50=_p(da, 50), decode_p99=_p(da, 99))
+
+
 def build(refresh=False):
     """Extract every cell once (cached). Returns nested dicts."""
     S = {}  # streaming: (proxy,n) -> CellStats  (incl. 128/256 from _scale)
@@ -64,6 +105,12 @@ def build(refresh=False):
             S[(p, n)] = cell(pstem(p, n), n, refresh)
         for n in PNODES:
             NS[(p, n)] = cell(f"proxycmp_{p}_nostream", n, refresh)
+    # envoy 256n: both clean attempts lost a node mid-job; use the healthy data
+    # run (run_index=1) only, dropping the node-failure-killed run. Backstop retry
+    # (proxycmp_envoy_256retry) queued — swap in if it lands clean.
+    ej = extract_run("proxycmp_envoy_scale", 256, {1})
+    if ej and not np.isnan(ej.rps):
+        S[("envoy", 256)] = ej
     O = {}   # oat streaming/(stem,n); ONS nostream
     ONS = {}
     for stem, _ in OAT + [("oat_120b", "120b")]:
@@ -101,7 +148,10 @@ def fig1_proxy_scaling(S):
     ax[0].set_ylabel("successful throughput (req/s)"); ax[0].set_title("Streaming proxy comparison — successful throughput vs nodes")
     ax[1].set_ylabel("success rate (%)"); ax[1].set_title("Request success rate (litellm/rayserve saturate)"); ax[1].set_ylim(-5, 105)
     ax[2].set_ylabel("paper SLO attainment"); ax[2].set_title("SLO attainment (TTFT≤1s ∧ P99-TBT≤250ms)"); ax[2].set_xlabel("nodes")
-    fig.tight_layout(); out = OUT / "fig1_proxy_scaling.png"; fig.savefig(out, dpi=130); plt.close(fig); return out
+    fig.text(0.5, 0.005,
+             "envoy 256n: healthy data run only (2 attempts lost a node mid-job; envoy itself did not crash). "
+             "num_runs=6 for n≤64, 3 for n∈{128,256}.", ha="center", fontsize=7, style="italic")
+    fig.tight_layout(rect=(0, 0.02, 1, 1)); out = OUT / "fig1_proxy_scaling.png"; fig.savefig(out, dpi=130); plt.close(fig); return out
 
 
 def fig2_two_mode(S, NS):
