@@ -10,7 +10,7 @@ every checklist run-item has exactly one spec here.
 |---|---|---|
 | `calibration/` | Single-node(/replica) saturation finders. Run once per (model, workload); their 90 %-rates are pasted into the OAT specs. | n/a (binary search) |
 | `validation/` | **Pilot sweep** — the complete experiment set, but each cell runs only `2` (run 0 = warm-up, run 1 = the data point). Use it to shake out every cell end-to-end and to measure real per-cell cost before committing to the full sweep. Spec names/filenames carry a `_val` suffix so results land in separate run groups. | 2 |
-| `full/` | The real sweep. Identical specs to `validation/` minus the suffix, with `6` runs (run 0 warm-up + 5 data points → mean/var per the v2 protocol). 6 is tentative — revisit after the validation sweep timing. | 6 |
+| `full/` | The real sweep (**complete**). Specs mirror `validation/` minus the suffix. `6` runs for N≤64 (warm-up + 5 data), `3` for the 128/256 scale cells (warm-up + 2; large-run economy). Both SSE (`stream:true`) and E2E (`_nostream`) variants. | 6 / 3 |
 | `smokes/` | 1-node/2-node infrastructure validation + the PP demonstration (`pp405b_verify_2node`). Already exercised; keep for re-validation after stack changes. | 1 |
 
 Spec names must be unique across the whole `eval/specs/` tree (the catalog
@@ -37,8 +37,9 @@ iteration speed.
 ## Suite contents (mirror of plan_exp.md §9)
 
 - **Set 1 — proxy comparison:** `proxycmp_{haproxy,envoy,litellm,rayserve,direct}`,
-  N ∈ {1,4,16,64} (+ a 256 extension for haproxy/direct, run from the same specs by
-  widening the matrix on capacity).
+  N ∈ {1,4,16,64} (full-sweep specs) **extended to {128,256} for all five** via
+  `proxycmp_<proxy>_scale` (128→debug-scaling, 256→prod). Each also has a `_nostream`
+  E2E variant at N≤64.
 - **Set 2 — OAT robustness:** `oat_8b_{baseline,poisson,2kx2k,4kx4k,code,chat,summary,burstgpt}`
   + `oat_120b` (rate 17.1 from `calibration/sat_120b_64x64`),
   N ∈ {1,64}.
@@ -47,75 +48,73 @@ iteration speed.
 - **Multi-node PP:** demonstration row = `smokes/pp405b_verify_2node` (verified);
   optional OAT-style rate via `calibration/sat_405b_pp2`.
 
-## Run checklist (per folder)
+## Status tables (per subdir)
 
-### calibration/ — 9 of 9 done
-- [x] `sat_8b_64x64` — 109 rps/node → OAT rate **98**
-- [x] `sat_8b_2kx2k` — 4 → **3.6**
-- [x] `sat_8b_4kx4k` — 2 → **1.8**
-- [x] `sat_8b_code` — 6 → **5.4**
-- [x] `sat_8b_chat` — 12 → **10.8**
-- [x] `sat_8b_summary` — 12 → **10.8**
-- [x] `sat_120b_64x64` — throughput knee 19 rps/node → 17.1, but SUPERSEDED: 17.1 busted
-      the paper SLO at sustained load (attain 0.14). See `sat_120b_paper_recal`.
-- [x] `sat_120b_paper_recal` — fixed-rate sweep vs paper SLO: r9 attain **1.000** (TBT p99
-      175ms), r12 0.94 (382ms), r15 0.93. → **120B OAT rate = 9** (committed `0d62a97`).
-- [x] `sat_405b_pp2` — replica ceiling BELOW the finder's 1 rps floor: offered 1 -> achieved
-      0.31 rps, p99 TTFT 25 s (verify run: ~0.5 rps with growing queue). Conclusion: treat the
-      405B row as a demonstration (raw TTFT/TBT); an OAT-style rate would be ~0.25-0.3 rps/replica
-      and needs longer windows for stable P99 stats.
+Results are data-runs-only (warm-up dropped). SLO attainment = paper SLO
+(per-request TTFT≤1s ∧ P99-TBT≤250ms); only meaningful for streaming.
 
-### validation/ — 38 of 38 sub-256 cells done (pilot complete); n256_r12 now on prod
-Counted by CELL. Attainment = paper SLO (TTFT≤1s ∧ P99-TBT≤250ms), warm-up dropped.
+### calibration/ — done (rates feed the OAT specs)
+| spec | swept | config | result |
+|---|---|---|---|
+| `sat_8b_64x64` | 1 replica | 64in/64out, binary search | 90%-rate → OAT **98** |
+| `sat_8b_2kx2k` | 1 | 2k/2k | → **3.6** |
+| `sat_8b_4kx4k` | 1 | 4k/2k | → **1.8** |
+| `sat_8b_code` | 1 | 256/512 | → **5.4** |
+| `sat_8b_chat` | 1 | 256/256 | → **10.8** |
+| `sat_8b_summary` | 1 | 768/256 | → **10.8** |
+| `sat_120b_paper_recal` | 1 | 120B, fixed-rate vs paper SLO | **rate 9** (r9 attain 1.000, TBT 175ms); 17.1 busted SLO |
+| `sat_405b_pp2` | 2 (PP2) | 405B | ~0.25–0.3 rps/replica; demo-only (offered 1→0.31 achieved) |
 
-**Set 2 OAT (18/18 done) — KEY FINDING: high-rate `dest=proxy` rows collapse at N=64 while
-throughput stays ~linear; low-rate rows hold.**
-- [x] `oat_8b_baseline` n1 0.994 → n64 rps **5776** (η≈0.92) attain **0.236** (TTFT-dominant)
-- [x] `oat_8b_poisson` n1 0.761 → n64 0.375 (burst sensitivity, intended)
-- [x] `oat_8b_2kx2k` n64 0.943 · `4kx4k` 0.995 · `code` 1.000 · `chat` 0.996 · `summary` 1.000 ·
-      `burstgpt` (low aggregate rps → proxy funnel not stressed → hold)
-- [x] `oat_120b` @ **rate 9** — n1 1.000 → n64 **0.987** (η≈1.0; ~544 rps stays under the funnel)
+### full/ — COMPLETE (the real sweep). num_runs=6 for N≤64, 3 for {128,256}. Both SSE + E2E modes.
 
-**Set 1 proxy (19/20 done) — throughput η vs paper attainment at n64 (rate 110 ≈ 8B knee, so
-absolute attain is a saturation stress test; the SCALING trend is the result):**
-- [x] `direct` n4/16/64 — η 1.02/1.02/**0.91**, attain **scale-invariant** 0.41/0.22/**0.15**
-- [x] `haproxy` — η .98/.97/.93, attain 0.20/0.18/**0.04** (5× drop)
-- [x] `envoy` — η 1.0/.97/.85, attain 0.16/0.18/**0.04**
-- [x] `rayserve` — η ~0.43 (half), attain ~**0.01**
-- [x] `litellm` n4/n16/n64 — η ~0.43, attain ~0.01, drops ~25–95% of reqs (worse at scale).
-      n4 first failed 3× to a **transient process-startup hang on one rank** that stalled the
-      whole MPI run to walltime (a load-client robustness gap, NOT litellm-specific);
-      recovered after the fixes below (run2/run3 clean: rps~180, success ~74%).
-- iso-SLO goodput @ n64 (rps×attain): **direct ≈800 ≫ haproxy 234 > envoy 212 ≫ rayserve/litellm ≈27**
-- NOTE: `direct` n64 only exists because of the gather fix (commit 570d727) — the old MPI
-  collective lost this exact cell. Re-run lives in `proxycmp_direct_val/run1`.
-- ROBUSTNESS (from the litellm n4 dig): one wedged/stuck connection could hang a whole
-  multi-node run to walltime (overall timeout = walltime, no SSE stall deadline, untimed
-  wait loop). Fixed: replay drain cap (`0cfb17a`) + go-client SSE stall deadline
-  `--stall-timeout` (default 120s, `d72196d`); validated zero false stalls. For sweeps set
-  `AURORA_REPLAY_TIMEOUT_S` < walltime, or rely on the stall deadline.
+**Set 1 — proxy comparison** · 8B, 64in/64out, 110 rps/node, `client.num_nodes=4`, stream+nostream
+| spec (+`_nostream`,`_scale`) | nodes swept | config | result (streaming) |
+|---|---|---|---|
+| `proxycmp_direct` | 1,4,16,64,128,256 | `dest=direct` (per-node, distributed) | **scales linearly → 18.1k rps / 100% @256** |
+| `proxycmp_haproxy` | 1…256 | `dest=proxy` haproxy | **plateaus ~4.7k / 100%** from 128n (centralized cap) |
+| `proxycmp_envoy` | 1…256 | `dest=proxy` envoy | clean to 128n; **degrades @256 (3.0k / 44%)**; SSE TBT-heavy |
+| `proxycmp_rayserve` | 1…256 | `dest=proxy` rayserve | **collapses** — success 100%→15%(n16)→3%(n256), proxy resets |
+| `proxycmp_litellm` | 1…256 | `dest=proxy` litellm (uvicorn) | **collapses** — success 89%(n1)→6.5%(n64+); accept-bound |
+| `..._nostream` (×5) | 1,4,16,64 | `stream:false` (E2E only) | all fast (~2s p99, ~6.8k rps); no per-token SLO |
 
-**Set 3 (prod queue):**
-- [ ] `nullcompute_scaling_val` n256_r12 — SUBMITTED to prod (job 8542241, queued; was held)
+Mode contrast: non-stream routing scales fine (≈27k-class at 256n in earlier runs); the
+**streaming token-delivery path is the wall** for centralized proxies. litellm/rayserve are
+saturation (proxy alive, can't accept), not crashes.
 
-### full/ — 0 of 15 done (gated on the validation sweep + budget)
-- [ ] `oat_8b_*` ×8 + `oat_120b` (rate **9**, paper-SLO recal) — N ∈ {1,64}; baseline also N=256
-- [ ] `proxycmp_*` ×5 — N ∈ {1,4,16,64}; haproxy+direct extended to 256 (capacity)
-- [ ] `nullcompute_scaling` — full (N,R) matrix to 1024; approve per-cell (cost!)
+**Set 2 — OAT robustness** · 8B unless noted, stream+nostream, N∈{1,64}
+| spec (+`_nostream`) | in/out | rate/node | SLO attain n1→n64 | note |
+|---|---|---|---|---|
+| `oat_8b_baseline` | 64/64 | 98 | 0.91 → **0.43** | short/high-rate → TBT-bound at scale |
+| `oat_8b_poisson` | 64/64 | 98 | 0.89 → **0.35** | burst sensitivity (intended) |
+| `oat_8b_2kx2k` | 2048/2048 | 3.6 | 1.00 → 0.90 | E2E p99 ~75s (long ctx) |
+| `oat_8b_4kx4k` | 4096/2048 | 1.8 | 1.00 → **1.00** | long-context holds |
+| `oat_8b_code` | 256/512 | 5.4 | 1.00 → 1.00 | |
+| `oat_8b_chat` | 256/256 | 10.8 | 0.99 → 0.99 | sharegpt dataset_replay |
+| `oat_8b_summary` | 768/256 | 10.8 | 1.00 → 1.00 | |
+| `oat_8b_burstgpt` | 512/64 | 5.0 | 0.46 → 0.46 | azure trace, bursty (low aggregate rps) |
+| `oat_120b` | 64/64 | 9 | 0.98 → 0.97 | gpt-oss-120b; 1 node-failure run re-ran clean |
 
-### smokes/ — 9 of 9 passing
-- [x] `smoke_slo_stream_1node` — HAProxy + stream + TBT + goodput (run repeatedly)
-- [x] `smoke_slo_stream_rayserve_1node` — Ray-native proxy; the TBT-buffering diagnostic
-- [x] `smoke_slo_stream_direct_1node` — dest=direct, verified post-fix (`ea2c5e9`)
-- [x] `dataset_replay_smoke_humaneval` — dataset_replay + Poisson end-to-end
-- [x] `nullcompute_smoke_1node` — null-compute + instrumentation probes
-- [x] `pp405b_verify_2node` — **the multi-node-PP demonstration: 30/30 streaming** ✓
-- [x] `pp2_verify_2node` — diagnostic; documents the small-TP auto-pack/over-density failure
-- [x] `pp2_serve_2node` — small-TP **multi-replica PP now SERVES** (req=2/assigned=2, READY 79s,
-      300 reqs, TBT 300/300, no OOM). The earlier tile-co-location OOM was resolved by the
-      per-GPU bundle fix (`17b88be`): each of the 4 workers gets a distinct single-GPU bundle.
-- [x] `clean_stage_check_1node` — clean-stage flag verified: `CLEAN-STAGE: wiping` → fresh
-      `Broadcast complete` (not "Reusing") → READY (66.8s). Run after any staging-path change.
+**Set 3 — null-compute control plane**
+| spec | nodes swept | config | result |
+|---|---|---|---|
+| `nullcompute_scaling` | 256,384,512,768,1024 | no GPU compute, proxy-routing stress | **NOT RUN** — held (prod, approve per-cell; ≥384n dominates cost) |
+
+### validation/ — pilot complete (superseded by full/)
+38 sub-256 cells + n256, `num_runs=2`, all families. Shook out every cell end-to-end and
+measured per-cell cost before the full sweep. Kept for provenance; the figures read `full/`.
+
+### smokes/ — passing (infra + diagnostics; re-run after stack changes)
+| spec | nodes | what | status |
+|---|---|---|---|
+| `smoke_slo_stream_1node` | 1 | haproxy + stream + TBT + goodput | ✓ |
+| `smoke_slo_stream_rayserve_1node` | 1 | Ray-native proxy TBT-buffering diagnostic | ✓ |
+| `smoke_slo_stream_direct_1node` | 1 | `dest=direct` post gather-fix | ✓ |
+| `dataset_replay_smoke_humaneval` | 1 | dataset_replay + Poisson e2e | ✓ |
+| `nullcompute_smoke_1node` | 1 | null-compute + instrumentation probes | ✓ |
+| `pp405b_verify_2node` | 2 (PP) | multi-node-PP demo: 30/30 streaming | ✓ |
+| `pp2_verify_2node` / `pp2_serve_2node` | 2 | small-TP multi-replica PP (serves post per-GPU-bundle fix `17b88be`) | ✓ |
+| `clean_stage_check_1node` | 1 | clean-stage flag (wipe→fresh broadcast→READY) | ✓ |
+| `serverstats_ttft_{on,off}delay_1node`, `_ondelay_2node` | 1,2 | `http-no-delay` TBT + server-stats collector | ✓ (added for the no-delay study) |
 
 ## Machine-time estimate (coarse, queue wait excluded)
 
@@ -135,10 +134,13 @@ cell ≈ bring-up + 13.5 min. Each cell is its own PBS job (no cluster reuse).
 | Set 3 (`n256_r12` only / full matrix) | ~150 node·h | ~2–4 k node·h (≥384n cells dominate; approve per-cell) |
 | **Total** | **~300 node·h** | **~1 k node·h ex-Set 3; 3–5 k with Set 3** |
 
-Debug/debug-scaling fits: N=1 and N≤64 validation cells (≤1 h each).
-Anything ≥256n must be submitted to the **prod** queue (the keepalive
-"capacity" job is small interactive headroom, not 256 nodes) — held until the
-sub-256n sweep is done.
+Queue routing actually used (per-user limits: capacity max 5 queued / 2 run,
+debug & debug-scaling max 1 run each, **global ~5 queued cap across queues**):
+**N≤16 → capacity** (2 parallel), **N=64,128 → debug-scaling** (1h, serialized),
+**N≥256 → prod**. 256n streaming with `num_runs=3` ≈ 50–60 min, so **2:30 walltime**
+acquires far faster than 6h on a congested prod. NOTE: 256n runs are
+node-failure-prone (~1h × 256 nodes) — re-run; the failures are diagnosable
+(ping/death-signal instrumentation), not mysterious.
 
 ## How to run
 
@@ -151,3 +153,12 @@ sub-256n sweep is done.
 
 Order: `calibration/` first (fills the two placeholder rates) → `validation/`
 sweep → revisit `full/` run count → `full/` sweep on capacity.
+
+
+Figures: `eval/plot/sc26_full_figures.py` → `eval/plot/output/sc26_full/`
+(fig1 proxy scaling [1→256], fig2 SSE-vs-E2E, fig3 workload sweep, fig4 n64 latency).
+
+TODO:
+* `nullcompute_scaling` (Set 3) — still unrun; approve per-cell (prod, ≥384n costly)
+* fine-grained CDF of inter-token latency; server-side TTFT/TBT panel at 128/256
+* envoy 256n: swap in the clean retry (`proxycmp_envoy_256retry`) if it lands
