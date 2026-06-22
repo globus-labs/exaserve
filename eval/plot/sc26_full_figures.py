@@ -42,6 +42,11 @@ COLORS = P.COLORS
 def pstem(p, n):
     """128n/256n live in proxycmp_<p>_scale; <=64 in the full-sweep spec."""
     return f"proxycmp_{p}_scale" if n >= 128 else f"proxycmp_{p}"
+
+
+def nstem(p, n):
+    """Non-stream (E2E): 128/256 in proxycmp_<p>_nostream_scale; <=64 in _nostream."""
+    return f"proxycmp_{p}_nostream_scale" if n >= 128 else f"proxycmp_{p}_nostream"
 OAT = [("oat_8b_baseline","baseline"),("oat_8b_poisson","poisson"),
        ("oat_8b_2kx2k","2k×2k"),("oat_8b_4kx4k","4k×4k"),("oat_8b_code","code"),
        ("oat_8b_chat","chat"),("oat_8b_summary","summary"),("oat_8b_burstgpt","burstgpt")]
@@ -103,8 +108,7 @@ def build(refresh=False):
     for p in PROXIES:
         for n in ALLNODES:
             S[(p, n)] = cell(pstem(p, n), n, refresh)
-        for n in PNODES:
-            NS[(p, n)] = cell(f"proxycmp_{p}_nostream", n, refresh)
+            NS[(p, n)] = cell(nstem(p, n), n, refresh)
     # envoy 256n: both clean attempts lost a node mid-job; use the healthy data
     # run (run_index=1) only, dropping the node-failure-killed run. Backstop retry
     # (proxycmp_envoy_256retry) queued — swap in if it lands clean.
@@ -162,14 +166,14 @@ def fig2_two_mode(S, NS):
         c = COLORS[p]
         for mode, d, ls, mk in [("SSE", S, "-", "o"), ("E2E", NS, "--", "s")]:
             xs, sr, e2e = [], [], []
-            for n in PNODES:
+            for n in ALLNODES:
                 st = d.get((p, n))
                 if not st or np.isnan(st.rps): continue
                 xs.append(n); sr.append(st.rps * st.success_rate); e2e.append(st.e2e_p99)
             if not xs: continue
             ax[0].plot(xs, sr, ls, marker=mk, color=c, label=f"{p} {mode}", lw=2)
             ax[1].plot(xs, e2e, ls, marker=mk, color=c, label=f"{p} {mode}", lw=2)
-    for a in ax: a.set_xscale("log", base=2); a.set_xticks(PNODES); a.set_xticklabels(PNODES); a.grid(alpha=.3); a.legend(fontsize=8, ncol=2)
+    for a in ax: a.set_xscale("log", base=2); a.set_xticks(ALLNODES); a.set_xticklabels(ALLNODES); a.grid(alpha=.3); a.legend(fontsize=8, ncol=2)
     ax[0].set_ylabel("successful throughput (req/s)"); ax[0].set_title("SSE (streaming) vs E2E (non-stream): throughput")
     ax[1].set_ylabel("E2E latency p99 (s)"); ax[1].set_title("SSE vs E2E: end-to-end latency p99"); ax[1].set_xlabel("nodes")
     fig.tight_layout(); out = OUT / "fig2_two_mode.png"; fig.savefig(out, dpi=130); plt.close(fig); return out
