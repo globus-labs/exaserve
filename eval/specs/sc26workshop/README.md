@@ -162,3 +162,11 @@ TODO:
 * `nullcompute_scaling` (Set 3) — still unrun; approve per-cell (prod, ≥384n costly)
 * fine-grained CDF of inter-token latency; server-side TTFT/TBT panel at 128/256
 * envoy 256n: swap in the clean retry (`proxycmp_envoy_256retry`) if it lands
+
+TODO:
+* update ttft to 3s
+* consistency
+* add error bars
+* putting in a rcfile for the consistent fontsize
+* table for the e2e latency one (condense)
+* cdf include errors to make litellm look worse

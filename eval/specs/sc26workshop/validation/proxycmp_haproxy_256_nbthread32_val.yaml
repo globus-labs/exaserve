@@ -1,27 +1,30 @@
-name: oat_8b_4kx4k_val
-# EXP SET 2 (OAT) - workload perturbation: long-context 4K/4K (4096 in / 2048 out),
-# fixed-interval at 90% of its single-node saturation (2 -> 1.8 rps/node).
+name: proxycmp_haproxy_256_nbthread32_val
+# Does giving HAProxy more THREADS relieve the 256n streaming collapse? The collapse
+# was connection/network-bound with HAProxy using only ~4 of 208 cores (peak 427%).
+# Same as the streaming 256n cell (http-no-delay ON = real streaming, client=4) but
+# nbthread=32 (vs default). If throughput jumps -> it was thread-bound; if it still
+# collapses -> confirms NIC/connection-bound (threads don't help). debug-scaling (1h).
 matrix:
   name_template: 'n{num_nodes}'
   axes:
   - name: num_nodes
-    values: [1, 64]
+    values: [256]
     targets: [deployment.num_nodes, scheduler.nodes]
     label_template: '{value}_nodes'
   derived:
   - path: client.num_nodes
     expr: 'min(num_nodes, 4)'
   - path: scheduler.queue
-    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+    expr: '"debug-scaling"'
   - path: scheduler.walltime
     expr: '"01:00:00"'
 trace:
   kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 4096
-  output_len: 2048
-  rate_per_node: 1.8
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
   arrival: fixed
   generation_mode: deterministic
 deployment:
@@ -29,12 +32,12 @@ deployment:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    max_model_len: 8192
+    max_model_len: 4096
     size: 8
     gpu_memory_utilization: 0.90
     enforce_eager: true
-    max_num_seqs: 32
-  replica_max_ongoing_requests: 128
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
   collect_stats: true
 client:
   num_runs: 2
@@ -53,9 +56,9 @@ backend:
         type: haproxy
         port: 4001
         backend_port: 8000
-        num_workers: 1
         options:
           balance: leastconn
           maxconn: 100000
+          nbthread: 32
 scheduler:
   type: pbs

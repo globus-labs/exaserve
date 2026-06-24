@@ -79,3 +79,6 @@
 [] Legacy `AURORA_PROXY_PROFILE` monkey-patches at aurora_serve.py:264-297, :1547-1605, :1929-1930 — superseded by overlay [proxy.py](~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py) probe. Still default-on via launch_cluster.sh:372; both write `/tmp/aurora_inst/proxy_init_*.json` → overlay and legacy race/overwrite. Writes are tmpfs (no Lustre impact) but redundant. Decide: disable via `AURORA_PROXY_PROFILE=0` or delete the three blocks.
 [] Extend Copper broadcast to cover `$PROJECT_ROOT/src` — right now Copper only broadcasts the overlay (launch_cluster.sh:473-477). Every Ray process still does Lustre imports of our aurora_rayserver Python modules, causing MDS stampede at scale. At 256n with ~3k Python processes × ~20 imports = ~60k concurrent Lustre opens during Stage 3.
 
+### Paper related TODOs
+[] The client could be written with C++, Boost.io, verify if that is a better choice, need clear justification
+[] 

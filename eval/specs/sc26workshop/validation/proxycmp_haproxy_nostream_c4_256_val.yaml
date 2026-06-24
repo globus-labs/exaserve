@@ -1,27 +1,31 @@
-name: oat_8b_4kx4k_val
-# EXP SET 2 (OAT) - workload perturbation: long-context 4K/4K (4096 in / 2048 out),
-# fixed-interval at 90% of its single-node saturation (2 -> 1.8 rps/node).
+name: proxycmp_haproxy_nostream_c4_256_val
+# CONFOUND TEST: identical to proxycmp_haproxy_nostream n256 (non-stream, rate
+# 110, 64/64, num_go_procs 4, http-no-delay default ON) EXCEPT client.num_nodes
+# = min(num_nodes,4) = 4 instead of 256. The old Apr run that achieved 26.9k
+# used 4 client nodes; my new specs used 256 (1024 dispatchers hammering one
+# HAProxy). If this recovers toward ~26.9k -> the "regression" was client
+# topology, not code/stack. If it still collapses (~11k) -> topology exonerated.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
   - name: num_nodes
-    values: [1, 64]
+    values: [256]
     targets: [deployment.num_nodes, scheduler.nodes]
     label_template: '{value}_nodes'
   derived:
   - path: client.num_nodes
     expr: 'min(num_nodes, 4)'
   - path: scheduler.queue
-    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+    expr: '"prod"'
   - path: scheduler.walltime
-    expr: '"01:00:00"'
+    expr: '"02:00:00"'
 trace:
   kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 4096
-  output_len: 2048
-  rate_per_node: 1.8
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
   arrival: fixed
   generation_mode: deterministic
 deployment:
@@ -29,17 +33,17 @@ deployment:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    max_model_len: 8192
+    max_model_len: 4096
     size: 8
     gpu_memory_utilization: 0.90
     enforce_eager: true
-    max_num_seqs: 32
-  replica_max_ongoing_requests: 128
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
   collect_stats: true
 client:
   num_runs: 2
   dest: proxy
-  stream: true
+  stream: false
   num_go_procs: 4
   num_go_workers: 4
 backend:

@@ -40,6 +40,7 @@ import argparse
 import json
 import os
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -59,6 +60,9 @@ CACHE_DIR = Path("/tmp/sc26_preview_cache")
 # Paper SLO (Sarathi-Serve style): TTFT <= 1s AND P99 time-between-tokens <= 250ms.
 TTFT_SLO_S = 1.0
 TBT_P99_SLO_S = 0.250
+# Extra TTFT thresholds tracked per cell so the TTFT-attainment panel can show
+# how a looser first-token budget exposes the node-count scaling trend.
+TTFT_SLO_MULTI = (1.0, 2.0, 3.0)
 
 # --- Suite definitions (mirror README "Run checklist") ----------------------
 
@@ -136,7 +140,9 @@ class CellStats:
     n_req: int
     n_success: int
     rps: float          # achieved throughput (completed/duration), run>=1
-    attainment: float   # paper SLO, failures count as miss
+    attainment: float   # paper SLO (TTFT≤1s ∧ P99-TBT≤250ms), failures count as miss
+    ttft_attainment: float  # frac requests with TTFT ≤ 1s (separated)
+    tbt_attainment: float   # frac requests with P99-TBT ≤ 250ms (separated)
     goodput: float
     success_rate: float
     ttft_p50: float
@@ -147,6 +153,17 @@ class CellStats:
     e2e_p99: float
     decode_p50: float   # E2E - TTFT (decode duration), successful reqs
     decode_p99: float
+    # TTFT attainment at 1/2/3s (aggregate over run>=1). ttft_attain_1s == ttft_attainment.
+    ttft_attain_1s: float = float("nan")
+    ttft_attain_2s: float = float("nan")
+    ttft_attain_3s: float = float("nan")
+    # Per-run series (run_index>=1) for error bars. Lists, one entry per data run.
+    runs_succ_rps: list = None        # per-run successful throughput (rps × success)
+    runs_succ_rate: list = None       # per-run success rate
+    runs_tbt_attain: list = None      # per-run TBT attainment
+    runs_ttft_attain_1s: list = None
+    runs_ttft_attain_2s: list = None
+    runs_ttft_attain_3s: list = None
 
 
 def extract_cell(spec_stem: str, node: int, *, keep_arrays: bool,
@@ -168,11 +185,15 @@ def extract_cell(spec_stem: str, node: int, *, keep_arrays: bool,
     # Stream: per_run summaries (run>=1) then the requests array.
     completed = 0.0
     duration = 0.0
+    per_run_cd: dict[int, list[float]] = {}   # run_index -> [completed, duration]
     with open(src, "rb") as fh:
         for pr in ijson.items(fh, "per_run.item"):
-            if int(pr.get("run_index", 0)) >= 1:
-                completed += float(pr.get("requests_completed", 0) or 0)
-                duration += float(pr.get("duration_s", 0) or 0)
+            ri = int(pr.get("run_index", 0))
+            if ri >= 1:
+                c = float(pr.get("requests_completed", 0) or 0)
+                d = float(pr.get("duration_s", 0) or 0)
+                completed += c; duration += d
+                per_run_cd[ri] = [c, d]
     rps = completed / duration if duration > 0 else float("nan")
 
     ttft_l: list[float] = []
@@ -182,30 +203,52 @@ def extract_cell(spec_stem: str, node: int, *, keep_arrays: bool,
     n_req = 0
     n_success = 0
     n_meet = 0
+    n_ttft_meet = [0, 0, 0]   # per TTFT_SLO_MULTI threshold
+    n_tbt_meet = 0
+    # per-run counters: run_index -> [n_req, n_succ, n_tbt_meet, n_ttft1, n_ttft2, n_ttft3]
+    pr_ctr: dict[int, list[int]] = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
     with open(src, "rb") as fh:
         for r in ijson.items(fh, "requests.item"):
-            if int(r.get("run_index", 0)) < 1:
+            ri = int(r.get("run_index", 0))
+            if ri < 1:
                 continue
             n_req += 1
             ok = bool(r.get("success", True))
             ttft = r.get("ttft_s")
             tbt = r.get("tbt_p99_s")
             lat = r.get("latency")
-            ttft = float(ttft) if ttft is not None else float("nan")
-            tbt = float(tbt) if tbt is not None else float("nan")
             lat = float(lat) if lat is not None else float("nan")
+            # Non-stream requests carry no per-token timing (ttft_s/tbt_p99_s are
+            # null). Derive a COARSE estimate from the single E2E latency L and the
+            # completion-token count T: average per-token τ = L/T as the TBT proxy,
+            # and TTFT = L (the whole response arrives at once, so the first visible
+            # token is at L). Streaming requests use their real measured values.
+            if ttft is None and tbt is None and not np.isnan(lat):
+                comp = r.get("actual_completion_tokens") or r.get("output_len") or 0
+                comp = float(comp)
+                ttft = lat
+                tbt = (lat / comp) if comp > 0 else float("nan")
+            else:
+                ttft = float(ttft) if ttft is not None else float("nan")
+                tbt = float(tbt) if tbt is not None else float("nan")
             if ok:
                 n_success += 1
                 ttft_l.append(ttft)
                 tbt_l.append(tbt)
                 lat_l.append(lat)
                 dec_l.append(lat - ttft)
-            meet = (
-                ok
-                and not np.isnan(ttft) and ttft <= TTFT_SLO_S
-                and not np.isnan(tbt) and tbt <= TBT_P99_SLO_S
-            )
-            if meet:
+            ttft_meets = [ok and not np.isnan(ttft) and ttft <= thr for thr in TTFT_SLO_MULTI]
+            tbt_ok = ok and not np.isnan(tbt) and tbt <= TBT_P99_SLO_S
+            c = pr_ctr[ri]
+            c[0] += 1
+            if ok:
+                c[1] += 1
+            if tbt_ok:
+                n_tbt_meet += 1; c[2] += 1
+            for j, m in enumerate(ttft_meets):
+                if m:
+                    n_ttft_meet[j] += 1; c[3 + j] += 1
+            if ttft_meets[0] and tbt_ok:   # paper SLO conjunction uses the 1s TTFT
                 n_meet += 1
 
     ttft_a = np.asarray(ttft_l, dtype=np.float32)
@@ -214,15 +257,40 @@ def extract_cell(spec_stem: str, node: int, *, keep_arrays: bool,
     dec_a = np.asarray(dec_l, dtype=np.float32)
     attainment = n_meet / n_req if n_req else float("nan")
     _p = lambda a, q: float(np.nanpercentile(a, q)) if a.size else float("nan")
+    _frac = lambda num: (num / n_req if n_req else float("nan"))
+
+    # Per-run series (ordered by run_index) for error bars.
+    runs = sorted(pr_ctr)
+    runs_succ_rps, runs_succ_rate = [], []
+    runs_tbt, runs_t1, runs_t2, runs_t3 = [], [], [], []
+    for ri in runs:
+        nr, ns, ntbt, nt1, nt2, nt3 = pr_ctr[ri]
+        cd = per_run_cd.get(ri)
+        r_rps = (cd[0] / cd[1]) if (cd and cd[1] > 0) else float("nan")
+        sr = (ns / nr) if nr else float("nan")
+        runs_succ_rps.append(r_rps * sr)
+        runs_succ_rate.append(sr)
+        runs_tbt.append(ntbt / nr if nr else float("nan"))
+        runs_t1.append(nt1 / nr if nr else float("nan"))
+        runs_t2.append(nt2 / nr if nr else float("nan"))
+        runs_t3.append(nt3 / nr if nr else float("nan"))
+
     st = CellStats(
         spec=spec_stem, node=node, src=str(src),
         n_req=n_req, n_success=n_success, rps=rps,
         attainment=attainment, goodput=rps * attainment,
+        ttft_attainment=_frac(n_ttft_meet[0]),
+        tbt_attainment=_frac(n_tbt_meet),
         success_rate=(n_success / n_req if n_req else float("nan")),
         ttft_p50=_p(ttft_a, 50), ttft_p99=_p(ttft_a, 99),
         tbt_p50=_p(tbt_a, 50), tbt_p99=_p(tbt_a, 99),
         e2e_p50=_p(lat_a, 50), e2e_p99=_p(lat_a, 99),
         decode_p50=_p(dec_a, 50), decode_p99=_p(dec_a, 99),
+        ttft_attain_1s=_frac(n_ttft_meet[0]), ttft_attain_2s=_frac(n_ttft_meet[1]),
+        ttft_attain_3s=_frac(n_ttft_meet[2]),
+        runs_succ_rps=runs_succ_rps, runs_succ_rate=runs_succ_rate,
+        runs_tbt_attain=runs_tbt, runs_ttft_attain_1s=runs_t1,
+        runs_ttft_attain_2s=runs_t2, runs_ttft_attain_3s=runs_t3,
     )
     sjson.write_text(json.dumps(asdict(st)))
     np.savez_compressed(snpz, ttft=ttft_a, tbt=tbt_a)

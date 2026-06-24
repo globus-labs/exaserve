@@ -1,22 +1,22 @@
-name: proxycmp_direct_scale
-# EXP SET 1 (proxy comparison) — Direct-MPI dispatch (one client per node hits
-# its LOCAL Ray Serve port; no shared proxy). Zero-LB upper bound. Mirrors the
-# working weakscaling_direct_short_v3 (proxy type none, dest direct) but adds
-# stream=true for P99 TTFT/TBT and num_go_procs=8 (each rank owns a node).
-# NOTE: validate the 1-node streaming cell first — a prior 1n direct+stream run
-# timed out on the per-node HSN health check; confirm before submit-all.
+name: proxycmp_direct_nostream_val
+# NON-STREAMING direct control for the non-stream comparison (rate 110, 64/64),
+# n64 only. Pairs with proxycmp_haproxy_nostream n64 to show whether non-stream
+# proxy E2E recovers toward direct, and with proxycmp_direct_val (streaming) n64
+# to test whether streaming backpressure inflated direct's E2E. No TTFT/TBT
+# (paper SLO N/A) — judge by E2E latency / throughput / errors. The streaming
+# direct n256 (19.4k rps, linear) is the "good" reference for the 256n retest.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
   - name: num_nodes
-    values: [128, 256]
+    values: [64]
     targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
     label_template: '{value}_nodes'
   derived:
   - path: scheduler.queue
-    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
+    expr: '"debug-scaling"'
   - path: scheduler.walltime
-    expr: '"02:00:00" if num_nodes <= 16 else ("02:30:00" if num_nodes >= 256 else "01:00:00")'
+    expr: '"01:00:00"'
 trace:
   kind: weak_scaling
 workload:
@@ -39,9 +39,9 @@ deployment:
   replica_max_ongoing_requests: 256
   collect_stats: true
 client:
-  num_runs: 3
+  num_runs: 2
   dest: direct
-  stream: true
+  stream: false
   num_go_procs: 8
   num_go_workers: 4
 backend:

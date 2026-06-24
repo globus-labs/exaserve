@@ -1,27 +1,31 @@
-name: oat_8b_4kx4k_val
-# EXP SET 2 (OAT) - workload perturbation: long-context 4K/4K (4096 in / 2048 out),
-# fixed-interval at 90% of its single-node saturation (2 -> 1.8 rps/node).
+name: proxycmp_haproxy_nostream_val
+# NON-STREAMING twin of proxycmp_haproxy (rate 110, 64/64) to test whether the
+# HAProxy throughput collapse at 256n is streaming-specific. stream=false => 1
+# buffered response/request through the proxy instead of ~64 http-no-delay SSE
+# chunk-flushes. NOTE: non-streaming has NO TTFT/TBT (paper SLO N/A) — judge by
+# E2E latency, achieved throughput, and error rate only. n64 validates first
+# (debug-scaling); n256 retests the collapse on prod.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
   - name: num_nodes
-    values: [1, 64]
+    values: [64, 256]
     targets: [deployment.num_nodes, scheduler.nodes]
     label_template: '{value}_nodes'
   derived:
   - path: client.num_nodes
     expr: 'min(num_nodes, 4)'
   - path: scheduler.queue
-    expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
+    expr: '"prod" if num_nodes >= 256 else "debug-scaling"'
   - path: scheduler.walltime
-    expr: '"01:00:00"'
+    expr: '"01:30:00" if num_nodes >= 256 else "01:00:00"'
 trace:
   kind: weak_scaling
 workload:
   duration: 60.0
-  input_len: 4096
-  output_len: 2048
-  rate_per_node: 1.8
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
   arrival: fixed
   generation_mode: deterministic
 deployment:
@@ -29,17 +33,17 @@ deployment:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    max_model_len: 8192
+    max_model_len: 4096
     size: 8
     gpu_memory_utilization: 0.90
     enforce_eager: true
-    max_num_seqs: 32
-  replica_max_ongoing_requests: 128
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
   collect_stats: true
 client:
   num_runs: 2
   dest: proxy
-  stream: true
+  stream: false
   num_go_procs: 4
   num_go_workers: 4
 backend:

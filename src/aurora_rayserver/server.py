@@ -1954,19 +1954,33 @@ if __name__ == "__main__":
                     proxy_milestones[n] = entry["elapsed_s"]
             print(f"[AuroraServe] Proxy spawn timeline: {proxy_milestones}", flush=True)
 
-        # Collect per-proxy status from serve.status()
+        # Collect per-proxy status from serve.status(). status.proxies maps
+        # node_id -> ProxyStatus (an ENUM: HEALTHY/UNHEALTHY/STARTING/DRAINING/
+        # DRAINED) in current Ray; some versions expose a details object with a
+        # .status field instead. Handle both, and SURFACE any non-healthy proxy
+        # (previously this swallowed an AttributeError and reported nothing, so a
+        # degraded proxy at deploy time was invisible).
         try:
+            from collections import Counter
             status = serve.status()
             proxy_status_list = []
             for node_id, proxy in status.proxies.items():
-                proxy_status_list.append({
-                    "node_id": node_id,
-                    "status": str(proxy.status),
-                })
+                ps = getattr(proxy, "status", proxy)         # details.status or the enum itself
+                ps_str = getattr(ps, "name", None) or getattr(ps, "value", None) or str(ps)
+                proxy_status_list.append({"node_id": node_id, "status": str(ps_str)})
             tracer.set_metadata(proxy_statuses=proxy_status_list)
-            print(f"[AuroraServe] Proxy statuses: {len(proxy_status_list)} proxies", flush=True)
+            counts = Counter(d["status"] for d in proxy_status_list)
+            n_total = len(proxy_status_list)
+            n_healthy = sum(v for k, v in counts.items() if "HEALTHY" in k.upper() and "UN" not in k.upper())
+            print(f"[AuroraServe] Proxy statuses: {n_total} proxies, "
+                  f"{n_healthy} healthy — {dict(counts)}", flush=True)
+            if n_healthy < n_total:
+                print(f"[AuroraServe] ⚠ {n_total - n_healthy}/{n_total} proxies NOT healthy "
+                      f"at deploy time: {dict(counts)}", flush=True)
         except Exception as e:
+            import traceback
             print(f"[AuroraServe] Failed to collect proxy statuses: {e}", flush=True)
+            traceback.print_exc()
 
         # When instrumentation is on, gather /tmp/aurora_inst from every node
         # to Lustre once. No-op for clean Ray installs.

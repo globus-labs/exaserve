@@ -13,7 +13,7 @@ matrix:
     label_template: '{value}_nodes'
   derived:
   - path: client.num_nodes
-    expr: 'num_nodes'
+    expr: 'min(num_nodes, 4)'
   - path: scheduler.queue
     expr: '"debug" if num_nodes <= 2 else "debug-scaling"'
   - path: scheduler.walltime

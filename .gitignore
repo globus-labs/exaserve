@@ -21,5 +21,10 @@ eval/site_config_local.py
 codex_hooks/
 # wheel/sdist build artifacts
 build/
+build.bak.*/
 dist/
+dist.bak.*/
 *.egg-info/
+*.egg-info.bak*/
+# generated plot output
+eval/plot/output/
