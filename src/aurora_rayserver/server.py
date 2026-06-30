@@ -44,7 +44,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 
 from .schemas import ModelConfig, DeploymentConfig, load_deployment_config, load_proxy_config
-from .model_paths import get_model_route_name
+from .model_paths import get_model_route_name, get_model_storage_name, get_model_storage_path
 from .model_staging import print_red, resolve_model_paths
 from .replica_planner import (
     NodeInventory,
@@ -301,6 +301,7 @@ def get_alive_ray_gpu_nodes() -> List[Dict[str, Any]]:
         alive_nodes.append(
             {
                 "ip": node_ip,
+                "hostname": str(node.get("NodeManagerHostname", "") or node_ip),
                 "resource_key": resource_key,
                 "gpu_count": gpu_count,
                 "cpu_count": int(resources.get("CPU", 0)),
@@ -389,6 +390,49 @@ def build_pp_placement_group_bundles(
         for _ in range(model_config.tensor_parallel_size):
             bundles.append({"GPU": 1.0, resource_key: 0.001})
 
+    return bundles, [str(node["ip"]) for node in stage_nodes]
+
+
+def ordered_pp_nodes() -> list[dict]:
+    """Alive Ray GPU nodes in a STABLE global order (sorted by ip). This is the
+    shared contract between shard-aware staging (pp_stage.assign_pp_nodes, which
+    sorts the same node ips) and node-pinned deployment, so replica r's stage s
+    is placed on the same node that staging put stage s's shards on."""
+    return sorted(get_alive_ray_gpu_nodes(), key=lambda node: str(node["ip"]))
+
+
+def build_pp_replica_bundles(
+    model_config: ModelConfig,
+    config: DeploymentConfig,
+    replica_index: int,
+) -> tuple[List[Dict[str, float]], List[str]]:
+    """Node-pinned PP bundles for ONE specific replica in the shard-aware path:
+    replica r occupies ordered_pp_nodes()[r*PP : (r+1)*PP], stage s on node r*PP+s
+    (same mapping as pp_stage.assign_pp_nodes). Unlike build_pp_placement_group_bundles
+    (which always pins the FIRST PP nodes — single-replica only), this pins each
+    replica to its own disjoint node group so N single-replica deployments don't
+    contend. Bundle 0 is the CPU coordinator on the stage-0 node; the rest are
+    one-GPU worker bundles ordered by (pp_rank, tp_rank)."""
+    pp = model_config.pipeline_parallel_size
+    nodes = ordered_pp_nodes()
+    start = replica_index * pp
+    stage_nodes = nodes[start:start + pp]
+    if len(stage_nodes) < pp:
+        raise RuntimeError(
+            f"shard-aware PP: replica {replica_index} needs nodes "
+            f"[{start}:{start + pp}] but only {len(nodes)} alive GPU nodes exist")
+    for node in stage_nodes:
+        if int(node["gpu_count"]) < model_config.tensor_parallel_size:
+            raise RuntimeError(
+                f"Node {node['ip']} has {node['gpu_count']} GPUs < "
+                f"TP={model_config.tensor_parallel_size}")
+    bundles: List[Dict[str, float]] = [
+        {"CPU": float(model_config.num_cpus_per_replica),
+         str(stage_nodes[0]["resource_key"]): 0.001}
+    ]
+    for node in stage_nodes:
+        for _ in range(model_config.tensor_parallel_size):
+            bundles.append({"GPU": 1.0, str(node["resource_key"]): 0.001})
     return bundles, [str(node["ip"]) for node in stage_nodes]
 
 
@@ -1267,12 +1311,18 @@ def deploy_model(
     num_replicas_override: Optional[int] = None,
     use_global_planner: bool = False,
     planner_max_replicas_per_node: Optional[int] = None,
+    pp_replica_index: Optional[int] = None,
 ) -> tuple:
     """
     Build a bound VLLMWorker deployment for one model.
 
     Ray Serve options (num_gpus, replicas, max_ongoing_requests, …) are passed
     via .options() so no factory/class-creation indirection is needed.
+
+    When `pp_replica_index` is set (shard-aware PP path), this builds ONE
+    node-pinned single-replica deployment for that replica (name suffix -r{idx}),
+    pinned via build_pp_replica_bundles — the caller loops to create the N
+    deployments. Otherwise behaviour is unchanged.
 
     Returns:
         (deployment, model_id)
@@ -1281,14 +1331,18 @@ def deploy_model(
     local_path = model_path_map.get(model_id, model_id)
     null_compute = os.environ.get("AURORA_NULL_COMPUTE", "0") == "1"
 
+    shard_aware_pp = pp_replica_index is not None
     num_replicas = (
-        num_replicas_override
-        if num_replicas_override is not None
-        else model_config.num_replicas
-        or default_num_replicas(model_config, total_gpus, config)
+        1 if shard_aware_pp else (
+            num_replicas_override
+            if num_replicas_override is not None
+            else model_config.num_replicas
+            or default_num_replicas(model_config, total_gpus, config)
+        )
     )
 
     safe_name = get_model_route_name(model_id)
+    deployment_name_suffix = f"-r{pp_replica_index}" if shard_aware_pp else ""
 
     print(
         f"[AuroraServe] Configuring VLLMWorker for {model_id}\n"
@@ -1312,7 +1366,22 @@ def deploy_model(
 
     if use_global_planner:
         if model_config.pipeline_parallel_size > 1:
-            if num_replicas == 1:
+            if shard_aware_pp:
+                # Shard-aware path: this deployment is ONE replica, pinned to its
+                # own disjoint node group (ordered_pp_nodes()[r*PP:(r+1)*PP]),
+                # matching where pp_stage staged that replica's per-stage shards.
+                placement_group_bundles, stage_node_ips = (
+                    build_pp_replica_bundles(model_config, config, pp_replica_index)
+                )
+                placement_group_strategy = "PACK"
+                actor_num_gpus = 0
+                print(
+                    f"[AuroraServe] Shard-aware PP placement for {model_id} "
+                    f"replica {pp_replica_index}: node-pinned stages={stage_node_ips}, "
+                    f"bundles={len(placement_group_bundles)}",
+                    flush=True,
+                )
+            elif num_replicas == 1:
                 # Node-pinned per-GPU bundles: each stage's TP group stays on
                 # one node. Only valid for a single replica — Serve shares one
                 # bundle template across replicas, so pinned bundles would make
@@ -1383,7 +1452,7 @@ def deploy_model(
         )
 
     deployment_options = dict(
-        name=f"VLLMWorker-{safe_name}",
+        name=f"VLLMWorker-{safe_name}{deployment_name_suffix}",
         num_replicas=num_replicas,
         ray_actor_options={
             "num_gpus": actor_num_gpus,
@@ -1416,6 +1485,42 @@ def deploy_model(
     )
 
     return deployment, model_id
+
+
+def stage_pp_sharded_models(config: DeploymentConfig) -> Dict[str, str]:
+    """Shard-aware PP staging (AURORA_PP_SHARD_AWARE). For each PP multi-replica
+    model, two-group bcast each PP stage's shards to that stage's node group, so
+    every node holds ONLY its stage (~size/PP, fits node-local tmpfs) and only the
+    PP seed nodes read the shared store (no read storm). Runs post-ray.init so it
+    shares ordered_pp_nodes() with the node-pinned deploy (same node↔stage map).
+    Returns {model_id: node-local model path} for the staged models."""
+    from . import pp_stage
+    from .model_bcast import compile_bcast
+
+    ordered = ordered_pp_nodes()
+    hosts = [str(n["hostname"]) for n in ordered]
+    bcast_bin = str(compile_bcast())
+    staged: Dict[str, str] = {}
+    for mc in config.model_configs:
+        n_rep = mc.num_replicas or 0
+        if mc.pipeline_parallel_size <= 1 or n_rep <= 1:
+            continue
+        need = n_rep * mc.pipeline_parallel_size
+        if len(hosts) < need:
+            raise RuntimeError(
+                f"shard-aware PP {mc.model_id}: need {need} nodes "
+                f"({n_rep} replicas x PP{mc.pipeline_parallel_size}), got {len(hosts)}")
+        storage_name = get_model_storage_name(mc.model_id)
+        lustre_model = get_model_storage_path(mc.model_id, config.model_storage_path)
+        stage_base = os.path.join(str(config.model_storage_path), "_pp_stage", storage_name)
+        print(f"[AuroraServe] Shard-aware PP staging {mc.model_id}: "
+              f"PP{mc.pipeline_parallel_size} x {n_rep} replicas over {need} nodes "
+              f"(source {lustre_model})", flush=True)
+        pp_stage.stage_pp_sharded(
+            str(lustre_model), storage_name, stage_base, str(config.local_stage_path),
+            mc.pipeline_parallel_size, hosts[:need], n_rep, bcast_bin)
+        staged[mc.model_id] = str(get_model_storage_path(mc.model_id, config.local_stage_path))
+    return staged
 
 
 def deploy_from_replica_plan(
@@ -1462,6 +1567,32 @@ def deploy_from_replica_plan(
             f"\n[AuroraServe] ═══ Deploying planned model {model_index + 1}/{len(active_plans)} ═══",
             flush=True,
         )
+
+        # Shard-aware PP: deploy N node-pinned single-replica deployments (Serve
+        # has no per-replica placement), each pinned to replica r's nodes via
+        # build_pp_replica_bundles — matching where pp_stage staged its shards.
+        # Each replica gets its own route /{safe_name}_r{r}; the external proxy
+        # round-robins across them (routing wired separately).
+        shard_aware = (
+            os.environ.get("AURORA_PP_SHARD_AWARE", "0") == "1"
+            and model_config.pipeline_parallel_size > 1
+            and model_plan.assigned_replicas > 1
+        )
+        if shard_aware:
+            safe_name = get_model_route_name(model_plan.model_config.model_id)
+            for r in range(model_plan.assigned_replicas):
+                dep, model_id = deploy_model(
+                    model_config, model_path_map, total_gpus, config, model_index,
+                    use_global_planner=True, pp_replica_index=r,
+                )
+                app_name = f"{safe_name}_r{r}"
+                route_prefix = f"/{app_name}"
+                with tracer.phase("serve.run", model_id=model_id, replica=r):
+                    serve.run(dep, name=app_name, route_prefix=route_prefix)
+                print(f"[AuroraServe] ✓ {model_id} replica {r} → "
+                      f"http://localhost:8000{route_prefix}/v1", flush=True)
+            continue
+
         deployment, model_id = deploy_model(
             model_config,
             model_path_map,
@@ -1719,16 +1850,26 @@ if __name__ == "__main__":
         )
         model_path_map = {cfg.model_id: cfg.model_id for cfg in config.model_configs}
     else:
+        # Shard-aware PP models are staged per-stage HERE (post-ray.init); their
+        # per-node dirs are intentionally PARTIAL, so they bypass resolve_model_paths
+        # (which requires a complete model on every node).
+        shard_models: Dict[str, str] = {}
+        if os.environ.get("AURORA_PP_SHARD_AWARE", "0") == "1":
+            with tracer.phase("pp_shard_stage"):
+                shard_models = stage_pp_sharded_models(config)
         stage_start = time.time()
         print(
             f"[AuroraServe] Model Resolution: Resolving staged models from {config.local_stage_path}...",
             flush=True,
         )
-        model_path_map = resolve_model_paths(
-            config.model_configs,
-            config.local_stage_path,
-            require_complete=True,
-        )
+        model_path_map = dict(shard_models)
+        non_shard = [cfg for cfg in config.model_configs if cfg.model_id not in shard_models]
+        if non_shard:
+            model_path_map.update(resolve_model_paths(
+                non_shard,
+                config.local_stage_path,
+                require_complete=True,
+            ))
         print_red(
             f"[AuroraServe] ✓ Model Resolution completed in "
             f"{time.time() - stage_start:.2f}s"

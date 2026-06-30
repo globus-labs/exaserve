@@ -186,9 +186,21 @@ def bcast_models(
 
     per_model_timings: list[dict] = []
 
+    shard_aware = os.environ.get("AURORA_PP_SHARD_AWARE", "0") == "1"
     for model_id in iter_unique_model_ids(model_configs):
         model_t0 = time.monotonic()
         model_config = next(cfg for cfg in model_configs if cfg.model_id == model_id)
+        # Shard-aware PP: the driver stages this model per-PP-stage post-ray.init
+        # (only its stage's shards per node). Skip the uniform node-local bcast
+        # here — it would put the FULL model on every node (defeats the point /
+        # overflows tmpfs for 405B). The model stays on Lustre for the driver to read.
+        if shard_aware and model_config.pipeline_parallel_size > 1 and (model_config.num_replicas or 0) > 1:
+            print(f"[ModelBcast] SKIP node-local bcast for {model_id} "
+                  "(shard-aware PP — driver stages per-stage post-ray.init)", flush=True)
+            local_model_paths[model_id] = str(lustre_model_paths[model_id])
+            per_model_timings.append({"model_id": model_id, "shard_aware_skip": True,
+                                      "duration_s": 0.0})
+            continue
         validate_tensor_parallel_compatibility(
             model_id,
             Path(lustre_model_paths[model_id]),
