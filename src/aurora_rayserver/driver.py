@@ -549,6 +549,15 @@ def main():
                     f"/{get_model_route_name(model_config.model_id)}/health"
                     for model_config in deploy_config.model_configs
                 ]
+            elif os.environ.get("AURORA_PP_SHARD_AWARE", "0") == "1":
+                # Shard-aware PP serves N node-pinned single-replica deployments at
+                # /<route>_r{0..N-1}; there is no root route, so health-check each
+                # replica route (all must answer before the proxy starts).
+                mc0 = deploy_config.model_configs[0]
+                n_rep = getattr(mc0, "num_replicas", 0) or 0
+                if getattr(mc0, "pipeline_parallel_size", 1) > 1 and n_rep > 1:
+                    route = get_model_route_name(mc0.model_id)
+                    serve_health_paths = [f"/{route}_r{r}/health" for r in range(n_rep)]
 
             # Ray is only ready once aurora_serve.py reports its cluster-wide
             # readiness marker. The per-route /health endpoints can return 200
