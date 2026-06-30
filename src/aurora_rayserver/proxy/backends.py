@@ -54,24 +54,39 @@ def discover_backends(
         raise RuntimeError(f"PBS_NODEFILE '{nodefile}' does not exist.")
 
     nodes = _read_nodefile(nodefile)
-    model_ids = [mc.model_id for mc in deploy_config.model_configs]
-    use_root_route = len(model_ids) == 1
+    use_root_route = len(deploy_config.model_configs) == 1
+    shard_aware = os.environ.get("AURORA_PP_SHARD_AWARE", "0") == "1"
 
     endpoints: list[BackendEndpoint] = []
     for node in nodes:
-        for model_id in model_ids:
-            path_prefix = "" if use_root_route else f"/{get_model_route_name(model_id)}"
+        for mc in deploy_config.model_configs:
+            model_id = mc.model_id
+            n_rep = getattr(mc, "num_replicas", 0) or 0
+            is_shard = (shard_aware and getattr(mc, "pipeline_parallel_size", 1) > 1
+                        and n_rep > 1)
+            if is_shard:
+                # Served as N node-pinned single-replica deployments at routes
+                # /<route>_r{0..N-1}; the proxy round-robins across them.
+                path_prefix = f"/{get_model_route_name(model_id)}"
+                shard_replicas = n_rep
+            else:
+                path_prefix = "" if use_root_route else f"/{get_model_route_name(model_id)}"
+                shard_replicas = 0
             endpoints.append(
                 BackendEndpoint(
                     host=node,
                     port=backend_port,
                     model_id=model_id,
                     path_prefix=path_prefix,
+                    shard_replicas=shard_replicas,
                 )
             )
 
+    n_shard = sum(1 for ep in endpoints if ep.shard_replicas > 0)
     print(
-        f"[ProxyBackends] Discovered {len(nodes)} node(s) × {len(model_ids)} model(s) "
-        f"= {len(endpoints)} backend endpoint(s) on port {backend_port}."
+        f"[ProxyBackends] Discovered {len(nodes)} node(s) × {len(deploy_config.model_configs)} "
+        f"model(s) = {len(endpoints)} backend endpoint(s) on port {backend_port}"
+        + (f" (shard-aware PP: {endpoints[0].shard_replicas} replica routes)" if n_shard else "")
+        + "."
     )
     return endpoints

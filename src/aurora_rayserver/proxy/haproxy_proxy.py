@@ -377,15 +377,36 @@ def _render_backend(
     check_fall: int,
     check_rise: int,
 ) -> str:
-    """Render a single HAProxy backend section."""
-    health_path = f"{path_prefix}/health" if path_prefix else "/health"
-    lines = [
-        f"backend {name}",
-        f"    balance {balance}",
-        f"    option httpchk GET {health_path}",
-        f"    http-check expect status 200",
-    ]
-    for i, ep in enumerate(endpoints):
+    """Render a single HAProxy backend section.
+
+    Shard-aware PP (endpoints[].shard_replicas > 0): the model is served as N
+    node-pinned single-replica deployments at routes <path_prefix>_r{0..N-1}.
+    Every node's Ray Serve proxy can route any replica route, so we keep the
+    node servers for TCP spread and pick a replica per request by REWRITING the
+    path to /<path_prefix>_r{rand}<orig-path>. Random selection (rand(N)) is
+    statistically even and avoids a shared round-robin counter under concurrency.
+    """
+    shard_n = endpoints[0].shard_replicas if endpoints else 0
+    if shard_n > 0:
+        health_path = f"{path_prefix}_r0/health"
+        lines = [
+            f"backend {name}",
+            f"    balance {balance}",
+            # pick a replica index 0..N-1 and prepend its route to the path
+            f"    http-request set-var(txn.ridx) rand({shard_n})",
+            f"    http-request set-path {path_prefix}_r%[var(txn.ridx)]%[path]",
+            f"    option httpchk GET {health_path}",
+            "    http-check expect status 200",
+        ]
+    else:
+        health_path = f"{path_prefix}/health" if path_prefix else "/health"
+        lines = [
+            f"backend {name}",
+            f"    balance {balance}",
+            f"    option httpchk GET {health_path}",
+            "    http-check expect status 200",
+        ]
+    for ep in endpoints:
         server_name = f"{_safe_backend_name(ep.host)}_{ep.port}"
         lines.append(
             f"    server {server_name} {ep.host}:{ep.port} "
