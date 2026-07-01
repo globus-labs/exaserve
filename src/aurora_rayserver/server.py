@@ -1616,21 +1616,27 @@ def deploy_from_replica_plan(
             # replica's actors in parallel (vLLM engine init overlaps across nodes).
             # A sequential blocking loop is O(N x per-replica-load) — ~3h at 32
             # replicas, ~12h at 128 — which blows any walltime.
-            app_names = []
             model_id = model_plan.model_config.model_id
-            with tracer.phase("shard_serve.run_submit", replicas=n_rep):
-                for r in range(n_rep):
-                    dep, model_id = deploy_model(
-                        model_config, model_path_map, total_gpus, config, model_index,
-                        use_global_planner=True, pp_replica_index=r,
-                    )
-                    app_name = f"{safe_name}_r{r}"
-                    serve.run(dep, name=app_name, route_prefix=f"/{app_name}", blocking=False)
-                    app_names.append(app_name)
-            print(f"[AuroraServe] Submitted {n_rep} shard-aware PP replica deployments "
-                  f"for {model_id}; waiting for all to run...", flush=True)
-            with tracer.phase("shard_serve.run_wait", replicas=n_rep):
-                _wait_for_apps_running(app_names)
+            # Deploy all N node-pinned replicas in ONE controller call so their
+            # vLLM engines initialise CONCURRENTLY across nodes. A per-replica
+            # serve.run() loop serialises: serve.run -> _run -> _run_many with a
+            # SINGLE app + wait_for_applications_running, which blocks ~5-10min per
+            # 405B replica -> ~N*10min, blowing the walltime (n64 reached only
+            # replica 5 in 1h). _run_many with ALL N RunTargets submits them
+            # together and waits for the whole batch to come up in parallel.
+            from ray.serve.api import _run_many, RunTarget
+            targets = []
+            for r in range(n_rep):
+                dep, model_id = deploy_model(
+                    model_config, model_path_map, total_gpus, config, model_index,
+                    use_global_planner=True, pp_replica_index=r,
+                )
+                targets.append(RunTarget(target=dep, name=f"{safe_name}_r{r}",
+                                         route_prefix=f"/{safe_name}_r{r}"))
+            print(f"[AuroraServe] Deploying {n_rep} shard-aware PP replicas CONCURRENTLY "
+                  f"(single _run_many for {n_rep} apps) for {model_id}...", flush=True)
+            with tracer.phase("shard_serve.run_many", replicas=n_rep):
+                _run_many(targets, wait_for_applications_running=True)
             print(f"[AuroraServe] ✓ all {n_rep} replicas running → "
                   f"http://localhost:8000/{safe_name}_r{{0..{n_rep - 1}}}/v1", flush=True)
             continue
