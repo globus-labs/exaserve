@@ -1523,6 +1523,36 @@ def stage_pp_sharded_models(config: DeploymentConfig) -> Dict[str, str]:
     return staged
 
 
+def _wait_for_apps_running(app_names, timeout_s: float = 3000.0, poll_s: float = 5.0) -> None:
+    """Poll serve.status() until every named app reports RUNNING. Used by the
+    shard-aware PP path, which submits N deployments non-blocking and then waits
+    for them collectively (so replicas come up in parallel)."""
+    import time as _time
+    deadline = _time.monotonic() + timeout_s
+    remaining = set(app_names)
+    last_log = 0.0
+    while _time.monotonic() < deadline:
+        apps = serve.status().applications
+        for name in list(remaining):
+            a = apps.get(name)
+            if a is not None and str(getattr(a, "status", "")).upper().endswith("RUNNING"):
+                remaining.discard(name)
+            elif a is not None and "DEPLOY_FAILED" in str(getattr(a, "status", "")).upper():
+                raise RuntimeError(f"shard-aware PP: app {name} DEPLOY_FAILED")
+        if not remaining:
+            return
+        now = _time.monotonic()
+        if now - last_log > 30:
+            print(f"[AuroraServe] shard-aware deploy: "
+                  f"{len(app_names) - len(remaining)}/{len(app_names)} replicas RUNNING...",
+                  flush=True)
+            last_log = now
+        _time.sleep(poll_s)
+    raise RuntimeError(
+        f"shard-aware PP: {len(remaining)}/{len(app_names)} replica apps not RUNNING "
+        f"after {timeout_s}s: {sorted(remaining)}")
+
+
 def deploy_from_replica_plan(
     config: DeploymentConfig,
     model_path_map: Dict[str, str],
@@ -1580,17 +1610,29 @@ def deploy_from_replica_plan(
         )
         if shard_aware:
             safe_name = get_model_route_name(model_plan.model_config.model_id)
-            for r in range(model_plan.assigned_replicas):
-                dep, model_id = deploy_model(
-                    model_config, model_path_map, total_gpus, config, model_index,
-                    use_global_planner=True, pp_replica_index=r,
-                )
-                app_name = f"{safe_name}_r{r}"
-                route_prefix = f"/{app_name}"
-                with tracer.phase("serve.run", model_id=model_id, replica=r):
-                    serve.run(dep, name=app_name, route_prefix=route_prefix)
-                print(f"[AuroraServe] ✓ {model_id} replica {r} → "
-                      f"http://localhost:8000{route_prefix}/v1", flush=True)
+            n_rep = model_plan.assigned_replicas
+            # Deploy all N node-pinned replicas CONCURRENTLY. serve.run(blocking=False)
+            # submits each app without waiting, so the controller schedules every
+            # replica's actors in parallel (vLLM engine init overlaps across nodes).
+            # A sequential blocking loop is O(N x per-replica-load) — ~3h at 32
+            # replicas, ~12h at 128 — which blows any walltime.
+            app_names = []
+            model_id = model_plan.model_config.model_id
+            with tracer.phase("shard_serve.run_submit", replicas=n_rep):
+                for r in range(n_rep):
+                    dep, model_id = deploy_model(
+                        model_config, model_path_map, total_gpus, config, model_index,
+                        use_global_planner=True, pp_replica_index=r,
+                    )
+                    app_name = f"{safe_name}_r{r}"
+                    serve.run(dep, name=app_name, route_prefix=f"/{app_name}", blocking=False)
+                    app_names.append(app_name)
+            print(f"[AuroraServe] Submitted {n_rep} shard-aware PP replica deployments "
+                  f"for {model_id}; waiting for all to run...", flush=True)
+            with tracer.phase("shard_serve.run_wait", replicas=n_rep):
+                _wait_for_apps_running(app_names)
+            print(f"[AuroraServe] ✓ all {n_rep} replicas running → "
+                  f"http://localhost:8000/{safe_name}_r{{0..{n_rep - 1}}}/v1", flush=True)
             continue
 
         deployment, model_id = deploy_model(
