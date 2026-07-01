@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 import socket
+import sys
 import time
 import uuid
 from typing import Optional, List, Dict, Any
@@ -39,9 +40,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from ray import serve
 from ray.serve.config import HTTPOptions, ProxyLocation
-from vllm import SamplingParams
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+# vLLM is imported lazily (inside VLLMWorker / async_engine_arg_supported) so this
+# module can be imported in a SGLang environment where vLLM is absent or where its
+# transformers pin conflicts with SGLang's. The AURORA_ENGINE env var (read in
+# deploy_model) selects VLLMWorker vs SGLangWorker; only the chosen engine is imported.
 
 from .schemas import ModelConfig, DeploymentConfig, load_deployment_config, load_proxy_config
 from .model_paths import get_model_route_name, get_model_storage_name, get_model_storage_path
@@ -242,6 +244,7 @@ def get_open_port(
 
 def async_engine_arg_supported(arg_name: str) -> bool:
     """Best-effort compatibility gate for installed vLLM builds."""
+    from vllm.engine.arg_utils import AsyncEngineArgs
     try:
         signature = inspect.signature(AsyncEngineArgs.__init__)
     except (TypeError, ValueError):
@@ -970,6 +973,8 @@ class VLLMWorker:
             engine_kwargs["distributed_executor_backend"] = "ray"
 
         # -- Sub-phase: AsyncEngineArgs construction --
+        from vllm.engine.arg_utils import AsyncEngineArgs
+        from vllm.engine.async_llm_engine import AsyncLLMEngine
         t0 = time.monotonic()
         engine_args = AsyncEngineArgs(**engine_kwargs)
         if not hasattr(engine_args, "enable_log_requests"):
@@ -1235,6 +1240,7 @@ class VLLMWorker:
         yield "data: [DONE]\n\n"
 
     async def _generate(self, prompt: str, sampling_kwargs: dict) -> dict:
+        from vllm import SamplingParams
         request_id = sampling_kwargs.pop("_request_id", str(uuid.uuid4()))
         params = SamplingParams(**sampling_kwargs)
 
@@ -1254,6 +1260,7 @@ class VLLMWorker:
         }
 
     async def _generate_stream(self, prompt: str, sampling_kwargs: dict):
+        from vllm import SamplingParams
         request_id = sampling_kwargs.pop("_request_id", str(uuid.uuid4()))
         params = SamplingParams(**sampling_kwargs)
 
@@ -1296,6 +1303,318 @@ class VLLMWorker:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": max_tokens,
         }
+
+
+# ---------------------------------------------------------------------------
+# SGLangWorker — HTTP ingress + SGLang engine in one deployment
+#
+# Sibling of VLLMWorker: same OpenAI HTTP surface and same per-tile placement,
+# but runs SGLang's embedded engine (sgl.Engine) instead of vLLM. Selected via
+# AURORA_ENGINE=sglang in deploy_model. Imports SGLang lazily so this module
+# stays importable in a vLLM-only environment. torch_native attention is the
+# only numerically-correct attention backend on Aurora PVC (the fused intel_xpu
+# kernel is Battlemage-tuned and wrong on Xe-HPC).
+# ---------------------------------------------------------------------------
+sgl_app = FastAPI()
+
+
+@serve.deployment
+@serve.ingress(sgl_app)
+class SGLangWorker:
+    def __init__(
+        self,
+        model_id: str,
+        local_model_path: str = None,
+        null_compute: bool = False,
+        tensor_parallel_size: int = 1,
+        pipeline_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.85,
+        max_model_len: int = 4096,
+        enforce_eager: bool = True,
+        max_num_seqs: int = None,
+        collect_stats: bool = False,
+    ):
+        init_start = time.monotonic()
+        pid = os.getpid()
+        hostname = socket.gethostname()
+        self.model_id = model_id
+        self.null_compute = null_compute
+
+        gpu_ids = []
+        for g in ray.get_gpu_ids():
+            try:
+                gpu_ids.append(int(g))
+            except (ValueError, TypeError):
+                pass  # non-integer Ray GPU id (e.g. test harness) -> skip mask
+        device_id = gpu_ids[0] if gpu_ids else 0
+        # SGLang's XPU init needs a VALID ONEAPI_DEVICE_SELECTOR (unlike vLLM, which
+        # runs with it unset). Ray mangles it to "level_zero:" and the launcher unsets
+        # it; set the value the working standalone SGLang server uses. Tile isolation is
+        # still done by ZE_AFFINITY_MASK, which composes with the level_zero backend.
+        os.environ["ONEAPI_DEVICE_SELECTOR"] = "opencl:gpu;level_zero:gpu"
+        if gpu_ids:
+            os.environ["ZE_AFFINITY_MASK"] = ",".join(str(g) for g in gpu_ids)
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        os.environ.setdefault("RAYON_NUM_THREADS", "1")
+        print(
+            f"[SGLangWorker pid={pid}] tile {gpu_ids} ZE_AFFINITY_MASK="
+            f"{os.environ.get('ZE_AFFINITY_MASK')}",
+            flush=True,
+        )
+
+        model_path = local_model_path or model_id
+        attention_backend = os.environ.get("AURORA_SGLANG_ATTENTION", "torch_native")
+
+        import sglang as sgl
+        from transformers import AutoTokenizer
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True
+        )
+        engine_kwargs = dict(
+            model_path=model_path,
+            device="xpu",
+            attention_backend=attention_backend,
+            tp_size=tensor_parallel_size,
+            mem_fraction_static=gpu_memory_utilization,
+            context_length=max_model_len,
+            disable_overlap_schedule=True,
+            grammar_backend="none",
+            page_size=64,
+            max_running_requests=(max_num_seqs or 256),
+            trust_remote_code=True,
+            log_level="warning",
+        )
+        # CRITICAL: SGLang spawns its scheduler via multiprocessing 'spawn', which
+        # re-imports this process's __main__. In a Ray worker __main__ is Ray's
+        # default_worker.py -> `import ray` -> pyarrow, whose bundled jemalloc starts a
+        # background thread that SIGSEGVs in the freshly-spawned child (confirmed via
+        # core dump: background_thread_entry in libarrow). Neutralize __main__ so the
+        # spawned scheduler re-imports nothing (no ray, no pyarrow) and inits cleanly.
+        _main = sys.modules.get("__main__")
+        if _main is not None:
+            try:
+                _main.__spec__ = None
+            except Exception:
+                pass
+            if hasattr(_main, "__file__"):
+                try:
+                    del _main.__file__
+                except Exception:
+                    pass
+        print(
+            f"[SGLangWorker pid={pid}] Creating sgl.Engine for {model_id} "
+            f"(attn={attention_backend})...",
+            flush=True,
+        )
+        self.engine = sgl.Engine(**engine_kwargs)
+        print_red(
+            f"[SGLangWorker pid={pid}] ★ INIT TOTAL: "
+            f"{time.monotonic() - init_start:.2f}s ★"
+        )
+        from .scaling_trace import report_replica_stats
+        report_replica_stats({
+            "pid": pid, "hostname": hostname, "model_id": model_id,
+            "device_id": device_id, "engine": "sglang",
+            "total_init_s": round(time.monotonic() - init_start, 4),
+        })
+
+    # ---- HTTP endpoints ------------------------------------------------------
+    @sgl_app.get("/health")
+    async def health_check(self):
+        return JSONResponse({"status": "healthy", "model": self.model_id})
+
+    @sgl_app.get("/v1/models")
+    async def list_models(self):
+        return JSONResponse({
+            "object": "list",
+            "data": [{
+                "id": self.model_id, "object": "model",
+                "created": int(time.time()), "owned_by": "aurora",
+            }],
+        })
+
+    @sgl_app.post("/v1/chat/completions")
+    async def chat_completions(self, request: Request):
+        body = await request.json()
+        messages = body.get("messages", [])
+        stream = body.get("stream", False)
+        add_generation_prompt = bool(body.get("add_generation_prompt", True))
+        continue_final_message = bool(body.get("continue_final_message", False))
+        sp = self._sampling_params(body)
+        try:
+            prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                continue_final_message=continue_final_message,
+            )
+        except Exception:
+            prompt = _chat_messages_to_plain_prompt(
+                messages,
+                add_generation_prompt=add_generation_prompt
+                and not continue_final_message,
+            )
+        request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        if stream:
+            return StreamingResponse(
+                self._chat_stream(request_id, prompt, sp),
+                media_type="text/event-stream",
+            )
+        return await self._chat_non_stream(request_id, prompt, sp)
+
+    @sgl_app.post("/v1/completions")
+    async def completions(self, request: Request):
+        body = await request.json()
+        prompt = body.get("prompt", "")
+        stream = body.get("stream", False)
+        sp = self._sampling_params(body)
+        request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+        if stream:
+            return StreamingResponse(
+                self._completion_stream(request_id, prompt, sp),
+                media_type="text/event-stream",
+            )
+        res = await self._generate(prompt, sp)
+        if "error" in res:
+            return JSONResponse({"error": res["error"]}, status_code=500)
+        return JSONResponse({
+            "id": request_id, "object": "text_completion",
+            "created": int(time.time()), "model": self.model_id,
+            "choices": [{
+                "index": 0, "text": res["text"],
+                "finish_reason": res["finish_reason"],
+            }],
+            "usage": {
+                "prompt_tokens": res["prompt_tokens"],
+                "completion_tokens": res["completion_tokens"],
+                "total_tokens": res["prompt_tokens"] + res["completion_tokens"],
+            },
+        })
+
+    # ---- Internal helpers ----------------------------------------------------
+    @staticmethod
+    def _sampling_params(body: dict) -> dict:
+        sp: dict = {}
+        if "temperature" in body:
+            sp["temperature"] = float(body["temperature"])
+        if "top_p" in body:
+            sp["top_p"] = float(body["top_p"])
+        if "max_tokens" in body:
+            sp["max_new_tokens"] = int(body["max_tokens"])
+        if "min_tokens" in body:
+            sp["min_new_tokens"] = int(body["min_tokens"])
+        if "stop" in body:
+            sp["stop"] = body["stop"]
+        if body.get("ignore_eos"):
+            sp["ignore_eos"] = True
+        sp.setdefault("temperature", 0.7)
+        sp.setdefault("max_new_tokens", 1024)
+        return sp
+
+    @staticmethod
+    def _finish_reason(meta: dict):
+        fr = meta.get("finish_reason") if isinstance(meta, dict) else None
+        if isinstance(fr, dict):
+            return fr.get("type", "stop")
+        return fr or "stop"
+
+    async def _generate(self, prompt: str, sp: dict) -> dict:
+        try:
+            out = await self.engine.async_generate(prompt=prompt, sampling_params=sp)
+        except Exception as exc:  # surface engine errors as HTTP 500
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(out, list):
+            out = out[0]
+        meta = out.get("meta_info", {}) or {}
+        return {
+            "text": out.get("text", ""),
+            "finish_reason": self._finish_reason(meta),
+            "prompt_tokens": int(meta.get("prompt_tokens", 0)),
+            "completion_tokens": int(meta.get("completion_tokens", 0)),
+        }
+
+    async def _chat_non_stream(self, request_id: str, prompt: str, sp: dict):
+        res = await self._generate(prompt, sp)
+        if "error" in res:
+            return JSONResponse({"error": res["error"]}, status_code=500)
+        return JSONResponse({
+            "id": request_id, "object": "chat.completion",
+            "created": int(time.time()), "model": self.model_id,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": res["text"]},
+                "finish_reason": res["finish_reason"],
+            }],
+            "usage": {
+                "prompt_tokens": res["prompt_tokens"],
+                "completion_tokens": res["completion_tokens"],
+                "total_tokens": res["prompt_tokens"] + res["completion_tokens"],
+            },
+        })
+
+    async def _stream_deltas(self, prompt: str, sp: dict):
+        """Yield (delta_text, finish_reason, usage_or_None) from SGLang streaming."""
+        prev = ""
+        last_meta = {}
+        gen = await self.engine.async_generate(
+            prompt=prompt, sampling_params=sp, stream=True
+        )
+        async for out in gen:
+            if isinstance(out, list):
+                out = out[0]
+            text = out.get("text", "")
+            last_meta = out.get("meta_info", {}) or last_meta
+            delta = text[len(prev):]
+            prev = text
+            if delta:
+                yield delta, None, None
+        usage = {
+            "prompt_tokens": int(last_meta.get("prompt_tokens", 0)),
+            "completion_tokens": int(last_meta.get("completion_tokens", 0)),
+        }
+        yield "", self._finish_reason(last_meta), usage
+
+    async def _chat_stream(self, request_id: str, prompt: str, sp: dict):
+        created = int(time.time())
+        async for delta, finish_reason, usage in self._stream_deltas(prompt, sp):
+            if delta:
+                chunk = {
+                    "id": request_id, "object": "chat.completion.chunk",
+                    "created": created, "model": self.model_id,
+                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            if finish_reason is not None:
+                final = {
+                    "id": request_id, "object": "chat.completion.chunk",
+                    "created": created, "model": self.model_id,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                }
+                if usage:
+                    final["usage"] = {**usage, "total_tokens": usage["prompt_tokens"] + usage["completion_tokens"]}
+                yield f"data: {json.dumps(final)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def _completion_stream(self, request_id: str, prompt: str, sp: dict):
+        created = int(time.time())
+        async for delta, finish_reason, usage in self._stream_deltas(prompt, sp):
+            if delta:
+                chunk = {
+                    "id": request_id, "object": "text_completion",
+                    "created": created, "model": self.model_id,
+                    "choices": [{"index": 0, "text": delta, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            if finish_reason is not None:
+                final = {
+                    "id": request_id, "object": "text_completion",
+                    "created": created, "model": self.model_id,
+                    "choices": [{"index": 0, "text": "", "finish_reason": finish_reason}],
+                }
+                if usage:
+                    final["usage"] = {**usage, "total_tokens": usage["prompt_tokens"] + usage["completion_tokens"]}
+                yield f"data: {json.dumps(final)}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1451,8 +1770,15 @@ def deploy_model(
             else model_config.tensor_parallel_size
         )
 
+    # Engine selection: AURORA_ENGINE=sglang deploys SGLangWorker (sgl.Engine)
+    # instead of VLLMWorker. Everything else (placement, replicas, HAProxy, Go
+    # replay client) is identical — a single-variable engine swap.
+    engine = os.environ.get("AURORA_ENGINE", "vllm").lower()
+    worker_cls = SGLangWorker if engine == "sglang" else VLLMWorker
+    worker_name = "SGLangWorker" if engine == "sglang" else "VLLMWorker"
+
     deployment_options = dict(
-        name=f"VLLMWorker-{safe_name}{deployment_name_suffix}",
+        name=f"{worker_name}-{safe_name}{deployment_name_suffix}",
         num_replicas=num_replicas,
         ray_actor_options={
             "num_gpus": actor_num_gpus,
@@ -1471,7 +1797,7 @@ def deploy_model(
     elif planner_max_replicas_per_node is not None:
         deployment_options["max_replicas_per_node"] = planner_max_replicas_per_node
 
-    deployment = VLLMWorker.options(**deployment_options).bind(
+    deployment = worker_cls.options(**deployment_options).bind(
         model_id=model_id,
         local_model_path=local_path,
         null_compute=null_compute,

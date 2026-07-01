@@ -135,6 +135,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
             deployment_raw.get("num_gpus_per_node", get_site_config().num_gpus_per_node)
         ),
         collect_stats=bool(deployment_raw.get("collect_stats", False)),
+        engine=str(deployment_raw.get("engine", "vllm")).lower(),
     )
     client = ClientSpec(
         num_runs=int(client_raw.get("num_runs", 1)),

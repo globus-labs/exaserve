@@ -448,6 +448,7 @@ def load_run_plan(path: str) -> RunPlan:
         replica_max_ongoing_requests=int(deployment_raw["replica_max_ongoing_requests"]),
         num_gpus_per_node=int(deployment_raw["num_gpus_per_node"]),
         collect_stats=bool(deployment_raw.get("collect_stats", False)),
+        engine=str(deployment_raw.get("engine", "vllm")).lower(),
     )
     client = ClientSpec(
         num_runs=int(client_raw["num_runs"]),

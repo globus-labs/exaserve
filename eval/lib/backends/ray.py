@@ -198,6 +198,16 @@ class RayBackendAdapter(BackendAdapter):
             # Wipe node-local artifacts before staging so Phase-2 MPI weight
             # broadcast is re-done and timed every run (resources/cleanup_run.sh).
             exports["AURORA_CLEAN_STAGE"] = "1"
+        # Engine backend selection (deployment.engine). "sglang" routes deploy_model
+        # to SGLangWorker (AURORA_ENGINE) and the whole serving stack to the SGLang
+        # venv (AURORA_PYTHON_EXEC, honored by launch_cluster.sh). Default "vllm" is a
+        # no-op so existing specs are unchanged.
+        engine = str(getattr(run_plan.deployment, "engine", "vllm") or "vllm").lower()
+        if engine == "sglang":
+            exports["AURORA_ENGINE"] = "sglang"
+            sglang_py = str(getattr(get_site_config(), "sglang_python_path", "")).strip()
+            if sglang_py:
+                exports["AURORA_PYTHON_EXEC"] = sglang_py
         return RuntimeEnvSpec(env_script=env_script, exports=exports)
 
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:

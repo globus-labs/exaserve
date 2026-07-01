@@ -92,11 +92,15 @@ export PYTHONPATH="$PACKAGE_PARENT${SANITIZED_PYTHONPATH:+:$SANITIZED_PYTHONPATH
 
 # Ensure user-local binaries (e.g. haproxy built from source) are reachable.
 export PATH="$HOME/bin:$PATH"
-PYTHON_EXEC="$(resolve_frameworks_python)"
+# AURORA_PYTHON_EXEC overrides the frameworks python — used for the SGLang engine,
+# which runs in a --system-site-packages venv (inherits frameworks Ray + Aurora XPU
+# torch, adds sglang/sgl_kernel). Falls back to frameworks python (vLLM path).
+PYTHON_EXEC="${AURORA_PYTHON_EXEC:-$(resolve_frameworks_python)}"
 if [ -z "$PYTHON_EXEC" ] || [ ! -x "$PYTHON_EXEC" ]; then
-    echo "ERROR: Failed to resolve Aurora frameworks python3."
+    echo "ERROR: Failed to resolve python3 (AURORA_PYTHON_EXEC=$AURORA_PYTHON_EXEC)."
     exit 1
 fi
+echo "[System] PYTHON_EXEC=$PYTHON_EXEC (AURORA_ENGINE=${AURORA_ENGINE:-vllm})"
 
 DEPLOYMENT_CONFIG_PATH="${1:-config.yaml}"
 if [ ! -f "$DEPLOYMENT_CONFIG_PATH" ]; then

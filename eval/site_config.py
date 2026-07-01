@@ -25,6 +25,9 @@ _FIELD_DEFAULTS = OrderedDict(
         ("env_script_litellm", ""),
         ("num_gpus_per_node", 12),
         ("local_stage_path", "/tmp/hf_home"),
+        # Python for the SGLang serving stack (frameworks-inheriting venv with SGLang
+        # added). Used when a spec sets deployment.engine: sglang. Empty -> frameworks.
+        ("sglang_python_path", "/home/wenyiw/sglang_test/fwvenv/bin/python"),
     ]
 )
 _FIELD_NAMES = set(_FIELD_DEFAULTS)

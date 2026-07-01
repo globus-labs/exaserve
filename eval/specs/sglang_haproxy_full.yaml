@@ -1,0 +1,66 @@
+name: sglang_haproxy_full
+# SGLang backend, HAProxy weak-scaling 1..256 — mirrors proxycmp_haproxy (the vLLM
+# baseline) but with deployment.engine: sglang (drop-in). Identical Ray Serve +
+# HAProxy + Go replay client; only the per-replica engine differs.
+# NOTE: rate_per_node is a knob — the vLLM baseline uses 110 (near vLLM saturation);
+# SGLang (torch_native) saturates ~7 rps/node, so validate the rate at 1 node first.
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [1, 4, 16, 64, 128, 256]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: 'min(num_nodes, 4)'
+  - path: scheduler.queue
+    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
+  - path: scheduler.walltime
+    expr: '"02:00:00" if num_nodes <= 16 else ("02:30:00" if num_nodes >= 256 else "01:00:00")'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  engine: sglang
+  model_storage_path: /lus/flare/projects/datasets/model-weights
+  models:
+  - model_id: meta-llama/Llama-3.1-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.85
+    enforce_eager: true
+    max_num_seqs: 256
+  replica_max_ongoing_requests: 256
+  collect_stats: false
+client:
+  num_runs: 3
+  dest: proxy
+  stream: true
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs

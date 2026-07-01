@@ -117,6 +117,11 @@ class DeploymentSpec:
     replica_max_ongoing_requests: int = 64
     num_gpus_per_node: int = 0
     collect_stats: bool = False
+    # Inference engine backend: "vllm" (default) or "sglang". Drop-in — the whole
+    # pipeline (staging, Ray Serve, HAProxy, replay client, metrics) is identical;
+    # only the per-replica engine differs. "sglang" routes the serving stack to a
+    # venv that adds SGLang on the frameworks env and deploys SGLangWorker replicas.
+    engine: str = "vllm"
 
 
 @dataclass
