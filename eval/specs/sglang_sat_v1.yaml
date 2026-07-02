@@ -38,7 +38,8 @@ workload:
 deployment:
   engine: sglang
   num_nodes: 1
-  model_storage_path: /lus/flare/projects/datasets/model-weights
+  # model_storage_path deliberately omitted: Meta-Llama-3-8B-Instruct lives in
+  # the site-default storage (like the paper specs), not datasets/model-weights.
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
