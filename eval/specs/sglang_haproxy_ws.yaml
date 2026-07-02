@@ -39,7 +39,7 @@ deployment:
     size: 8
     gpu_memory_utilization: 0.85
     enforce_eager: true
-    max_num_seqs: 256
+    max_num_seqs: 32
   replica_max_ongoing_requests: 128
 client:
   num_runs: 2

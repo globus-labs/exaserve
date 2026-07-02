@@ -1384,6 +1384,10 @@ class SGLangWorker:
             max_running_requests=(max_num_seqs or 256),
             trust_remote_code=True,
             log_level="warning",
+            # ServerArgs defaults nccl_port to get_free_port(), which races when 12
+            # engines start concurrently on one node (torch.distributed EADDRINUSE
+            # -> dead replica -> multi-minute restart). device_id is unique per node.
+            nccl_port=25100 + device_id,
         )
         # CRITICAL: SGLang spawns its scheduler via multiprocessing 'spawn', which
         # re-imports this process's __main__. In a Ray worker __main__ is Ray's
@@ -1518,9 +1522,25 @@ class SGLangWorker:
             return fr.get("type", "stop")
         return fr or "stop"
 
-    async def _generate(self, prompt: str, sp: dict) -> dict:
+    def _abort_engine_request(self, rid: str):
+        """Tell the engine to stop working on rid. The embedded async_generate
+        gets no fastapi.Request, so sglang's own is_disconnected() abort paths
+        never fire — without this, a client-abandoned request keeps decoding
+        to completion and its zombie load deepens any overload."""
         try:
-            out = await self.engine.async_generate(prompt=prompt, sampling_params=sp)
+            self.engine.tokenizer_manager.abort_request(rid=rid)
+        except Exception:
+            pass
+
+    async def _generate(self, prompt: str, sp: dict) -> dict:
+        rid = f"aur-{uuid.uuid4().hex}"
+        try:
+            out = await self.engine.async_generate(
+                prompt=prompt, sampling_params=sp, rid=rid
+            )
+        except asyncio.CancelledError:  # client disconnected mid-request
+            self._abort_engine_request(rid)
+            raise
         except Exception as exc:  # surface engine errors as HTTP 500
             return {"error": f"{type(exc).__name__}: {exc}"}
         if isinstance(out, list):
@@ -1556,18 +1576,27 @@ class SGLangWorker:
         """Yield (delta_text, finish_reason, usage_or_None) from SGLang streaming."""
         prev = ""
         last_meta = {}
+        rid = f"aur-{uuid.uuid4().hex}"
+        finished = False
         gen = await self.engine.async_generate(
-            prompt=prompt, sampling_params=sp, stream=True
+            prompt=prompt, sampling_params=sp, stream=True, rid=rid
         )
-        async for out in gen:
-            if isinstance(out, list):
-                out = out[0]
-            text = out.get("text", "")
-            last_meta = out.get("meta_info", {}) or last_meta
-            delta = text[len(prev):]
-            prev = text
-            if delta:
-                yield delta, None, None
+        try:
+            async for out in gen:
+                if isinstance(out, list):
+                    out = out[0]
+                text = out.get("text", "")
+                last_meta = out.get("meta_info", {}) or last_meta
+                delta = text[len(prev):]
+                prev = text
+                if delta:
+                    yield delta, None, None
+            finished = True
+        finally:
+            # GeneratorExit/CancelledError lands on the yield when the client
+            # disconnects; abort so the engine drops the request too.
+            if not finished:
+                self._abort_engine_request(rid)
         usage = {
             "prompt_tokens": int(last_meta.get("prompt_tokens", 0)),
             "completion_tokens": int(last_meta.get("completion_tokens", 0)),

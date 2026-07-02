@@ -2,8 +2,11 @@ name: sglang_haproxy_full
 # SGLang backend, HAProxy weak-scaling 1..256 — mirrors proxycmp_haproxy (the vLLM
 # baseline) but with deployment.engine: sglang (drop-in). Identical Ray Serve +
 # HAProxy + Go replay client; only the per-replica engine differs.
-# NOTE: rate_per_node is a knob — the vLLM baseline uses 110 (near vLLM saturation);
-# SGLang (torch_native) saturates ~7 rps/node, so validate the rate at 1 node first.
+# NOTE: rate_per_node is a knob — the vLLM baseline uses 110 (near vLLM saturation).
+# SGLang (torch_native) measured ~13.2 rps/node ceiling at n1 (run3); per-replica
+# completion rate FALLS once batch grows past ~16, so offered load above the ceiling
+# runs away (batch up -> TBT up -> throughput down). Keep rate below ~13 and cap
+# max_num_seqs to hold replicas near their throughput peak under transients.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -24,7 +27,7 @@ workload:
   duration: 60.0
   input_len: 64
   output_len: 64
-  rate_per_node: 110.0
+  rate_per_node: 10.0
   arrival: fixed
   generation_mode: deterministic
 deployment:
@@ -38,11 +41,11 @@ deployment:
     size: 8
     gpu_memory_utilization: 0.85
     enforce_eager: true
-    max_num_seqs: 256
+    max_num_seqs: 32
   replica_max_ongoing_requests: 256
   collect_stats: false
 client:
-  num_runs: 3
+  num_runs: 2
   dest: proxy
   stream: true
   num_go_procs: 4
