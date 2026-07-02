@@ -384,8 +384,32 @@ echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKE
 export PROJECT_ROOT PACKAGE_ROOT PACKAGE_PARENT PYTHON_EXEC UNIQUE_NODES_FILE HOSTNAME_SHORT
 export AURORA_RAYSERVER_PACKAGE_ROOT="$PACKAGE_ROOT"
 export AURORA_RAYSERVER_PACKAGE_PARENT="$PACKAGE_PARENT"
+# Stage the engine venv node-local when PYTHON_EXEC lives on shared FS
+# (AURORA_PYTHON_EXEC override, e.g. the SGLang venv on $HOME). Imports and
+# Triton JIT hashing then hit tmpfs instead of gecko/hawk-NFS; see
+# distribute_to_nodes.sh for the full rationale.
+if [ "${AURORA_STAGE_VENV:-auto}" = "auto" ]; then
+    case "$PYTHON_EXEC" in
+        /tmp/*|/opt/*) AURORA_STAGE_VENV=0 ;;
+        *) AURORA_STAGE_VENV=1 ;;
+    esac
+fi
+if [ "$AURORA_STAGE_VENV" = "1" ]; then
+    AURORA_VENV_ROOT="$(dirname "$(dirname "$PYTHON_EXEC")")"
+    if [ ! -f "$AURORA_VENV_ROOT/pyvenv.cfg" ]; then
+        echo "[System] PYTHON_EXEC=$PYTHON_EXEC is not inside a venv; skipping venv staging"
+        AURORA_STAGE_VENV=0
+    fi
+fi
+export AURORA_STAGE_VENV AURORA_VENV_ROOT
 DISTRIBUTE_SCRIPT="${AURORA_DISTRIBUTE_SCRIPT:-$SCRIPT_DIR/distribute_to_nodes.sh}"
 bash "$DISTRIBUTE_SCRIPT"
+
+if [ "$AURORA_STAGE_VENV" = "1" ] && [ -x /tmp/aurora_venv/bin/python ]; then
+    PYTHON_EXEC="/tmp/aurora_venv/bin/python"
+    export AURORA_PYTHON_EXEC="$PYTHON_EXEC"
+    echo "[System] PYTHON_EXEC repointed to node-local venv: $PYTHON_EXEC"
+fi
 
 export PYTHONPATH="/tmp/aurora_src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "${AURORA_INSTRUMENTATION:-0}" = "1" ] && [ -d /tmp/aurora_overlay/ray/serve/_private ]; then

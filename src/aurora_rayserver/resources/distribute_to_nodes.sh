@@ -107,6 +107,55 @@ echo "[distribute_to_nodes] bcast source ($(du -sh "$TMP_CLEAN" | awk '{print $1
 mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
     "$BCAST_BIN" "$TMP_CLEAN/aurora_rayserver" "$LOCAL_SRC"
 
+# --- Optional: node-local engine venv (sglang) ---
+# PYTHON_EXEC may point at a venv on shared $HOME (gecko), and Triton lives in
+# the frameworks install on /opt/aurora, which is NFS from hawk.lb. Every
+# engine process imports the venv's site-packages, and Triton's JIT
+# (triton_key) hashes the entire ~1GB triton package per process on first
+# compile. At hundreds of concurrent engines this is a multi-minute
+# shared-FS read storm (sglang_haproxy_full run4: every stream wedged for
+# 330s). Stage the venv once via MPI bcast — with a triton copy injected
+# into its site-packages so it shadows the NFS copy — exactly like the
+# aurora_src tree above. launch_cluster.sh repoints PYTHON_EXEC afterwards.
+LOCAL_VENV="/tmp/aurora_venv"
+if [ "${AURORA_STAGE_VENV:-0}" = "1" ] && [ -n "${AURORA_VENV_ROOT:-}" ]; then
+    if [ ! -f "$AURORA_VENV_ROOT/pyvenv.cfg" ]; then
+        echo "[distribute_to_nodes] ERROR: AURORA_VENV_ROOT=$AURORA_VENV_ROOT is not a venv (no pyvenv.cfg)"
+        exit 1
+    fi
+    # Stage a dereferenced clean copy on the head node's tmpfs (not Lustre:
+    # this tree is ~7GB and tmpfs->HSN bcast avoids a shared-FS round trip).
+    TMP_VENV_STAGE="/tmp/aurora_venv_stage"
+    rm -rf "$TMP_VENV_STAGE"
+    mkdir -p "$TMP_VENV_STAGE/aurora_venv"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -aL --exclude='__pycache__/' --exclude='*.pyc' \
+            "$AURORA_VENV_ROOT/" "$TMP_VENV_STAGE/aurora_venv/"
+    else
+        cp -rL "$AURORA_VENV_ROOT/." "$TMP_VENV_STAGE/aurora_venv/"
+        find "$TMP_VENV_STAGE" -name __pycache__ -type d -prune -exec rm -rf {} +
+    fi
+    # Shadow the NFS triton with a node-local copy: venv site-packages
+    # precede system site-packages, so this wins over /opt/aurora.
+    VENV_SITE="$(ls -d "$TMP_VENV_STAGE/aurora_venv/lib/python"*/site-packages | head -1)"
+    if [ ! -d "$VENV_SITE/triton" ]; then
+        TRITON_SRC="$("$PYTHON_EXEC" -c 'import triton, os; print(os.path.dirname(triton.__file__))' 2>/dev/null || true)"
+        if [ -n "$TRITON_SRC" ] && [ -d "$TRITON_SRC" ]; then
+            cp -r "$TRITON_SRC" "$VENV_SITE/triton"
+        else
+            echo "[distribute_to_nodes] WARNING: could not locate triton to inject into staged venv"
+        fi
+    fi
+    echo "[distribute_to_nodes] bcast venv ($(du -sh "$TMP_VENV_STAGE/aurora_venv" | awk '{print $1}')) to $NODE_COUNT node(s) -> $LOCAL_VENV"
+    mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+        "$BCAST_BIN" "$TMP_VENV_STAGE/aurora_venv" "/tmp"
+    rm -rf "$TMP_VENV_STAGE"
+    if [ ! -x "$LOCAL_VENV/bin/python" ]; then
+        echo "[distribute_to_nodes] ERROR: staged venv missing $LOCAL_VENV/bin/python"
+        exit 1
+    fi
+fi
+
 # Optional: overlay. bcast the patched files (tiny — five .py files),
 # then run setup_overlay.sh on every rank to assemble the symlink farm
 # locally. mpiexec replaces the previous `for node in ...; do ssh & done`.
