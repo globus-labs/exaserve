@@ -1,11 +1,17 @@
 name: sglang_sat_v1
-# Single-node saturation finder for the SGLang backend (post JIT-storm fixes).
+# Single-node saturation finder for the SGLang backend (post JIT-storm fixes),
+# aligned with the sc26workshop paper baseline (proxycmp_haproxy / oat_8b_*):
+# Meta-Llama-3-8B-Instruct, gpu_mem 0.90, replica_max_ongoing 256. Feeds the
+# OAT protocol: measured saturation S -> weak-scaling runs at 0.9*S
+# (vLLM: 109 -> 98 rps/node in oat_8b_baseline).
+#
 # Aggressive rate steps (geometric ~1.35x, top = 2.7x the ~13 rps ceiling seen
 # in run3) so the finder overshoots the knee rather than converging low.
 # Two engine configs at every rate:
-#   seqs32  = the config that produced the clean run7 weak-scaling sweep
-#   seqs64  = vLLM-baseline parity (max_num_seqs 64, max_ongoing 128) — if this
-#             also behaves, the earlier collapse was the JIT storm, not the knobs.
+#   seqs32 = the config that produced the clean run7 sglang weak-scaling sweep
+#   seqs64 = paper vLLM-baseline parity — if this also behaves, the earlier
+#            collapse was the JIT storm, not the knobs; if not, keep seqs32
+#            and note the deviation in the paper.
 # abortonclose so client-aborted overload requests are cancelled in the engine
 # (via SGLangWorker's abort propagation) instead of decoding as zombies, which
 # would deflate the measured ceiling.
@@ -34,15 +40,15 @@ deployment:
   num_nodes: 1
   model_storage_path: /lus/flare/projects/datasets/model-weights
   models:
-  - model_id: meta-llama/Llama-3.1-8B-Instruct
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
     max_model_len: 4096
     size: 8
-    gpu_memory_utilization: 0.85
+    gpu_memory_utilization: 0.90
     enforce_eager: true
     max_num_seqs: 32
-  replica_max_ongoing_requests: 128
+  replica_max_ongoing_requests: 256
   collect_stats: false
 client:
   num_runs: 2
