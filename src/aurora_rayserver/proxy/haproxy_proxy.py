@@ -62,6 +62,13 @@ class HAProxyProxy(ProxyBackend):
         stats_port = int(options.get("stats_port", 9999))
         maxconn = int(options.get("maxconn", 50000))
         http_no_delay = bool(options.get("http_no_delay", True))
+        # `option abortonclose` propagates a client close to the backend even
+        # while the response is pending (zero bytes sent). Without it a wedged
+        # stream is only reaped by `timeout server` (330s) and the engine keeps
+        # decoding the abandoned request. Off by default to keep configs
+        # byte-identical to prior runs; enable for saturation probing, where
+        # zombie decodes deflate the measured ceiling.
+        abortonclose = bool(options.get("abortonclose", False))
         # HAProxy parallelism = threads (modern HAProxy is threaded, not multi-proc).
         # 0/unset -> omit nbthread (HAProxy auto-detects = bound CPUs). Set
         # options.nbthread (alias: num_workers) to pin more accept/processing threads
@@ -85,6 +92,7 @@ class HAProxyProxy(ProxyBackend):
         # it (e.g. non-streaming throughput tests, where coalescing matters at
         # scale). Default True preserves the streaming-SLO behavior.
         no_delay = "\n                option http-no-delay" if http_no_delay else ""
+        abort_line = "\n                option abortonclose" if abortonclose else ""
         nbthread_line = f"\n                nbthread {nbthread}" if nbthread > 0 else ""
         lines.append(dedent(f"""\
             global
@@ -92,7 +100,7 @@ class HAProxyProxy(ProxyBackend):
                 log stdout format raw local0 info
 
             defaults
-                mode http{no_delay}
+                mode http{no_delay}{abort_line}
                 timeout connect 5s
                 timeout client  330s
                 timeout server  330s

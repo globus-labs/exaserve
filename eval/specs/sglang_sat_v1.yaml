@@ -1,0 +1,74 @@
+name: sglang_sat_v1
+# Single-node saturation finder for the SGLang backend (post JIT-storm fixes).
+# Aggressive rate steps (geometric ~1.35x, top = 2.7x the ~13 rps ceiling seen
+# in run3) so the finder overshoots the knee rather than converging low.
+# Two engine configs at every rate:
+#   seqs32  = the config that produced the clean run7 weak-scaling sweep
+#   seqs64  = vLLM-baseline parity (max_num_seqs 64, max_ongoing 128) — if this
+#             also behaves, the earlier collapse was the JIT storm, not the knobs.
+# abortonclose so client-aborted overload requests are cancelled in the engine
+# (via SGLangWorker's abort propagation) instead of decoding as zombies, which
+# would deflate the measured ceiling.
+matrix:
+  name_template: 'rps{rate_per_node}_seqs{max_num_seqs}'
+  axes:
+  - name: rate_per_node
+    values: [10, 14, 19, 26, 35]
+    targets: [workload.rate_per_node]
+    label_template: 'rps{value}'
+  - name: max_num_seqs
+    values: [32, 64]
+    targets: [deployment.models.0.max_num_seqs]
+    label_template: 'seqs{value}'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 10.0
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  engine: sglang
+  num_nodes: 1
+  model_storage_path: /lus/flare/projects/datasets/model-weights
+  models:
+  - model_id: meta-llama/Llama-3.1-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.85
+    enforce_eager: true
+    max_num_seqs: 32
+  replica_max_ongoing_requests: 128
+  collect_stats: false
+client:
+  num_runs: 2
+  num_nodes: 1
+  dest: proxy
+  stream: true
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+          abortonclose: true
+scheduler:
+  type: pbs
+  nodes: 1
+  queue: capacity
+  walltime: 00:45:00
