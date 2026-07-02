@@ -113,6 +113,13 @@ class BackendAdapter(abc.ABC):
     def runtime_env(self, run_plan: RunPlan) -> RuntimeEnvSpec:
         raise NotImplementedError
 
+    def job_env_exports(self, run_plan: RunPlan) -> dict[str, str]:
+        """Env vars exported at the PBS job-script level, visible to the WHOLE
+        job: the server launch, discover_targets, and the replay client. This is
+        distinct from runtime_env().exports, which are applied only to the launch
+        subprocess. Default: none."""
+        return {}
+
     @abc.abstractmethod
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:
         raise NotImplementedError

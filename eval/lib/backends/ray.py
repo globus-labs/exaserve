@@ -210,6 +210,23 @@ class RayBackendAdapter(BackendAdapter):
                 exports["AURORA_PYTHON_EXEC"] = sglang_py
         return RuntimeEnvSpec(env_script=env_script, exports=exports)
 
+    def job_env_exports(self, run_plan: RunPlan) -> dict[str, str]:
+        exports: dict[str, str] = {}
+        # Shard-aware PP must be signalled to the WHOLE job, not just the launch
+        # subprocess: the server keys its per-stage staging + node-pinned
+        # per-replica deploy off AURORA_PP_SHARD_AWARE, and discover_targets keys
+        # per-replica direct routing off it. Derive from the deployment
+        # (pp>1 AND num_replicas>1) — the exact condition server.py gates on — so
+        # shard-aware multi-replica PP specs are self-contained (no hand-edited
+        # job.pbs). Single-replica or PP=1 deployments are unaffected.
+        if any(
+            int(getattr(m, "pipeline_parallel_size", 1) or 1) > 1
+            and int(getattr(m, "num_replicas", 0) or 0) > 1
+            for m in run_plan.deployment.models
+        ):
+            exports["AURORA_PP_SHARD_AWARE"] = "1"
+        return exports
+
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:
         run_plan = run_ctx.run_plan
         env = _sanitize_launch_env(os.environ.copy())
@@ -299,6 +316,12 @@ class RayBackendAdapter(BackendAdapter):
                         node = line.strip()
                         if node and node not in nodes:
                             nodes.append(node)
+            # Shard-aware PP has no root route: each replica is a node-pinned app
+            # at /<route>_r{i}, normally reached via the proxy's set-path rewrite.
+            # Direct mode bypasses the proxy, so address each replica explicitly.
+            shard_urls = _shard_aware_direct_urls(run_plan, nodes, backend_port)
+            if shard_urls is not None:
+                return shard_urls
             return [f"http://{node}:{backend_port}" for node in nodes]
 
         port_file = str(launched.metadata["proxy_port_file"])
@@ -351,3 +374,55 @@ class RayBackendAdapter(BackendAdapter):
             input_len=run_plan.workload.input_len,
             modes=dict(run_plan.workload.modes),
         )
+
+
+def _shard_aware_direct_urls(
+    run_plan: RunPlan, node_ips: list[str], backend_port: int
+) -> list[str] | None:
+    """Per-replica direct URLs for shard-aware PP, or None if not applicable.
+
+    Shard-aware PP (AURORA_PP_SHARD_AWARE=1, pp>1, num_replicas>1) serves each
+    replica as a node-pinned single-replica app at route /<route>_r{i}; there is
+    no root route (see driver.py / server.ordered_pp_nodes). The HAProxy proxy
+    normally reaches them by rewriting the path to /<route>_r{rand}. Direct mode
+    bypasses the proxy, so the client must address each replica explicitly.
+
+    Node-assignment contract (server.ordered_pp_nodes + pp_stage.assign_pp_nodes):
+    replica i's stage-0 node is (alive Ray GPU IPs sorted by ip string)[i*pp].
+    ray_node_ips.txt holds that same IP set (NodeManagerAddress) but unsorted, so
+    we sort here to reproduce the deployment's ordering exactly. Even if the
+    ordering were off, Ray Serve routes /<route>_r{i} to replica i from any node's
+    HTTP proxy, so requests still succeed (only node-locality would be lost).
+    """
+    if os.environ.get("AURORA_PP_SHARD_AWARE", "0") != "1":
+        return None
+    models = list(run_plan.deployment.models)
+    if len(models) != 1:
+        return None  # per-replica direct addressing is only defined for one model
+    mc = models[0]
+    pp = int(getattr(mc, "pipeline_parallel_size", 1) or 1)
+    n_rep = int(getattr(mc, "num_replicas", 0) or 0)
+    if pp <= 1 or n_rep <= 1:
+        return None
+    need = n_rep * pp
+    if len(node_ips) < need:
+        raise RuntimeError(
+            f"shard-aware direct: need {need} nodes ({n_rep} replicas x PP={pp}) "
+            f"but only {len(node_ips)} Ray node IP(s) available"
+        )
+    ordered = sorted(node_ips)  # match ordered_pp_nodes(): lexicographic ip sort
+    try:
+        from aurora_rayserver.model_paths import get_model_route_name
+    except ImportError:  # pragma: no cover - snapshot import fallback
+        from src.aurora_rayserver.model_paths import get_model_route_name
+    route = get_model_route_name(mc.model_id)
+    urls = [
+        f"http://{ordered[i * pp]}:{backend_port}/{route}_r{i}"
+        for i in range(n_rep)
+    ]
+    print(
+        f"[RayBackend] shard-aware direct mode: {n_rep} per-replica URLs "
+        f"(PP={pp}, proxy bypassed) -> stage-0 node of each replica.",
+        flush=True,
+    )
+    return urls

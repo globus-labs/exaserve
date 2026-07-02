@@ -29,10 +29,18 @@ def render_pbs_job(
     code_root: str,
     env_script: str,
     run_yaml_path: str,
+    job_exports: dict[str, str] | None = None,
 ) -> str:
     mail_lines = ""
     if mail_user:
         mail_lines = f"#PBS -m {mail_events}\n#PBS -M {mail_user}\n"
+
+    # Job-script-level exports, visible to the whole job (server launch,
+    # discover_targets, replay client). Emitted after `source env_script` so they
+    # win over anything the env script sets.
+    export_block = "".join(
+        f"export {key}={value}\n" for key, value in (job_exports or {}).items()
+    )
 
     return f"""#!/bin/bash -l
 #PBS -N {job_name}
@@ -66,5 +74,5 @@ fi
 # 'from aurora_rayserver.X' both resolve when eval.cli imports backends.
 export PYTHONPATH="{code_root}:{code_root}/src${{PYTHONPATH:+:$PYTHONPATH}}"
 source "{env_script}"
-python3 -m eval.cli run execute "{run_yaml_path}"
+{export_block}python3 -m eval.cli run execute "{run_yaml_path}"
 """

@@ -600,6 +600,7 @@ def _materialize_variant(
         code_root=run_plan.repo_root,
         env_script=runtime_env.env_script,
         run_yaml_path=bundle.run_yaml_path,
+        job_exports=adapter.job_env_exports(run_plan),
     )
     with open(bundle.job_path, "w", encoding="utf-8") as handle:
         handle.write(job_text)
