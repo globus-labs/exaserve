@@ -1412,6 +1412,21 @@ class SGLangWorker:
             flush=True,
         )
         self.engine = sgl.Engine(**engine_kwargs)
+        # Warm up before reporting healthy: the first real prefill JIT-compiles
+        # sglang's Triton paged-allocator kernels, and triton_key() hashes the
+        # whole venv off shared $HOME. With hundreds of engines doing this
+        # concurrently under client traffic it is a minutes-long zero-byte
+        # stall (run4 n1/n64/n128: every stream wedged until HAProxy's 330s
+        # server timeout reaped it). Paying it here moves the storm into the
+        # deploy phase, which has no traffic and no client timeouts.
+        t_warm = time.monotonic()
+        self.engine.generate(
+            prompt="warmup", sampling_params={"max_new_tokens": 8, "temperature": 0.0}
+        )
+        print_red(
+            f"[SGLangWorker pid={pid}] warmup generate: "
+            f"{time.monotonic() - t_warm:.2f}s"
+        )
         print_red(
             f"[SGLangWorker pid={pid}] ★ INIT TOTAL: "
             f"{time.monotonic() - init_start:.2f}s ★"
