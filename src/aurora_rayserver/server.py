@@ -1412,21 +1412,7 @@ class SGLangWorker:
             flush=True,
         )
         self.engine = sgl.Engine(**engine_kwargs)
-        # Warm up before reporting healthy: the first real prefill JIT-compiles
-        # sglang's Triton paged-allocator kernels, and triton_key() hashes the
-        # whole venv off shared $HOME. With hundreds of engines doing this
-        # concurrently under client traffic it is a minutes-long zero-byte
-        # stall (run4 n1/n64/n128: every stream wedged until HAProxy's 330s
-        # server timeout reaped it). Paying it here moves the storm into the
-        # deploy phase, which has no traffic and no client timeouts.
-        t_warm = time.monotonic()
-        self.engine.generate(
-            prompt="warmup", sampling_params={"max_new_tokens": 8, "temperature": 0.0}
-        )
-        print_red(
-            f"[SGLangWorker pid={pid}] warmup generate: "
-            f"{time.monotonic() - t_warm:.2f}s"
-        )
+        self._warmed = False
         print_red(
             f"[SGLangWorker pid={pid}] ★ INIT TOTAL: "
             f"{time.monotonic() - init_start:.2f}s ★"
@@ -1437,6 +1423,30 @@ class SGLangWorker:
             "device_id": device_id, "engine": "sglang",
             "total_init_s": round(time.monotonic() - init_start, 4),
         })
+
+    async def reconfigure(self, user_config):
+        """Warm up the engine before the replica reports healthy.
+
+        The first real prefill JIT-compiles sglang's Triton paged-allocator
+        kernels; without a warmup that lands on client traffic (run4: every
+        stream wedged until HAProxy's 330s server timeout). Serve awaits
+        reconfigure during replica init when user_config is set (see
+        deploy_model). This cannot live in __init__: a sync engine.generate
+        there calls run_until_complete on the already-running replica event
+        loop, and an async __init__ is silently skipped by the serve.ingress
+        wrapper (run5 deploy failure).
+        """
+        if self._warmed:
+            return
+        t_warm = time.monotonic()
+        await self.engine.async_generate(
+            prompt="warmup", sampling_params={"max_new_tokens": 8, "temperature": 0.0}
+        )
+        self._warmed = True
+        print_red(
+            f"[SGLangWorker pid={os.getpid()}] warmup generate: "
+            f"{time.monotonic() - t_warm:.2f}s"
+        )
 
     # ---- HTTP endpoints ------------------------------------------------------
     @sgl_app.get("/health")
@@ -1840,6 +1850,11 @@ def deploy_model(
         deployment_options["max_replicas_per_node"] = replicas_per_node
     elif planner_max_replicas_per_node is not None:
         deployment_options["max_replicas_per_node"] = planner_max_replicas_per_node
+    if engine == "sglang":
+        # A non-None user_config makes Serve await SGLangWorker.reconfigure
+        # during replica init (pre-healthy), which is where the engine warmup
+        # runs — see SGLangWorker.reconfigure.
+        deployment_options["user_config"] = {"warmup": True}
 
     deployment = worker_cls.options(**deployment_options).bind(
         model_id=model_id,
