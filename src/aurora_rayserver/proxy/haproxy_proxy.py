@@ -396,7 +396,17 @@ def _render_backend(
     """
     shard_n = endpoints[0].shard_replicas if endpoints else 0
     if shard_n > 0:
-        health_path = f"{path_prefix}_r0/health"
+        # Health-check the Ray Serve proxy's OWN liveness (/-/healthz), NOT a
+        # model route. All N servers share one backend, so a per-replica health
+        # path like /<route>_r0/health funnels EVERY server's check through the
+        # single replica r0 -> under load (slow 405B r0 + N checks per `inter`)
+        # r0's /health blows the check timeout -> Layer7 timeout -> servers flap
+        # DOWN in waves -> "no server available" -> 503s, even at trivial request
+        # rates (measured at 256n: ~508 Layer7 timeouts, ~800 DOWN events,
+        # 20-37% client errors, while HAProxy itself sat at 7-33% CPU). /-/healthz
+        # is answered locally by each node's proxy (router-ready / not-draining),
+        # independent of replica load, so checks stay fast and servers stay UP.
+        health_path = "/-/healthz"
         lines = [
             f"backend {name}",
             f"    balance {balance}",
