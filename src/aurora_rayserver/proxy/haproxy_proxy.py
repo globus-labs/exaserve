@@ -395,35 +395,33 @@ def _render_backend(
     statistically even and avoids a shared round-robin counter under concurrency.
     """
     shard_n = endpoints[0].shard_replicas if endpoints else 0
+    lines = [
+        f"backend {name}",
+        f"    balance {balance}",
+    ]
     if shard_n > 0:
-        # Health-check the Ray Serve proxy's OWN liveness (/-/healthz), NOT a
-        # model route. All N servers share one backend, so a per-replica health
-        # path like /<route>_r0/health funnels EVERY server's check through the
-        # single replica r0 -> under load (slow 405B r0 + N checks per `inter`)
-        # r0's /health blows the check timeout -> Layer7 timeout -> servers flap
-        # DOWN in waves -> "no server available" -> 503s, even at trivial request
-        # rates (measured at 256n: ~508 Layer7 timeouts, ~800 DOWN events,
-        # 20-37% client errors, while HAProxy itself sat at 7-33% CPU). /-/healthz
-        # is answered locally by each node's proxy (router-ready / not-draining),
-        # independent of replica load, so checks stay fast and servers stay UP.
-        health_path = "/-/healthz"
-        lines = [
-            f"backend {name}",
-            f"    balance {balance}",
-            # pick a replica index 0..N-1 and prepend its route to the path
+        # Shard-aware PP: the model is served as N node-pinned single-replica apps
+        # at <path_prefix>_r{0..N-1}. Pick a replica per request (rand, even and
+        # lock-free) and rewrite the path to its route; any node's Serve proxy then
+        # routes it to that replica.
+        lines += [
             f"    http-request set-var(txn.ridx) rand({shard_n})",
             f"    http-request set-path {path_prefix}_r%[var(txn.ridx)]%[path]",
-            f"    option httpchk GET {health_path}",
-            "    http-check expect status 200",
         ]
-    else:
-        health_path = f"{path_prefix}/health" if path_prefix else "/health"
-        lines = [
-            f"backend {name}",
-            f"    balance {balance}",
-            f"    option httpchk GET {health_path}",
-            "    http-check expect status 200",
-        ]
+    # Health-check the Ray Serve proxy's OWN liveness (/-/healthz) in ALL cases,
+    # never a model route. /-/healthz is answered locally by each node's proxy
+    # (router-ready / not-draining), independent of any replica's load, so a slow
+    # or busy replica cannot fail the check. Layering: HAProxy owns "is this node's
+    # proxy up?"; Ray Serve owns replica health (its own check_health RPC) and
+    # routes around dead replicas via EveryNode. A per-replica health path instead
+    # funnels EVERY server's check through one replica and flaps the whole backend
+    # under load -- measured at 405B/256n with /<route>_r0/health: ~508 Layer7
+    # timeouts, ~800 DOWN events, 20-37% client errors, while HAProxy itself sat at
+    # 7-33% CPU. /-/healthz -> 0 Layer7 timeouts, 0 errors, throughput == direct.
+    lines += [
+        "    option httpchk GET /-/healthz",
+        "    http-check expect status 200",
+    ]
     for ep in endpoints:
         server_name = f"{_safe_backend_name(ep.host)}_{ep.port}"
         lines.append(
