@@ -1,0 +1,57 @@
+name: sglang_direct_n256
+# SGLang backend, 256-node point in Direct-MPI dispatch (one client rank per
+# node hits its LOCAL Ray Serve port; no shared proxy). Companion to
+# sglang_haproxy_full run8: identical paper protocol (Meta-Llama-3-8B-Instruct,
+# seqs64/ongoing256, rate 15 = 0.9*S), only the dispatch path differs — run8's
+# n256 plateaued at ~2.0-2.3k rps (7.9/node, 59.8% eff, 0 errors, engines idle)
+# on the single head-node HAProxy streaming ceiling, mirroring the vLLM
+# proxycmp finding. Direct mode removes the proxy to show the backend itself
+# scales; client mirrors proxycmp_direct (num_go_procs=8, each rank owns a node).
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [256]
+    targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 15.0
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  engine: sglang
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+  collect_stats: false
+client:
+  num_runs: 6
+  dest: direct
+  stream: true
+  num_go_procs: 8
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+      proxy:
+        type: none
+scheduler:
+  type: pbs
+  queue: prod
+  walltime: '02:30:00'
