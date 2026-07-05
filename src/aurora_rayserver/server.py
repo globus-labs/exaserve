@@ -35,9 +35,12 @@ from typing import Optional, List, Dict, Any
 from .patches import apply_all as _apply_all  # noqa: I001
 _apply_all()
 
+import random
 import ray
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from ray import serve
 from ray.serve.config import HTTPOptions, ProxyLocation
 # vLLM is imported lazily (inside VLLMWorker / async_engine_arg_supported) so this
@@ -1671,6 +1674,89 @@ class SGLangWorker:
         yield "data: [DONE]\n\n"
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ShardUmbrella — root-route fan-out for shard-aware PP (proxy-agnostic serving)
+# ═══════════════════════════════════════════════════════════════════════════
+umbrella_app = FastAPI()
+
+
+@serve.deployment
+@serve.ingress(umbrella_app)
+class ShardUmbrella:
+    """Root-route ingress that fans out to the N node-pinned PP replica apps
+    served at /<route>_r{0..N-1}. Lets ANY external proxy -- or a direct client --
+    treat a shard-aware PP deployment as ONE root endpoint: the proxy just
+    round-robins across nodes at "/", and this deployment picks a replica and
+    rewrites the path. No per-proxy shard routing (HAProxy set-path) required, so
+    a new proxy backend needs zero shard-awareness.
+
+    Each request is reverse-proxied (streaming, so SSE passes through untouched)
+    to http://127.0.0.1:<backend_port>/<route>_r{rand}/<path>, which the node's
+    own Ray Serve HTTP proxy (EveryNode) routes to that replica. CPU-only and
+    replicated across nodes, so the umbrella is not itself a single bottleneck.
+    """
+
+    def __init__(self, route_name: str, n_replicas: int, backend_port: int = 8000):
+        self._route = str(route_name)
+        self._n = int(n_replicas)
+        self._base = f"http://127.0.0.1:{int(backend_port)}"
+        # Long timeout to match replica/proxy streaming; unbounded pool so the
+        # umbrella never becomes the connection limiter.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(330.0, connect=10.0),
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=None),
+        )
+
+    @umbrella_app.api_route(
+        "/{fwd_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"]
+    )
+    async def _fanout(self, request: Request, fwd_path: str):
+        idx = random.randrange(self._n) if self._n > 1 else 0
+        url = f"{self._base}/{self._route}_r{idx}/{fwd_path}"
+        body = await request.body()
+        fwd_headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length", "connection")
+        }
+        upstream_req = self._client.build_request(
+            request.method, url, content=body,
+            headers=fwd_headers, params=request.query_params,
+        )
+        upstream = await self._client.send(upstream_req, stream=True)
+        resp_headers = {
+            k: v for k, v in upstream.headers.items()
+            if k.lower() not in ("content-length", "transfer-encoding", "connection")
+        }
+        return StreamingResponse(
+            upstream.aiter_raw(),
+            status_code=upstream.status_code,
+            headers=resp_headers,
+            media_type=upstream.headers.get("content-type"),
+            background=BackgroundTask(upstream.aclose),
+        )
+
+
+def deploy_shard_umbrella(
+    safe_name: str, n_rep: int, backend_port: int, n_umbrella: int
+) -> None:
+    """Deploy ShardUmbrella at the root route, in front of the N /<route>_r{i}
+    replica apps. Opt-in via AURORA_PP_UMBRELLA=1 in the shard-aware PP path."""
+    n_umbrella = max(1, int(n_umbrella))
+    umb = ShardUmbrella.options(
+        name=f"{safe_name}_umbrella",
+        num_replicas=n_umbrella,
+        ray_actor_options={"num_cpus": 1},
+        max_ongoing_requests=1000,
+    ).bind(safe_name, n_rep, backend_port)
+    serve.run(umb, name=f"{safe_name}_umbrella", route_prefix="/")
+    print(
+        f"[AuroraServe] ✓ ShardUmbrella at http://localhost:{backend_port}/v1 "
+        f"({n_umbrella} replica(s)) fans out to {n_rep} /{safe_name}_r(i) apps; "
+        f"any proxy can front '/' with NO shard routing.",
+        flush=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Deployment helpers
 # ---------------------------------------------------------------------------
@@ -2024,6 +2110,14 @@ def deploy_from_replica_plan(
                 _run_many(targets, wait_for_applications_running=True)
             print(f"[AuroraServe] ✓ all {n_rep} replicas running → "
                   f"http://localhost:8000/{safe_name}_r{{0..{n_rep - 1}}}/v1", flush=True)
+            # Optional umbrella: a root-route ingress that fans out to the N
+            # replica apps, so external proxies (and direct clients) need no
+            # shard-aware routing. Default 1 umbrella replica per node.
+            if os.environ.get("AURORA_PP_UMBRELLA", "0") == "1":
+                n_umbrella = int(os.environ.get(
+                    "AURORA_PP_UMBRELLA_REPLICAS", str(len(ordered_pp_nodes()))))
+                with tracer.phase("shard_umbrella.run", replicas=n_umbrella):
+                    deploy_shard_umbrella(safe_name, n_rep, 8000, n_umbrella)
             continue
 
         deployment, model_id = deploy_model(
