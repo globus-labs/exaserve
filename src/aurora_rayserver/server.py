@@ -182,6 +182,52 @@ def _ray_serve_timeout_patches() -> Dict[str, Any]:
     }
 
 
+# GCS-bootstrap hardening exported by launch_cluster.sh. RayConfig consumes
+# RAY_* env at process start, so the value is only live in a process whose
+# environment carries it — env present in a spawned Ray worker == RayConfig in
+# that worker read it. Verified against a real remote worker (the process
+# class that failed in sglang_direct_n256 run0-run3) instead of the driver,
+# because a driver-only export that misses the mpiexec'd `ray start` is
+# exactly the silent failure mode this guards against.
+_CORE_ENV_EXPECTED = (
+    "RAY_gcs_rpc_server_connect_timeout_s",
+    "RAY_gcs_rpc_server_reconnect_timeout_s",
+    "RAY_worker_register_timeout_seconds",
+    "RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT",
+)
+
+
+def _verify_core_env() -> None:
+    """Probe a fresh remote Ray worker and fail fast if the GCS-hardening env
+    did not propagate (set AURORA_SKIP_ENV_PROBE=1 to bypass)."""
+    if os.environ.get("AURORA_SKIP_ENV_PROBE", "0") == "1":
+        return
+    expected = {k: os.environ[k] for k in _CORE_ENV_EXPECTED if k in os.environ}
+    if not expected:
+        print("[AuroraServe] Core env probe: nothing exported to verify", flush=True)
+        return
+
+    @ray.remote(num_cpus=0)
+    def _probe(keys):
+        import os as _os
+        return {k: _os.environ.get(k) for k in keys}
+
+    seen = ray.get(_probe.remote(list(expected)), timeout=120)
+    mismatched = {k: (v, seen.get(k)) for k, v in expected.items() if seen.get(k) != v}
+    if mismatched:
+        detail = ", ".join(f"{k}: driver={v} worker={w}" for k, (v, w) in mismatched.items())
+        raise RuntimeError(
+            f"GCS-hardening env not live in Ray workers ({detail}). "
+            "Exports did not reach the mpiexec'd ray start; aborting before "
+            "deploy rather than replaying the run0-run3 bootstrap lottery."
+        )
+    print(
+        "[AuroraServe] Core env verified in remote worker: "
+        + ", ".join(f"{k}={v}" for k, v in expected.items()),
+        flush=True,
+    )
+
+
 def _patch_ray_serve_proxy_constants() -> None:
     """Worker setup hook applied via runtime_env. Relaxes Ray Serve proxy/
     replica health-check thresholds so the ServeController doesn't kill
@@ -2263,6 +2309,8 @@ if __name__ == "__main__":
     # per-file Lustre I/O).  Must be created after ray.init, before serve.run.
     from .scaling_trace import create_stats_collector, collect_replica_stats
     create_stats_collector()
+
+    _verify_core_env()
 
     # Patch proxy timeouts in *this* (driver) process before serve.start()
     # spawns ProxyActors. The runtime_env worker hook covers Ray workers, but

@@ -376,6 +376,22 @@ export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 echo "[System] RAYON_NUM_THREADS=$RAYON_NUM_THREADS TOKENIZERS_PARALLELISM=$TOKENIZERS_PARALLELISM"
 
+# --- GCS bootstrap hardening (256n deploy fan-in) -----------------------------
+# At 3072 simultaneous replica creations, a single worker's NEW gRPC connection
+# to GCS can land in the tail past the stock 5s connect budget; Serve then
+# aborts the whole app after 20 constructor failures (sglang_direct_n256
+# run0-run3, 2026-07-06: one ActorUnavailableError killed each 256n deploy in
+# ~14s while GCS was serving thousands of other creations in the same second).
+# RayConfig reads RAY_* env at process start; these exports reach every node's
+# raylet (and thus every worker it spawns) via the same mpiexec env forwarding
+# that RAYON_NUM_THREADS demonstrably uses. The driver verifies them inside a
+# remote worker before deploying — see _verify_core_env in server.py.
+export RAY_gcs_rpc_server_connect_timeout_s="${RAY_gcs_rpc_server_connect_timeout_s:-30}"
+export RAY_gcs_rpc_server_reconnect_timeout_s="${RAY_gcs_rpc_server_reconnect_timeout_s:-120}"
+export RAY_worker_register_timeout_seconds="${RAY_worker_register_timeout_seconds:-120}"
+export RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT="${RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT:-200}"
+echo "[System] GCS hardening: connect_timeout=${RAY_gcs_rpc_server_connect_timeout_s}s reconnect_timeout=${RAY_gcs_rpc_server_reconnect_timeout_s}s worker_register=${RAY_worker_register_timeout_seconds}s serve_ctor_retries=${RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT}"
+
 # --- Per-node distribution: aurora_serve src + (optional) Ray Serve overlay ---
 # Stages /tmp/aurora_src on every node so user code runs from local tmpfs.
 # When AURORA_INSTRUMENTATION=1, also stages /tmp/aurora_overlay (symlink farm
