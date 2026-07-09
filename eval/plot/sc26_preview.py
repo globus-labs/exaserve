@@ -57,8 +57,8 @@ RUNS_ROOT = Path(
 OUT_DIR = Path(__file__).resolve().parent / "output" / "sc26_preview"
 CACHE_DIR = Path("/tmp/sc26_preview_cache")
 
-# Paper SLO (Sarathi-Serve style): TTFT <= 1s AND P99 time-between-tokens <= 250ms.
-TTFT_SLO_S = 1.0
+# Paper SLO (Sarathi-Serve style): TTFT <= 2s AND P99 time-between-tokens <= 250ms.
+TTFT_SLO_S = 2.0
 TBT_P99_SLO_S = 0.250
 # Extra TTFT thresholds tracked per cell so the TTFT-attainment panel can show
 # how a looser first-token budget exposes the node-count scaling trend.

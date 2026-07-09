@@ -1,0 +1,45 @@
+# All options: https://matplotlib.org/stable/users/explain/customizing.html#customizing-with-matplotlibrc-files
+# Font sizes
+font.size: 6
+axes.titlesize: 6
+axes.labelsize: 6
+figure.titlesize: 6
+figure.labelsize: 6
+legend.fontsize: 6
+legend.title_fontsize: 6
+xtick.labelsize: 6
+ytick.labelsize: 6
+# Figure parameters
+axes.linewidth: 0.5
+axes.titlepad: 2.0
+axes.grid: True
+axes.grid.axis: both
+grid.linewidth: 0.5
+grid.alpha: 1.0
+grid.color: "#DFDFDF"
+grid.linestyle: :
+lines.markersize: 6
+lines.linewidth: 1.0
+xtick.major.width: 0.5
+xtick.minor.width: 0.5
+ytick.major.width: 0.5
+ytick.minor.width: 0.5
+xtick.major.size: 2
+xtick.minor.size: 2
+ytick.major.size: 2
+ytick.minor.size: 2
+# Subplots
+figure.subplot.left: 0.1
+figure.subplot.right: 0.98
+figure.subplot.bottom: 0.1
+figure.subplot.top: 0.97
+figure.subplot.wspace: 0.2
+figure.subplot.hspace: 0.2
+# Rendering
+figure.dpi: 400
+savefig.dpi: 400
+savefig.format: pdf
+savefig.bbox: tight
+savefig.pad_inches: 0.05
+# Colors
+axes.prop_cycle: cycler('color', ['4D3886', '11A579', 'D64269', 'F2B701', '3969AC', 'E68310'])
