@@ -1,0 +1,80 @@
+name: bringup_inst_real_val
+# tab:gcs re-run — instrumented REAL serving runs (weights loaded, forward pass
+# real), replacing the earlier null-compute-only GCS instrumentation.
+#
+# Same overlay probes as nullcompute_scaling (instrumentation=true) so we get
+# GetActorInfo counts + per-proxy ray.get_actor "Max GCS" alongside
+# scaling_trace's wait_proxies/deploy_apps — but WITHOUT null_compute, so the
+# replicas load real 8B weights. startup_only=true: the data is the bring-up
+# itself; no replay client.
+#
+# Scale axis N in {64,128,256} to match the real tab:startup rows.
+# Queue derived by N: n64/n128 -> debug-scaling (1h), n256 -> prod (3h).
+#
+# !!! READ BEFORE SUBMITTING !!!
+#  - VALIDATE n64 FIRST. Only after it succeeds and the instrumentation/ dir is
+#    produced with real replicas, submit n128 then n256.
+#  - n256 is a prod job (~32 min bring-up + gather); never submit the whole
+#    matrix at once.
+matrix:
+  name_template: 'n{num_nodes}'
+  combine: cartesian
+  axes:
+  - name: num_nodes
+    values: [64, 128, 256]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: 'n{value}'
+  derived:
+  - path: client.num_nodes
+    expr: 'min(num_nodes, 4)'
+  - path: scheduler.queue
+    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
+  - path: scheduler.walltime
+    expr: '"01:00:00" if num_nodes < 256 else "03:00:00"'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 1.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 1.0
+  generation_mode: deterministic
+deployment:
+  num_gpus_per_node: 12
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    num_cpus_per_replica: 1
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 1
+  startup_only: true
+  dest: proxy
+  stream: false
+  num_go_procs: 1
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+        instrumentation: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs
+  queue: debug-scaling

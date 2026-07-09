@@ -1,0 +1,69 @@
+name: pp2_shard_4node
+# Shard-aware PP integration test (run with AURORA_PP_SHARD_AWARE=1):
+# Llama-3-8B PP=2 (TP=1) x 2 replicas on 4 nodes -> 4 stage-nodes, 1 stage each.
+# Validates the full path: two-group bcast stages each node ONLY its stage's
+# shards (post-ray.init, sharing ordered_pp_nodes() with the node-pinned deploy),
+# vLLM loads the partial per-stage dir, and N node-pinned single-replica
+# deployments serve. PASS criterion = driver reaches "CLUSTER FULLY READY"
+# (staging + per-stage load + serve). Routing across the per-replica routes
+# (/<safe>_r{r}) is TODO, so the replay client may not route — that's expected;
+# the deploy reaching READY is what this test checks.
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [4]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: '2'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 30.0
+  input_len: 128
+  output_len: 64
+  rate_per_node: 1.0
+  generation_mode: deterministic
+deployment:
+  num_nodes: 4
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /tmp/pp2_shard_test
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 2
+    num_replicas: 2
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.9
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 128
+client:
+  num_runs: 1
+  num_nodes: 2
+  dest: proxy
+  stream: true
+  num_go_procs: 2
+  num_go_workers: 4
+  go_concurrency: 50
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 50000
+scheduler:
+  type: pbs
+  queue: debug-scaling
+  walltime: 00:45:00
