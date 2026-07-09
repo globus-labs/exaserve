@@ -2153,7 +2153,23 @@ def deploy_from_replica_plan(
             print(f"[AuroraServe] Deploying {n_rep} shard-aware PP replicas CONCURRENTLY "
                   f"(single _run_many for {n_rep} apps) for {model_id}...", flush=True)
             with tracer.phase("shard_serve.run_many", replicas=n_rep):
-                _run_many(targets, wait_for_applications_running=True)
+                try:
+                    _run_many(targets, wait_for_applications_running=True)
+                except Exception as _deploy_exc:
+                    # FAIL FAST. A replica's deploy failed (e.g. vLLM KV-cache OOM ->
+                    # EngineCore crash). _run_many raises, but Ray Serve's background
+                    # actors + atexit keep this process alive, so the driver would
+                    # wait AURORA_SERVE_READY_TIMEOUT_S and burn the ENTIRE walltime.
+                    # os._exit bypasses the hanging cleanup; the driver sees the
+                    # process die within ~1s (poll()) and aborts the job cleanly so
+                    # it can be retried in minutes instead of hours.
+                    import traceback
+                    print(f"[AuroraServe] ✗✗✗ SHARD-AWARE DEPLOY FAILED "
+                          f"({n_rep} replicas): {_deploy_exc}", flush=True)
+                    traceback.print_exc()
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    os._exit(1)
             print(f"[AuroraServe] ✓ all {n_rep} replicas running → "
                   f"http://localhost:8000/{safe_name}_r{{0..{n_rep - 1}}}/v1", flush=True)
             # Optional umbrella: a root-route ingress that fans out to the N
