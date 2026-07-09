@@ -16,6 +16,6 @@ prune tools
 exclude .codex
 exclude .gitignore
 exclude AGENTS.md
-exclude OBJECTIVES.md
-exclude TODO.md
+exclude doc/OBJECTIVES.md
+exclude doc/TODO.md
 exclude note.txt

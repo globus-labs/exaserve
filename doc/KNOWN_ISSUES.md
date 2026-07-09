@@ -5,7 +5,7 @@ running the Aurora Ray Serve eval — kept so we can revisit them instead of
 re-discovering them. This is the **empirical** companion to:
 
 - [TODO.md](TODO.md) — forward-looking improvement backlog (P0–P3, feature gaps).
-- [findings/](findings/) — deep-dive root-cause writeups (GCS contention,
+- [findings/](../findings/) — deep-dive root-cause writeups (GCS contention,
   wait_proxies, death cascade, launch stages, etc.).
 - Agent memory under `~/.claude/projects/-home-wenyiw-aurora-rayserver/memory/`
   — one fact per file; slugs referenced below as `[[memory_slug]]`.
@@ -200,7 +200,7 @@ Refs: `[[project_haproxy_httpnodelay_regression]]`.
 
 - **Improvement backlog & priorities:** [TODO.md](TODO.md) (P0–P3 table, feature gaps:
   tests, /metrics, tracing, caching, constants centralization, sitecustomize fragility).
-- **Deep-dive root causes:** [findings/](findings/) — esp. `gcs_contention_quantitative.md`,
+- **Deep-dive root causes:** [findings/](../findings/) — esp. `gcs_contention_quantitative.md`,
   `wait_proxies_root_cause_instrumented.md`, `proxyactor_death_cascade_256n.md`,
   `ray_launch_stages.md`, `overlay_distribution_design.md`.
 - **SC26 eval status & data coverage:** eval/specs/sc26workshop/README.md, DATA_LEDGER.md.
