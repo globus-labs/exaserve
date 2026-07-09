@@ -291,9 +291,19 @@ def main() -> int:
         raise SystemExit("--num-nodes must be >= 1")
 
     config = load_deployment_config(args.config)
-    if args.num_nodes != config.num_nodes:
+    # Shard-aware PP may deploy on a SUBSET of the allocation (e.g. a 256-node prod
+    # job that only deploys 32 nodes / 16 replicas, to get >1h walltime that
+    # capacity/debug-scaling can't provide at that node count). The pre-Ray bcast is
+    # a no-op for shard-aware (bcast_models skips it; real staging is post-Ray to
+    # hosts[:need]), so only require the allocation to be large ENOUGH. Non-shard
+    # still requires an exact match (its per-node cache probe expects num_nodes).
+    shard_aware = os.environ.get("AURORA_PP_SHARD_AWARE", "0") == "1"
+    if args.num_nodes < config.num_nodes or (
+        not shard_aware and args.num_nodes != config.num_nodes
+    ):
         raise SystemExit(
-            f"--num-nodes ({args.num_nodes}) does not match config.num_nodes ({config.num_nodes})"
+            f"--num-nodes ({args.num_nodes}) does not match config.num_nodes "
+            f"({config.num_nodes})"
         )
 
     print(

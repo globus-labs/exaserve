@@ -23,6 +23,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,11 +70,18 @@ class ProcessMonitor:
         return self
 
     def wait_for_ready(self, timeout_s: float) -> bool:
-        if self.ready_event.wait(timeout_s):
-            return True
-        if self.process is not None and self.process.poll() is not None:
-            return False
-        return False
+        # Poll for the process dying DURING the wait: when launch_cluster crashes
+        # without emitting the ready marker, the marker event is never set, so a
+        # plain ready_event.wait(timeout_s) would block the ENTIRE timeout (i.e.
+        # the walltime) instead of failing fast. Check poll() every couple seconds
+        # so a failed launch aborts the job in seconds, not hours.
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.ready_event.wait(timeout=min(2.0, max(0.0, deadline - time.monotonic()))):
+                return True
+            if self.process is not None and self.process.poll() is not None:
+                return False  # exited before the ready marker → launch failed
+        return self.ready_event.is_set()
 
     def close(self) -> None:
         if self.process is not None and self.process.stdout is not None:
