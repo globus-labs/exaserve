@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aurora-rayserver"
-version = "0.1.0"
+version = "0.2.0"
 description = "Ray Serve helpers and scale patches for Aurora HPC vLLM deployments"
 requires-python = ">=3.10"
 readme = "README.md"
