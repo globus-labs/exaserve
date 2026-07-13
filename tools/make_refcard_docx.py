@@ -298,7 +298,7 @@ blocks.append(body_par(
     "inference engine, MPI, and the accelerator toolchain. The recipe below targets ALCF "
     "Aurora; recipes for other sites will be added as they are supported.", after=60,
 ))
-blocks.append(bold_lead("On ALCF Aurora"))
+blocks.append(bold_lead("ALCF Aurora"))
 blocks.append(body_par(
     "The package installs into the Python provided by Aurora’s frameworks module, "
     "which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only the "
@@ -323,7 +323,7 @@ blocks.append(body_par(
 
 # 4 Example
 blocks.append(heading(4, "Example"))
-blocks.append(bold_lead("On ALCF Aurora"))
+blocks.append(bold_lead("ALCF Aurora"))
 blocks.append(body_par(
     "One YAML file describes a deployment — the Ray cluster, the model deployment, "
     "and the client-facing proxy. Submit it from a login node (no allocation needed), "

@@ -14,11 +14,11 @@ reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
 
 # ExaServe Reference Card
 
-ExaServe (distributed as the `exaserve` package) turns a batch-scheduler allocation of N HPC nodes (e.g. a PBS job) into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang, selected by `EXASERVE_ENGINE`), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming QPS with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
+ExaServe (distributed as the `exaserve` package) turns a batch-scheduler allocation of N HPC nodes (e.g. a PBS job) into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming QPS with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
 
 ## Install
 
-Installs into the Python provided by Aurora's `frameworks` module, which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only this package.
+Install is site-specific; the recipe below targets **ALCF Aurora** (other sites to follow). It installs into the Python provided by Aurora's `frameworks` module, which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only this package.
 
 ```bash
 module load frameworks
@@ -152,7 +152,7 @@ All numbers above are steady-state serving, measured after the cluster reports r
 | 128 | 1,536 | 156 | 300 | 456 | 470 |
 | 256 | 3,072 | 155 | 1,612 | 1,767 | 1,857 |
 
-The growth is concentrated in `wait_proxies` (38 s → 1,612 s, a 42× increase over a 4× node increase): on every deployment broadcast, every Ray Serve proxy resolves every replica handle against the Ray GCS — `R·N²` work that reaches 1.38 M `GetActorInfo` calls and 1,587 s of per-proxy GCS time at 256 nodes. A 512-node bring-up fails outright. Practical consequences: budget PBS walltime as bring-up + serving window (405B weight loading adds substantially more), and reuse a running cluster across runs where possible instead of re-deploying per experiment.
+The growth is concentrated in `wait_proxies` (38 s → 1,612 s, a 42× increase over a 4× node increase): on every deployment broadcast, every Ray Serve proxy resolves every replica handle against the Ray GCS — `R·N²` work that reaches 1.38 M `GetActorInfo` calls and 1,587 s of per-proxy GCS time at 256 nodes. A 512-node bring-up fails outright. Practical consequences: budget job walltime as bring-up + serving window (405B weight loading adds substantially more), and reuse a running cluster across runs where possible instead of re-deploying per experiment.
 
 ### Launch-time environment knobs
 
