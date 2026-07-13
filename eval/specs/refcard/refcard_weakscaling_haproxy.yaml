@@ -1,0 +1,62 @@
+name: refcard_weakscaling_haproxy
+# Reference-card weak scaling: Llama-3-8B, one replica per XPU tile, HAProxy
+# front end, 110 req/s offered per node, streaming so P99 TTFT and P99 TBT are
+# captured per request. Scale axis [1,4,16,64] fits standard queues; extend
+# values to [128, 256] for the full sweep (queue/walltime are derived below).
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [1, 4, 16, 64]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: client.num_nodes
+    expr: 'min(num_nodes, 4)'
+  - path: scheduler.queue
+    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
+  - path: scheduler.walltime
+    expr: '"02:00:00" if num_nodes <= 16 else ("06:00:00" if num_nodes >= 256 else "01:00:00")'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 6
+  dest: proxy
+  stream: true
+  num_go_procs: 4
+  num_go_workers: 4
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 100000
+scheduler:
+  type: pbs

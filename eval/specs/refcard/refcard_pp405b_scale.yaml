@@ -1,0 +1,78 @@
+name: refcard_pp405b_scale
+# Reference-card PP weak scaling: Llama-3.1-405B-Instruct TP=8 x PP=2 (one
+# replica spans 2 whole nodes) behind HAProxy. num_replicas scales with the
+# cluster so each replica gets a fixed per-replica offered load -> ideal =
+# aggregate throughput grows linearly with replica count.
+#
+# Shard-aware PP is derived automatically by the harness (PP>1 with multiple
+# replicas -> AURORA_PP_SHARD_AWARE=1): each PP stage (~380 GiB) is broadcast
+# only to its node group, so every node holds just its own stage in tmpfs.
+# Expect a long bring-up at scale (weights come off Lustre on seed nodes).
+#
+# EDIT model_storage_path to your own Lustre model dir.
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [4, 8, 16, 32, 64, 128, 256]
+    targets: [deployment.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  # PP=2 -> one replica per 2 nodes. Scale replica count with the cluster.
+  - path: deployment.models.0.num_replicas
+    expr: 'num_nodes // 2'
+  - path: client.num_nodes
+    expr: 'min(num_nodes, 4)'
+  # 405B bring-up is long (Lustre weights); route small->capacity,
+  # large->prod, with walltime scaled up.
+  - path: scheduler.queue
+    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
+  - path: scheduler.walltime
+    expr: '"02:00:00" if num_nodes <= 16 else ("04:00:00" if num_nodes >= 256 else "01:00:00")'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 120.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 0.2          # x num_nodes / (num_nodes/2 replicas) = 0.4 rps/replica
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  num_nodes: 4
+  model_storage_path: /lus/flare/projects/<PROJECT>/<user>/models
+  local_stage_path: /tmp/pp405b_shard
+  models:
+  - model_id: meta-llama/Llama-3.1-405B-Instruct
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    num_replicas: 2           # overridden per node count by matrix.derived (num_nodes // 2)
+    max_model_len: 4096
+    size: 405
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 8
+  replica_max_ongoing_requests: 16
+client:
+  num_runs: 6
+  dest: proxy
+  stream: true
+  num_go_procs: 4
+  num_go_workers: 4
+  go_concurrency: 256
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 50000
+scheduler:
+  type: pbs
