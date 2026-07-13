@@ -1,4 +1,4 @@
-"""Generate doc/Aurora_RayServer_Reference_Card.docx.
+"""Generate doc/ExaServe_Reference_Card.docx.
 
 Matches the Academy_Framework_Reference_Card.docx visual language exactly:
 same palette (rust 9C4A2E/C2613F, navy 2C3340, warm grays), same
@@ -14,7 +14,7 @@ import re
 import zipfile
 
 SRC = "/home/wenyiw/aurora_rayserver/tmp/ref_card/Academy_Framework_Reference_Card.docx"
-OUT = "/home/wenyiw/aurora_rayserver/doc/Aurora_RayServer_Reference_Card.docx"
+OUT = "/home/wenyiw/aurora_rayserver/doc/ExaServe_Reference_Card.docx"
 
 RUST = "9C4A2E"
 RUST_BORDER = "C2613F"
@@ -211,16 +211,16 @@ def data_table(rows, col_w, repeat_header=False):
 blocks = []
 
 # title block
-blocks.append(par(run("AURORA RAYSERVER", sz=48, b=True, color=RUST)))
+blocks.append(par(run("EXASERVE", sz=48, b=True, color=RUST)))
 blocks.append(par(run("Framework Reference Card", sz=30, b=True), after=40))
 blocks.append(par(
     run("Scaling LLM Inference on HPC  —  One OpenAI-Compatible Endpoint "
-        "from N Compute Nodes  •  github.com/wenyiwang-us/aurora_rayserver",
+        "from N Compute Nodes  •  github.com/wenyiwang-us/ExaServe",
         sz=19, color=GRAYTXT),
     after=140, pbdr=(18, 4),
 ))
 blocks.append(body_par(
-    "Aurora RayServer is a framework for scaling LLM inference across the compute nodes of "
+    "ExaServe is a framework for scaling LLM inference across the compute nodes of "
     "an HPC system. From one YAML file and one command, it turns a PBS allocation into a "
     "single OpenAI-compatible inference service: it launches a Ray cluster over the "
     "allocation, stages model weights to node-local storage with an MPI broadcast, deploys "
@@ -231,11 +231,11 @@ blocks.append(body_par(
 ))
 
 # 1 Why
-blocks.append(heading(1, "Why Aurora RayServer?"))
+blocks.append(heading(1, "Why ExaServe?"))
 blocks.append(body_par(
     "Existing LLM serving stacks assume cloud environments; HPC systems bring PBS "
     "scheduling, MPI-only launch paths, Lustre metadata costs, exotic accelerators, and "
-    "scale cliffs that only appear past a hundred nodes. Aurora RayServer packages the "
+    "scale cliffs that only appear past a hundred nodes. ExaServe packages the "
     "engineering needed to cross that gap:"
 ))
 why = [
@@ -296,7 +296,7 @@ blocks.append(body_par(
 ))
 blocks.append(code_block(
     "module load frameworks\n"
-    "git clone https://github.com/wenyiwang-us/aurora_rayserver && cd aurora_rayserver\n"
+    "git clone https://github.com/wenyiwang-us/ExaServe && cd ExaServe\n"
     "python3 -m pip install --user .\n"
     "\n"
     "# console scripts land in a frameworks-versioned bin dir; add it to PATH:\n"
@@ -506,14 +506,14 @@ blocks.append(heading(7, "Examples and Resources"))
 blocks.append(body_par(
     "Runnable configurations and benchmark specifications live in the repository; code is "
     "linked rather than copied here. Paths are relative to "
-    "github.com/wenyiwang-us/aurora_rayserver."
+    "github.com/wenyiwang-us/ExaServe."
 ))
 blocks.append(data_table([
     ["Resource", "Location"],
-    ["Source code", "github.com/wenyiwang-us/aurora_rayserver"],
+    ["Source code", "github.com/wenyiwang-us/ExaServe"],
     ["Documentation", "README.md — install, configuration, console-script reference"],
     ["Machine-actionable card",
-     "doc/aurora_rayserver.md — markdown version of this card for coding agents"],
+     "doc/exaserve.md — markdown version of this card for coding agents"],
     ["Deployment templates",
      "examples/ — HAProxy, LiteLLM, and a fully annotated reference config"],
     ["Benchmark specs",
@@ -531,8 +531,8 @@ blocks.append(body_par(
     "paper (in preparation):", after=60,
 ))
 blocks.append(code_block(
-    "@misc{wang2026aurorarayserver,\n"
-    "    title = {Aurora Ray Server: Deploying and Measuring Large-Scale\n"
+    "@misc{wang2026exaserve,\n"
+    "    title = {ExaServe: Deploying and Measuring Large-Scale\n"
     "             Ray Serve for LLM Inference on Aurora System},\n"
     "    author = {Wenyi Wang and Shu Shi and Yadu Nand Babuji and\n"
     "              Ian Foster and Kyle Chard},\n"
@@ -565,7 +565,7 @@ with zipfile.ZipFile(SRC) as zin, zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED
             data = data.decode("utf-8").replace(
                 "</Relationships>", rel_entries + "</Relationships>").encode("utf-8")
         elif item.filename.startswith("word/footer"):
-            data = data.replace(b"Academy", b"Aurora RayServer")
+            data = data.replace(b"Academy", b"ExaServe")
         zout.writestr(item, data)
     for target, src, _ in _images:
         zout.writestr(f"word/{target}", open(src, "rb").read())

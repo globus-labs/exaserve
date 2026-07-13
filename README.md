@@ -1,7 +1,8 @@
-# aurora-rayserver
+# ExaServe
 
 Ray Serve helpers, Aurora-specific launch scripts, and scale patches for vLLM
-deployments on the ALCF Aurora HPC cluster.
+deployments on the ALCF Aurora HPC cluster. Distributed as the `aurora-rayserver`
+package (`import aurora_rayserver`).
 
 ## Install
 

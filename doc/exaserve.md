@@ -1,20 +1,20 @@
 ---
-name: aurora-rayserver
+name: exaserve
 description: Framework for scaling OpenAI-compatible LLM inference across HPC compute nodes — Ray Serve + vLLM deployments over PBS allocations with MPI weight staging, HAProxy/LiteLLM front ends, multi-node pipeline parallelism, and a declarative scaling-benchmark harness
 package: aurora-rayserver
 install: module load frameworks && pip install --user .
 language: python
 python_requires: ">=3.10"
-docs: https://github.com/wenyiwang-us/aurora_rayserver/blob/main/README.md
-source: https://github.com/wenyiwang-us/aurora_rayserver
-examples: https://github.com/wenyiwang-us/aurora_rayserver/tree/main/examples
-benchmarks: https://github.com/wenyiwang-us/aurora_rayserver/tree/main/eval/specs/refcard
+docs: https://github.com/wenyiwang-us/ExaServe/blob/main/README.md
+source: https://github.com/wenyiwang-us/ExaServe
+examples: https://github.com/wenyiwang-us/ExaServe/tree/main/examples
+benchmarks: https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard
 reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
 ---
 
-# Aurora RayServer Reference Card
+# ExaServe Reference Card
 
-`aurora-rayserver` turns a PBS allocation of N HPC nodes into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, deploys vLLM (or SGLang) replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — and fronts them with a head-node proxy such as HAProxy. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
+ExaServe (distributed as the `aurora-rayserver` package) turns a PBS allocation of N HPC nodes into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, deploys vLLM (or SGLang) replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — and fronts them with a head-node proxy such as HAProxy. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
 
 ## Install
 
@@ -22,7 +22,7 @@ Installs into the Python provided by Aurora's `frameworks` module, which already
 
 ```bash
 module load frameworks
-git clone https://github.com/wenyiwang-us/aurora_rayserver && cd aurora_rayserver
+git clone https://github.com/wenyiwang-us/ExaServe && cd ExaServe
 python3 -m pip install --user .
 
 # console scripts land in a frameworks-versioned bin dir; add it to PATH:
@@ -96,7 +96,7 @@ curl -sS -X POST "http://x4310c1s0b0n0:4001/v1/chat/completions" \
 qdel 8470123
 ```
 
-Ready-to-customize templates: [examples/](https://github.com/wenyiwang-us/aurora_rayserver/tree/main/examples) — `config.haproxy.yaml`, `config.litellm.yaml`, `config.reference.yaml` (every field, annotated).
+Ready-to-customize templates: [examples/](https://github.com/wenyiwang-us/ExaServe/tree/main/examples) — `config.haproxy.yaml`, `config.litellm.yaml`, `config.reference.yaml` (every field, annotated).
 
 ## Deployment recipes
 
@@ -178,7 +178,7 @@ python -m eval.cli run submit-all refcard_smoke_1node
 python -m eval.plot.goodput -e refcard_smoke_1node --preset paper
 ```
 
-Full spec schema: [eval/DESIGN.md](https://github.com/wenyiwang-us/aurora_rayserver/blob/main/eval/DESIGN.md).
+Full spec schema: [eval/DESIGN.md](https://github.com/wenyiwang-us/ExaServe/blob/main/eval/DESIGN.md).
 
 ## Serving LLM agents and OpenAI-compatible clients
 
@@ -193,21 +193,21 @@ export OPENAI_API_KEY=EMPTY
 
 | Example | What | Location |
 |---|---|---|
-| `examples/config.haproxy.yaml` | 2-node quickstart: 24 replicas behind one HAProxy endpoint | [examples/](https://github.com/wenyiwang-us/aurora_rayserver/tree/main/examples) |
-| `refcard_smoke_1node` | 1-node benchmark smoke: deploy → replay → TTFT/TBT → SLO score | [eval/specs/refcard/](https://github.com/wenyiwang-us/aurora_rayserver/tree/main/eval/specs/refcard) |
-| `refcard_weakscaling_haproxy` | 8B weak scaling behind HAProxy, 1→64 nodes (extend to 256): 27.1k req/s non-streaming at 256n; streaming plateaus ~4.7k on the head-node network | [eval/specs/refcard/](https://github.com/wenyiwang-us/aurora_rayserver/tree/main/eval/specs/refcard) |
-| `refcard_pp405b_2node` | 405B TP8×PP2 demo on one 2-node replica: 30/30 streaming | [eval/specs/refcard/](https://github.com/wenyiwang-us/aurora_rayserver/tree/main/eval/specs/refcard) |
-| `refcard_pp405b_scale` | 405B weak scaling 2→128 replicas (4→256 nodes) at fixed per-replica load: 0.7 → 31.0 query/s (streaming, 67% efficiency) | [eval/specs/refcard/](https://github.com/wenyiwang-us/aurora_rayserver/tree/main/eval/specs/refcard) |
+| `examples/config.haproxy.yaml` | 2-node quickstart: 24 replicas behind one HAProxy endpoint | [examples/](https://github.com/wenyiwang-us/ExaServe/tree/main/examples) |
+| `refcard_smoke_1node` | 1-node benchmark smoke: deploy → replay → TTFT/TBT → SLO score | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
+| `refcard_weakscaling_haproxy` | 8B weak scaling behind HAProxy, 1→64 nodes (extend to 256): 27.1k req/s non-streaming at 256n; streaming plateaus ~4.7k on the head-node network | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
+| `refcard_pp405b_2node` | 405B TP8×PP2 demo on one 2-node replica: 30/30 streaming | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
+| `refcard_pp405b_scale` | 405B weak scaling 2→128 replicas (4→256 nodes) at fixed per-replica load: 0.7 → 31.0 query/s (streaming, 67% efficiency) | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
 
-Deeper profiling and scaling analyses: [findings/](https://github.com/wenyiwang-us/aurora_rayserver/tree/main/findings).
+Deeper profiling and scaling analyses: [findings/](https://github.com/wenyiwang-us/ExaServe/tree/main/findings).
 
 ## Citation
 
 The system and its 1–256-node evaluation are described in an SC26 workshop paper (in preparation):
 
 ```bibtex
-@misc{wang2026aurorarayserver,
-    title = {Aurora Ray Server: Deploying and Measuring Large-Scale
+@misc{wang2026exaserve,
+    title = {ExaServe: Deploying and Measuring Large-Scale
              Ray Serve for LLM Inference on Aurora System},
     author = {Wenyi Wang and Shu Shi and Yadu Nand Babuji and
               Ian Foster and Kyle Chard},
