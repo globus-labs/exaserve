@@ -71,7 +71,7 @@ Standing principles for the night:
 - 23:35 CDT — Server-stats: implemented robust PUSH pattern (commit 31a676c). Each replica
   runs a daemon thread that computes its server-side summary+sample and pushes to a detached
   named ServingStatsCollector actor; collect_server_stats reads that actor (no serve.status
-  enumeration, no Lustre files, not gated on AURORA_SCALING_TRACE). Added a [serving-stats]
+  enumeration, no Lustre files, not gated on EXASERVE_SCALING_TRACE). Added a [serving-stats]
   log line to confirm the logger records in-process. Unit-tested the full path on synthetic
   data (2 replicas → pooled server TTFT 0.2s / TBT 22ms). Submitted fresh on-delay n1
   (job 8546145, snapshot 31a676c) to validate end-to-end. If server_stats.json appears with

@@ -2,7 +2,7 @@
 # Clean multi-proc ceiling test: 12 procs at per_proc=80 vs per_proc=10240
 # 70s cooldown between tests to avoid TIME_WAIT contamination.
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null

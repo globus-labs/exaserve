@@ -3,7 +3,7 @@
 # Test 1: 300K rps (achievable) — expect healthy
 # Test 2: 1M rps (above ceiling) — expect degraded diagnosis
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null

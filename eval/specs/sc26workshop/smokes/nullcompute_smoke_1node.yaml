@@ -2,9 +2,9 @@ name: nullcompute_smoke_1node
 # VALIDATION stand-in for EXP SET 3 (real spec nullcompute_scaling is 256+ nodes).
 # 1 node, null-compute (no forward pass) + instrumentation probes + startup_only.
 # Confirms the mode works before the capacity campaign:
-#   - AURORA_NULL_COMPUTE=1 / AURORA_INSTRUMENTATION=1 exported
+#   - EXASERVE_NULL_COMPUTE=1 / EXASERVE_INSTRUMENTATION=1 exported
 #   - cluster reaches CLUSTER FULLY READY without loading the model
-#   - scaling_trace.json + /tmp/aurora_inst/* instrumentation files written
+#   - scaling_trace.json + /tmp/exaserve_inst/* instrumentation files written
 #   - startup_only exits at READY (no replay)
 matrix:
   name_template: '{num_nodes}_nodes'

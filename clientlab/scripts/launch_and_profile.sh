@@ -3,7 +3,7 @@
 # Usage: bash launch_and_profile.sh [target_rps] [duration_s]
 # Must run ON the compute node (not via SSH).
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null
@@ -25,7 +25,7 @@ export PBS_NODEFILE="$OUTDIR/nodefile"
 echo "$(hostname)" > "$PBS_NODEFILE"
 
 echo "=== Launching cluster ==="
-bash src/aurora_rayserver/resources/launch_cluster.sh "$MANIFEST" > "$OUTDIR/cluster.log" 2>&1 &
+bash src/exaserve/resources/launch_cluster.sh "$MANIFEST" > "$OUTDIR/cluster.log" 2>&1 &
 CLUSTER_PID=$!
 
 # Wait for Ray Serve health

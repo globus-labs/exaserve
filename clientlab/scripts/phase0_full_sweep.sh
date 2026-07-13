@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 0 full sweep: max_ongoing + max_num_seqs on a single node.
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null
@@ -40,7 +40,7 @@ PYEOF
     export PBS_NODEFILE="$OUTDIR/nodefile"
     echo "$(hostname)" > "$PBS_NODEFILE"
 
-    bash src/aurora_rayserver/resources/launch_cluster.sh "$OUTDIR/runtime_${LABEL}.yaml" > "$OUTDIR/cluster_${LABEL}.log" 2>&1 &
+    bash src/exaserve/resources/launch_cluster.sh "$OUTDIR/runtime_${LABEL}.yaml" > "$OUTDIR/cluster_${LABEL}.log" 2>&1 &
     local CPID=$!
 
     local tries=0

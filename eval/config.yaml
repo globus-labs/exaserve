@@ -26,7 +26,7 @@ job_trace_config:
   sampling_strategy: sparse
   speedup: 300.0
 model_deployment_config:
-  deployment_name: aurora_serve
+  deployment_name: exaserve_serve
   model_configs:
   - enable_log_requests: true
     enforce_eager: true

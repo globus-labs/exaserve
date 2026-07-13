@@ -14,7 +14,7 @@ is a git-tracked repo. It currently tracks seven files under
 `serve/_private/`: six patched files plus one pristine baseline copy
 (`proxy_state.py`).
 
-At launch, `src/aurora_rayserver/resources/launch_cluster.sh` copies every `*.py` currently
+At launch, `src/exaserve/resources/launch_cluster.sh` copies every `*.py` currently
 present under the overlay's `serve/_private/` into `/tmp/ray_overlay`.
 So the tracked files below are the intended patch set, but any untracked
 Python file left in that directory is also active for that run.
@@ -22,13 +22,13 @@ Python file left in that directory is also active for that run.
 Source links in this walkthrough use the overlay path for patched
 `serve/_private` files. For unpatched Ray files that are not present in
 the sparse overlay, links point at the Aurora framework install under
-`/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/`.
+`/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/`.
 
 | File | Patched? | Purpose |
 |---|---|---|
 | `constants.py` | ✅ timeouts | `HTTP_PROXY_TIMEOUT=3600`, `PROXY_HEALTH_CHECK_TIMEOUT_S=300`, `PROXY_HEALTH_CHECK_UNHEALTHY_THRESHOLD=100` (prevents the ProxyActor kill cascade). |
 | `proxy.py` | ✅ timing probe | 7 substep timers in `ProxyActor.__init__` and wall-time around `ready()`. Writes `proxy_init_<host>_<pid>.json` once per proxy. |
-| `common.py` | ✅ §6 probe | Every `RunningReplicaInfo.get_actor_handle()` call records `(t, dur_ms)` into a buffered in-memory list; flushed every 500 calls (tunable via `AURORA_PROBE_FLUSH_N`) and again at `atexit`. |
+| `common.py` | ✅ §6 probe | Every `RunningReplicaInfo.get_actor_handle()` call records `(t, dur_ms)` into a buffered in-memory list; flushed every 500 calls (tunable via `EXASERVE_PROBE_FLUSH_N`) and again at `atexit`. |
 | `router.py` | ✅ §6 probe | Wraps `AsyncioRouter.update_deployment_targets()` to append one JSONL line per call with `n_replicas + duration_s`. |
 | `controller.py` | ✅ §6.1 probe | Per-tick JSONL in `ServeController.run_control_loop_step`, capturing sub-phase durations (`cluster_node_info_update`, `dsm_update`, `asm_update`, `node_update`, `proxy_state_update`). |
 | `deployment_state.py` | ✅ §6.2 probe | Per-call JSONL in `DeploymentStateManager.update()` with 7 step-level timings (`s1_check_and_update_replicas` … `s7_broadcast`). |
@@ -36,18 +36,18 @@ the sparse overlay, links point at the Aurora framework install under
 
 ## 2. Where each probe writes — the /tmp → gather architecture
 
-**During the run**, the core probes write to `/tmp/aurora_inst/` on the node
+**During the run**, the core probes write to `/tmp/exaserve_inst/` on the node
 where the process is running:
 
 ```
 Proxy worker node N:
-  /tmp/aurora_inst/
+  /tmp/exaserve_inst/
     proxy_init_<host>_<pid>.json           # one per ProxyActor (proxy.py)
     get_actor_calls_<pid>.csv              # one per ProxyActor process (common.py, buffered)
     router_updates_<pid>.jsonl             # one per ProxyActor process (router.py)
 
 Head (controller) node:
-  /tmp/aurora_inst/
+  /tmp/exaserve_inst/
     controller_ticks_<pid>.jsonl           # one per ServeController (controller.py)
     dsm_updates_<pid>.jsonl                # one per ServeController (deployment_state.py)
 ```
@@ -60,25 +60,25 @@ walkthrough uses for the Stage 3 decomposition.
 Writing to node-local `/tmp` eliminates per-call Lustre MDS contention
 (which previously added +634s at 256n in run17).
 
-**At end of Stage 3** (right after `aurora_serve.py`'s decomposed
+**At end of Stage 3** (right after `exaserve_serve.py`'s decomposed
 `wait_proxies` loop returns; this loop is equivalent to
-`wait_for_proxies_serving`), `aurora_serve._collect_instrumentation_all`
+`wait_for_proxies_serving`), `exaserve_serve._collect_instrumentation_all`
 runs one Ray remote task per alive node with NodeAffinity scheduling:
 
 ```python
 @ray.remote(num_cpus=0)
 def _read_node_inst():
     out = {"hostname": socket.gethostname(), "files": {}}
-    for path in glob.glob("/tmp/aurora_inst/*"):
+    for path in glob.glob("/tmp/exaserve_inst/*"):
         if os.path.isfile(path):
             out["files"][os.path.basename(path)] = open(path, "rb").read()
     return out
 ```
 
-Each task reads its node's `/tmp/aurora_inst/` contents into memory and
+Each task reads its node's `/tmp/exaserve_inst/` contents into memory and
 returns `{filename: bytes}`. The head process receives these objects via
 `ray.get(refs)` and writes one file per (host, filename) to
-`$AURORA_RUN_LOG_DIR/instrumentation/<host>/` on Lustre. **One Lustre
+`$EXASERVE_RUN_LOG_DIR/instrumentation/<host>/` on Lustre. **One Lustre
 write per file per node — no per-call I/O.**
 
 Measured run21 gather size: 1,267 files / 1.46 MiB total at 32n, and
@@ -127,8 +127,8 @@ class ProxyActor(ProxyActorInterface):
         # [7] server_tasks_and_gc — event_loop.create_task(run_http_server)
         _substeps["server_tasks_and_gc"] = ...
 
-        # Write proxy_init JSON to /tmp/aurora_inst
-        with open(f"/tmp/aurora_inst/proxy_init_{host}_{pid}.json", "w") as f:
+        # Write proxy_init JSON to /tmp/exaserve_inst
+        with open(f"/tmp/exaserve_inst/proxy_init_{host}_{pid}.json", "w") as f:
             json.dump({
                 "event": "proxy_init", "hostname": host, "pid": pid,
                 "wall_start": _init_wall_start, "wall_end": time(),
@@ -162,19 +162,19 @@ snapshot updates happen asynchronously in the controller's control loop
 matters).
 
 Both upstream `serve.run(target)` and this repo's decomposed
-`aurora_serve.py` path wait for ingress deployment creation and
+`exaserve_serve.py` path wait for ingress deployment creation and
 application RUNNING by default. That waiting is controlled by the
 internal `_blocking: bool = True` parameter on
-[`_run(...)`](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/api.py#L614),
+[`_run(...)`](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/api.py#L614),
 which `_run` passes through as `wait_for_applications_running=_blocking`
 to `client.deploy_applications`. The public `blocking: bool = False`
 parameter on `serve.run(...)` controls something **different** — whether,
 after the application is RUNNING, the call should `wait_for_interrupt()`
-and loop logging status until Ctrl-C'd ([api.py:732-733](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/api.py#L732-L733)).
+and loop logging status until Ctrl-C'd ([api.py:732-733](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/api.py#L732-L733)).
 So the readiness wait is **independent of the public `blocking`
 parameter**.
 
-What's specific to this repo's `aurora_serve.py` is **decomposition**,
+What's specific to this repo's `exaserve_serve.py` is **decomposition**,
 not different waiting semantics: each step is wrapped in its own
 `tracer.phase(...)` block so the deploy RPC, the deployment-creation
 poll, the application-RUNNING poll, and the wait_proxies step can each
@@ -183,9 +183,9 @@ mix of one fast intent RPC plus client-side polling waits for the
 control loop to catch up.
 
 ```
-Driver (aurora_serve.py, head node) 🔵
+Driver (exaserve_serve.py, head node) 🔵
 └── serve.run-equivalent path
-    # aurora_serve.py decomposes serve.run so it can time each phase.
+    # exaserve_serve.py decomposes serve.run so it can time each phase.
     ├── 1. client.deploy_applications(... wait_for_* = True)     [serve.run.deploy_apps]
     │   # Step 1a: fast intent RPC. This RPC returns as soon as the
     │   # controller stores target application state; no replicas are
@@ -232,7 +232,7 @@ Driver (aurora_serve.py, head node) 🔵
     │
     └── 2. wait_proxies loop                                      [serve.run.wait_proxies]  🔴 the cliff
             # Same operations as client.wait_for_proxies_serving(), with
-            # extra per-proxy progress logging in aurora_serve.py.
+            # extra per-proxy progress logging in exaserve_serve.py.
             │
             ├── proxy_handles = ray.get(controller.get_proxies.remote())
             │
@@ -260,7 +260,7 @@ router-side cliff.
 ### Important repo-specific assumption for the event-loop story
 
 This repo exports `RAY_SERVE_THROUGHPUT_OPTIMIZED=1`
-(`src/driver.py`, `src/aurora_rayserver/resources/launch_cluster.sh`). In upstream Ray Serve,
+(`src/driver.py`, `src/exaserve/resources/launch_cluster.sh`). In upstream Ray Serve,
 that flips `RAY_SERVE_RUN_ROUTER_IN_SEPARATE_LOOP` from its default `1`
 to `0`.
 
@@ -392,7 +392,7 @@ thread.**
 #### Actor spawn chain
 
 ```
-aurora_serve.py driver process (head node, Python process #A)
+exaserve_serve.py driver process (head node, Python process #A)
   serve.run(deployment)                                  [serve/api.py:686]
     _run(...)                                            [serve/api.py:614]
       client = _private_api.serve_start(...)             [serve/api.py:593]
@@ -412,7 +412,7 @@ aurora_serve.py driver process (head node, Python process #A)
 
 1. Allocate a new Python process (honoring `num_cpus=0` +
    `head_node_resource` from the `@ray.remote(...)` decorator —
-   [default_impl.py:225-235](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/default_impl.py#L225-L235)).
+   [default_impl.py:225-235](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/default_impl.py#L225-L235)).
 2. Start that process.
 3. Instantiate `ServeController(*args)` inside it. Because `__init__` is
    declared `async def`, Ray creates an asyncio event loop and runs
@@ -434,7 +434,7 @@ run_background_task(self.run_control_loop())     # ← kickoff
 ```
 
 `run_background_task(coro)`
-([ray/_common/utils.py:103](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/_common/utils.py#L103))
+([ray/_common/utils.py:103](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/_common/utils.py#L103))
 is a thin wrapper around:
 
 ```python
@@ -478,7 +478,7 @@ run_control_loop_step()                                  [controller.py:452]
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│ aurora_serve.py driver process (head node, Python process #A)         │
+│ exaserve_serve.py driver process (head node, Python process #A)         │
 │                                                                       │
 │   serve.run(deployment)                                               │
 │     └── serve_start() / _start_controller()                           │
@@ -521,8 +521,8 @@ probes is mediated by this one mechanism.
 
 **Two classes:**
 
-- **`LongPollHost`** ([long_poll.py:228](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/long_poll.py#L228)) — the publisher. Single instance inside the controller actor (created in [controller.py:147](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/controller.py#L147)). Holds `object_snapshots: Dict[key, Any]`, `snapshot_ids: Dict[key, int]`, and a set of waiters per key. Methods: `notify_changed({key: new_value})` bumps the snapshot id and wakes waiters; `listen_for_change(snapshot_ids)` is the async RPC subscribers block on.
-- **`LongPollClient`** ([long_poll.py:71](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/long_poll.py#L71)) — the subscriber. Each instance takes a dict of `{key: callback}`, calls `host.listen_for_change.remote(my_snapshot_ids)` in a loop, and invokes the registered callback whenever the corresponding key updates. A proxy process can have more than one instance: the `ProxyActor` creates one for `ROUTE_TABLE` / `GLOBAL_LOGGING_CONFIG`, and router creation adds dedicated/shared clients for `DEPLOYMENT_TARGETS` / `DEPLOYMENT_CONFIG`.
+- **`LongPollHost`** ([long_poll.py:228](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/long_poll.py#L228)) — the publisher. Single instance inside the controller actor (created in [controller.py:147](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/controller.py#L147)). Holds `object_snapshots: Dict[key, Any]`, `snapshot_ids: Dict[key, int]`, and a set of waiters per key. Methods: `notify_changed({key: new_value})` bumps the snapshot id and wakes waiters; `listen_for_change(snapshot_ids)` is the async RPC subscribers block on.
+- **`LongPollClient`** ([long_poll.py:71](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/long_poll.py#L71)) — the subscriber. Each instance takes a dict of `{key: callback}`, calls `host.listen_for_change.remote(my_snapshot_ids)` in a loop, and invokes the registered callback whenever the corresponding key updates. A proxy process can have more than one instance: the `ProxyActor` creates one for `ROUTE_TABLE` / `GLOBAL_LOGGING_CONFIG`, and router creation adds dedicated/shared clients for `DEPLOYMENT_TARGETS` / `DEPLOYMENT_CONFIG`.
 
 "*A proxy subscribes to `DEPLOYMENT_TARGETS`*" means: its `LongPollClient`
 has an entry like `{(DEPLOYMENT_TARGETS, deployment_id): some_callback}`
@@ -530,11 +530,11 @@ in its key listeners, so its outstanding `listen_for_change` RPC will
 return whenever the controller publishes a new `DeploymentTargetInfo`
 for that deployment.
 
-**The four namespaces** ([long_poll.py:42-49](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/long_poll.py#L42-L49)) are just enum keys:
+**The four namespaces** ([long_poll.py:42-49](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/long_poll.py#L42-L49)) are just enum keys:
 
 | Namespace | Payload | Who owns/publishes | Who subscribes |
 |---|---|---|---|
-| `ROUTE_TABLE` | `Dict[DeploymentID, EndpointInfo]` — ingress deployment → HTTP route | `EndpointState` inside the controller ([endpoint_state.py:48](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/endpoint_state.py#L48)) | `ProxyActor` ([proxy.py:1178](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py#L1178)) |
+| `ROUTE_TABLE` | `Dict[DeploymentID, EndpointInfo]` — ingress deployment → HTTP route | `EndpointState` inside the controller ([endpoint_state.py:48](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/endpoint_state.py#L48)) | `ProxyActor` ([proxy.py:1178](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py#L1178)) |
 | `DEPLOYMENT_TARGETS` | `DeploymentTargetInfo(is_available, running_replicas)` per deployment; key is compound `(DEPLOYMENT_TARGETS, deployment_id)` | `DeploymentState` inside the controller ([deployment_state.py:2252](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/deployment_state.py#L2252), fired from `dsm.update()`'s s7_broadcast step) | `AsyncioRouter` instances per handle ([router.py:600, 1116](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/router.py#L600)) |
 | `DEPLOYMENT_CONFIG` | `DeploymentConfig` (autoscaling, timeouts) per deployment | same as DEPLOYMENT_TARGETS ([deployment_state.py:2282](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/deployment_state.py#L2282)) | same `AsyncioRouter` instances ([router.py:604](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/router.py#L604)) |
 | `GLOBAL_LOGGING_CONFIG` | single cluster-wide `LoggingConfig` | `ServeController` directly ([controller.py:253](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/controller.py#L253)) | `ProxyActor` ([proxy.py:1177](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py#L1177)) |
@@ -664,7 +664,7 @@ separate thread or process.
 
 The closest thing to a "spawning event" is:
 
-1. `controller_impl.remote(...)` at [api.py:94](/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/api.py#L94) — spawns the controller **process** (Ray raylet side).
+1. `controller_impl.remote(...)` at [api.py:94](/opt/aurora/26.26.0/frameworks/exaserve_frameworks-2025.3.1/lib/python3.12/site-packages/ray/serve/_private/api.py#L94) — spawns the controller **process** (Ray raylet side).
 2. `run_background_task(self.run_control_loop())` at [controller.py:230](../../.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/controller.py#L230) — schedules the control loop **coroutine** onto the process's existing event loop.
 
 ## 5. Mapping the timing numbers to code lines (clean, run21)
@@ -848,7 +848,7 @@ Layered together, these give the complete Stage 3 decomposition:
 
 ```bash
 module load frameworks go/1.25.3
-PYTHONPATH=/home/wenyiw/aurora_rayserver python3 -m eval.cli run materialize weakscaling_nullcompute_proxy
+PYTHONPATH=/home/wenyiw/exaserve python3 -m eval.cli run materialize weakscaling_nullcompute_proxy
 # retarget queue if using a reservation (leave as-is for prod at 256n)
 for s in 32 64 128; do
     sed -i 's/#PBS -q debug-scaling/#PBS -q R8443082/' \
@@ -880,7 +880,7 @@ python3 eval/tools/parse_gcs_event_stats.py runN/256-nodes/.../gcs_server.out
 
 ### Overlay (`~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray`)
 - `serve/_private/proxy.py` — init substeps + ready timing
-- `serve/_private/common.py` — buffered get_actor_handle probe + module-level `_aurora_probe_record` helpers
+- `serve/_private/common.py` — buffered get_actor_handle probe + module-level `_exaserve_probe_record` helpers
 - `serve/_private/router.py` — update_deployment_targets JSONL
 - `serve/_private/controller.py` — run_control_loop_step JSONL
 - `serve/_private/deployment_state.py` — dsm.update() JSONL
@@ -889,8 +889,8 @@ python3 eval/tools/parse_gcs_event_stats.py runN/256-nodes/.../gcs_server.out
 - `.gitignore`
 
 ### Main repo (`perf-inst-dev`)
-- `src/aurora_rayserver/resources/launch_cluster.sh` — overlay build + symlink tree + env vars
-- `src/aurora_serve.py` — `_collect_instrumentation_all` Ray-remote gather + `_collect_proxy_profiles` legacy summary
+- `src/exaserve/resources/launch_cluster.sh` — overlay build + symlink tree + env vars
+- `src/exaserve_serve.py` — `_collect_instrumentation_all` Ray-remote gather + `_collect_proxy_profiles` legacy summary
 - `eval/tools/parse_gcs_event_stats.py` — GCS server-side event parser
 - `eval/tools/analyze_scaling.py` — cross-scale table
 - `eval/tools/analyze_probes.py` — §6 probes (get_actor + router)

@@ -6,11 +6,11 @@
 #PBS -A AuroraGPT
 #PBS -N debug-sleep128
 #PBS -l place=scatter
-#PBS -o /home/wenyiw/aurora_rayserver/tmp/debug-sleep128.stdout
-#PBS -e /home/wenyiw/aurora_rayserver/tmp/debug-sleep128.stderr
+#PBS -o /home/wenyiw/exaserve/tmp/debug-sleep128.stdout
+#PBS -e /home/wenyiw/exaserve/tmp/debug-sleep128.stderr
 echo "NODE=$(hostname)"
 echo "JOBID=$PBS_JOBID"
-cp "$PBS_NODEFILE" "$HOME/.aurora_nodefile.$PBS_JOBID"
-echo "NODEFILE=$HOME/.aurora_nodefile.$PBS_JOBID"
+cp "$PBS_NODEFILE" "$HOME/.exaserve_nodefile.$PBS_JOBID"
+echo "NODEFILE=$HOME/.exaserve_nodefile.$PBS_JOBID"
 echo "NODES=$(sort -u "$PBS_NODEFILE" | wc -l)"
 sleep 3500

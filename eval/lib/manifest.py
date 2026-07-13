@@ -1,6 +1,6 @@
 """Eval-layer runtime manifest: config types used only by the eval control plane.
 
-The serving runtime (driver.py, aurora_serve.py) reads only DeploymentConfig
+The serving runtime (driver.py, exaserve_serve.py) reads only DeploymentConfig
 and ProxyConfig from the YAML manifest.  Everything else — PBS metadata,
 trace generator config, replay client config — is consumed exclusively by
 the eval layer (replay_engine.py, run_executor.py).
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Union
 
-from aurora_rayserver.schemas import (
+from exaserve.schemas import (
     DeploymentConfig,
     ProxyConfig,
     _path_to_str,

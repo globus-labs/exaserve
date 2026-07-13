@@ -32,7 +32,7 @@ startup_concurrency=8 + deploy_apps window) was incorrect.
 Instrumented `ProxyActor.__init__` and `ready()` directly in a copy of
 `ray/serve/_private/proxy.py`, loaded via PYTHONPATH symlink overlay
 (`/tmp/ray_overlay`). Each proxy writes a JSON profile to
-`/tmp/aurora_inst/proxy_init_{hostname}_{pid}.json`.
+`/tmp/exaserve_inst/proxy_init_{hostname}_{pid}.json`.
 
 **32 nodes** (7 sampled proxies, 0 restarts):
 
@@ -232,7 +232,7 @@ Controller and ProxyStateManager instrumentation via `usercustomize.py`
 
 ### Data collection
 
-`finalize_run_logs` in `launch_cluster.sh` collects `/tmp/aurora_inst/` from
+`finalize_run_logs` in `launch_cluster.sh` collects `/tmp/exaserve_inst/` from
 all nodes via SCP into the run log directory.
 
 ## Previous Finding (incorrect)
@@ -252,7 +252,7 @@ The 3-factor hypothesis was disproven:
 | 128n inst | 128 | 8438789 | debug-scaling | weakscaling_nullcompute_proxy/run3/128-nodes |
 | 256n inst | 256 | 8438882 | small (prod) | weakscaling_nullcompute_proxy/run4/256-nodes |
 
-All runs: `AURORA_NULL_COMPUTE=1`, PYTHONPATH overlay with instrumented proxy.py.
+All runs: `EXASERVE_NULL_COMPUTE=1`, PYTHONPATH overlay with instrumented proxy.py.
 All use commit `36c9066` (perf-inst branch) via snapshot.
 
 ## Files

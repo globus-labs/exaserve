@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aurora-rayserver"
+name = "exaserve"
 version = "0.2.0"
-description = "Ray Serve helpers and scale patches for Aurora HPC vLLM deployments"
+description = "Ray Serve helpers and scale patches for LLM inference on HPC clusters (reference platform: ALCF Aurora)"
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
@@ -28,23 +28,23 @@ dev = [
 ]
 
 [project.scripts]
-aurora-launch-cluster = "aurora_rayserver.cli:launch_cluster"
-aurora-driver         = "aurora_rayserver.cli:driver"
-aurora-server         = "aurora_rayserver.cli:server"
-aurora-model-bcast    = "aurora_rayserver.cli:model_bcast"
-aurora-ray-start      = "aurora_rayserver.cli:ray_start"
-aurora-serve-submit   = "aurora_rayserver.cli:serve_submit"
-aurora-serve-url      = "aurora_rayserver.cli:serve_url"
+exaserve-launch-cluster = "exaserve.cli:launch_cluster"
+exaserve-driver         = "exaserve.cli:driver"
+exaserve-server         = "exaserve.cli:server"
+exaserve-model-bcast    = "exaserve.cli:model_bcast"
+exaserve-ray-start      = "exaserve.cli:ray_start"
+exaserve-serve-submit   = "exaserve.cli:serve_submit"
+exaserve-serve-url      = "exaserve.cli:serve_url"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aurora_rayserver*"]
+include = ["exaserve*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"aurora_rayserver" = ["py.typed"]
-"aurora_rayserver.patches" = ["ray_serve_overlay/ray/serve/_private/*.py"]
-"aurora_rayserver.resources" = ["*.sh", "*.c", "*.Makefile"]
+"exaserve" = ["py.typed"]
+"exaserve.patches" = ["ray_serve_overlay/ray/serve/_private/*.py"]
+"exaserve.resources" = ["*.sh", "*.c", "*.Makefile"]

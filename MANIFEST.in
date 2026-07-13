@@ -1,10 +1,10 @@
 include README.md
 include pyproject.toml
 include MANIFEST.in
-recursive-include src/aurora_rayserver *.py
-recursive-include src/aurora_rayserver/resources *.sh *.c *.Makefile
-recursive-include src/aurora_rayserver/patches/ray_serve_overlay *.py
-include src/aurora_rayserver/py.typed
+recursive-include src/exaserve *.py
+recursive-include src/exaserve/resources *.sh *.c *.Makefile
+recursive-include src/exaserve/patches/ray_serve_overlay *.py
+include src/exaserve/py.typed
 recursive-include tests *.py
 
 prune benchmarks

@@ -2,7 +2,7 @@
 # Compare saturation finder vs ceiling study on the same node.
 # This runs both tests against the same C++ stub server to rule out node variance.
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 module load frameworks 2>/dev/null || true
 module load go 2>/dev/null || true

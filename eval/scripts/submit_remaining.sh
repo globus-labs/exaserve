@@ -4,7 +4,7 @@ set -e
 
 RUNS_ROOT="/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs"
 RUN_GROUP="run3"
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 source ~/script/env_aurora 2>/dev/null
 
 check_result() {

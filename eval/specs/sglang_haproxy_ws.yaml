@@ -1,6 +1,6 @@
 name: sglang_haproxy_ws
 # SGLang weak-scaling via Ray Serve (SGLangWorker embeds sgl.Engine) + HAProxy + Go
-# replay client. Run with AURORA_ENGINE=sglang and AURORA_PYTHON_EXEC=<fwvenv python>
+# replay client. Run with EXASERVE_ENGINE=sglang and EXASERVE_PYTHON_EXEC=<fwvenv python>
 # so launch_cluster/driver/server select the SGLang engine on the frameworks-inheriting
 # venv. Apples-to-apples vs the vLLM weak-scaling: same control plane / proxy / client.
 matrix:

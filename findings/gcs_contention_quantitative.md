@@ -42,8 +42,8 @@ Quantify the GCS-contention hypothesis from
   per-substep timing), plus pristine `controller.py` and `proxy_state.py`
   as baselines.
 - **Direct-to-Lustre output**: ProxyActors write
-  `$AURORA_RUN_LOG_DIR/instrumentation/<host>/proxy_init_<pid>.json`
-  instead of `/tmp/aurora_inst/` (which was being cleaned by PBS epilogue
+  `$EXASERVE_RUN_LOG_DIR/instrumentation/<host>/proxy_init_<pid>.json`
+  instead of `/tmp/exaserve_inst/` (which was being cleaned by PBS epilogue
   before the head-node finalize trap could ssh to collect).
 - **`RAY_event_stats=1 RAY_event_stats_print_interval_ms=1000`** — Ray's
   built-in per-RPC telemetry, dumped every 1s to the head's

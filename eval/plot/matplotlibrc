@@ -1,4 +1,4 @@
-# Project-wide matplotlib theme for Aurora Ray Serve eval plots.
+# Project-wide matplotlib theme for ExaServe eval plots.
 # Loaded explicitly via eval/plot/plotstyle.py (apply()), so it applies
 # regardless of CWD. Per-series colour/marker/linestyle choices live in
 # plotstyle.py; this file is global look-and-feel only.

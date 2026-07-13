@@ -5,7 +5,7 @@ name: refcard_pp405b_scale
 # aggregate throughput grows linearly with replica count.
 #
 # Shard-aware PP is derived automatically by the harness (PP>1 with multiple
-# replicas -> AURORA_PP_SHARD_AWARE=1): each PP stage (~380 GiB) is broadcast
+# replicas -> EXASERVE_PP_SHARD_AWARE=1): each PP stage (~380 GiB) is broadcast
 # only to its node group, so every node holds just its own stage in tmpfs.
 # Expect a long bring-up at scale (weights come off Lustre on seed nodes).
 #

@@ -104,7 +104,7 @@ def main() -> int:
     )
     fig.tight_layout()
 
-    out = sys.argv[1] if len(sys.argv) > 1 else "/home/wenyiw/aurora_rayserver/findings/weakscaling_haproxy_vs_direct_v3.png"
+    out = sys.argv[1] if len(sys.argv) > 1 else "/home/wenyiw/exaserve/findings/weakscaling_haproxy_vs_direct_v3.png"
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print(f"\nSaved: {out}")
     return 0

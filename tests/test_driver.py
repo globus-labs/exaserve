@@ -2,8 +2,8 @@ import subprocess
 import sys
 import textwrap
 
-from aurora_rayserver.driver import (
-    AURORA_SERVE_READY_MARKER,
+from exaserve.driver import (
+    EXASERVE_SERVE_READY_MARKER,
     ProcessOutputRelay,
     wait_for_process_ready_marker,
 )
@@ -32,14 +32,14 @@ def _start_output_process(lines: list[str], delay_s: float = 0.05) -> subprocess
 def test_wait_for_process_ready_marker_detects_cluster_ready():
     process = _start_output_process(
         [
-            "[AuroraServe] Stage 1: Initializing Ray cluster...",
-            f"{AURORA_SERVE_READY_MARKER} Total time: 12.34s",
+            "[ExaServe] Stage 1: Initializing Ray cluster...",
+            f"{EXASERVE_SERVE_READY_MARKER} Total time: 12.34s",
         ]
     )
     relay = ProcessOutputRelay(
         process=process,
-        ready_marker=AURORA_SERVE_READY_MARKER,
-        label="Aurora Serve",
+        ready_marker=EXASERVE_SERVE_READY_MARKER,
+        label="ExaServe",
     ).start()
 
     try:
@@ -52,14 +52,14 @@ def test_wait_for_process_ready_marker_detects_cluster_ready():
 def test_wait_for_process_ready_marker_fails_when_process_exits_early():
     process = _start_output_process(
         [
-            "[AuroraServe] Stage 1: Initializing Ray cluster...",
-            "[AuroraServe] Stage 3: Deploying model services...",
+            "[ExaServe] Stage 1: Initializing Ray cluster...",
+            "[ExaServe] Stage 3: Deploying model services...",
         ]
     )
     relay = ProcessOutputRelay(
         process=process,
-        ready_marker=AURORA_SERVE_READY_MARKER,
-        label="Aurora Serve",
+        ready_marker=EXASERVE_SERVE_READY_MARKER,
+        label="ExaServe",
     ).start()
 
     try:
@@ -68,8 +68,8 @@ def test_wait_for_process_ready_marker_fails_when_process_exits_early():
         if relay._thread is not None:
             relay._thread.join(timeout=1.0)
         assert list(relay.recent_lines) == [
-            "[AuroraServe] Stage 1: Initializing Ray cluster...",
-            "[AuroraServe] Stage 3: Deploying model services...",
+            "[ExaServe] Stage 1: Initializing Ray cluster...",
+            "[ExaServe] Stage 3: Deploying model services...",
         ]
     finally:
         relay.close()

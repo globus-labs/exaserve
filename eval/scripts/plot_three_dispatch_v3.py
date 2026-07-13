@@ -442,7 +442,7 @@ def main() -> int:
 
     fig.tight_layout(rect=[0, 0, 1, 0.92])
 
-    out = sys.argv[1] if len(sys.argv) > 1 else "/home/wenyiw/aurora_rayserver/findings/weakscaling_three_dispatch_v3.png"
+    out = sys.argv[1] if len(sys.argv) > 1 else "/home/wenyiw/exaserve/findings/weakscaling_three_dispatch_v3.png"
     fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white", edgecolor="none")
     plt.close(fig)
     print(f"\nSaved: {out}")

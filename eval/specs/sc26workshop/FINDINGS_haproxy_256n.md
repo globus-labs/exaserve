@@ -39,8 +39,8 @@ ceiling"; accept-queue overflow; TIME_WAIT/port exhaustion; CPU saturation.
 ## Measured root cause of the streaming-256n collapse
 
 Instrumented with a head-node sampler (commit adds `_start_diag_sampler` in
-`src/aurora_rayserver/proxy/haproxy_proxy.py`; writes `proxy_out/haproxy_diag.log`
-every 3s; disable with `AURORA_HAPROXY_DIAG=0`). From the run that collapsed
+`src/exaserve/proxy/haproxy_proxy.py`; writes `proxy_out/haproxy_diag.log`
+every 3s; disable with `EXASERVE_HAPROXY_DIAG=0`). From the run that collapsed
 (`proxycmp_haproxy_256_val/run2`, streaming, client=4):
 
 | signal | measured | verdict |

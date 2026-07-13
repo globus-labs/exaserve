@@ -96,7 +96,7 @@ def _coerce_field_value(field_name: str, raw_value: Any) -> Any:
 def _load_local_override_module(path: Path) -> Optional[ModuleType]:
     if not path.is_file():
         return None
-    spec = importlib.util.spec_from_file_location("_aurora_site_config_local", str(path))
+    spec = importlib.util.spec_from_file_location("_exaserve_site_config_local", str(path))
     if spec is None or spec.loader is None:
         raise ImportError("Could not load site config overrides from {0}".format(path))
     module = importlib.util.module_from_spec(spec)
@@ -105,7 +105,7 @@ def _load_local_override_module(path: Path) -> Optional[ModuleType]:
 
 
 def _load_local_overrides() -> Dict[str, Any]:
-    override_path = os.environ.get("AURORA_SITE_CONFIG_LOCAL")
+    override_path = os.environ.get("EXASERVE_SITE_CONFIG_LOCAL")
     if override_path:
         path = Path(os.path.expanduser(override_path))
     else:
@@ -125,7 +125,7 @@ def _load_local_overrides() -> Dict[str, Any]:
 def _load_env_overrides() -> Dict[str, Any]:
     overrides = {}
     for field_name in _FIELD_NAMES:
-        env_name = "AURORA_{0}".format(field_name.upper())
+        env_name = "EXASERVE_{0}".format(field_name.upper())
         if env_name in os.environ:
             overrides[field_name] = os.environ[env_name]
     return overrides

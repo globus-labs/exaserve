@@ -2,7 +2,7 @@
 # Multi-proc ceiling: compare per_proc=80 vs per_proc=853 (10240/12, auto-derived budget).
 # 70s cooldown between tests.
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null

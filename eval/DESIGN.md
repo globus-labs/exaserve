@@ -136,7 +136,7 @@ For each variant:
 3. **Backend validation + manifest** — asks the backend adapter to validate
    the RunPlan and build a runtime manifest. For the `ray` backend, this
    translates the eval-layer RunPlan into the serving-layer `ExpConfig` YAML
-   that `src/aurora_rayserver/resources/launch_cluster.sh` and `replay_client.py` understand.
+   that `src/exaserve/resources/launch_cluster.sh` and `replay_client.py` understand.
 
 4. **PBS job rendering** — renders a PBS job script that sources the env
    script and runs `python -m eval.cli run execute <run.yaml>`.
@@ -177,7 +177,7 @@ class BackendAdapter(ABC):
 
 The `ray` adapter bridges two config worlds: it translates the eval-layer
 `RunPlan` into the serving-layer `ExpConfig` (defined in `src/schemas.py`)
-which is what the existing `src/aurora_rayserver/resources/launch_cluster.sh`, `src/driver.py`,
+which is what the existing `src/exaserve/resources/launch_cluster.sh`, `src/driver.py`,
 and `replay_client.py` understand. This avoids rewriting the serving
 infrastructure while giving the eval layer its own clean data model.
 

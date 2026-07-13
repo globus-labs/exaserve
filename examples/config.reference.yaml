@@ -4,19 +4,19 @@
 # fields you need and drop this into your own config.
 #
 # Authoritative definitions (keep this file in sync if those change):
-#   src/aurora_rayserver/schemas.py             RayClusterConfig, DeploymentConfig, ModelConfig, ProxyConfig
-#   src/aurora_rayserver/proxy/haproxy_proxy.py HAProxy options
-#   src/aurora_rayserver/proxy/litellm_proxy.py LiteLLM options
+#   src/exaserve/schemas.py             RayClusterConfig, DeploymentConfig, ModelConfig, ProxyConfig
+#   src/exaserve/proxy/haproxy_proxy.py HAProxy options
+#   src/exaserve/proxy/litellm_proxy.py LiteLLM options
 #
 # PBS submission settings are NOT in this YAML. The deployment YAML
 # describes the cluster (Ray + vLLM + proxy); PBS scheduling parameters
-# (queue, project, walltime, filesystems) come from aurora-serve-submit's
+# (queue, project, walltime, filesystems) come from exaserve-serve-submit's
 # CLI flags or env vars. See "PBS submission environment variables"
 # at the bottom of this file.
 
 # --------------------------------------------------------------- cluster ---
 ray_cluster_config:
-  head_ip: ""         # Auto-populated by aurora-launch-cluster; leave empty.
+  head_ip: ""         # Auto-populated by exaserve-launch-cluster; leave empty.
   port: 6379          # Ray GCS port (head).
   node_cpus: 8        # CPUs advertised to Ray per node. Raise (e.g. 64) for
                       # serve-heavy deployments so Raylet can schedule more
@@ -29,7 +29,7 @@ model_deployment_config:
                                     # be downloaded to on first run).
   local_stage_path: "/tmp/hf_home"  # Absolute path on each node's local scratch;
                                     # model_bcast.py stages weights here.
-  deployment_name: "aurora_serve"   # Ray Serve application name.
+  deployment_name: "exaserve_serve"   # Ray Serve application name.
   replica_max_ongoing_requests: 32  # Per-replica concurrency cap. 128+ for
                                     # high-throughput workloads.
   num_gpus_per_node: 12             # Aurora default: 12 XPU tiles/node.
@@ -56,7 +56,7 @@ proxy_config:
   type: "none"        # "none" | "haproxy" | "litellm"
   port: 4001          # Front-end port users connect to.
   backend_port: 8000  # Ray Serve HTTP port on each node (don't change
-                      # unless you also edit src/aurora_serve.py).
+                      # unless you also edit src/exaserve_serve.py).
   python_path: ""     # Interpreter for the proxy subprocess (empty = current).
                       # For litellm, point at your litellm venv's python3.
   num_workers: 1      # uvicorn worker count for litellm. Keep at 1 — see
@@ -86,45 +86,45 @@ proxy_config:
   options: {}
 
 # ----------------------------- PBS submission environment variables ---
-# Read by ``aurora-serve-submit`` when rendering a PBS script. CLI flags
+# Read by ``exaserve-serve-submit`` when rendering a PBS script. CLI flags
 # (--queue, --walltime, --project-account) override these per-invocation.
 # All values listed are the built-in defaults if neither the CLI flag
 # nor the env var is set.
 #
-#   AURORA_PROJECT_ACCOUNT=AuroraGPT       PBS allocation/account (-A)
-#   AURORA_DEFAULT_QUEUE=debug-scaling     PBS queue name (-q)
-#   AURORA_DEFAULT_WALLTIME=01:00:00       PBS walltime (-l walltime=)
-#   AURORA_DEFAULT_FILESYSTEMS=home:flare  PBS filesystems (-l filesystems=)
-#   AURORA_PBS_KEEP_FLAG=doe               PBS -k flag (keep stdout/stderr
+#   EXASERVE_PROJECT_ACCOUNT=AuroraGPT       PBS allocation/account (-A)
+#   EXASERVE_DEFAULT_QUEUE=debug-scaling     PBS queue name (-q)
+#   EXASERVE_DEFAULT_WALLTIME=01:00:00       PBS walltime (-l walltime=)
+#   EXASERVE_DEFAULT_FILESYSTEMS=home:flare  PBS filesystems (-l filesystems=)
+#   EXASERVE_PBS_KEEP_FLAG=doe               PBS -k flag (keep stdout/stderr
 #                                          on exec host across rerun)
 #
 # --------------------------- runtime environment variables (compute) ---
 # Not in the YAML schema, set on the launcher shell to tune compute-side
-# behavior. These take effect when aurora-launch-cluster (i.e. the body
+# behavior. These take effect when exaserve-launch-cluster (i.e. the body
 # of the PBS job) runs, NOT at submit time.
 #
-#   AURORA_SCALING_TRACE=1       Emit per-replica startup timing traces.
+#   EXASERVE_SCALING_TRACE=1       Emit per-replica startup timing traces.
 #                                Adds ~10 min overhead on Lustre at 128+ nodes.
-#   AURORA_NULL_COMPUTE=1        Skip model staging & vLLM init (infra test).
-#   AURORA_DEBUG_HOLD_ON_FAILURE_S=300   Keep Ray alive for N seconds after
+#   EXASERVE_NULL_COMPUTE=1        Skip model staging & vLLM init (infra test).
+#   EXASERVE_DEBUG_HOLD_ON_FAILURE_S=300   Keep Ray alive for N seconds after
 #                                        the server exits on error, so you
 #                                        can ssh in and inspect.
-#   AURORA_RAY_SERVE_INSTRUMENTATION=1   Activate the Ray Serve overlay
-#                                        with probes / /tmp/aurora_inst
+#   EXASERVE_RAY_SERVE_INSTRUMENTATION=1   Activate the Ray Serve overlay
+#                                        with probes / /tmp/exaserve_inst
 #                                        writes. (Legacy name
-#                                        AURORA_INSTRUMENTATION still works.)
-#   AURORA_VLLM_PATCH_PP_LAYER_FILTER=1  vLLM PP layer-filter monkey-patches.
+#                                        EXASERVE_INSTRUMENTATION still works.)
+#   EXASERVE_VLLM_PATCH_PP_LAYER_FILTER=1  vLLM PP layer-filter monkey-patches.
 #                                        On by default; set to 0 to disable.
-#   AURORA_PROJECT_ROOT, AURORA_WORKDIR   Override the launcher's PROJECT_ROOT.
+#   EXASERVE_PROJECT_ROOT, EXASERVE_WORKDIR   Override the launcher's PROJECT_ROOT.
 #                                        Defaults to a source-tree heuristic
 #                                        then $PWD.
-#   AURORA_RUN_LOG_DIR, AURORA_RUN_LOG_ROOT   Override where the launcher
+#   EXASERVE_RUN_LOG_DIR, EXASERVE_RUN_LOG_ROOT   Override where the launcher
 #                                             writes its run logs (default:
 #                                             $PROJECT_ROOT/run_logs/<stamp>_<config>).
-#   AURORA_BCAST_BUILD_DIR                Where model_bcast extracts its
+#   EXASERVE_BCAST_BUILD_DIR                Where model_bcast extracts its
 #                                         packaged C source + Makefile.
-#                                         Defaults: $AURORA_RUN_LOG_DIR/bcast_build
-#                                         then $PWD/.aurora_rayserver_build/bcast.
+#                                         Defaults: $EXASERVE_RUN_LOG_DIR/bcast_build
+#                                         then $PWD/.exaserve_build/bcast.
 #   RAYON_NUM_THREADS=1                  Already set by launch_cluster.sh to
 #   TOKENIZERS_PARALLELISM=false         avoid HF tokenizer rayon panics at 128+.
 #   RAY_num_server_call_thread=4         Serve HTTP proxy thread count.

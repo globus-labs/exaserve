@@ -8,8 +8,8 @@
 #PBS -l filesystems=home:flare
 #PBS -A AuroraGPT
 #PBS -l place=scatter
-#PBS -o /home/wenyiw/aurora_rayserver/tmp/debug-proxy.stdout
-#PBS -e /home/wenyiw/aurora_rayserver/tmp/debug-proxy.stderr
+#PBS -o /home/wenyiw/exaserve/tmp/debug-proxy.stdout
+#PBS -e /home/wenyiw/exaserve/tmp/debug-proxy.stderr
 
 # =============================================================================
 # Debug job: Launch Ray cluster and diagnose ProxyActor deaths.
@@ -24,7 +24,7 @@
 
 set -eo pipefail
 
-PROJECT_ROOT="/home/wenyiw/aurora_rayserver"
+PROJECT_ROOT="/home/wenyiw/exaserve"
 DEBUG_OUT="$PROJECT_ROOT/tmp/debug_proxy_$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$DEBUG_OUT"
 
@@ -105,12 +105,12 @@ echo "Time: $(date -u)"
 # launch_cluster.sh blocks until the cluster shuts down, so we run it in the
 # background and capture its PID. The script's head node logic prints
 # "[Driver] ALL SERVICES READY" when the cluster is live.
-export AURORA_RUN_LOG_DIR="$DEBUG_OUT/run_logs"
-export AURORA_RUN_LOG_FILE="$DEBUG_OUT/run_logs/launch.log"
-export AURORA_DEBUG_HOLD_ON_FAILURE_S=300
+export EXASERVE_RUN_LOG_DIR="$DEBUG_OUT/run_logs"
+export EXASERVE_RUN_LOG_FILE="$DEBUG_OUT/run_logs/launch.log"
+export EXASERVE_DEBUG_HOLD_ON_FAILURE_S=300
 mkdir -p "$DEBUG_OUT/run_logs"
 
-bash src/aurora_rayserver/resources/launch_cluster.sh "$DEBUG_OUT/config.yaml" &
+bash src/exaserve/resources/launch_cluster.sh "$DEBUG_OUT/config.yaml" &
 CLUSTER_PID=$!
 echo "Cluster launcher PID: $CLUSTER_PID"
 

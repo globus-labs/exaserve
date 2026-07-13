@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run 12-proc ceiling at auto-derived per_proc with error capture in summary.
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null

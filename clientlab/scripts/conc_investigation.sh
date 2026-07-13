@@ -1,7 +1,7 @@
 #!/bin/bash
 # Multi-proc 12 procs: compare per_proc=80 vs per_proc=port_range//12
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null

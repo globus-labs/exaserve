@@ -6,8 +6,8 @@ SRC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
-from aurora_rayserver.proxy.base import BackendEndpoint
-from aurora_rayserver.proxy.haproxy_proxy import HAProxyProxy
+from exaserve.proxy.base import BackendEndpoint
+from exaserve.proxy.haproxy_proxy import HAProxyProxy
 
 
 def _read_config(path: Path) -> str:

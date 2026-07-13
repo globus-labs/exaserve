@@ -44,7 +44,7 @@ workload:
   generation_mode: deterministic
 deployment:
   num_nodes: 4
-  # Shard-aware PP (AURORA_PP_SHARD_AWARE=1): model_storage_path = Lustre SOURCE
+  # Shard-aware PP (EXASERVE_PP_SHARD_AWARE=1): model_storage_path = Lustre SOURCE
   # (full 405B via flat-form symlink); local_stage_path = NODE-LOCAL tmpfs dest.
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   local_stage_path: /tmp/pp405b_shard

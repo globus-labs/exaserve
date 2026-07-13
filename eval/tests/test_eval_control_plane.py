@@ -268,7 +268,7 @@ def test_trace_artifacts_are_reused(temp_spec, tmp_path):
 
 def test_run_bundle_materialization_and_mock_execute(temp_spec, tmp_path, monkeypatch):
     repo_root = _init_git_repo(tmp_path / "repo")
-    monkeypatch.setenv("AURORA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    monkeypatch.setenv("EXASERVE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
 
     plans = materialize_run_bundles(
         str(temp_spec),
@@ -302,7 +302,7 @@ def test_materialize_twice_creates_incrementing_run_groups_and_reuses_snapshot(
     temp_spec, tmp_path, monkeypatch
 ):
     repo_root = _init_git_repo(tmp_path / "repo")
-    monkeypatch.setenv("AURORA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    monkeypatch.setenv("EXASERVE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
 
     first = materialize_run_bundles(
         str(temp_spec),
@@ -330,7 +330,7 @@ def test_dirty_repo_warning_and_snapshot_excludes_uncommitted_content(
     temp_spec, tmp_path, monkeypatch, capsys
 ):
     repo_root = _init_git_repo(tmp_path / "repo", tracked_contents="committed\n")
-    monkeypatch.setenv("AURORA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    monkeypatch.setenv("EXASERVE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
     (repo_root / "tracked.txt").write_text("dirty tracked\n", encoding="utf-8")
     (repo_root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
 
@@ -357,14 +357,14 @@ def test_dirty_repo_warning_and_snapshot_excludes_uncommitted_content(
     assert sorted(run_group_meta["dirty_files"]) == ["tracked.txt", "untracked.txt"]
 
 
-def test_ray_adapter_always_uses_aurora_env(temp_spec, tmp_path, monkeypatch):
+def test_ray_adapter_always_uses_exaserve_env(temp_spec, tmp_path, monkeypatch):
     """Backend always uses env_aurora; litellm runs as a separate subprocess."""
     prompt_path = tmp_path / "prompts.json"
     spec_path = tmp_path / "ray_spec.yaml"
     repo_root = _init_git_repo(tmp_path / "repo")
     _write_prompt_dataset(prompt_path)
     _write_spec(spec_path, prompt_path, proxy_type="litellm")
-    monkeypatch.setenv("AURORA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    monkeypatch.setenv("EXASERVE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
 
     plans = materialize_run_bundles(
         str(spec_path),
@@ -380,7 +380,7 @@ def test_ray_adapter_always_uses_aurora_env(temp_spec, tmp_path, monkeypatch):
 
 def test_cli_validate_and_submit_all_latest_dry_run(temp_spec, tmp_path, monkeypatch):
     repo_root = _init_git_repo(tmp_path / "repo")
-    monkeypatch.setenv("AURORA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    monkeypatch.setenv("EXASERVE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
     run_kwargs = dict(
         backend_name="mock",
         experiments_root=str(tmp_path / "runs"),
@@ -444,7 +444,7 @@ def test_plot_scripts_resolve_latest_run_group(tmp_path, monkeypatch):
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
-    env["AURORA_EXPERIMENTS_ROOT"] = str(experiments_root)
+    env["EXASERVE_EXPERIMENTS_ROOT"] = str(experiments_root)
     weak_plot = tmp_path / "weak.png"
     litellm_plot = tmp_path / "litellm.png"
 

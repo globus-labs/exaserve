@@ -17,8 +17,8 @@ def patched_site_env(**updates):
     keys_to_clear = {
         "HOME",
         "USER",
-        "AURORA_SITE_CONFIG_LOCAL",
-        *(f"AURORA_{field.upper()}" for field in site_config._FIELD_NAMES),
+        "EXASERVE_SITE_CONFIG_LOCAL",
+        *(f"EXASERVE_{field.upper()}" for field in site_config._FIELD_NAMES),
     }
     original = {key: os.environ.get(key) for key in keys_to_clear}
     try:
@@ -71,7 +71,7 @@ class SiteConfigTests(unittest.TestCase):
             with patched_site_env(
                 USER="alice",
                 HOME=temp_home,
-                AURORA_SITE_CONFIG_LOCAL=handle.name,
+                EXASERVE_SITE_CONFIG_LOCAL=handle.name,
             ):
                 cfg = site_config.get_site_config()
 
@@ -89,9 +89,9 @@ class SiteConfigTests(unittest.TestCase):
             with patched_site_env(
                 USER="alice",
                 HOME=temp_home,
-                AURORA_SITE_CONFIG_LOCAL=handle.name,
-                AURORA_MODEL_STORAGE_PATH="/tmp/env/models",
-                AURORA_NUM_GPUS_PER_NODE="24",
+                EXASERVE_SITE_CONFIG_LOCAL=handle.name,
+                EXASERVE_MODEL_STORAGE_PATH="/tmp/env/models",
+                EXASERVE_NUM_GPUS_PER_NODE="24",
             ):
                 cfg = site_config.get_site_config()
 
@@ -100,9 +100,9 @@ class SiteConfigTests(unittest.TestCase):
 
     def test_cache_reset_is_required_after_env_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_home:
-            with patched_site_env(USER="alice", HOME=temp_home, AURORA_MODEL_STORAGE_PATH="/tmp/first"):
+            with patched_site_env(USER="alice", HOME=temp_home, EXASERVE_MODEL_STORAGE_PATH="/tmp/first"):
                 first = site_config.get_site_config()
-                os.environ["AURORA_MODEL_STORAGE_PATH"] = "/tmp/second"
+                os.environ["EXASERVE_MODEL_STORAGE_PATH"] = "/tmp/second"
                 cached = site_config.get_site_config()
                 site_config.clear_site_config_cache()
                 updated = site_config.get_site_config()

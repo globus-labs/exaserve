@@ -1,9 +1,9 @@
 #!/bin/bash
 # Saturation finder smoke test on a compute node.
-# Run via: ssh <compute-node> "cd /home/wenyiw/aurora_rayserver && bash clientlab/scripts/run_sat_smoke.sh"
+# Run via: ssh <compute-node> "cd /home/wenyiw/exaserve && bash clientlab/scripts/run_sat_smoke.sh"
 exec 2>&1
 
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 module load frameworks 2>/dev/null || true
 module load go 2>/dev/null || true

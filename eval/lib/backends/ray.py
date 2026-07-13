@@ -1,16 +1,16 @@
 """Ray backend adapter.
 
 This adapter bridges the new eval control plane with the existing serving
-infrastructure (src/aurora_rayserver/resources/launch_cluster.sh, src/driver.py, src/aurora_serve.py).
+infrastructure (src/exaserve/resources/launch_cluster.sh, src/driver.py, src/exaserve_serve.py).
 
 Key responsibilities:
   - build_runtime_manifest: translates the eval-layer RunPlan into an
     EvalManifest YAML that launch_cluster.sh and replay_client.py expect.
     This is the bridge between the two config schemas.
-  - launch: starts `bash src/aurora_rayserver/resources/launch_cluster.sh <manifest>` as a child
+  - launch: starts `bash src/exaserve/resources/launch_cluster.sh <manifest>` as a child
     process group, monitored by ProcessMonitor for the readiness marker.
   - runtime_env: selects the shell env used for the Ray/vLLM stack and sets
-    launcher exports such as AURORA_NULL_COMPUTE. Ray cluster settings such as
+    launcher exports such as EXASERVE_NULL_COMPUTE. Ray cluster settings such as
     head_ip, port, and node_cpus live in the runtime manifest, which is the
     single source of truth for driver.py. LiteLLM itself is launched as a
     separate subprocess via proxy_config.python_path, so the backend should
@@ -23,7 +23,7 @@ import os
 import subprocess
 from dataclasses import asdict
 
-from aurora_rayserver.schemas import DeploymentConfig, ModelConfig, ProxyConfig
+from exaserve.schemas import DeploymentConfig, ModelConfig, ProxyConfig
 from eval.site_config import get_site_config
 
 from ..manifest import (
@@ -189,32 +189,32 @@ class RayBackendAdapter(BackendAdapter):
             env_script = cfg.env_script_aurora
         exports = {}
         if bool(launch_settings.get("null_compute", False)):
-            exports["AURORA_NULL_COMPUTE"] = "1"
+            exports["EXASERVE_NULL_COMPUTE"] = "1"
         if bool(launch_settings.get("instrumentation", False)):
             # Stages the Ray Serve overlay probes (GetActorInfo counts, per-proxy
             # ray.get_actor timing) read by launch_cluster.sh. Needed for EXP SET 3.
-            exports["AURORA_INSTRUMENTATION"] = "1"
+            exports["EXASERVE_INSTRUMENTATION"] = "1"
         if bool(launch_settings.get("clean_stage", False)):
             # Wipe node-local artifacts before staging so Phase-2 MPI weight
             # broadcast is re-done and timed every run (resources/cleanup_run.sh).
-            exports["AURORA_CLEAN_STAGE"] = "1"
+            exports["EXASERVE_CLEAN_STAGE"] = "1"
         # Engine backend selection (deployment.engine). "sglang" routes deploy_model
-        # to SGLangWorker (AURORA_ENGINE) and the whole serving stack to the SGLang
-        # venv (AURORA_PYTHON_EXEC, honored by launch_cluster.sh). Default "vllm" is a
+        # to SGLangWorker (EXASERVE_ENGINE) and the whole serving stack to the SGLang
+        # venv (EXASERVE_PYTHON_EXEC, honored by launch_cluster.sh). Default "vllm" is a
         # no-op so existing specs are unchanged.
         engine = str(getattr(run_plan.deployment, "engine", "vllm") or "vllm").lower()
         if engine == "sglang":
-            exports["AURORA_ENGINE"] = "sglang"
+            exports["EXASERVE_ENGINE"] = "sglang"
             sglang_py = str(getattr(get_site_config(), "sglang_python_path", "")).strip()
             if sglang_py:
-                exports["AURORA_PYTHON_EXEC"] = sglang_py
+                exports["EXASERVE_PYTHON_EXEC"] = sglang_py
         return RuntimeEnvSpec(env_script=env_script, exports=exports)
 
     def job_env_exports(self, run_plan: RunPlan) -> dict[str, str]:
         exports: dict[str, str] = {}
         # Shard-aware PP must be signalled to the WHOLE job, not just the launch
         # subprocess: the server keys its per-stage staging + node-pinned
-        # per-replica deploy off AURORA_PP_SHARD_AWARE, and discover_targets keys
+        # per-replica deploy off EXASERVE_PP_SHARD_AWARE, and discover_targets keys
         # per-replica direct routing off it. Derive from the deployment
         # (pp>1 AND num_replicas>1) — the exact condition server.py gates on — so
         # shard-aware multi-replica PP specs are self-contained (no hand-edited
@@ -224,7 +224,7 @@ class RayBackendAdapter(BackendAdapter):
             and int(getattr(m, "num_replicas", 0) or 0) > 1
             for m in run_plan.deployment.models
         ):
-            exports["AURORA_PP_SHARD_AWARE"] = "1"
+            exports["EXASERVE_PP_SHARD_AWARE"] = "1"
         return exports
 
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:
@@ -233,7 +233,7 @@ class RayBackendAdapter(BackendAdapter):
         runtime_env = self.runtime_env(run_plan)
         env.update(runtime_env.exports)
         # PYTHONPATH must include both the repo root (so 'from eval.X' resolves)
-        # and repo_root/src (so 'from aurora_rayserver.X' resolves).
+        # and repo_root/src (so 'from exaserve.X' resolves).
         env["PYTHONPATH"] = (
             run_plan.repo_root
             + os.pathsep
@@ -241,10 +241,10 @@ class RayBackendAdapter(BackendAdapter):
             + os.pathsep
             + env.get("PYTHONPATH", "")
         )
-        env["AURORA_RUN_LOG_ROOT"] = os.path.join(run_plan.bundle.logs_dir, "backend")
+        env["EXASERVE_RUN_LOG_ROOT"] = os.path.join(run_plan.bundle.logs_dir, "backend")
         # The launcher lives inside the package's resources/ data dir as of v0.1.0.
         launch_script = os.path.join(
-            run_plan.repo_root, "src", "aurora_rayserver", "resources", "launch_cluster.sh"
+            run_plan.repo_root, "src", "exaserve", "resources", "launch_cluster.sh"
         )
         cmd = ["bash", launch_script, run_plan.runtime_manifest_path]
         process = subprocess.Popen(
@@ -381,7 +381,7 @@ def _shard_aware_direct_urls(
 ) -> list[str] | None:
     """Per-replica direct URLs for shard-aware PP, or None if not applicable.
 
-    Shard-aware PP (AURORA_PP_SHARD_AWARE=1, pp>1, num_replicas>1) serves each
+    Shard-aware PP (EXASERVE_PP_SHARD_AWARE=1, pp>1, num_replicas>1) serves each
     replica as a node-pinned single-replica app at route /<route>_r{i}; there is
     no root route (see driver.py / server.ordered_pp_nodes). The HAProxy proxy
     normally reaches them by rewriting the path to /<route>_r{rand}. Direct mode
@@ -394,7 +394,7 @@ def _shard_aware_direct_urls(
     ordering were off, Ray Serve routes /<route>_r{i} to replica i from any node's
     HTTP proxy, so requests still succeed (only node-locality would be lost).
     """
-    if os.environ.get("AURORA_PP_SHARD_AWARE", "0") != "1":
+    if os.environ.get("EXASERVE_PP_SHARD_AWARE", "0") != "1":
         return None
     models = list(run_plan.deployment.models)
     if len(models) != 1:
@@ -412,9 +412,9 @@ def _shard_aware_direct_urls(
         )
     ordered = sorted(node_ips)  # match ordered_pp_nodes(): lexicographic ip sort
     try:
-        from aurora_rayserver.model_paths import get_model_route_name
+        from exaserve.model_paths import get_model_route_name
     except ImportError:  # pragma: no cover - snapshot import fallback
-        from src.aurora_rayserver.model_paths import get_model_route_name
+        from src.exaserve.model_paths import get_model_route_name
     route = get_model_route_name(mc.model_id)
     urls = [
         f"http://{ordered[i * pp]}:{backend_port}/{route}_r{i}"

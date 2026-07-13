@@ -67,7 +67,7 @@ deployment:
   # Optional. If omitted, site_config.local_stage_path is used.
   # local_stage_path: /tmp/hf_home
   # This maps directly to Ray Serve's `max_ongoing_requests` for each replica.
-  # It is wired through the runtime manifest and applied in src/aurora_serve.py.
+  # It is wired through the runtime manifest and applied in src/exaserve_serve.py.
   replica_max_ongoing_requests: 64
   # Defaults from site_config.num_gpus_per_node if omitted.
   num_gpus_per_node: 12
@@ -127,7 +127,7 @@ backend:
       launch:
         # Override the env script used inside the PBS job if needed.
         # env_script: /home/<user>/script/env_aurora
-        # Sets AURORA_NULL_COMPUTE=1 for the launcher / serving stack.
+        # Sets EXASERVE_NULL_COMPUTE=1 for the launcher / serving stack.
         null_compute: false
         # Ray head port written into the runtime manifest.
         ray_head_port: 6379

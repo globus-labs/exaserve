@@ -9,12 +9,12 @@ SRC_DIR = os.path.join(REPO_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from aurora_rayserver.replica_planner import (
+from exaserve.replica_planner import (
     NodeInventory,
     compute_replica_plan,
     tp_replica_capacity_for_nodes,
 )
-from aurora_rayserver.schemas import ModelConfig
+from exaserve.schemas import ModelConfig
 
 
 def make_nodes(

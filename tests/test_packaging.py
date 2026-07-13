@@ -1,10 +1,10 @@
 from importlib import resources
 
-from aurora_rayserver.model_bcast import prepare_bcast_tools
+from exaserve.model_bcast import prepare_bcast_tools
 
 
 def test_packaged_runtime_resources_are_present():
-    resource_root = resources.files("aurora_rayserver.resources")
+    resource_root = resources.files("exaserve.resources")
 
     for name in (
         "launch_cluster.sh",

@@ -6,7 +6,7 @@
 # Requires haproxy on $PATH. Install via your distro / Aurora module.
 #
 # Run with:
-#   aurora-serve-submit examples/config.haproxy.yaml
+#   exaserve-serve-submit examples/config.haproxy.yaml
 
 ray_cluster_config:
   head_ip: ""
@@ -17,7 +17,7 @@ model_deployment_config:
   num_nodes: 2
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models # ! Change to your own model path
   local_stage_path: /tmp/hf_home
-  deployment_name: aurora_serve
+  deployment_name: exaserve_serve
   replica_max_ongoing_requests: 128
   num_gpus_per_node: 12
 

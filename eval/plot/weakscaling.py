@@ -108,7 +108,7 @@ def _extract_plot_template_fields(
     is_null_compute = "null_compute" in pbs_job_name.lower()
     task_duration_s = ""
     if is_null_compute:
-        task_duration_s = os.environ.get("AURORA_NULL_COMPUTE_LATENCY", "1")
+        task_duration_s = os.environ.get("EXASERVE_NULL_COMPUTE_LATENCY", "1")
 
     rate_per_node = trace_cfg.get("rpn", "")
     trace_duration_s = trace_cfg.get("duration", "")

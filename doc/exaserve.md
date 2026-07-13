@@ -1,7 +1,7 @@
 ---
 name: exaserve
 description: Framework for scaling OpenAI-compatible LLM inference across HPC compute nodes — Ray Serve + vLLM deployments over PBS allocations with MPI weight staging, HAProxy/LiteLLM front ends, multi-node pipeline parallelism, and a declarative scaling-benchmark harness
-package: aurora-rayserver
+package: exaserve
 install: module load frameworks && pip install --user .
 language: python
 python_requires: ">=3.10"
@@ -14,7 +14,7 @@ reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
 
 # ExaServe Reference Card
 
-ExaServe (distributed as the `aurora-rayserver` package) turns a PBS allocation of N HPC nodes into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, deploys vLLM (or SGLang) replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — and fronts them with a head-node proxy such as HAProxy. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
+ExaServe (distributed as the `exaserve` package) turns a PBS allocation of N HPC nodes into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, deploys vLLM (or SGLang) replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — and fronts them with a head-node proxy such as HAProxy. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
 
 ## Install
 
@@ -27,7 +27,7 @@ python3 -m pip install --user .
 
 # console scripts land in a frameworks-versioned bin dir; add it to PATH:
 export PATH="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))'):$PATH"
-which aurora-serve-submit   # verify
+which exaserve-serve-submit   # verify
 ```
 
 One-time extras, only for the feature that uses them:
@@ -42,11 +42,11 @@ One-time extras, only for the feature that uses them:
 
 | Command | Purpose |
 |---|---|
-| `aurora-serve-submit <cfg> --wait` | Submit a serving job from a login node; prints PBS job id + service URL |
-| `aurora-serve-submit <cfg> --dry-run` | Write the generated PBS script without submitting (custom PBS pipelines) |
-| `aurora-launch-cluster <cfg>` | Foreground launch inside an interactive allocation; ready when it prints `[Driver] ALL SERVICES READY` |
-| `aurora-serve-url <jobid>` | Resolve a running job's service URL |
-| `aurora-model-bcast --config <cfg> --num-nodes N` | Pre-stage weights node-locally without starting Ray |
+| `exaserve-serve-submit <cfg> --wait` | Submit a serving job from a login node; prints PBS job id + service URL |
+| `exaserve-serve-submit <cfg> --dry-run` | Write the generated PBS script without submitting (custom PBS pipelines) |
+| `exaserve-launch-cluster <cfg>` | Foreground launch inside an interactive allocation; ready when it prints `[Driver] ALL SERVICES READY` |
+| `exaserve-serve-url <jobid>` | Resolve a running job's service URL |
+| `exaserve-model-bcast --config <cfg> --num-nodes N` | Pre-stage weights node-locally without starting Ray |
 | `qdel <jobid>` | Tear down a deployment |
 | `python -m eval.cli run materialize <spec>` | Benchmark spec → traces + per-cell PBS jobs |
 | `python -m eval.cli run submit-all <spec>` | Submit all cells of a benchmark sweep |
@@ -83,7 +83,7 @@ proxy_config:
 ```
 
 ```bash
-aurora-serve-submit my_config.yaml --project-account YOUR_PROJECT --wait
+exaserve-serve-submit my_config.yaml --project-account YOUR_PROJECT --wait
 # 8470123.aurora-pbs-0001...
 # http://x4310c1s0b0n0:4001
 
@@ -111,7 +111,7 @@ For benchmarking only, the harness's client can bypass the proxy and dispatch to
 
 ### Multi-node pipeline parallelism (405B-class models)
 
-Llama-3.1-405B spans two nodes per replica: TP=8 within a node × PP=2 across a node pair. Shard-aware staging (`AURORA_PP_SHARD_AWARE=1`) gives each pipeline stage only its own weight shard (~380 GiB, fits node-local tmpfs) and pins each replica's deployment to its nodes. The benchmark harness derives this env var automatically from the spec (PP>1 with multiple replicas). Measured at a fixed per-replica offered rate (0.4 req/s per replica), streaming: aggregate successful throughput grows from 0.7 query/s at 2 replicas to 31.0 query/s at 128 replicas (4 → 256 nodes) — 67% weak-scaling efficiency vs the 4-node base, sublinear rather than linear; through a single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes (9.3 query/s, 80%) before the head-node streaming ceiling appears. A non-streaming 405B configuration has not been measured.
+Llama-3.1-405B spans two nodes per replica: TP=8 within a node × PP=2 across a node pair. Shard-aware staging (`EXASERVE_PP_SHARD_AWARE=1`) gives each pipeline stage only its own weight shard (~380 GiB, fits node-local tmpfs) and pins each replica's deployment to its nodes. The benchmark harness derives this env var automatically from the spec (PP>1 with multiple replicas). Measured at a fixed per-replica offered rate (0.4 req/s per replica), streaming: aggregate successful throughput grows from 0.7 query/s at 2 replicas to 31.0 query/s at 128 replicas (4 → 256 nodes) — 67% weak-scaling efficiency vs the 4-node base, sublinear rather than linear; through a single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes (9.3 query/s, 80%) before the head-node streaming ceiling appears. A non-streaming 405B configuration has not been measured.
 
 ```yaml
 model_configs:
@@ -158,11 +158,11 @@ The growth is concentrated in `wait_proxies` (38 s → 1,612 s, a 42× increase 
 
 | Env var | Effect |
 |---|---|
-| `AURORA_ENGINE=sglang` | SGLang instead of vLLM as inference engine |
-| `AURORA_PP_SHARD_AWARE=1` | Shard-aware multi-node PP staging + node-pinned per-replica deploys |
-| `AURORA_PP_UMBRELLA=1` | Single root-route ingress over the per-replica PP routes |
-| `AURORA_NULL_COMPUTE=1` | Skip the engine, simulate latency — control-plane/routing stress tests |
-| `AURORA_CLEAN_STAGE=1` | Wipe node-local staged weights first (cold-start timing) |
+| `EXASERVE_ENGINE=sglang` | SGLang instead of vLLM as inference engine |
+| `EXASERVE_PP_SHARD_AWARE=1` | Shard-aware multi-node PP staging + node-pinned per-replica deploys |
+| `EXASERVE_PP_UMBRELLA=1` | Single root-route ingress over the per-replica PP routes |
+| `EXASERVE_NULL_COMPUTE=1` | Skip the engine, simulate latency — control-plane/routing stress tests |
+| `EXASERVE_CLEAN_STAGE=1` | Wipe node-local staged weights first (cold-start timing) |
 
 Scale cliffs and fixes (Ray/vLLM patches at 256+ nodes, thread-pool clamps — applied automatically by the launcher): [doc/KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 

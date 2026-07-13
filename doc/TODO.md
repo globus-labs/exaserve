@@ -28,16 +28,16 @@
 
 ### Moderate
 
-- **Null-compute token counting is inaccurate** (aurora_serve.py:~607)
+- **Null-compute token counting is inaccurate** (exaserve_serve.py:~607)
   - Uses `len(prompt.split())` instead of actual tokenization. Off by 1.5-2x, skews null-compute benchmark results. Use `tiktoken` or the model's tokenizer.
 
-- **Port allocation is fragile** (aurora_serve.py:64-77)
+- **Port allocation is fragile** (exaserve_serve.py:64-77)
   - Best-effort scan over a port range with no registry. Can collide under multi-tenant nodes. Use OS-assigned ports (port 0) or a proper lease/registry.
 
 - **Sequential model staging** (model_bcast.py)
   - Models are downloaded and broadcast one at a time. Parallelize across models for multi-model deployments to reduce startup time.
 
-- **Silent chat template fallback** (aurora_serve.py:~462-474)
+- **Silent chat template fallback** (exaserve_serve.py:~462-474)
   - Falls back to plain-text concatenation silently when tokenizer lacks a chat template. Should log a warning — produces garbage for chat-tuned models.
 
 - **No request tracing or correlation IDs**
@@ -75,9 +75,9 @@
 ### Wenyi's Note
 [] Make a main branch with clean-up code so people can deploy it with one click. - can work on stable branch.
 [] Performance instrumentation on ray side.
-[] Now need to broadcast all used files. (Our aurora_serve code, ray overlay(or conda env), model data).
-[] Legacy `AURORA_PROXY_PROFILE` monkey-patches at aurora_serve.py:264-297, :1547-1605, :1929-1930 — superseded by overlay [proxy.py](~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py) probe. Still default-on via launch_cluster.sh:372; both write `/tmp/aurora_inst/proxy_init_*.json` → overlay and legacy race/overwrite. Writes are tmpfs (no Lustre impact) but redundant. Decide: disable via `AURORA_PROXY_PROFILE=0` or delete the three blocks.
-[] Extend Copper broadcast to cover `$PROJECT_ROOT/src` — right now Copper only broadcasts the overlay (launch_cluster.sh:473-477). Every Ray process still does Lustre imports of our aurora_rayserver Python modules, causing MDS stampede at scale. At 256n with ~3k Python processes × ~20 imports = ~60k concurrent Lustre opens during Stage 3.
+[] Now need to broadcast all used files. (Our exaserve_serve code, ray overlay(or conda env), model data).
+[] Legacy `EXASERVE_PROXY_PROFILE` monkey-patches at exaserve_serve.py:264-297, :1547-1605, :1929-1930 — superseded by overlay [proxy.py](~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py) probe. Still default-on via launch_cluster.sh:372; both write `/tmp/exaserve_inst/proxy_init_*.json` → overlay and legacy race/overwrite. Writes are tmpfs (no Lustre impact) but redundant. Decide: disable via `EXASERVE_PROXY_PROFILE=0` or delete the three blocks.
+[] Extend Copper broadcast to cover `$PROJECT_ROOT/src` — right now Copper only broadcasts the overlay (launch_cluster.sh:473-477). Every Ray process still does Lustre imports of our exaserve Python modules, causing MDS stampede at scale. At 256n with ~3k Python processes × ~20 imports = ~60k concurrent Lustre opens during Stage 3.
 
 ### Paper related TODOs
 [] The client could be written with C++, Boost.io, verify if that is a better choice, need clear justification

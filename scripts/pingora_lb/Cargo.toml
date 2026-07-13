@@ -2,7 +2,7 @@
 name = "pingora_lb"
 version = "0.1.0"
 edition = "2021"
-description = "Minimal Pingora-based HTTP load balancer for Aurora Ray Serve benchmarks"
+description = "Minimal Pingora-based HTTP load balancer for ExaServe benchmarks"
 
 [dependencies]
 pingora = { version = "0.5", features = ["lb"] }

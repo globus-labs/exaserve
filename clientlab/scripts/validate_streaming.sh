@@ -2,7 +2,7 @@
 # Validate streaming/TTFT support on a compute node.
 # Tests: (1) non-streaming baseline, (2) streaming with TTFT, (3) saturation with streaming.
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 module load frameworks 2>/dev/null || true
 module load go 2>/dev/null || true

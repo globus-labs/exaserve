@@ -10,12 +10,12 @@ ClientLab is a standalone measurement system for studying `eval/go_client/bin/go
 - `python3 -m clientlab compare <study_dir_a> <study_dir_b>`
 - `python3 -m clientlab smoke <preset>`
 
-Built-in presets live in [clientlab/specs](/home/wenyiw/aurora_rayserver/clientlab/specs):
+Built-in presets live in [clientlab/specs](/home/wenyiw/exaserve/clientlab/specs):
 
 - `client_microbench`
 - `latency_capacity_map`
 - `fanout_and_affinity`
-- `aurora_internode`
+- `exaserve_internode`
 
 ## What It Produces
 

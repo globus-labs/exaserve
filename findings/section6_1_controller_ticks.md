@@ -9,7 +9,7 @@
 ## What's measured
 
 Each iteration of the controller's reconcile loop writes one JSONL line
-to `$AURORA_RUN_LOG_DIR/instrumentation/<head>/controller_ticks_<pid>.jsonl`:
+to `$EXASERVE_RUN_LOG_DIR/instrumentation/<head>/controller_ticks_<pid>.jsonl`:
 
 ```json
 {

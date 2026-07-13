@@ -1,13 +1,13 @@
 # Known Issues & Failure Log
 
 A running list of issues, failure modes, and gotchas we've actually hit while
-running the Aurora Ray Serve eval — kept so we can revisit them instead of
+running the ExaServe eval — kept so we can revisit them instead of
 re-discovering them. This is the **empirical** companion to:
 
 - [TODO.md](TODO.md) — forward-looking improvement backlog (P0–P3, feature gaps).
 - [findings/](../findings/) — deep-dive root-cause writeups (GCS contention,
   wait_proxies, death cascade, launch stages, etc.).
-- Agent memory under `~/.claude/projects/-home-wenyiw-aurora-rayserver/memory/`
+- Agent memory under `~/.claude/projects/-home-wenyiw-exaserve/memory/`
   — one fact per file; slugs referenced below as `[[memory_slug]]`.
 
 When something here is fixed, move it to **§E Resolved** with the fix, don't delete it.
@@ -40,7 +40,7 @@ registry/lease, deliberately not bullet-proof (most runs are fine). Under a
 chaotic ≥128n deploy (reused nodes, co-located DP replicas, node loss) it can
 collide → EADDRINUSE → A1. **Action:** re-run on collision; eventual fix is
 OS-assigned (port 0) or a lease/retry-on-bind scheme.
-Refs: TODO.md "Port allocation is fragile"; `aurora_serve.py` port scan.
+Refs: TODO.md "Port allocation is fragile"; `exaserve_serve.py` port scan.
 
 ### A3. GCS O(N²) actor-handle contention — `WORKAROUND`
 At 256n, `wait_proxies` reaches ~1751s (27 min): each of N proxies re-resolves
@@ -67,10 +67,10 @@ nproc exhausted by Ray gRPC threads); the replay client then produces no output.
 Refs: CLAUDE.md "Project-Specific Knobs", launch_cluster.sh.
 
 ### A6. Per-replica scaling-trace JSON cost on Lustre — `WORKAROUND` (default-off)
-`AURORA_SCALING_TRACE=1` writes per-replica trace JSONs that cost ~5s/file under
+`EXASERVE_SCALING_TRACE=1` writes per-replica trace JSONs that cost ~5s/file under
 MDS contention → +10 min setup at 128n. **Default `=0`**; only enable for short
 Ray-startup debugging.
-Refs: CLAUDE.md, `aurora_serve.py:_collect_replica_traces`.
+Refs: CLAUDE.md, `exaserve_serve.py:_collect_replica_traces`.
 
 ### A7. Lustre import stampede at scale — `OPEN`
 ~3k Ray processes × ~20 imports = ~60k concurrent Lustre opens during launch
@@ -169,17 +169,17 @@ deleting the staged script, and O(N) handshakes (~25s at 256n) don't scale past
 ~512n. **Action:** add rc checks / migrate to Copper.
 Refs: findings/overlay_distribution_design.md.
 
-### D3. Legacy AURORA_PROXY_PROFILE races with overlay probe — `OPEN` (low-impact)
-Legacy `AURORA_PROXY_PROFILE` monkey-patches and the overlay `proxy.py` probe both
-write `/tmp/aurora_inst/proxy_init_*.json` and race/overwrite (tmpfs, no Lustre
-impact, but redundant). Still default-on. **Action:** `AURORA_PROXY_PROFILE=0` or
-delete the three aurora_serve.py blocks.
+### D3. Legacy EXASERVE_PROXY_PROFILE races with overlay probe — `OPEN` (low-impact)
+Legacy `EXASERVE_PROXY_PROFILE` monkey-patches and the overlay `proxy.py` probe both
+write `/tmp/exaserve_inst/proxy_init_*.json` and race/overwrite (tmpfs, no Lustre
+impact, but redundant). Still default-on. **Action:** `EXASERVE_PROXY_PROFILE=0` or
+delete the three exaserve_serve.py blocks.
 Refs: TODO.md "Wenyi's Note", launch_cluster.sh.
 
 ### D4. PP>1 forces single replica / uncompiled DAG — `KNOWN` (limitation + workaround)
 `pipeline_parallel_size > 1` forces `num_replicas=1` (blocks PP throughput
 scaling), and Ray compiled-DAG channels crash on XPU so PP>1 must use the
-uncompiled executor (`AURORA_VLLM_DISABLE_RAY_COMPILED_DAG=1`, set in
+uncompiled executor (`EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG=1`, set in
 launch_cluster.sh). **Action:** redesign placement groups for multi-replica PP.
 Refs: TODO.md "Single replica enforced for PP", server.py.
 

@@ -58,7 +58,7 @@ def _log(msg: str) -> None:
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     _log(f"GET {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "aurora-rayserver/eval"})
+    req = urllib.request.Request(url, headers={"User-Agent": "exaserve/eval"})
     with urllib.request.urlopen(req) as resp, open(dest, "wb") as out:
         # Stream in chunks; these files are 100s of MB.
         while True:
@@ -83,7 +83,7 @@ def _write_jsonl(rows: list[dict], dest: Path) -> None:
 
 def fetch_humaneval(out_dir: Path, sample: int | None) -> None:
     _log("humaneval: downloading")
-    req = urllib.request.Request(HUMANEVAL_URL, headers={"User-Agent": "aurora-rayserver/eval"})
+    req = urllib.request.Request(HUMANEVAL_URL, headers={"User-Agent": "exaserve/eval"})
     with urllib.request.urlopen(req) as resp:
         raw = resp.read()
     rows = []

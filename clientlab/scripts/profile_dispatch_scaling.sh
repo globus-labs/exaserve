@@ -12,7 +12,7 @@
 # Redirect all output to stdout so PBS captures it even on early failure.
 exec 2>&1
 
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 # Module loads may return non-zero; don't use set -e until after.
 module load frameworks || true

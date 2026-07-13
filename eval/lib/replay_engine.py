@@ -21,7 +21,7 @@ import urllib.request
 from dataclasses import asdict
 
 from eval.lib.manifest import EvalManifest, TraceGeneratorConfig, WeakScalingConfig, load_eval_manifest
-from aurora_rayserver.schemas import load_proxy_config
+from exaserve.schemas import load_proxy_config
 
 try:
     import uvloop
@@ -38,18 +38,18 @@ except ImportError:  # pragma: no cover - optional dependency
     _MPI_AVAILABLE = False
 
 
-TIMEOUT_S = float(os.environ.get("AURORA_REPLAY_TIMEOUT_S", "3600"))
+TIMEOUT_S = float(os.environ.get("EXASERVE_REPLAY_TIMEOUT_S", "3600"))
 # Cap on how long a rank waits for its go procs to exit after dispatch. A wedged
 # backend connection (open, no response, no EOF) can hang a go proc past its own
 # --timeout; killing stragglers shortly after stops one wedged rank from stalling
 # the whole MPI run to the PBS walltime. Override via env for live debugging.
 DRAIN_WAIT_TIMEOUT_S = float(
-    os.environ.get("AURORA_REPLAY_DRAIN_WAIT_TIMEOUT_S", str(TIMEOUT_S + 180.0))
+    os.environ.get("EXASERVE_REPLAY_DRAIN_WAIT_TIMEOUT_S", str(TIMEOUT_S + 180.0))
 )
-DIRECT_TARGET_READY_TIMEOUT_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_TIMEOUT_S", "300"))
-DIRECT_TARGET_READY_PROBE_TIMEOUT_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_PROBE_TIMEOUT_S", "2"))
-DIRECT_TARGET_READY_INTERVAL_S = float(os.environ.get("AURORA_DIRECT_TARGET_READY_INTERVAL_S", "5"))
-DIRECT_TARGET_READY_MAX_WORKERS = int(os.environ.get("AURORA_DIRECT_TARGET_READY_MAX_WORKERS", "64"))
+DIRECT_TARGET_READY_TIMEOUT_S = float(os.environ.get("EXASERVE_DIRECT_TARGET_READY_TIMEOUT_S", "300"))
+DIRECT_TARGET_READY_PROBE_TIMEOUT_S = float(os.environ.get("EXASERVE_DIRECT_TARGET_READY_PROBE_TIMEOUT_S", "2"))
+DIRECT_TARGET_READY_INTERVAL_S = float(os.environ.get("EXASERVE_DIRECT_TARGET_READY_INTERVAL_S", "5"))
+DIRECT_TARGET_READY_MAX_WORKERS = int(os.environ.get("EXASERVE_DIRECT_TARGET_READY_MAX_WORKERS", "64"))
 
 
 def _init_mpi():
@@ -266,7 +266,7 @@ def _direct_health_paths(exp_config: EvalManifest) -> list[str]:
     try:
         from src.model_paths import get_model_route_name
     except ImportError:  # pragma: no cover - script-mode fallback
-        from aurora_rayserver.model_paths import get_model_route_name
+        from exaserve.model_paths import get_model_route_name
 
     paths = []
     for model_config in model_configs:

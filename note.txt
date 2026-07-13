@@ -145,7 +145,7 @@ Option B: Explicit per-node deployment sharding (more robust)
 You could restructure your deployment so that instead of one large deployment with 768 replicas all talking through a single ingress, you run one deployment per node (or per rack) and use your own request routing at the client or load-balancer level:
 Client → node-local HTTP proxy → VLLMWorker replicas on that node only
 In your current architecture, this would mean something like:
-Each node runs its own aurora_serve.py with num_replicas=12 (local tiles only)
+Each node runs its own exaserve_serve.py with num_replicas=12 (local tiles only)
 The client driver (your replay_client.py) distributes requests across nodes itself (round-robin, random, or by tracking per-node load via a lightweight sidecar)
 This is essentially what your system already does per-node — the issue is that Ray Serve then federates all of them under one global proxy which reintroduces the O(N-replicas) polling.
 Why this is the long-term right answer
@@ -156,7 +156,7 @@ For your null-compute experiment specifically at 64 nodes, the simpler fix (the 
 ================================================================================================================
 Why ray is not scaling? Why ray errors out at 2048 nodes?
 The Real Problem: serve.run() Deployment Time Exceeds the 20-Minute Timeout
-The actual failure is that serve.run() (line 509 of aurora_serve.py) blocks until all replicas report as RUNNING. With 24,576 replicas (2048 nodes × 12 tiles), this deployment takes far longer than the driver's 20-minute timeout (240 retries × 5s = 1200s). The deployment time scales roughly linearly (possibly super-linearly) with replica count:
+The actual failure is that serve.run() (line 509 of exaserve_serve.py) blocks until all replicas report as RUNNING. With 24,576 replicas (2048 nodes × 12 tiles), this deployment takes far longer than the driver's 20-minute timeout (240 retries × 5s = 1200s). The deployment time scales roughly linearly (possibly super-linearly) with replica count:
 Nodes	Replicas	serve.run() Time	Status
 256	3,072	99.58s (~1.7 min)	Success
 512	6,144	198.99s (~3.3 min)	Success

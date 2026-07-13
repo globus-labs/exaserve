@@ -4,7 +4,7 @@
 
 ### 1. Instrumentation overhead (solved in v3 commit 8cbc66b)
 `_collect_replica_traces()` read/deleted per-replica trace files on Lustre,
-adding ~615s at 128 nodes, ~1000s at 256 nodes. Fix: `AURORA_SCALING_TRACE=0`
+adding ~615s at 128 nodes, ~1000s at 256 nodes. Fix: `EXASERVE_SCALING_TRACE=0`
 default in `launch_cluster.sh`; all tracer I/O short-circuits when disabled.
 Propagated via Ray actor `runtime_env`.
 
@@ -69,7 +69,7 @@ Deploying 3072 replicas (256 nodes × 12 replicas/node) at 256 nodes:
 | Stage 3 (Deploy 3072 replicas via serve.run) | **1787s (~30 min)** | Highly variable; first attempt timed out at 1800s, succeeded at 1787s on retry |
 | **Total init** | **~30.5 min** | |
 
-The original `AURORA_SERVE_READY_TIMEOUT_S=1800` was too tight — the successful
+The original `EXASERVE_SERVE_READY_TIMEOUT_S=1800` was too tight — the successful
 run completed Stage 3 with only 13s to spare. Timeout is now configurable via
 env var, defaulting to 3600s.
 

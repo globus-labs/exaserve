@@ -3,7 +3,7 @@
 # Deploys vLLM for each config, runs saturation finder, collects results.
 # Usage: bash phase0_sweep.sh
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null
@@ -54,7 +54,7 @@ print(f'  Manifest written: max_ongoing={$MOR}')
 
     # Launch cluster
     echo "  Launching cluster..."
-    bash src/aurora_rayserver/resources/launch_cluster.sh "$STEP_DIR/runtime.yaml" > "$STEP_DIR/cluster.log" 2>&1 &
+    bash src/exaserve/resources/launch_cluster.sh "$STEP_DIR/runtime.yaml" > "$STEP_DIR/cluster.log" 2>&1 &
     CLUSTER_PID=$!
 
     # Wait for health

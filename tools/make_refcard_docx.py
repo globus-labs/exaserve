@@ -13,8 +13,8 @@ Needs:  tmp/ref_card/Academy_Framework_Reference_Card.docx as the template.
 import re
 import zipfile
 
-SRC = "/home/wenyiw/aurora_rayserver/tmp/ref_card/Academy_Framework_Reference_Card.docx"
-OUT = "/home/wenyiw/aurora_rayserver/doc/ExaServe_Reference_Card.docx"
+SRC = "/home/wenyiw/exaserve/tmp/ref_card/Academy_Framework_Reference_Card.docx"
+OUT = "/home/wenyiw/exaserve/doc/ExaServe_Reference_Card.docx"
 
 RUST = "9C4A2E"
 RUST_BORDER = "C2613F"
@@ -128,7 +128,7 @@ def callout(lead, text, fill):
                           (110, 170, 110, 150))
 
 
-IMG_DIR = "/home/wenyiw/aurora_rayserver/doc/figures"
+IMG_DIR = "/home/wenyiw/exaserve/doc/figures"
 _images = []  # (zip_target, src_path, relationship_id)
 
 
@@ -269,7 +269,7 @@ blocks.append(body_par(
 blocks.append(data_table([
     ["Component", "Description"],
     ["Launcher",
-     "aurora-serve-submit (batch, from a login node) or aurora-launch-cluster "
+     "exaserve-serve-submit (batch, from a login node) or exaserve-launch-cluster "
      "(interactive) bring up the whole stack on a PBS allocation"],
     ["MPI weight staging",
      "One-source-many-sinks MPI broadcast from the shared file system (e.g., Lustre) to "
@@ -292,7 +292,7 @@ blocks.append(heading(3, "Installation"))
 blocks.append(body_par(
     "The package installs into the Python provided by Aurora’s frameworks module, "
     "which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only the "
-    "aurora-rayserver package itself.", after=60,
+    "exaserve package itself.", after=60,
 ))
 blocks.append(code_block(
     "module load frameworks\n"
@@ -302,7 +302,7 @@ blocks.append(code_block(
     "# console scripts land in a frameworks-versioned bin dir; add it to PATH:\n"
     "export PATH=\"$(python3 -c 'import sysconfig; "
     "print(sysconfig.get_path(\"scripts\", \"posix_user\"))'):$PATH\"\n"
-    "which aurora-serve-submit   # verify"
+    "which exaserve-serve-submit   # verify"
 ))
 blocks.append(body_par(
     "One-time extras, each needed only for the feature that uses it: build HAProxy with "
@@ -319,7 +319,7 @@ blocks.append(body_par(
     "then query the printed URL from anywhere that can reach the head node:", after=60,
 ))
 blocks.append(code_block(
-    "aurora-serve-submit my_config.yaml --project-account YOUR_PROJECT --wait\n"
+    "exaserve-serve-submit my_config.yaml --project-account YOUR_PROJECT --wait\n"
     "# 8470123.aurora-pbs-0001...          <- PBS job id\n"
     "# http://x4310c1s0b0n0:4001           <- service URL\n"
     "\n"
@@ -469,14 +469,14 @@ blocks.append(body_par(
 ))
 blocks.append(data_table([
     ["Environment knob", "Effect"],
-    ["AURORA_ENGINE=sglang", "SGLang instead of vLLM as the inference engine"],
-    ["AURORA_PP_SHARD_AWARE=1",
+    ["EXASERVE_ENGINE=sglang", "SGLang instead of vLLM as the inference engine"],
+    ["EXASERVE_PP_SHARD_AWARE=1",
      "Shard-aware multi-node pipeline-parallel staging and node-pinned replicas "
      "(405B-class models)"],
-    ["AURORA_PP_UMBRELLA=1", "Single root-route ingress over the per-replica PP routes"],
-    ["AURORA_NULL_COMPUTE=1",
+    ["EXASERVE_PP_UMBRELLA=1", "Single root-route ingress over the per-replica PP routes"],
+    ["EXASERVE_NULL_COMPUTE=1",
      "Skip the engine and simulate latency — control-plane stress tests"],
-    ["AURORA_CLEAN_STAGE=1", "Wipe node-local staged weights first (cold-start timing)"],
+    ["EXASERVE_CLEAN_STAGE=1", "Wipe node-local staged weights first (cold-start timing)"],
 ], [3300, 6924]))
 blocks.append(body_par(
     "Scale cliffs and their fixes (Ray/vLLM patches at 256+ nodes, thread-pool clamps) "

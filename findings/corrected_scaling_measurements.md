@@ -1,7 +1,7 @@
 # Corrected Scaling Measurements (Overhead-Free)
 
 **Branch**: perf-inst-dev
-**Architecture**: probes write to node-local `/tmp/aurora_inst`; aurora_serve
+**Architecture**: probes write to node-local `/tmp/exaserve_inst`; exaserve_serve
 runs one Ray remote task per node to gather all files in-memory; head
 writes once per file per node to Lustre. Single MDS pass at the end of
 Stage 3, zero per-call Lustre load during the critical path.
@@ -95,17 +95,17 @@ would:
 
 ```
 During run:
-  ProxyActor.__init__             → /tmp/aurora_inst/proxy_init_<host>_<pid>.json (1 write/proxy)
+  ProxyActor.__init__             → /tmp/exaserve_inst/proxy_init_<host>_<pid>.json (1 write/proxy)
   ProxyActor.ready()              → appends to same file
   RunningReplicaInfo.get_actor_handle  → buffered CSV (flush every 500 calls)
-  RequestRouter.update_deployment_targets → /tmp/aurora_inst/router_updates_<pid>.jsonl
-  ServeController.run_control_loop_step  → /tmp/aurora_inst/controller_ticks_<pid>.jsonl (head only)
-  DeploymentStateManager.update() → /tmp/aurora_inst/dsm_updates_<pid>.jsonl (head only)
+  RequestRouter.update_deployment_targets → /tmp/exaserve_inst/router_updates_<pid>.jsonl
+  ServeController.run_control_loop_step  → /tmp/exaserve_inst/controller_ticks_<pid>.jsonl (head only)
+  DeploymentStateManager.update() → /tmp/exaserve_inst/dsm_updates_<pid>.jsonl (head only)
 
 End of Stage 3 (after wait_for_proxies_serving returns):
-  aurora_serve._collect_instrumentation_all runs Ray remote task per node
-  → each task reads /tmp/aurora_inst/*, returns bytes in-memory to head
-  → head writes each file ONCE to $AURORA_RUN_LOG_DIR/instrumentation/<host>/<file>
+  exaserve_serve._collect_instrumentation_all runs Ray remote task per node
+  → each task reads /tmp/exaserve_inst/*, returns bytes in-memory to head
+  → head writes each file ONCE to $EXASERVE_RUN_LOG_DIR/instrumentation/<host>/<file>
 
 Total Lustre ops: ~1238 files across 32 nodes = ~1.4 MB total per scale run.
 One open/write/close per file.
@@ -117,13 +117,13 @@ One open/write/close per file.
   - `a7fc2b7` — common.py buffered writes
   - `1504cda` — all probes write to /tmp (was Lustre)
 - Main:
-  - `a1befd1` — aurora_serve._collect_instrumentation_all
+  - `a1befd1` — exaserve_serve._collect_instrumentation_all
 
 ## Reproducibility
 
 ```bash
 module load frameworks go/1.25.3
-PYTHONPATH=/home/wenyiw/aurora_rayserver python3 -m eval.cli run materialize weakscaling_nullcompute_proxy
+PYTHONPATH=/home/wenyiw/exaserve python3 -m eval.cli run materialize weakscaling_nullcompute_proxy
 # edit job.pbs to use reservation queue if needed
 qsub /lus/flare/.../runN/{scale}-nodes/job/job.pbs
 

@@ -1,4 +1,4 @@
-"""Shared plotting style for the Aurora Ray Serve eval figures.
+"""Shared plotting style for the ExaServe eval figures.
 
 Single source of truth so the SAME experiment type looks identical across every
 figure:

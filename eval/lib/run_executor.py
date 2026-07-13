@@ -180,7 +180,7 @@ def _build_hostfile(client_nodes: int) -> str:
         raise RuntimeError(
             f"Requested {client_nodes} replay client nodes, but only found {len(nodes)} in PBS_NODEFILE"
         )
-    fd, path = tempfile.mkstemp(prefix="aurora_eval_hosts_", text=True)
+    fd, path = tempfile.mkstemp(prefix="exaserve_eval_hosts_", text=True)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         for node in nodes[:client_nodes]:
             handle.write(node + "\n")

@@ -15,7 +15,7 @@ Built from code walkthrough and experiment logs (v3 weak-scaling runs).
    - `RAY_num_server_call_thread=4`, gRPC thread clamping — prevents thread exhaustion at scale
    - `RAY_gcs_server_num_threads=8` — helps GCS handle 256+ node registration storms
    - `RAYON_NUM_THREADS=1`, `TOKENIZERS_PARALLELISM=false` — prevents HF tokenizer thread pool panic at 128+ nodes
-   - `AURORA_SCALING_TRACE=0` — disables per-replica Lustre trace I/O (saves 10+ min at 128n)
+   - `EXASERVE_SCALING_TRACE=0` — disables per-replica Lustre trace I/O (saves 10+ min at 128n)
 5. Installs `sitecustomize.py` in user site-packages to monkey-patch Ray Serve proxy timeouts in ALL Python processes (including the ServeController actor which runs as a separate process)
 6. Launches `mpiexec -n $NODE_COUNT -ppn 1 python src/driver.py`
 
@@ -30,12 +30,12 @@ Built from code walkthrough and experiment logs (v3 weak-scaling runs).
    `--block` keeps the subprocess alive (loops sleeping 1s monitoring child processes),
    but does NOT wait for GCS readiness or any nodes to join.
 
-2. **Launch aurora_serve.py** — `subprocess.Popen("python src/aurora_serve.py --config ...")`.
+2. **Launch exaserve_serve.py** — `subprocess.Popen("python src/exaserve_serve.py --config ...")`.
    Non-blocking. Output is relayed through `ProcessOutputRelay` which scans for the
    readiness marker `"CLUSTER FULLY READY"`.
 
-3. **Wait for readiness marker** — blocks until aurora_serve prints `CLUSTER FULLY READY`
-   (timeout: `AURORA_SERVE_READY_TIMEOUT_S`, default 3600s = 1 hour).
+3. **Wait for readiness marker** — blocks until exaserve_serve prints `CLUSTER FULLY READY`
+   (timeout: `EXASERVE_SERVE_READY_TIMEOUT_S`, default 3600s = 1 hour).
 
 4. **HTTP health check** — polls `GET /health` on localhost:8000 to confirm Ray Serve
    HTTP routes are live. Timeout: `RAY_SERVE_HEALTH_TIMEOUT_S` (1800s = 30 min).
@@ -45,7 +45,7 @@ Built from code walkthrough and experiment logs (v3 weak-scaling runs).
 
 6. **Print `ALL SERVICES READY`** — run_executor watches for this to start the replay client.
 
-7. **Block** — `serve_process.wait()` keeps the head node alive until aurora_serve exits.
+7. **Block** — `serve_process.wait()` keeps the head node alive until exaserve_serve exits.
 
 ### Rank 1+ (Worker Nodes)
 
@@ -57,10 +57,10 @@ Built from code walkthrough and experiment logs (v3 weak-scaling runs).
 2. **Block** — `ray_process.wait()` keeps the worker alive until Ray dies or is killed.
 
 **Key insight:** There is no explicit barrier between "all workers started" and
-"aurora_serve begins". Workers register with GCS asynchronously, and aurora_serve
+"exaserve_serve begins". Workers register with GCS asynchronously, and exaserve_serve
 polls `ray.cluster_resources()` to detect them (see Stage 3 — GPU Poll).
 
-## Stage 2 — Serve Init (`aurora_serve.py`)
+## Stage 2 — Serve Init (`exaserve_serve.py`)
 
 Runs as a subprocess on the head node, launched by driver.py rank 0.
 **Observed: ~47s constant regardless of cluster size (1 to 256 nodes).**
@@ -123,7 +123,7 @@ copies the value before our hook fires. The env var is the only reliable mechani
 60s gives 2× headroom over the 30s metrics timeout, and is constant regardless of
 node count since all proxy readiness checks run in parallel.
 
-## Stage 3 — GPU Poll (`aurora_serve.py`)
+## Stage 3 — GPU Poll (`exaserve_serve.py`)
 
 - Polls `ray.cluster_resources()` + `ray.nodes()` in a loop (15s sleep between polls)
 - Waits until `total_gpus >= expected_gpus` (100% — changed from 95%)
@@ -134,7 +134,7 @@ node count since all proxy readiness checks run in parallel.
 that's 12 nodes. This was presumably pragmatic for straggler tolerance but could
 mask real failures.
 
-## Stage 4 — Model Deployment (`aurora_serve.py`)
+## Stage 4 — Model Deployment (`exaserve_serve.py`)
 
 ### 4a. Resolve staged models
 
@@ -262,7 +262,7 @@ flag to minimize queue time.
 
 ## Known Issues & Action Items
 
-- **GCS sleep was redundant** — aurora_serve's retry loop handles GCS readiness.
+- **GCS sleep was redundant** — exaserve_serve's retry loop handles GCS readiness.
   **Fixed:** Removed `time.sleep()` in driver.py.
 - **Metrics agent timeout wastes ~30s** — hardcoded `constexpr` in C++, not
   configurable at runtime. Official Ray position: *"doing no monitoring at all

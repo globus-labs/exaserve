@@ -1,4 +1,4 @@
-// Minimal Pingora-based HTTP load balancer for the Aurora Ray Serve
+// Minimal Pingora-based HTTP load balancer for the ExaServe
 // benchmarks. Reads a YAML config that lists upstream Ray Serve nodes and
 // the listen port, then proxies all requests round-robin or least-request.
 //
@@ -22,7 +22,7 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(version, about = "Pingora-based HTTP LB for Ray Serve nodes")]
 struct Cli {
-    /// Path to the YAML config produced by aurora_rayserver.proxy.pingora_proxy.
+    /// Path to the YAML config produced by exaserve.proxy.pingora_proxy.
     #[arg(short, long)]
     config: String,
 }

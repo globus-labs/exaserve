@@ -1,5 +1,5 @@
 name: pp2_shard_4node
-# Shard-aware PP integration test (run with AURORA_PP_SHARD_AWARE=1):
+# Shard-aware PP integration test (run with EXASERVE_PP_SHARD_AWARE=1):
 # Llama-3-8B PP=2 (TP=1) x 2 replicas on 4 nodes -> 4 stage-nodes, 1 stage each.
 # Validates the full path: two-group bcast stages each node ONLY its stage's
 # shards (post-ray.init, sharing ordered_pp_nodes() with the node-pinned deploy),

@@ -3,7 +3,7 @@
 # Runs against a live Ray Serve deployment on the same node.
 # Usage: bash burst_test.sh <server_url>
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 module load frameworks 2>/dev/null || true
 module load go 2>/dev/null || true

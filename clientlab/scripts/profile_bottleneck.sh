@@ -3,7 +3,7 @@
 # Runs a replay workload against an already-running cluster.
 # Usage: bash profile_bottleneck.sh <server_url> <target_rps> <duration_s> <output_dir>
 exec 2>&1
-cd /home/wenyiw/aurora_rayserver
+cd /home/wenyiw/exaserve
 
 source /opt/cray/pe/lmod/default/init/bash 2>/dev/null
 source /etc/bash.bashrc 2>/dev/null
