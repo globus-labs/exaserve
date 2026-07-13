@@ -5,10 +5,10 @@ package: exaserve
 install: module load frameworks && pip install --user .
 language: python
 python_requires: ">=3.10"
-docs: https://github.com/wenyiwang-us/ExaServe/blob/main/README.md
-source: https://github.com/wenyiwang-us/ExaServe
-examples: https://github.com/wenyiwang-us/ExaServe/tree/main/examples
-benchmarks: https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard
+docs: https://github.com/wenyiwang-us/exaserve/blob/main/README.md
+source: https://github.com/wenyiwang-us/exaserve
+examples: https://github.com/wenyiwang-us/exaserve/tree/main/examples
+benchmarks: https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard
 reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
 ---
 
@@ -22,7 +22,7 @@ Installs into the Python provided by Aurora's `frameworks` module, which already
 
 ```bash
 module load frameworks
-git clone https://github.com/wenyiwang-us/ExaServe && cd ExaServe
+git clone https://github.com/wenyiwang-us/exaserve && cd exaserve
 python3 -m pip install --user .
 
 # console scripts land in a frameworks-versioned bin dir; add it to PATH:
@@ -96,7 +96,7 @@ curl -sS -X POST "http://x4310c1s0b0n0:4001/v1/chat/completions" \
 qdel 8470123
 ```
 
-Ready-to-customize templates: [examples/](https://github.com/wenyiwang-us/ExaServe/tree/main/examples) — `config.haproxy.yaml`, `config.litellm.yaml`, `config.reference.yaml` (every field, annotated).
+Ready-to-customize templates: [examples/](https://github.com/wenyiwang-us/exaserve/tree/main/examples) — `config.haproxy.yaml`, `config.litellm.yaml`, `config.reference.yaml` (every field, annotated).
 
 ## Deployment recipes
 
@@ -178,7 +178,7 @@ python -m eval.cli run submit-all refcard_smoke_1node
 python -m eval.plot.goodput -e refcard_smoke_1node --preset paper
 ```
 
-Full spec schema: [eval/DESIGN.md](https://github.com/wenyiwang-us/ExaServe/blob/main/eval/DESIGN.md).
+Full spec schema: [eval/DESIGN.md](https://github.com/wenyiwang-us/exaserve/blob/main/eval/DESIGN.md).
 
 ## Serving LLM agents and OpenAI-compatible clients
 
@@ -193,13 +193,13 @@ export OPENAI_API_KEY=EMPTY
 
 | Example | What | Location |
 |---|---|---|
-| `examples/config.haproxy.yaml` | 2-node quickstart: 24 replicas behind one HAProxy endpoint | [examples/](https://github.com/wenyiwang-us/ExaServe/tree/main/examples) |
-| `refcard_smoke_1node` | 1-node benchmark smoke: deploy → replay → TTFT/TBT → SLO score | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
-| `refcard_weakscaling_haproxy` | 8B weak scaling behind HAProxy, 1→64 nodes (extend to 256): 27.1k req/s non-streaming at 256n; streaming plateaus ~4.7k on the head-node network | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
-| `refcard_pp405b_2node` | 405B TP8×PP2 demo on one 2-node replica: 30/30 streaming | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
-| `refcard_pp405b_scale` | 405B weak scaling 2→128 replicas (4→256 nodes) at fixed per-replica load: 0.7 → 31.0 query/s (streaming, 67% efficiency) | [eval/specs/refcard/](https://github.com/wenyiwang-us/ExaServe/tree/main/eval/specs/refcard) |
+| `examples/config.haproxy.yaml` | 2-node quickstart: 24 replicas behind one HAProxy endpoint | [examples/](https://github.com/wenyiwang-us/exaserve/tree/main/examples) |
+| `refcard_smoke_1node` | 1-node benchmark smoke: deploy → replay → TTFT/TBT → SLO score | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
+| `refcard_weakscaling_haproxy` | 8B weak scaling behind HAProxy, 1→64 nodes (extend to 256): 27.1k req/s non-streaming at 256n; streaming plateaus ~4.7k on the head-node network | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
+| `refcard_pp405b_2node` | 405B TP8×PP2 demo on one 2-node replica: 30/30 streaming | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
+| `refcard_pp405b_scale` | 405B weak scaling 2→128 replicas (4→256 nodes) at fixed per-replica load: 0.7 → 31.0 query/s (streaming, 67% efficiency) | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
 
-Deeper profiling and scaling analyses: [findings/](https://github.com/wenyiwang-us/ExaServe/tree/main/findings).
+Deeper profiling and scaling analyses: [findings/](https://github.com/wenyiwang-us/exaserve/tree/main/findings).
 
 ## Citation
 

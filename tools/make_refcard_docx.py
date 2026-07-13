@@ -215,7 +215,7 @@ blocks.append(par(run("EXASERVE", sz=48, b=True, color=RUST)))
 blocks.append(par(run("Framework Reference Card", sz=30, b=True), after=40))
 blocks.append(par(
     run("Scaling LLM Inference on HPC  —  One OpenAI-Compatible Endpoint "
-        "from N Compute Nodes  •  github.com/wenyiwang-us/ExaServe",
+        "from N Compute Nodes  •  github.com/wenyiwang-us/exaserve",
         sz=19, color=GRAYTXT),
     after=140, pbdr=(18, 4),
 ))
@@ -298,7 +298,7 @@ blocks.append(body_par(
 ))
 blocks.append(code_block(
     "module load frameworks\n"
-    "git clone https://github.com/wenyiwang-us/ExaServe && cd ExaServe\n"
+    "git clone https://github.com/wenyiwang-us/exaserve && cd exaserve\n"
     "python3 -m pip install --user .\n"
     "\n"
     "# console scripts land in a frameworks-versioned bin dir; add it to PATH:\n"
@@ -508,11 +508,11 @@ blocks.append(heading(7, "Examples and Resources"))
 blocks.append(body_par(
     "Runnable configurations and benchmark specifications live in the repository; code is "
     "linked rather than copied here. Paths are relative to "
-    "github.com/wenyiwang-us/ExaServe."
+    "github.com/wenyiwang-us/exaserve."
 ))
 blocks.append(data_table([
     ["Resource", "Location"],
-    ["Source code", "github.com/wenyiwang-us/ExaServe"],
+    ["Source code", "github.com/wenyiwang-us/exaserve"],
     ["Documentation", "README.md — install, configuration, console-script reference"],
     ["Machine-actionable card",
      "doc/exaserve.md — markdown version of this card for coding agents"],
