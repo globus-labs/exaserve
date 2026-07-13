@@ -29,7 +29,6 @@ from .base import (  # noqa: F401
     GenDelta,
     GenResult,
     NullEngine,
-    SamplingParams,
 )
 
 _REGISTRY: Dict[str, Type[EngineBackend]] = {}
@@ -89,7 +88,6 @@ __all__ = [
     "available_engines",
     "EngineBackend",
     "EngineSpec",
-    "SamplingParams",
     "GenResult",
     "GenDelta",
     "EngineCaps",

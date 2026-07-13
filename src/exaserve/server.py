@@ -869,14 +869,15 @@ def _serving_stats_push_loop(period_s=None):
 
 @serve.deployment
 @serve.ingress(app)
-class VLLMWorker:
-    """
-    Single Ray Serve deployment that handles OpenAI-format HTTP requests and
-    runs vLLM inference on one GPU tile.
+class EngineWorker:
+    """Single Ray Serve deployment: OpenAI-format HTTP ingress on one GPU tile,
+    delegating inference to a pluggable EngineBackend (vLLM / SGLang / null).
 
-    Set null_compute=True to skip the vLLM engine entirely and simulate
-    inference with a configurable sleep (useful for isolating Ray/routing
-    overhead from actual inference cost).
+    The engine is selected by ``engine_name`` (from EXASERVE_ENGINE) or replaced
+    by NullEngine when ``null_compute`` is set. This host owns everything engine-
+    agnostic — the HTTP surface, per-tile placement wiring (via deploy_model),
+    stats, and the readiness warmup — while each EngineBackend owns device
+    isolation + engine creation + generation. See exaserve.engines.
     """
 
     def __init__(
@@ -891,201 +892,74 @@ class VLLMWorker:
         enforce_eager: bool = True,
         max_num_seqs: int = None,
         collect_stats: bool = False,
+        engine_name: str = "vllm",
     ):
+        from .engines import EngineSpec, NullEngine, get_engine
+
         init_start = time.time()
-        init_mono = time.monotonic()
         pid = os.getpid()
         hostname = socket.gethostname()
         self.model_id = model_id
         self.null_compute = null_compute
-        self.stats_collector = None
-        self._collect_stats = collect_stats
 
-        gpu_ids = [int(gpu_id) for gpu_id in ray.get_gpu_ids()]
+        gpu_ids = []
+        for g in ray.get_gpu_ids():
+            try:
+                gpu_ids.append(int(g))
+            except (ValueError, TypeError):
+                pass  # non-integer Ray GPU id (e.g. test harness) -> skip mask
         device_id = gpu_ids[0] if gpu_ids else 0
 
-        if null_compute:
-            self.latency = float(os.environ.get("EXASERVE_NULL_COMPUTE_LATENCY", "1.0"))
-            print(
-                f"[VLLMWorker pid={pid}] NullCompute mode on tile {device_id} "
-                f"(latency={self.latency:.2f}s, no vLLM engine)",
-                flush=True,
-            )
-            total_s = time.time() - init_start
-            print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
-            from .scaling_trace import report_replica_stats
-            report_replica_stats({
-                "pid": pid, "hostname": hostname, "model_id": model_id,
-                "device_id": device_id, "null_compute": True,
-                "total_init_s": round(total_s, 4),
-            })
-            return
+        spec = EngineSpec(
+            model_id=model_id,
+            local_path=local_model_path or model_id,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=gpu_memory_utilization,
+            enforce_eager=enforce_eager,
+            max_num_seqs=max_num_seqs,
+            device_ids=gpu_ids,
+            collect_stats=collect_stats,
+        )
 
-        # ---- Device isolation ------------------------------------------------
-        t0 = time.monotonic()
-        if gpu_ids:
-            affinity_mask = ",".join(str(gpu_id) for gpu_id in gpu_ids)
-            os.environ["ZE_AFFINITY_MASK"] = affinity_mask
-            os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
+        if null_compute:
+            latency = float(os.environ.get("EXASERVE_NULL_COMPUTE_LATENCY", "1.0"))
+            self.backend = NullEngine(latency_s=latency)
             print(
-                f"[VLLMWorker pid={pid}] Assigned GPU tiles {gpu_ids} "
-                f"ZE_AFFINITY_MASK={affinity_mask} "
-                "ONEAPI_DEVICE_SELECTOR=<unset>",
+                f"[EngineWorker pid={pid}] NullCompute mode on tile {device_id} "
+                f"(latency={latency:.2f}s, no engine)",
                 flush=True,
             )
         else:
-            os.environ.pop("ZE_AFFINITY_MASK", None)
-            os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
-            print(
-                f"[VLLMWorker pid={pid}] No Ray GPUs assigned to coordinator actor; "
-                f"waiting for vLLM Ray workers to claim GPUs",
-                flush=True,
-            )
-        device_isolation_s = time.monotonic() - t0
+            self.backend = get_engine(engine_name)
 
-        # ---- Distributed init port -------------------------------------------
-        t0 = time.monotonic()
-        master_addr = "127.0.0.1"
-        bind_host = "127.0.0.1"
-        if pipeline_parallel_size > 1:
-            if not async_engine_arg_supported("pipeline_parallel_size"):
-                raise RuntimeError(
-                    "Installed vLLM build does not expose pipeline_parallel_size on "
-                    "AsyncEngineArgs. Validate the Aurora runtime before using PP."
-                )
-            # Unconditional: the VLLM_TARGET_DEVICE gate silently skipped this
-            # when the env var was absent, leaving the compiled DAG enabled —
-            # which crashes XPU workers in Ray's accelerator context at first
-            # inference. We only deploy on XPU.
-            os.environ.setdefault("EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG", "1")
-            os.environ.setdefault("EXASERVE_XPU_VLLM_FORCE_RAY_CHANNEL_TYPE", "auto")
-            # The EngineCore is a multiprocessing-spawn child that never
-            # imports exaserve, so the vLLM executor patches in
-            # _sitecustomize (incl. the uncompiled-PP fallback these env vars
-            # select) are otherwise inert exactly where the Ray executor
-            # lives. Prepend a node-local sitecustomize shim so the spawned
-            # interpreter applies them at startup.
-            shim_dir = "/tmp/exaserve_pp_shim"
-            try:
-                os.makedirs(shim_dir, exist_ok=True)
-                shim_path = os.path.join(shim_dir, "sitecustomize.py")
-                if not os.path.exists(shim_path):
-                    with open(shim_path, "w", encoding="utf-8") as shim_fh:
-                        shim_fh.write(
-                            "try:\n"
-                            "    import exaserve._sitecustomize  # noqa: F401\n"
-                            "except Exception:\n"
-                            "    pass\n"
-                        )
-                existing_pp = os.environ.get("PYTHONPATH", "")
-                if shim_dir not in existing_pp.split(os.pathsep):
-                    os.environ["PYTHONPATH"] = (
-                        shim_dir + (os.pathsep + existing_pp if existing_pp else "")
-                    )
-            except OSError as shim_exc:
-                print(
-                    f"[VLLMWorker pid={pid}] WARNING: PP sitecustomize shim "
-                    f"setup failed: {shim_exc}",
-                    flush=True,
-                )
-            master_addr = get_ray_node_ip() or get_hsn_ip()
-            bind_host = "0.0.0.0"
-            os.environ["VLLM_HOST_IP"] = master_addr
+        self.backend.create(spec)
 
-        port = get_open_port(23000 + device_id * 100, bind_host=bind_host)
-        if port is None:
-            raise RuntimeError(f"No free port for distributed init (device {device_id})")
-        os.environ["MASTER_ADDR"] = master_addr
-        os.environ["MASTER_PORT"] = str(port)
-        dist_setup_s = time.monotonic() - t0
-        print(
-            f"[VLLMWorker pid={pid}] Using distributed master {master_addr}:{port} "
-            f"(PP={pipeline_parallel_size})",
-            flush=True,
-        )
+        total_s = time.time() - init_start
+        print_red(f"[EngineWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
 
-        # ---- vLLM async engine -----------------------------------------------
-        model_path = local_model_path or model_id
-        engine_kwargs = dict(
-            model=model_path,
-            tensor_parallel_size=tensor_parallel_size,
-            master_addr=master_addr,
-            master_port=port,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            enforce_eager=enforce_eager,
-        )
-        if max_num_seqs is not None:
-            engine_kwargs["max_num_seqs"] = max_num_seqs
-        if pipeline_parallel_size > 1:
-            engine_kwargs["pipeline_parallel_size"] = pipeline_parallel_size
-            engine_kwargs["distributed_executor_backend"] = "ray"
-
-        # -- Sub-phase: AsyncEngineArgs construction --
-        from vllm.engine.arg_utils import AsyncEngineArgs
-        from vllm.engine.async_llm_engine import AsyncLLMEngine
-        t0 = time.monotonic()
-        engine_args = AsyncEngineArgs(**engine_kwargs)
-        if not hasattr(engine_args, "enable_log_requests"):
-            engine_args.enable_log_requests = True
-        engine_args_s = time.monotonic() - t0
-
-        print(f"[VLLMWorker pid={pid}] Creating vLLM engine for {model_id}...", flush=True)
-
-        # -- Sub-phase: engine creation (weight loading + GPU init + KV cache) --
-        engine_start = time.monotonic()
-        extra_engine_kwargs = {}
-        if self._collect_stats:
-            extra_engine_kwargs["stat_loggers"] = [CollectingStatLogger]
-        self.engine = AsyncLLMEngine.from_engine_args(engine_args, **extra_engine_kwargs)
-        engine_create_s = time.monotonic() - engine_start
-        print_red(f"[VLLMWorker pid={pid}] Engine creation: {engine_create_s:.2f}s")
-
-        if self._collect_stats:
-            self.stats_collector = CollectingStatLogger.get_instance()
-            if self.stats_collector is not None:
-                print(f"[VLLMWorker pid={pid}] Stats collection enabled", flush=True)
-            else:
-                print(f"[VLLMWorker pid={pid}] WARNING: CollectingStatLogger not instantiated by engine", flush=True)
-            # Start the head-ward serving-stats push (daemon; best-effort).
-            try:
-                import threading
-                threading.Thread(target=_serving_stats_push_loop, daemon=True).start()
-                print(f"[VLLMWorker pid={pid}] serving-stats push thread started", flush=True)
-            except Exception as _e:
-                print(f"[VLLMWorker pid={pid}] serving-stats push thread failed: {_e}", flush=True)
-
-        total_s = time.monotonic() - init_mono
-        print_red(f"[VLLMWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
-
-        # -- Record replica init breakdown for trace --
+        from .scaling_trace import report_replica_stats
         replica_info = {
             "pid": pid,
             "hostname": hostname,
             "model_id": model_id,
             "device_id": device_id,
-            "gpu_ids": gpu_ids,
-            "null_compute": False,
-            "tensor_parallel_size": tensor_parallel_size,
-            "pipeline_parallel_size": pipeline_parallel_size,
+            "null_compute": null_compute,
             "total_init_s": round(total_s, 4),
-            "device_isolation_s": round(device_isolation_s, 4),
-            "dist_setup_s": round(dist_setup_s, 4),
-            "engine_args_s": round(engine_args_s, 4),
-            "engine_create_s": round(engine_create_s, 4),
             "wall_start": init_start,
             "wall_end": time.time(),
         }
-        # Parse EngineCore sub-phase timings from this replica's own Ray log.
-        # from_engine_args() blocks until model loading completes, so the
-        # log lines exist by this point. Each replica reads its own log
-        # (local /tmp), giving per-replica, per-GPU attribution.
-        engine_sub = _parse_own_engine_log(pid)
-        if engine_sub:
-            replica_info["engine_sub_phases"] = engine_sub
-
-        from .scaling_trace import report_replica_stats
+        init_stats = getattr(self.backend, "init_stats", None)
+        if callable(init_stats):
+            replica_info.update(init_stats())
         report_replica_stats(replica_info)
+
+    async def reconfigure(self, user_config):
+        """Serve awaits this pre-healthy when a deployment sets user_config (see
+        deploy_model). Engines that need a warmup (e.g. SGLang JIT kernels) run it
+        here; others are a no-op."""
+        await self.backend.warmup()
 
     # ---- HTTP endpoints ------------------------------------------------------
 
@@ -1095,39 +969,18 @@ class VLLMWorker:
 
     @app.get("/stats")
     async def stats(self):
-        """Per-replica live stats from CollectingStatLogger (if enabled) or basic info."""
         pid = os.getpid()
         if self.null_compute:
             return JSONResponse({"pid": pid, "model": self.model_id, "null_compute": True})
         result = {"pid": pid, "model": self.model_id}
-        collector = CollectingStatLogger.get_instance()
-        if collector is not None:
-            snaps = collector.scheduler_snapshots
-            reqs = collector.finished_requests
-            result["latest_scheduler"] = snaps[-1] if snaps else None
-            result["total_finished_requests"] = len(reqs)
-            result["scheduler_snapshot_count"] = len(snaps)
+        result.update(self.backend.live_stats())
         return JSONResponse(result)
 
     def collect_stats(self) -> dict:
-        """Return buffered stats. Called via ray.get(actor_handle.collect_stats.remote())."""
-        pid = os.getpid()
-        if self.stats_collector is None:
-            return {"pid": pid, "model": self.model_id, "error": "stats collection not enabled"}
-        data = self.stats_collector.to_dict()
-        data["pid"] = pid
-        data["model"] = self.model_id
-        reqs = data["finished_requests"]
-        snaps = data["scheduler_snapshots"]
-        data["summary"] = {
-            "total_requests": len(reqs),
-            "mean_batch_size": sum(s["running"] for s in snaps) / max(len(snaps), 1),
-            "max_batch_size": max((s["running"] for s in snaps), default=0),
-            "mean_e2e_latency": sum(r["e2e_latency"] for r in reqs) / max(len(reqs), 1),
-            "mean_queued_time": sum(r["queued_time"] for r in reqs) / max(len(reqs), 1),
-            "mean_prefill_time": sum(r["prefill_time"] for r in reqs) / max(len(reqs), 1),
-            "kv_cache_peak": max((s["kv_cache_usage"] for s in snaps), default=0),
-        }
+        """Called via ray.get(actor_handle.collect_stats.remote())."""
+        data = self.backend.collect_stats()
+        data.setdefault("pid", os.getpid())
+        data.setdefault("model", self.model_id)
         return data
 
     @app.get("/v1/models")
@@ -1153,76 +1006,82 @@ class VLLMWorker:
         stream = body.get("stream", False)
         add_generation_prompt = bool(body.get("add_generation_prompt", True))
         continue_final_message = bool(body.get("continue_final_message", False))
+        sampling = self._parse_sampling(body)
 
-        sampling_kwargs: dict = {}
-        for key in ("temperature", "top_p"):
-            if key in body:
-                sampling_kwargs[key] = float(body[key])
-        for key in ("max_tokens", "min_tokens"):
-            if key in body:
-                sampling_kwargs[key] = int(body[key])
-        if "stop" in body:
-            sampling_kwargs["stop"] = body["stop"]
-        if body.get("ignore_eos"):
-            sampling_kwargs["ignore_eos"] = True
-        sampling_kwargs.setdefault("temperature", 0.7)
-        sampling_kwargs.setdefault("max_tokens", 1024)
-
-        if self.null_compute:
-            prompt = _chat_messages_to_plain_prompt(
-                messages,
-                add_generation_prompt=add_generation_prompt
-                and not continue_final_message,
-            )
-        else:
-            tokenizer = self.engine.get_tokenizer()
-            chat_template = body.get("chat_template")
-            chat_template_kwargs = body.get("chat_template_kwargs") or {}
-            try:
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=add_generation_prompt,
-                    continue_final_message=continue_final_message,
-                    chat_template=chat_template,
-                    **chat_template_kwargs,
-                )
-            except ValueError as exc:
-                if "chat_template" not in str(exc):
-                    raise
-                print(
-                    "[ExaServe] Tokenizer has no chat template; "
-                    f"falling back to plain-text prompt for {self.model_id}",
-                    flush=True,
-                )
-                prompt = _chat_messages_to_plain_prompt(
-                    messages,
-                    add_generation_prompt=add_generation_prompt
-                    and not continue_final_message,
-                )
+        prompt = self.backend.build_chat_prompt(
+            messages,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            chat_template=body.get("chat_template"),
+            chat_template_kwargs=body.get("chat_template_kwargs") or {},
+        )
 
         request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        sampling_kwargs["_request_id"] = request_id
-
+        sampling["_request_id"] = request_id
         if stream:
             return StreamingResponse(
-                self._stream(request_id, prompt, sampling_kwargs),
+                self._chat_stream(request_id, prompt, sampling),
                 media_type="text/event-stream",
             )
-        return await self._non_stream(request_id, prompt, sampling_kwargs)
+        return await self._chat_non_stream(request_id, prompt, sampling)
+
+    @app.post("/v1/completions")
+    async def completions(self, request: Request):
+        body = await request.json()
+        prompt = body.get("prompt", "")
+        stream = body.get("stream", False)
+        sampling = self._parse_sampling(body)
+        request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
+        sampling["_request_id"] = request_id
+        if stream:
+            return StreamingResponse(
+                self._completion_stream(request_id, prompt, sampling),
+                media_type="text/event-stream",
+            )
+        res = await self.backend.generate(prompt, sampling)
+        if res.error:
+            return JSONResponse({"error": res.error}, status_code=500)
+        return JSONResponse(
+            {
+                "id": request_id,
+                "object": "text_completion",
+                "created": int(time.time()),
+                "model": self.model_id,
+                "choices": [
+                    {"index": 0, "text": res.text, "finish_reason": res.finish_reason}
+                ],
+                "usage": {
+                    "prompt_tokens": res.prompt_tokens,
+                    "completion_tokens": res.completion_tokens,
+                    "total_tokens": res.prompt_tokens + res.completion_tokens,
+                },
+            }
+        )
 
     # ---- Internal helpers ----------------------------------------------------
 
-    async def _non_stream(self, request_id: str, prompt: str, sampling_kwargs: dict):
-        result = (
-            await self._null_generate(prompt, sampling_kwargs)
-            if self.null_compute
-            else await self._generate(prompt, sampling_kwargs)
-        )
+    @staticmethod
+    def _parse_sampling(body: dict) -> dict:
+        """OpenAI request body -> neutral sampling dict (each backend re-maps)."""
+        sampling: dict = {}
+        for key in ("temperature", "top_p"):
+            if key in body:
+                sampling[key] = float(body[key])
+        for key in ("max_tokens", "min_tokens"):
+            if key in body:
+                sampling[key] = int(body[key])
+        if "stop" in body:
+            sampling["stop"] = body["stop"]
+        if body.get("ignore_eos"):
+            sampling["ignore_eos"] = True
+        sampling.setdefault("temperature", 0.7)
+        sampling.setdefault("max_tokens", 1024)
+        return sampling
 
-        if "error" in result:
-            return JSONResponse({"error": result["error"]}, status_code=500)
-
+    async def _chat_non_stream(self, request_id: str, prompt: str, sampling: dict):
+        res = await self.backend.generate(prompt, sampling)
+        if res.error:
+            return JSONResponse({"error": res.error}, status_code=500)
         return JSONResponse(
             {
                 "id": request_id,
@@ -1232,490 +1091,79 @@ class VLLMWorker:
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": result["text"]},
-                        "finish_reason": result["finish_reason"],
+                        "message": {"role": "assistant", "content": res.text},
+                        "finish_reason": res.finish_reason,
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": result["prompt_tokens"],
-                    "completion_tokens": result["completion_tokens"],
-                    "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
+                    "prompt_tokens": res.prompt_tokens,
+                    "completion_tokens": res.completion_tokens,
+                    "total_tokens": res.prompt_tokens + res.completion_tokens,
                 },
             }
         )
 
-    async def _stream(self, request_id: str, prompt: str, sampling_kwargs: dict):
+    async def _chat_stream(self, request_id: str, prompt: str, sampling: dict):
         created = int(time.time())
-        gen = (
-            self._null_generate_stream(prompt, sampling_kwargs)
-            if self.null_compute
-            else self._generate_stream(prompt, sampling_kwargs)
-        )
-
         usage = None
-        async for chunk in gen:
-            delta = chunk.get("delta", "")
-            finish_reason = chunk.get("finish_reason")
-
-            if "prompt_tokens" in chunk:
+        async for chunk in self.backend.generate_stream(prompt, sampling):
+            if chunk.finish_reason is not None:
                 usage = {
-                    "prompt_tokens": chunk["prompt_tokens"],
-                    "completion_tokens": chunk["completion_tokens"],
-                    "total_tokens": chunk["prompt_tokens"] + chunk["completion_tokens"],
+                    "prompt_tokens": chunk.prompt_tokens,
+                    "completion_tokens": chunk.completion_tokens,
+                    "total_tokens": chunk.prompt_tokens + chunk.completion_tokens,
                 }
-
-            if delta:
+            if chunk.delta:
                 sse = {
                     "id": request_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": self.model_id,
-                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                    "choices": [{"index": 0, "delta": {"content": chunk.delta}, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(sse)}\n\n"
-
-            if finish_reason is not None:
+            if chunk.finish_reason is not None:
                 final = {
                     "id": request_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": self.model_id,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": chunk.finish_reason}],
                 }
                 if usage:
                     final["usage"] = usage
                 yield f"data: {json.dumps(final)}\n\n"
-
         yield "data: [DONE]\n\n"
 
-    async def _generate(self, prompt: str, sampling_kwargs: dict) -> dict:
-        from vllm import SamplingParams
-        request_id = sampling_kwargs.pop("_request_id", str(uuid.uuid4()))
-        params = SamplingParams(**sampling_kwargs)
-
-        final = None
-        async for output in self.engine.generate(prompt, params, request_id):
-            final = output
-
-        if final is None:
-            return {"error": "No output generated"}
-
-        choice = final.outputs[0]
-        return {
-            "text": choice.text,
-            "finish_reason": choice.finish_reason or "stop",
-            "prompt_tokens": len(final.prompt_token_ids),
-            "completion_tokens": len(choice.token_ids),
-        }
-
-    async def _generate_stream(self, prompt: str, sampling_kwargs: dict):
-        from vllm import SamplingParams
-        request_id = sampling_kwargs.pop("_request_id", str(uuid.uuid4()))
-        params = SamplingParams(**sampling_kwargs)
-
-        prev_text = ""
-        async for output in self.engine.generate(prompt, params, request_id):
-            text = output.outputs[0].text
-            delta = text[len(prev_text):]
-            prev_text = text
-            if delta:
-                yield {"delta": delta, "finish_reason": None}
-
-        choice = output.outputs[0]
-        yield {
-            "delta": "",
-            "finish_reason": choice.finish_reason or "stop",
-            "prompt_tokens": len(output.prompt_token_ids),
-            "completion_tokens": len(choice.token_ids),
-        }
-
-    async def _null_generate(self, prompt: str, sampling_kwargs: dict) -> dict:
-        await asyncio.sleep(self.latency)
-        max_tokens = int(sampling_kwargs.get("max_tokens", 10))
-        # No tokenizer in null_compute mode; word count is the same approximation
-        # used by the chat handler when it flattens messages into a plain string.
-        prompt_tokens = len(prompt.split())
-        return {
-            "text": "null " * max_tokens,
-            "finish_reason": "stop",
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": max_tokens,
-        }
-
-    async def _null_generate_stream(self, prompt: str, sampling_kwargs: dict):
-        await asyncio.sleep(self.latency)
-        max_tokens = int(sampling_kwargs.get("max_tokens", 10))
-        prompt_tokens = len(prompt.split())
-        yield {
-            "delta": "null " * max_tokens,
-            "finish_reason": "stop",
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": max_tokens,
-        }
-
-
-# ---------------------------------------------------------------------------
-# SGLangWorker — HTTP ingress + SGLang engine in one deployment
-#
-# Sibling of VLLMWorker: same OpenAI HTTP surface and same per-tile placement,
-# but runs SGLang's embedded engine (sgl.Engine) instead of vLLM. Selected via
-# EXASERVE_ENGINE=sglang in deploy_model. Imports SGLang lazily so this module
-# stays importable in a vLLM-only environment. torch_native attention is the
-# only numerically-correct attention backend on Aurora PVC (the fused intel_xpu
-# kernel is Battlemage-tuned and wrong on Xe-HPC).
-# ---------------------------------------------------------------------------
-sgl_app = FastAPI()
-
-
-@serve.deployment
-@serve.ingress(sgl_app)
-class SGLangWorker:
-    def __init__(
-        self,
-        model_id: str,
-        local_model_path: str = None,
-        null_compute: bool = False,
-        tensor_parallel_size: int = 1,
-        pipeline_parallel_size: int = 1,
-        gpu_memory_utilization: float = 0.85,
-        max_model_len: int = 4096,
-        enforce_eager: bool = True,
-        max_num_seqs: int = None,
-        collect_stats: bool = False,
-    ):
-        init_start = time.monotonic()
-        pid = os.getpid()
-        hostname = socket.gethostname()
-        self.model_id = model_id
-        self.null_compute = null_compute
-
-        gpu_ids = []
-        for g in ray.get_gpu_ids():
-            try:
-                gpu_ids.append(int(g))
-            except (ValueError, TypeError):
-                pass  # non-integer Ray GPU id (e.g. test harness) -> skip mask
-        device_id = gpu_ids[0] if gpu_ids else 0
-        # SGLang's XPU init needs a VALID ONEAPI_DEVICE_SELECTOR (unlike vLLM, which
-        # runs with it unset). Ray mangles it to "level_zero:" and the launcher unsets
-        # it; set the value the working standalone SGLang server uses. Tile isolation is
-        # still done by ZE_AFFINITY_MASK, which composes with the level_zero backend.
-        os.environ["ONEAPI_DEVICE_SELECTOR"] = "opencl:gpu;level_zero:gpu"
-        if gpu_ids:
-            os.environ["ZE_AFFINITY_MASK"] = ",".join(str(g) for g in gpu_ids)
-        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-        os.environ.setdefault("RAYON_NUM_THREADS", "1")
-        print(
-            f"[SGLangWorker pid={pid}] tile {gpu_ids} ZE_AFFINITY_MASK="
-            f"{os.environ.get('ZE_AFFINITY_MASK')}",
-            flush=True,
-        )
-
-        model_path = local_model_path or model_id
-        attention_backend = os.environ.get("EXASERVE_XPU_SGLANG_ATTENTION", "torch_native")
-
-        import sglang as sgl
-        from transformers import AutoTokenizer
-
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
-        engine_kwargs = dict(
-            model_path=model_path,
-            device="xpu",
-            attention_backend=attention_backend,
-            tp_size=tensor_parallel_size,
-            mem_fraction_static=gpu_memory_utilization,
-            context_length=max_model_len,
-            disable_overlap_schedule=True,
-            grammar_backend="none",
-            page_size=64,
-            max_running_requests=(max_num_seqs or 256),
-            trust_remote_code=True,
-            log_level="warning",
-            # ServerArgs defaults nccl_port to get_free_port(), which races when 12
-            # engines start concurrently on one node (torch.distributed EADDRINUSE
-            # -> dead replica -> multi-minute restart). device_id is unique per node.
-            nccl_port=25100 + device_id,
-        )
-        # CRITICAL: SGLang spawns its scheduler via multiprocessing 'spawn', which
-        # re-imports this process's __main__. In a Ray worker __main__ is Ray's
-        # default_worker.py -> `import ray` -> pyarrow, whose bundled jemalloc starts a
-        # background thread that SIGSEGVs in the freshly-spawned child (confirmed via
-        # core dump: background_thread_entry in libarrow). Neutralize __main__ so the
-        # spawned scheduler re-imports nothing (no ray, no pyarrow) and inits cleanly.
-        _main = sys.modules.get("__main__")
-        if _main is not None:
-            try:
-                _main.__spec__ = None
-            except Exception:
-                pass
-            if hasattr(_main, "__file__"):
-                try:
-                    del _main.__file__
-                except Exception:
-                    pass
-        print(
-            f"[SGLangWorker pid={pid}] Creating sgl.Engine for {model_id} "
-            f"(attn={attention_backend})...",
-            flush=True,
-        )
-        self.engine = sgl.Engine(**engine_kwargs)
-        self._warmed = False
-        print_red(
-            f"[SGLangWorker pid={pid}] ★ INIT TOTAL: "
-            f"{time.monotonic() - init_start:.2f}s ★"
-        )
-        from .scaling_trace import report_replica_stats
-        report_replica_stats({
-            "pid": pid, "hostname": hostname, "model_id": model_id,
-            "device_id": device_id, "engine": "sglang",
-            "total_init_s": round(time.monotonic() - init_start, 4),
-        })
-
-    async def reconfigure(self, user_config):
-        """Warm up the engine before the replica reports healthy.
-
-        The first real prefill JIT-compiles sglang's Triton paged-allocator
-        kernels; without a warmup that lands on client traffic (run4: every
-        stream wedged until HAProxy's 330s server timeout). Serve awaits
-        reconfigure during replica init when user_config is set (see
-        deploy_model). This cannot live in __init__: a sync engine.generate
-        there calls run_until_complete on the already-running replica event
-        loop, and an async __init__ is silently skipped by the serve.ingress
-        wrapper (run5 deploy failure).
-        """
-        if self._warmed:
-            return
-        t_warm = time.monotonic()
-        await self.engine.async_generate(
-            prompt="warmup", sampling_params={"max_new_tokens": 8, "temperature": 0.0}
-        )
-        self._warmed = True
-        print_red(
-            f"[SGLangWorker pid={os.getpid()}] warmup generate: "
-            f"{time.monotonic() - t_warm:.2f}s"
-        )
-
-    # ---- HTTP endpoints ------------------------------------------------------
-    @sgl_app.get("/health")
-    async def health_check(self):
-        return JSONResponse({"status": "healthy", "model": self.model_id})
-
-    @sgl_app.get("/v1/models")
-    async def list_models(self):
-        return JSONResponse({
-            "object": "list",
-            "data": [{
-                "id": self.model_id, "object": "model",
-                "created": int(time.time()), "owned_by": "exaserve",
-            }],
-        })
-
-    @sgl_app.post("/v1/chat/completions")
-    async def chat_completions(self, request: Request):
-        body = await request.json()
-        messages = body.get("messages", [])
-        stream = body.get("stream", False)
-        add_generation_prompt = bool(body.get("add_generation_prompt", True))
-        continue_final_message = bool(body.get("continue_final_message", False))
-        sp = self._sampling_params(body)
-        try:
-            prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False,
-                add_generation_prompt=add_generation_prompt,
-                continue_final_message=continue_final_message,
-            )
-        except Exception:
-            prompt = _chat_messages_to_plain_prompt(
-                messages,
-                add_generation_prompt=add_generation_prompt
-                and not continue_final_message,
-            )
-        request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        if stream:
-            return StreamingResponse(
-                self._chat_stream(request_id, prompt, sp),
-                media_type="text/event-stream",
-            )
-        return await self._chat_non_stream(request_id, prompt, sp)
-
-    @sgl_app.post("/v1/completions")
-    async def completions(self, request: Request):
-        body = await request.json()
-        prompt = body.get("prompt", "")
-        stream = body.get("stream", False)
-        sp = self._sampling_params(body)
-        request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
-        if stream:
-            return StreamingResponse(
-                self._completion_stream(request_id, prompt, sp),
-                media_type="text/event-stream",
-            )
-        res = await self._generate(prompt, sp)
-        if "error" in res:
-            return JSONResponse({"error": res["error"]}, status_code=500)
-        return JSONResponse({
-            "id": request_id, "object": "text_completion",
-            "created": int(time.time()), "model": self.model_id,
-            "choices": [{
-                "index": 0, "text": res["text"],
-                "finish_reason": res["finish_reason"],
-            }],
-            "usage": {
-                "prompt_tokens": res["prompt_tokens"],
-                "completion_tokens": res["completion_tokens"],
-                "total_tokens": res["prompt_tokens"] + res["completion_tokens"],
-            },
-        })
-
-    # ---- Internal helpers ----------------------------------------------------
-    @staticmethod
-    def _sampling_params(body: dict) -> dict:
-        sp: dict = {}
-        if "temperature" in body:
-            sp["temperature"] = float(body["temperature"])
-        if "top_p" in body:
-            sp["top_p"] = float(body["top_p"])
-        if "max_tokens" in body:
-            sp["max_new_tokens"] = int(body["max_tokens"])
-        if "min_tokens" in body:
-            sp["min_new_tokens"] = int(body["min_tokens"])
-        if "stop" in body:
-            sp["stop"] = body["stop"]
-        if body.get("ignore_eos"):
-            sp["ignore_eos"] = True
-        sp.setdefault("temperature", 0.7)
-        sp.setdefault("max_new_tokens", 1024)
-        return sp
-
-    @staticmethod
-    def _finish_reason(meta: dict):
-        fr = meta.get("finish_reason") if isinstance(meta, dict) else None
-        if isinstance(fr, dict):
-            return fr.get("type", "stop")
-        return fr or "stop"
-
-    def _abort_engine_request(self, rid: str):
-        """Tell the engine to stop working on rid. The embedded async_generate
-        gets no fastapi.Request, so sglang's own is_disconnected() abort paths
-        never fire — without this, a client-abandoned request keeps decoding
-        to completion and its zombie load deepens any overload."""
-        try:
-            self.engine.tokenizer_manager.abort_request(rid=rid)
-        except Exception:
-            pass
-
-    async def _generate(self, prompt: str, sp: dict) -> dict:
-        rid = f"aur-{uuid.uuid4().hex}"
-        try:
-            out = await self.engine.async_generate(
-                prompt=prompt, sampling_params=sp, rid=rid
-            )
-        except asyncio.CancelledError:  # client disconnected mid-request
-            self._abort_engine_request(rid)
-            raise
-        except Exception as exc:  # surface engine errors as HTTP 500
-            return {"error": f"{type(exc).__name__}: {exc}"}
-        if isinstance(out, list):
-            out = out[0]
-        meta = out.get("meta_info", {}) or {}
-        return {
-            "text": out.get("text", ""),
-            "finish_reason": self._finish_reason(meta),
-            "prompt_tokens": int(meta.get("prompt_tokens", 0)),
-            "completion_tokens": int(meta.get("completion_tokens", 0)),
-        }
-
-    async def _chat_non_stream(self, request_id: str, prompt: str, sp: dict):
-        res = await self._generate(prompt, sp)
-        if "error" in res:
-            return JSONResponse({"error": res["error"]}, status_code=500)
-        return JSONResponse({
-            "id": request_id, "object": "chat.completion",
-            "created": int(time.time()), "model": self.model_id,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": res["text"]},
-                "finish_reason": res["finish_reason"],
-            }],
-            "usage": {
-                "prompt_tokens": res["prompt_tokens"],
-                "completion_tokens": res["completion_tokens"],
-                "total_tokens": res["prompt_tokens"] + res["completion_tokens"],
-            },
-        })
-
-    async def _stream_deltas(self, prompt: str, sp: dict):
-        """Yield (delta_text, finish_reason, usage_or_None) from SGLang streaming."""
-        prev = ""
-        last_meta = {}
-        rid = f"aur-{uuid.uuid4().hex}"
-        finished = False
-        gen = await self.engine.async_generate(
-            prompt=prompt, sampling_params=sp, stream=True, rid=rid
-        )
-        try:
-            async for out in gen:
-                if isinstance(out, list):
-                    out = out[0]
-                text = out.get("text", "")
-                last_meta = out.get("meta_info", {}) or last_meta
-                delta = text[len(prev):]
-                prev = text
-                if delta:
-                    yield delta, None, None
-            finished = True
-        finally:
-            # GeneratorExit/CancelledError lands on the yield when the client
-            # disconnects; abort so the engine drops the request too.
-            if not finished:
-                self._abort_engine_request(rid)
-        usage = {
-            "prompt_tokens": int(last_meta.get("prompt_tokens", 0)),
-            "completion_tokens": int(last_meta.get("completion_tokens", 0)),
-        }
-        yield "", self._finish_reason(last_meta), usage
-
-    async def _chat_stream(self, request_id: str, prompt: str, sp: dict):
+    async def _completion_stream(self, request_id: str, prompt: str, sampling: dict):
         created = int(time.time())
-        async for delta, finish_reason, usage in self._stream_deltas(prompt, sp):
-            if delta:
-                chunk = {
-                    "id": request_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_id,
-                    "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+        usage = None
+        async for chunk in self.backend.generate_stream(prompt, sampling):
+            if chunk.finish_reason is not None:
+                usage = {
+                    "prompt_tokens": chunk.prompt_tokens,
+                    "completion_tokens": chunk.completion_tokens,
+                    "total_tokens": chunk.prompt_tokens + chunk.completion_tokens,
                 }
-                yield f"data: {json.dumps(chunk)}\n\n"
-            if finish_reason is not None:
+            if chunk.delta:
+                sse = {
+                    "id": request_id,
+                    "object": "text_completion",
+                    "created": created,
+                    "model": self.model_id,
+                    "choices": [{"index": 0, "text": chunk.delta, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(sse)}\n\n"
+            if chunk.finish_reason is not None:
                 final = {
-                    "id": request_id, "object": "chat.completion.chunk",
-                    "created": created, "model": self.model_id,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                    "id": request_id,
+                    "object": "text_completion",
+                    "created": created,
+                    "model": self.model_id,
+                    "choices": [{"index": 0, "text": "", "finish_reason": chunk.finish_reason}],
                 }
                 if usage:
-                    final["usage"] = {**usage, "total_tokens": usage["prompt_tokens"] + usage["completion_tokens"]}
-                yield f"data: {json.dumps(final)}\n\n"
-        yield "data: [DONE]\n\n"
-
-    async def _completion_stream(self, request_id: str, prompt: str, sp: dict):
-        created = int(time.time())
-        async for delta, finish_reason, usage in self._stream_deltas(prompt, sp):
-            if delta:
-                chunk = {
-                    "id": request_id, "object": "text_completion",
-                    "created": created, "model": self.model_id,
-                    "choices": [{"index": 0, "text": delta, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-            if finish_reason is not None:
-                final = {
-                    "id": request_id, "object": "text_completion",
-                    "created": created, "model": self.model_id,
-                    "choices": [{"index": 0, "text": "", "finish_reason": finish_reason}],
-                }
-                if usage:
-                    final["usage"] = {**usage, "total_tokens": usage["prompt_tokens"] + usage["completion_tokens"]}
+                    final["usage"] = usage
                 yield f"data: {json.dumps(final)}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -1850,7 +1298,7 @@ def deploy_model(
     deployment_name_suffix = f"-r{pp_replica_index}" if shard_aware_pp else ""
 
     print(
-        f"[ExaServe] Configuring VLLMWorker for {model_id}\n"
+        f"[ExaServe] Configuring EngineWorker for {model_id}\n"
         f"  Replicas    : {num_replicas} "
         f"(TP={model_config.tensor_parallel_size}, PP={model_config.pipeline_parallel_size})\n"
         f"  NullCompute : {null_compute}\n"
@@ -1860,7 +1308,7 @@ def deploy_model(
     if null_compute:
         latency = float(os.environ.get("EXASERVE_NULL_COMPUTE_LATENCY", "1.0"))
         print(
-            f"[ExaServe] NULL-COMPUTE mode — vLLM replaced by sleep({latency:.2f}s)",
+            f"[ExaServe] NULL-COMPUTE mode — engine replaced by sleep({latency:.2f}s)",
             flush=True,
         )
 
@@ -1956,15 +1404,14 @@ def deploy_model(
             else model_config.tensor_parallel_size
         )
 
-    # Engine selection: EXASERVE_ENGINE=sglang deploys SGLangWorker (sgl.Engine)
-    # instead of VLLMWorker. Everything else (placement, replicas, HAProxy, Go
-    # replay client) is identical — a single-variable engine swap.
+    # Engine selection: one EngineWorker host serves any pluggable EngineBackend
+    # (exaserve.engines). EXASERVE_ENGINE picks the backend (vllm/sglang/...);
+    # everything else (placement, replicas, HAProxy, Go replay client) is
+    # identical — a single-variable engine swap.
     engine = os.environ.get("EXASERVE_ENGINE", "vllm").lower()
-    worker_cls = SGLangWorker if engine == "sglang" else VLLMWorker
-    worker_name = "SGLangWorker" if engine == "sglang" else "VLLMWorker"
 
     deployment_options = dict(
-        name=f"{worker_name}-{safe_name}{deployment_name_suffix}",
+        name=f"EngineWorker-{safe_name}{deployment_name_suffix}",
         num_replicas=num_replicas,
         ray_actor_options={
             "num_gpus": actor_num_gpus,
@@ -1983,12 +1430,12 @@ def deploy_model(
     elif planner_max_replicas_per_node is not None:
         deployment_options["max_replicas_per_node"] = planner_max_replicas_per_node
     if engine == "sglang":
-        # A non-None user_config makes Serve await SGLangWorker.reconfigure
-        # during replica init (pre-healthy), which is where the engine warmup
-        # runs — see SGLangWorker.reconfigure.
+        # A non-None user_config makes Serve await EngineWorker.reconfigure during
+        # replica init (pre-healthy), which is where SGLangEngine.warmup() runs
+        # (JIT kernel compile). Other engines' warmup is a no-op.
         deployment_options["user_config"] = {"warmup": True}
 
-    deployment = worker_cls.options(**deployment_options).bind(
+    deployment = EngineWorker.options(**deployment_options).bind(
         model_id=model_id,
         local_model_path=local_path,
         null_compute=null_compute,
@@ -1999,6 +1446,7 @@ def deploy_model(
         enforce_eager=model_config.enforce_eager,
         max_num_seqs=model_config.max_num_seqs,
         collect_stats=getattr(config, "collect_stats", False),
+        engine_name=engine,
     )
 
     return deployment, model_id

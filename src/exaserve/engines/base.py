@@ -1,23 +1,23 @@
 """
 Abstract interface for pluggable inference engines.
 
-Mirrors ``exaserve.proxy.base``: one shared Ray Serve host (``EngineWorker``, in
-server.py) owns the OpenAI-compatible HTTP surface, per-tile placement, and
-stats; each concrete engine (vLLM, SGLang, …) implements only the model-specific
-core behind this interface.
+One shared Ray Serve host (``EngineWorker`` in server.py) owns the OpenAI HTTP
+surface, per-tile placement, and stats; each concrete engine (vLLM, SGLang,
+null) implements only the model-specific core behind this interface.
 
 Design doc: doc/design/pluggable_interfaces.md
 
-Engine-neutral dataclasses (EngineSpec / SamplingParams / GenResult / GenDelta)
-keep the host free of any vLLM- or SGLang-specific types, so adding an engine —
-or running the same engine on a different vendor's accelerator — is a matter of
-implementing ``EngineBackend`` rather than copy-pasting a ~500-line deployment
-class.
+The generation contract is intentionally the *same dict/return shape the worker
+already used* so the port is behavior-preserving:
 
-IMPORTANT: concrete backends import their heavy dependency (``vllm`` / ``sglang``)
-lazily inside ``create()`` — never at module import — because vLLM and SGLang pin
-conflicting ``transformers`` versions and only the *chosen* engine may be
-imported in a given process (see server.py header notes).
+- ``sampling`` is a neutral OpenAI-parsed dict with keys among
+  ``temperature, top_p, max_tokens, min_tokens, stop, ignore_eos`` (defaults
+  applied by the worker). Each backend maps it to its engine's params.
+- ``generate`` returns a ``GenResult``; ``generate_stream`` yields ``GenDelta``.
+
+IMPORTANT: concrete backends import their heavy dep (``vllm``/``sglang``) lazily
+inside ``create()`` — never at module import — because vLLM and SGLang pin
+conflicting ``transformers`` versions and only the chosen engine may be imported.
 """
 
 from __future__ import annotations
@@ -29,11 +29,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 @dataclass
 class EngineSpec:
-    """Everything an engine needs to instantiate itself on its assigned tile(s).
-
-    Populated by the ``EngineWorker`` host from the model's ``ModelConfig`` plus
-    the runtime placement decisions (device ids, distributed master).
-    """
+    """Everything an engine needs to instantiate itself on its assigned tile(s)."""
     model_id: str
     local_path: str                       # node-local weights dir, or model_id
     tensor_parallel_size: int = 1
@@ -41,42 +37,26 @@ class EngineSpec:
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.90
     enforce_eager: bool = True
-    max_num_seqs: int = 64
-    # Device isolation is applied by the vendor layer before create() (e.g.
-    # ZE_AFFINITY_MASK on Intel XPU, CUDA_VISIBLE_DEVICES on NVIDIA). device_ids
-    # is the logical tile/GPU list this replica owns, for logging + validation.
-    device_ids: List[int] = field(default_factory=list)
-    # Multi-node PP: address:port of the distributed master, when set.
-    dist_master_addr: Optional[str] = None
-    dist_master_port: Optional[int] = None
-    # Escape hatch for backend-specific engine kwargs not modeled above.
+    max_num_seqs: Optional[int] = None
+    device_ids: List[int] = field(default_factory=list)   # Ray tile ids this replica owns
+    collect_stats: bool = False
     extra_engine_kwargs: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class SamplingParams:
-    """Engine-neutral sampling parameters, parsed from an OpenAI request body."""
-    max_tokens: int = 128
-    temperature: float = 1.0
-    top_p: float = 1.0
-    stop: Optional[List[str]] = None
-    seed: Optional[int] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class GenResult:
-    """Result of a non-streaming generation."""
-    text: str
+    """Result of a non-streaming generation. ``error`` set => HTTP 500."""
+    text: str = ""
+    finish_reason: str = "stop"
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    finish_reason: str = "stop"
+    error: Optional[str] = None
 
 
 @dataclass
 class GenDelta:
-    """One streaming chunk. ``finish_reason`` is set only on the final delta."""
-    text: str = ""
+    """One streaming chunk. ``finish_reason`` set only on the final delta."""
+    delta: str = ""
     finish_reason: Optional[str] = None
     prompt_tokens: int = 0            # populated on the final delta when known
     completion_tokens: int = 0
@@ -84,10 +64,10 @@ class GenDelta:
 
 @dataclass
 class EngineCaps:
-    """What a backend supports; the host uses this to gate optional features."""
+    """What a backend supports; the host uses this to gate optional behavior."""
     streaming: bool = True
-    logprobs: bool = False
     serving_stats: bool = False
+    needs_warmup: bool = False       # host awaits warmup() before reporting healthy
 
 
 class EngineBackend(ABC):
@@ -95,88 +75,110 @@ class EngineBackend(ABC):
 
     Lifecycle, driven by the ``EngineWorker`` Ray Serve deployment (per replica):
 
-        engine = get_engine(name)          # registry lookup
-        engine.create(spec)                # heavy: instantiate on the tile(s)
-        ...
-        result = await engine.generate(prompt, params)          # non-stream
-        async for delta in engine.generate_stream(prompt, params):  # stream
-            ...
-        await engine.shutdown()            # on replica teardown
+        engine = get_engine(name)
+        engine.create(spec)                       # heavy: instantiate on tile(s)
+        await engine.warmup()                     # optional (Serve reconfigure)
+        prompt = engine.build_chat_prompt(...)    # tokenizer apply_chat_template
+        res  = await engine.generate(prompt, sampling)
+        async for d in engine.generate_stream(prompt, sampling): ...
     """
 
-    #: short registry key, e.g. "vllm"
     name: str = "base"
 
     @abstractmethod
     def create(self, spec: EngineSpec) -> None:
-        """Instantiate the underlying engine on this replica's assigned tile(s).
+        """Instantiate the underlying engine (device isolation + engine build)."""
 
-        Import the heavy dependency lazily here (not at module scope). Device
-        isolation env (ZE_AFFINITY_MASK / CUDA_VISIBLE_DEVICES) is already set by
-        the vendor layer before this is called.
+    def build_chat_prompt(
+        self,
+        messages: list,
+        *,
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        chat_template: Optional[str] = None,
+        chat_template_kwargs: Optional[dict] = None,
+    ) -> str:
+        """Render chat messages to a single prompt string (engine tokenizer).
+
+        Default: flatten to plain text (used by NullEngine and as a fallback).
         """
+        from ..server import _chat_messages_to_plain_prompt
+        return _chat_messages_to_plain_prompt(
+            messages,
+            add_generation_prompt=add_generation_prompt and not continue_final_message,
+        )
 
     @abstractmethod
-    async def generate(self, prompt: str, params: SamplingParams) -> GenResult:
+    async def generate(self, prompt: str, sampling: Dict[str, Any]) -> GenResult:
         """Run one non-streaming completion to completion."""
 
     @abstractmethod
     async def generate_stream(
-        self, prompt: str, params: SamplingParams
+        self, prompt: str, sampling: Dict[str, Any]
     ) -> AsyncIterator[GenDelta]:
-        """Yield generation deltas as they are produced (SSE token streaming)."""
+        """Yield generation deltas (SSE token streaming)."""
         raise NotImplementedError
         yield  # pragma: no cover  (marks this an async generator)
 
     def capabilities(self) -> EngineCaps:
-        """Declare optional-feature support. Override as needed."""
         return EngineCaps()
 
+    async def warmup(self) -> None:
+        """Optional pre-healthy warmup (e.g. JIT kernel compile). Default no-op."""
+        return None
+
     def collect_stats(self) -> Dict[str, Any]:
-        """Return engine-side serving stats, or {} if unsupported."""
+        return {}
+
+    def live_stats(self) -> Dict[str, Any]:
+        """Snapshot for the /stats HTTP endpoint. Default: empty."""
         return {}
 
     async def shutdown(self) -> None:
-        """Release engine resources. Default: no-op."""
         return None
 
 
 class NullEngine(EngineBackend):
     """No-forward-pass stand-in for ``EXASERVE_NULL_COMPUTE=1``.
 
-    Replaces a real engine with a fixed-latency sleep that echoes deterministic
-    tokens, so cluster bring-up / placement / proxy wiring can be exercised at
-    scale without loading weights. Implemented once here instead of duplicated in
-    every worker class (was ``_null_generate*`` in VLLMWorker).
+    Replaces a real engine with a fixed-latency sleep echoing deterministic
+    tokens, so bring-up / placement / proxy wiring can be exercised at scale
+    without loading weights. Unifies what were VLLMWorker._null_generate*.
     """
 
     name = "null"
 
-    def __init__(self, latency_s: float = 1.0, tokens: int = 8):
+    def __init__(self, latency_s: float = 1.0):
         self._latency = latency_s
-        self._tokens = tokens
 
-    def create(self, spec: EngineSpec) -> None:  # noqa: D401 - trivial
-        self._model_id = spec.model_id
+    def create(self, spec: EngineSpec) -> None:
+        self.model_id = spec.model_id
 
-    async def generate(self, prompt: str, params: SamplingParams) -> GenResult:
+    @staticmethod
+    def _max_tokens(sampling: Dict[str, Any]) -> int:
+        return int(sampling.get("max_tokens", 10))
+
+    async def generate(self, prompt: str, sampling: Dict[str, Any]) -> GenResult:
         import asyncio
         await asyncio.sleep(self._latency)
-        n = min(self._tokens, params.max_tokens)
-        return GenResult(text=" ".join(["null"] * n), completion_tokens=n)
+        n = self._max_tokens(sampling)
+        # word-count prompt approximation, matching the old null path
+        return GenResult(
+            text="null " * n,
+            finish_reason="stop",
+            prompt_tokens=len(prompt.split()),
+            completion_tokens=n,
+        )
 
     async def generate_stream(
-        self, prompt: str, params: SamplingParams
+        self, prompt: str, sampling: Dict[str, Any]
     ) -> AsyncIterator[GenDelta]:
         import asyncio
-        n = min(self._tokens, params.max_tokens)
-        # Spread the fixed latency across the streamed tokens so TBT looks real.
-        per = self._latency / max(n, 1)
-        for i in range(n):
-            await asyncio.sleep(per)
-            last = i == n - 1
-            yield GenDelta(
-                text="null ",
-                finish_reason="length" if last else None,
-                completion_tokens=n if last else 0,
-            )
+        await asyncio.sleep(self._latency)
+        n = self._max_tokens(sampling)
+        yield GenDelta(
+            delta="null " * n,
+            finish_reason="stop",
+            prompt_tokens=len(prompt.split()),
+            completion_tokens=n,
+        )
