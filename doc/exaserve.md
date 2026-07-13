@@ -1,6 +1,6 @@
 ---
 name: exaserve
-description: Framework for scaling OpenAI-compatible LLM inference across HPC compute nodes — Ray Serve deployments with a pluggable inference engine (vLLM/SGLang) over PBS allocations, with MPI weight staging, pluggable HAProxy/LiteLLM front ends, multi-node pipeline parallelism, and a declarative scaling-benchmark harness
+description: Framework for scaling OpenAI-compatible LLM inference across HPC compute nodes — Ray Serve deployments with a pluggable inference engine (vLLM/SGLang) over batch-scheduler allocations (PBS today, Slurm planned), with MPI weight staging, pluggable HAProxy/LiteLLM front ends, multi-node pipeline parallelism, and a declarative scaling-benchmark harness
 package: exaserve
 install: module load frameworks && pip install --user .
 language: python
@@ -14,7 +14,7 @@ reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
 
 # ExaServe Reference Card
 
-ExaServe (distributed as the `exaserve` package) turns a PBS allocation of N HPC nodes into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang, selected by `EXASERVE_ENGINE`), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
+ExaServe (distributed as the `exaserve` package) turns a batch-scheduler allocation of N HPC nodes (e.g. a PBS job) into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang, selected by `EXASERVE_ENGINE`), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
 
 ## Install
 
@@ -165,6 +165,11 @@ The growth is concentrated in `wait_proxies` (38 s → 1,612 s, a 42× increase 
 | `EXASERVE_CLEAN_STAGE=1` | Wipe node-local staged weights first (cold-start timing) |
 
 Scale cliffs and fixes (Ray/vLLM patches at 256+ nodes, thread-pool clamps — applied automatically by the launcher): [doc/KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
+## Limitations
+
+- **Job scheduler — PBS only today.** The inference engine and front-end proxy are pluggable (swap via `EXASERVE_ENGINE` / `proxy_config.type`), but the batch scheduler is not yet: the launcher reads `$PBS_NODEFILE` and stages over `mpiexec`/PALS, and the eval harness submits with `qsub`. The scheduler logic is isolated behind a seam (`scheduler.type` in specs, `eval/lib/schedulers/`) and a `SchedulerBackend` interface is designed in [doc/design/scheduler_abstraction.md](design/scheduler_abstraction.md), but it is **not yet implemented** — running under another scheduler currently means writing that backend (job rendering, submit/poll, and a nodefile + per-node-launch shim, e.g. `srun` instead of `mpiexec`). **Slurm** is the planned first addition given its prevalence; contributions for other schedulers are welcome against that interface.
+- **Accelerator — Intel XPU only today.** Validated on Aurora's Intel PVC (device isolation via `ZE_AFFINITY_MASK`); a vendor abstraction for NVIDIA/AMD is designed ([doc/design/vendor_site_abstraction.md](design/vendor_site_abstraction.md)) but not yet implemented.
 
 ## Benchmarking harness
 

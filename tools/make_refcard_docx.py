@@ -221,7 +221,8 @@ blocks.append(par(
 ))
 blocks.append(body_par(
     "ExaServe is a framework for scaling LLM inference across the compute nodes of "
-    "an HPC system. From one YAML file and one command, it turns a PBS allocation into a "
+    "an HPC system. From one YAML file and one command, it turns a batch-scheduler "
+    "allocation (e.g. a PBS job) into a "
     "single OpenAI-compatible inference service: it launches a Ray cluster over the "
     "allocation, stages model weights to node-local storage with an MPI broadcast, deploys "
     "one inference replica per GPU tile as Ray Serve applications — a single EngineWorker "
@@ -242,8 +243,9 @@ blocks.append(body_par(
 ))
 why = [
     ("Turnkey N-node serving",
-     "One YAML file plus one command turns a PBS allocation into an OpenAI-compatible "
-     "service; clients see the standard API and need no HPC knowledge."),
+     "One YAML file plus one command turns a batch-scheduler allocation (e.g. a PBS job) "
+     "into an OpenAI-compatible service; clients see the standard API and need no HPC "
+     "knowledge."),
     ("Validated at scale",
      "Deployments measured to 256 nodes / 3,072 replicas behind a production HAProxy "
      "front end: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) "
@@ -483,6 +485,17 @@ blocks.append(data_table([
 blocks.append(body_par(
     "Scale cliffs and their fixes (Ray/vLLM patches at 256+ nodes, thread-pool clamps) "
     "are catalogued in doc/KNOWN_ISSUES.md; the launcher applies the fixes automatically."
+))
+blocks.append(callout(
+    "Portability.",
+    "The inference engine and front-end proxy are pluggable (EXASERVE_ENGINE / "
+    "proxy_config.type), but the batch scheduler is PBS-only today: the launcher reads "
+    "$PBS_NODEFILE and stages over mpiexec/PALS. A SchedulerBackend interface is designed "
+    "(doc/design/scheduler_abstraction.md) but not yet implemented — another scheduler "
+    "currently means writing that backend (e.g. srun instead of mpiexec). Slurm is the "
+    "planned first addition. Accelerator support is likewise Intel-XPU-only today, with a "
+    "NVIDIA/AMD vendor abstraction designed but not built.",
+    NOTE_BG,
 ))
 
 # 6 Clients
