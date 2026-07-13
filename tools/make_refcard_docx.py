@@ -226,7 +226,7 @@ blocks.append(body_par(
     "single OpenAI-compatible inference service: it launches a Ray cluster over the "
     "allocation, stages model weights to node-local storage with an MPI broadcast, deploys "
     "one inference replica per GPU tile as Ray Serve applications — a single EngineWorker "
-    "host over a pluggable engine backend (vLLM or SGLang, via EXASERVE_ENGINE) — and "
+    "host over a pluggable engine backend (vLLM or SGLang) — and "
     "optionally fronts them with a pluggable head-node proxy such as HAProxy. A companion "
     "benchmarking harness "
     "measures deployments end to end and has validated them at up to 256 nodes "
@@ -236,19 +236,19 @@ blocks.append(body_par(
 # 1 Why
 blocks.append(heading(1, "Why ExaServe?"))
 blocks.append(body_par(
-    "Existing LLM serving stacks assume cloud environments; HPC systems bring PBS "
+    "Existing LLM serving stacks assume cloud environments; HPC systems bring batch-queue "
     "scheduling, MPI-only launch paths, Lustre metadata costs, exotic accelerators, and "
     "scale cliffs that only appear past a hundred nodes. ExaServe packages the "
     "engineering needed to cross that gap:"
 ))
 why = [
     ("Turnkey N-node serving",
-     "One YAML file plus one command turns a batch-scheduler allocation (e.g. a PBS job) "
-     "into an OpenAI-compatible service; clients see the standard API and need no HPC "
+     "One YAML file plus one command turns a batch-scheduler allocation into an "
+     "OpenAI-compatible service; clients see the standard API and need no HPC "
      "knowledge."),
     ("Validated at scale",
      "Deployments measured to 256 nodes / 3,072 replicas behind a production HAProxy "
-     "front end: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) "
+     "front end: 27.1k non-streaming QPS with Llama-3-8B (one replica per tile) "
      "— 96% weak-scaling efficiency at 256 nodes (27.1k of 28.2k offered, 0% errors). "
      "A quantified comparison of head-node proxies (HAProxy, Envoy, LiteLLM, Ray Serve "
      "proxy) guides the front-end choice."),
@@ -257,8 +257,8 @@ why = [
      "replica) with shard-aware weight staging, demonstrated from 2 to 128 replicas "
      "(4 to 256 nodes) at 67% weak-scaling efficiency (streaming)."),
     ("Measurement built in",
-     "A declarative benchmark harness generates traces and PBS jobs, replays load through "
-     "a Go client, and scores per-request TTFT/TBT against latency SLOs."),
+     "A declarative benchmark harness generates traces and scheduler jobs, replays load "
+     "through a Go client, and scores per-request TTFT/TBT against latency SLOs."),
 ]
 for lead, text in why:
     blocks.append(bold_lead(lead))
@@ -274,7 +274,7 @@ blocks.append(data_table([
     ["Component", "Description"],
     ["Launcher",
      "exaserve-serve-submit (batch, from a login node) or exaserve-launch-cluster "
-     "(interactive) bring up the whole stack on a PBS allocation"],
+     "(interactive) bring up the whole stack on a scheduler allocation"],
     ["MPI weight staging",
      "One-source-many-sinks MPI broadcast from the shared file system (e.g., Lustre) to "
      "node-local storage; shard-aware per pipeline stage for very large models"],
@@ -288,11 +288,17 @@ blocks.append(data_table([
     ["Site patches",
      "Small Ray/vLLM fixes required at 256+ nodes, applied automatically at launch"],
     ["Benchmark harness",
-     "eval/: declarative specs → traces + PBS jobs → replay → SLO scoring"],
+     "eval/: declarative specs → traces + scheduler jobs → replay → SLO scoring"],
 ], [2800, 7424], repeat_header=True))
 
 # 3 Installation
 blocks.append(heading(3, "Installation"))
+blocks.append(body_par(
+    "Install steps are site-specific — they depend on how the host provides Ray, the "
+    "inference engine, MPI, and the accelerator toolchain. The recipe below targets ALCF "
+    "Aurora; recipes for other sites will be added as they are supported.", after=60,
+))
+blocks.append(bold_lead("On ALCF Aurora"))
 blocks.append(body_par(
     "The package installs into the Python provided by Aurora’s frameworks module, "
     "which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only the "
@@ -317,6 +323,7 @@ blocks.append(body_par(
 
 # 4 Example
 blocks.append(heading(4, "Example"))
+blocks.append(bold_lead("On ALCF Aurora"))
 blocks.append(body_par(
     "One YAML file describes a deployment — the Ray cluster, the model deployment, "
     "and the client-facing proxy. Submit it from a login node (no allocation needed), "
@@ -376,14 +383,18 @@ blocks.append(callout(
 
 # 5 Scaling
 blocks.append(heading(5, "Scaling to hundreds of nodes"))
+blocks.append(body_par(
+    "All measurements in this section were conducted on ALCF Aurora (Intel PVC XPU, "
+    "12 tiles/node, PBS), at up to 256 nodes / 3,072 tiles.", after=80,
+))
 blocks.append(bold_lead("Front-end proxy at scale"))
 blocks.append(body_par(
     "All client traffic enters through the head-node proxy. Non-streaming completions "
-    "scale nearly linearly through a single HAProxy — 27.1k requests/s with Llama-3-8B "
+    "scale nearly linearly through a single HAProxy — 27.1k QPS with Llama-3-8B "
     "at 256 nodes / 3,072 single-tile replicas, 0% errors. Streaming (SSE) is harder on "
     "a centralized front end: the per-token delivery path saturates the head node’s "
     "network at large node counts, so requests still complete but slowly — streaming "
-    "throughput plateaus around 4.7k requests/s from 128 nodes, and p99 end-to-end "
+    "throughput plateaus around 4.7k QPS from 128 nodes, and p99 end-to-end "
     "latency reaches 17 s at 256 nodes while non-streaming p99 stays near 2 s at every "
     "scale. Budget streaming capacity per proxy and prefer non-streaming completions at "
     "extreme scale.", after=60,
@@ -413,10 +424,10 @@ blocks.append(body_par(
     "gives each pipeline stage only its own weight shard (~380 GiB, which fits node-local "
     "tmpfs) and pins each replica to its nodes. All 405B measurements are streaming: at a "
     "fixed per-replica offered rate, aggregate successful throughput grows from "
-    "0.7 query/s at 2 replicas to 31.0 query/s at 128 replicas (4 to 256 nodes) — 67% "
+    "0.7 QPS at 2 replicas to 31.0 QPS at 128 replicas (4 to 256 nodes) — 67% "
     "weak-scaling efficiency vs the 4-node base, sublinear rather than linear. Through a "
     "single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes "
-    "(9.3 query/s, 80%) before the same head-node streaming ceiling appears; a "
+    "(9.3 QPS, 80%) before the same head-node streaming ceiling appears; a "
     "non-streaming 405B configuration has not been measured.", after=60,
 ))
 blocks.append(figure(
@@ -463,7 +474,7 @@ blocks.append(body_par(
     "concentrated in the proxy readiness wait: on every deployment broadcast, every "
     "Ray Serve proxy resolves every replica handle against the Ray control store (GCS), "
     "work that is quadratic in node count and reaches 1.38 million GCS lookups at 256 "
-    "nodes. Budget PBS walltime as bring-up plus serving window (405B weight loading "
+    "nodes. Budget job walltime as bring-up plus serving window (405B weight loading "
     "adds more), and reuse a running cluster across experiments where possible."
 ))
 blocks.append(bold_lead("Launch-time knobs"))

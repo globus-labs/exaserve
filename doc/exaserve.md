@@ -14,7 +14,7 @@ reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
 
 # ExaServe Reference Card
 
-ExaServe (distributed as the `exaserve` package) turns a batch-scheduler allocation of N HPC nodes (e.g. a PBS job) into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang, selected by `EXASERVE_ENGINE`), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
+ExaServe (distributed as the `exaserve` package) turns a batch-scheduler allocation of N HPC nodes (e.g. a PBS job) into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang, selected by `EXASERVE_ENGINE`), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming QPS with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
 
 ## Install
 
@@ -48,7 +48,7 @@ One-time extras, only for the feature that uses them:
 | `exaserve-serve-url <jobid>` | Resolve a running job's service URL |
 | `exaserve-model-bcast --config <cfg> --num-nodes N` | Pre-stage weights node-locally without starting Ray |
 | `qdel <jobid>` | Tear down a deployment |
-| `python -m eval.cli run materialize <spec>` | Benchmark spec → traces + per-cell PBS jobs |
+| `python -m eval.cli run materialize <spec>` | Benchmark spec → traces + per-cell scheduler jobs |
 | `python -m eval.cli run submit-all <spec>` | Submit all cells of a benchmark sweep |
 | `python -m eval.plot.goodput -e <spec> --preset paper` | Score a finished sweep against latency SLOs |
 
@@ -104,14 +104,14 @@ Ready-to-customize templates: [examples/](https://github.com/wenyiwang-us/exaser
 
 All client traffic enters through the head-node proxy (HAProxy recommended). Measured behavior at scale (Llama-3-8B, 64-in/64-out, 110 QPS/node offered, up to 256 nodes / 3,072 single-tile replicas):
 
-- **Non-streaming completions** scale nearly linearly through a single HAProxy: 27.1k requests/s at 256 nodes, 0.0% errors; p99 end-to-end latency stays near ~2 s at every scale.
-- **Streaming (SSE)** is harder on a centralized front end: the per-token delivery path saturates the head node's network. HAProxy still completes essentially every request but slowly — throughput plateaus at ~4.7k requests/s from 128 nodes, with p50 5.7 s / p99 17 s end-to-end at 256 nodes, so SLO attainment is effectively zero. Other centralized proxies fare worse: Envoy degrades to 3.0k requests/s at 44% success (256 nodes), the Ray Serve single-ProxyActor front end falls from 100% success at 1 node to 15% at 16 and 3% at 256, and LiteLLM's uvicorn front end falls to 6.5% success by 64 nodes. Budget streaming capacity per proxy, and prefer non-streaming at extreme scale.
+- **Non-streaming completions** scale nearly linearly through a single HAProxy: 27.1k QPS at 256 nodes, 0.0% errors; p99 end-to-end latency stays near ~2 s at every scale.
+- **Streaming (SSE)** is harder on a centralized front end: the per-token delivery path saturates the head node's network. HAProxy still completes essentially every request but slowly — throughput plateaus at ~4.7k QPS from 128 nodes, with p50 5.7 s / p99 17 s end-to-end at 256 nodes, so SLO attainment is effectively zero. Other centralized proxies fare worse: Envoy degrades to 3.0k QPS at 44% success (256 nodes), the Ray Serve single-ProxyActor front end falls from 100% success at 1 node to 15% at 16 and 3% at 256, and LiteLLM's uvicorn front end falls to 6.5% success by 64 nodes. Budget streaming capacity per proxy, and prefer non-streaming at extreme scale.
 
-For benchmarking only, the harness's client can bypass the proxy and dispatch to per-node endpoints (`client.dest: direct` in a spec) to isolate front-end overhead from backend capacity — the backends themselves stream at 19.4k requests/s with 100% success at 256 nodes when the proxy is bypassed. This mode exposes one endpoint per node and is not a deployment path.
+For benchmarking only, the harness's client can bypass the proxy and dispatch to per-node endpoints (`client.dest: direct` in a spec) to isolate front-end overhead from backend capacity — the backends themselves stream at 19.4k QPS with 100% success at 256 nodes when the proxy is bypassed. This mode exposes one endpoint per node and is not a deployment path.
 
 ### Multi-node pipeline parallelism (405B-class models)
 
-Llama-3.1-405B spans two nodes per replica: TP=8 within a node × PP=2 across a node pair. Shard-aware staging (`EXASERVE_PP_SHARD_AWARE=1`) gives each pipeline stage only its own weight shard (~380 GiB, fits node-local tmpfs) and pins each replica's deployment to its nodes. The benchmark harness derives this env var automatically from the spec (PP>1 with multiple replicas). Measured at a fixed per-replica offered rate (0.4 req/s per replica), streaming: aggregate successful throughput grows from 0.7 query/s at 2 replicas to 31.0 query/s at 128 replicas (4 → 256 nodes) — 67% weak-scaling efficiency vs the 4-node base, sublinear rather than linear; through a single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes (9.3 query/s, 80%) before the head-node streaming ceiling appears. A non-streaming 405B configuration has not been measured.
+Llama-3.1-405B spans two nodes per replica: TP=8 within a node × PP=2 across a node pair. Shard-aware staging (`EXASERVE_PP_SHARD_AWARE=1`) gives each pipeline stage only its own weight shard (~380 GiB, fits node-local tmpfs) and pins each replica's deployment to its nodes. The benchmark harness derives this env var automatically from the spec (PP>1 with multiple replicas). Measured at a fixed per-replica offered rate (0.4 QPS per replica), streaming: aggregate successful throughput grows from 0.7 QPS at 2 replicas to 31.0 QPS at 128 replicas (4 → 256 nodes) — 67% weak-scaling efficiency vs the 4-node base, sublinear rather than linear; through a single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes (9.3 QPS, 80%) before the head-node streaming ceiling appears. A non-streaming 405B configuration has not been measured.
 
 ```yaml
 model_configs:
@@ -173,7 +173,7 @@ Scale cliffs and fixes (Ray/vLLM patches at 256+ nodes, thread-pool clamps — a
 
 ## Benchmarking harness
 
-Declarative spec (workload × model × node-count matrix) → materialized traces + per-cell PBS jobs → multi-node MPI replay client driving a Go load generator. Run 0 of every cell is warm-up and dropped; per-request TTFT/TBT/E2E land in `<experiments_root>/runs/<spec>/<cell>/runN/results/result*.json`.
+Declarative spec (workload × model × node-count matrix) → materialized traces + per-cell scheduler jobs → multi-node MPI replay client driving a Go load generator. Run 0 of every cell is warm-up and dropped; per-request TTFT/TBT/E2E land in `<experiments_root>/runs/<spec>/<cell>/runN/results/result*.json`.
 
 ```bash
 cp eval/site_config_local.example.py eval/site_config_local.py   # edit paths; once
@@ -200,9 +200,9 @@ export OPENAI_API_KEY=EMPTY
 |---|---|---|
 | `examples/config.haproxy.yaml` | 2-node quickstart: 24 replicas behind one HAProxy endpoint | [examples/](https://github.com/wenyiwang-us/exaserve/tree/main/examples) |
 | `refcard_smoke_1node` | 1-node benchmark smoke: deploy → replay → TTFT/TBT → SLO score | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
-| `refcard_weakscaling_haproxy` | 8B weak scaling behind HAProxy, 1→64 nodes (extend to 256): 27.1k req/s non-streaming at 256n; streaming plateaus ~4.7k on the head-node network | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
+| `refcard_weakscaling_haproxy` | 8B weak scaling behind HAProxy, 1→64 nodes (extend to 256): 27.1k QPS non-streaming at 256n; streaming plateaus ~4.7k on the head-node network | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
 | `refcard_pp405b_2node` | 405B TP8×PP2 demo on one 2-node replica: 30/30 streaming | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
-| `refcard_pp405b_scale` | 405B weak scaling 2→128 replicas (4→256 nodes) at fixed per-replica load: 0.7 → 31.0 query/s (streaming, 67% efficiency) | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
+| `refcard_pp405b_scale` | 405B weak scaling 2→128 replicas (4→256 nodes) at fixed per-replica load: 0.7 → 31.0 QPS (streaming, 67% efficiency) | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
 
 Deeper profiling and scaling analyses: [findings/](https://github.com/wenyiwang-us/exaserve/tree/main/findings).
 
