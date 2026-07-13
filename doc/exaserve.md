@@ -42,12 +42,12 @@ One-time extras, only for the feature that uses them:
 
 | Command | Purpose |
 |---|---|
-| `exaserve-serve-submit <cfg> --wait` | Submit a serving job from a login node; prints PBS job id + service URL |
-| `exaserve-serve-submit <cfg> --dry-run` | Write the generated PBS script without submitting (custom PBS pipelines) |
+| `exaserve-serve-submit <cfg> --wait` | Submit a serving job from a login node; prints the scheduler job id + service URL |
+| `exaserve-serve-submit <cfg> --dry-run` | Write the generated job script without submitting (custom submission pipelines) |
 | `exaserve-launch-cluster <cfg>` | Foreground launch inside an interactive allocation; ready when it prints `[Driver] ALL SERVICES READY` |
 | `exaserve-serve-url <jobid>` | Resolve a running job's service URL |
 | `exaserve-model-bcast --config <cfg> --num-nodes N` | Pre-stage weights node-locally without starting Ray |
-| `qdel <jobid>` | Tear down a deployment |
+| `qdel <jobid>` | Tear down a deployment — cancel its scheduler job (`qdel` on PBS, `scancel` on Slurm) |
 | `python -m eval.cli run materialize <spec>` | Benchmark spec → traces + per-cell scheduler jobs |
 | `python -m eval.cli run submit-all <spec>` | Submit all cells of a benchmark sweep |
 | `python -m eval.plot.goodput -e <spec> --preset paper` | Score a finished sweep against latency SLOs |
