@@ -15,7 +15,7 @@ import subprocess
 @dataclass
 class BackendEndpoint:
     """A single Ray Serve HTTP endpoint (one per cluster node)."""
-    host: str       # HSN hostname or IP, e.g. "x4616c6s5b0n0.hsn.cm.aurora.alcf.anl.gov"
+    host: str       # cluster-fabric hostname or IP, e.g. "node0042.hsn.cluster.example"
     port: int       # Ray Serve HTTP port, e.g. 8000
     model_id: str   # e.g. "meta-llama/Meta-Llama-3-8B-Instruct"
     path_prefix: str = ""  # e.g. "/meta-llama--Llama-3-1-8B-Instruct" for multi-model
