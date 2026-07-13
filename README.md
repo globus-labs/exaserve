@@ -1,8 +1,12 @@
 # ExaServe
 
-Ray Serve helpers, Aurora-specific launch scripts, and scale patches for vLLM
-deployments on the ALCF Aurora HPC cluster. Distributed as the `exaserve`
-package (`import exaserve`).
+Ray Serve helpers, launch scripts, and scale patches for scaling OpenAI-compatible
+LLM inference on HPC clusters: a pluggable inference engine (vLLM/SGLang, selected
+by `EXASERVE_ENGINE`) behind one endpoint, with a pluggable front-end proxy
+(HAProxy/LiteLLM), over batch-scheduler allocations. Currently targets the ALCF
+Aurora HPC cluster (PBS, Intel XPU); Slurm and other schedulers/vendors are on the
+roadmap (see [`doc/design/`](doc/design/)). Distributed as the `exaserve` package
+(`import exaserve`).
 
 ## Install
 
@@ -218,9 +222,9 @@ of utilities.
 
 #### `exaserve-launch-cluster <config.yaml>`
 
-Foreground launcher. Brings up Ray + vLLM replicas + (optionally) HAProxy
-on whatever nodes are in `$PBS_NODEFILE`, blocks until shutdown, then
-finalizes logs. Run this **inside an interactive PBS allocation**:
+Foreground launcher. Brings up Ray + inference-engine replicas (vLLM or SGLang)
++ (optionally) HAProxy on whatever nodes are in `$PBS_NODEFILE`, blocks until
+shutdown, then finalizes logs. Run this **inside an interactive PBS allocation**:
 
 ```bash
 qsub -I -l select=2,walltime=01:00:00 -A AuroraGPT -q debug-scaling -l filesystems=home:flare

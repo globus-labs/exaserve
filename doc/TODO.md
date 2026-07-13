@@ -82,3 +82,14 @@
 ### Paper related TODOs
 [] The client could be written with C++, Boost.io, verify if that is a better choice, need clear justification
 [] 
+
+### Generic-HPC refactor — deferred (2026-07-13, v0.3.0)
+Rename + pluggable-engine refactor landed and smoke-validated; the following are owed follow-ups (design docs under doc/design/):
+[] Fix stale HAProxy unit tests — `tests/test_haproxy_proxy.py` asserts the old per-model `/<route>/health` but the code emits `/-/healthz` (commit 3d130c8). 2 failures, PRE-EXISTING (red on main too), not from the refactor.
+[] Implement (3) scheduler abstraction — `SchedulerBackend` ABC + `get_scheduler()` registry (PBS wrapper first, then Slurm) + runtime seam `EXASERVE_NODEFILE` / `EXASERVE_MPILAUNCH` / `EXASERVE_JOBID` so `launch_cluster.sh` stops hard-coding `$PBS_NODEFILE`/`mpiexec`. Spec: doc/design/scheduler_abstraction.md. Slurm e2e only validatable off-Aurora.
+[] Implement (4) vendor/site abstraction — `VendorBackend` (XPU/CUDA/ROCm device isolation) + `SiteConfig`; hoist `ZE_AFFINITY_MASK`/`ONEAPI_DEVICE_SELECTOR` out of the engines into the vendor layer. Spec: doc/design/vendor_site_abstraction.md. NVIDIA/AMD e2e only validatable off-Aurora.
+[] SGLang engine path is NOT smoke-validated (no sglang smoke spec exists; refactor only exercised vLLM). Add a 1-node sglang smoke or validate `SGLangEngine` end-to-end before trusting the sglang path post-refactor.
+[] Document `EXASERVE_ENGINE` + pluggable engine/proxy selection in README (currently only in doc/exaserve.md + the reference-card docx).
+[] doc/figures/*.png are gitignored (`*.png`) so the reference-card docx is not regenerable from a clean clone (the docx embeds them, so it renders fine). Either track the two figures + tmp/ref_card/ template, or document the regen prerequisites. Sources are in ~/aurora_rayserver.
+[] Update the SC26 paper (sc26workshop/) to the generic scheduler/vendor framing (roadmap step 5) once (3)/(4) land.
+[] Validate the refactor + rename at 128/256 nodes — this round covered components+correctness (1/2/4-node), NOT the large-scale overlay/GCS timing.
