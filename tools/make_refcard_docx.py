@@ -224,8 +224,10 @@ blocks.append(body_par(
     "an HPC system. From one YAML file and one command, it turns a PBS allocation into a "
     "single OpenAI-compatible inference service: it launches a Ray cluster over the "
     "allocation, stages model weights to node-local storage with an MPI broadcast, deploys "
-    "one vLLM (or SGLang) replica per GPU tile as Ray Serve applications, and optionally "
-    "fronts them with a head-node proxy such as HAProxy. A companion benchmarking harness "
+    "one inference replica per GPU tile as Ray Serve applications — a single EngineWorker "
+    "host over a pluggable engine backend (vLLM or SGLang, via EXASERVE_ENGINE) — and "
+    "optionally fronts them with a pluggable head-node proxy such as HAProxy. A companion "
+    "benchmarking harness "
     "measures deployments end to end and has validated them at up to 256 nodes "
     "(3,072 Intel XPU tiles) on ALCF Aurora.", after=100,
 ))
@@ -469,7 +471,7 @@ blocks.append(body_par(
 ))
 blocks.append(data_table([
     ["Environment knob", "Effect"],
-    ["EXASERVE_ENGINE=sglang", "SGLang instead of vLLM as the inference engine"],
+    ["EXASERVE_ENGINE=sglang", "Select the SGLang engine backend instead of the default vLLM (both plug into the same EngineWorker host)"],
     ["EXASERVE_PP_SHARD_AWARE=1",
      "Shard-aware multi-node pipeline-parallel staging and node-pinned replicas "
      "(405B-class models)"],

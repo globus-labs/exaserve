@@ -1,6 +1,6 @@
 ---
 name: exaserve
-description: Framework for scaling OpenAI-compatible LLM inference across HPC compute nodes — Ray Serve + vLLM deployments over PBS allocations with MPI weight staging, HAProxy/LiteLLM front ends, multi-node pipeline parallelism, and a declarative scaling-benchmark harness
+description: Framework for scaling OpenAI-compatible LLM inference across HPC compute nodes — Ray Serve deployments with a pluggable inference engine (vLLM/SGLang) over PBS allocations, with MPI weight staging, pluggable HAProxy/LiteLLM front ends, multi-node pipeline parallelism, and a declarative scaling-benchmark harness
 package: exaserve
 install: module load frameworks && pip install --user .
 language: python
@@ -14,7 +14,7 @@ reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
 
 # ExaServe Reference Card
 
-ExaServe (distributed as the `exaserve` package) turns a PBS allocation of N HPC nodes into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, deploys vLLM (or SGLang) replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — and fronts them with a head-node proxy such as HAProxy. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
+ExaServe (distributed as the `exaserve` package) turns a PBS allocation of N HPC nodes into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang, selected by `EXASERVE_ENGINE`), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming requests/s with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
 
 ## Install
 
@@ -158,7 +158,7 @@ The growth is concentrated in `wait_proxies` (38 s → 1,612 s, a 42× increase 
 
 | Env var | Effect |
 |---|---|
-| `EXASERVE_ENGINE=sglang` | SGLang instead of vLLM as inference engine |
+| `EXASERVE_ENGINE=sglang` | Select the SGLang engine backend instead of the default vLLM (both plug into the same `EngineWorker` host) |
 | `EXASERVE_PP_SHARD_AWARE=1` | Shard-aware multi-node PP staging + node-pinned per-replica deploys |
 | `EXASERVE_PP_UMBRELLA=1` | Single root-route ingress over the per-replica PP routes |
 | `EXASERVE_NULL_COMPUTE=1` | Skip the engine, simulate latency — control-plane/routing stress tests |
