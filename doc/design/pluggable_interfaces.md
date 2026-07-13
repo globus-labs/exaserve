@@ -1,7 +1,19 @@
 # Design: Pluggable Interfaces (Engine, Proxy) — and the seams for Scheduler & Vendor
 
-Status: **draft** · Branch: `refactor/pluggable-interfaces` · Depends on: the
-`aurora_rayserver → exaserve` rename (commit `6a2faa9`).
+Status: **partially implemented** · Branch: `refactor/pluggable-interfaces` ·
+Depends on: the `aurora_rayserver → exaserve` rename (commit `6a2faa9`).
+
+## Implementation status (what actually shipped vs. proposed)
+
+| Piece | State |
+|---|---|
+| `src/exaserve/engines/` — `EngineBackend` ABC, neutral dataclasses, `NullEngine`, `get_engine()` registry | **Shipped** (`1e58aa0`), unit-exercised on login node (registry + NullEngine stream/non-stream). **Not yet wired into `server.py`.** |
+| Proxy `BackendEndpoint` docstring de-Aurora-ification | **Shipped** (`1e58aa0`). |
+| Proxy entry-point plugin registration | Proposed only. |
+| `engines/vllm.py`, `engines/sglang.py`, the shared `EngineWorker` host, deletion of `VLLMWorker`/`SGLangWorker` | **Not started** — the load-bearing `server.py` extraction. Deferred pending real-compute smoke validation. |
+
+The sections below are the full design; treat anything not in the table above as
+**proposed, not built**.
 
 ## Goal
 

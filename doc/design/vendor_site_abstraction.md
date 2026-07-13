@@ -1,7 +1,16 @@
 # Design Sketch: Vendor & Site Abstraction (XPU → NVIDIA/AMD, Aurora → pluggable site)
 
-Status: **sketch** · Branch: `refactor/pluggable-interfaces` · Step (4) of the
-generic-HPC refactor. Builds on (2) engine and (3) scheduler.
+Status: **sketch (design only — no code shipped)** · Branch:
+`refactor/pluggable-interfaces` · Step (4) of the generic-HPC refactor. Builds on
+(2) engine and (3) scheduler.
+
+> **Implementation status:** nothing here is built yet. Device isolation
+> (`ZE_AFFINITY_MASK`/`ONEAPI_DEVICE_SELECTOR`) still lives inline in the
+> `server.py` worker classes, and site facts are still spread across
+> `eval/site_config.py` + `SchedulerSpec` defaults. `VendorBackend`, `SiteConfig`,
+> and the CUDA/ROCm backends are all **proposed**. Best sequenced *after* the (2)
+> engine extraction, since the device code lives in the worker `__init__` that (2)
+> refactors.
 
 ## Goal & the two distinct axes
 

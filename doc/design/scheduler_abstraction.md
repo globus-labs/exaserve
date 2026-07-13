@@ -1,7 +1,14 @@
 # Design Sketch: Scheduler Abstraction (PBS → pluggable, Slurm-ready)
 
-Status: **sketch** · Branch: `refactor/pluggable-interfaces` · Step (3) of the
-generic-HPC refactor. Sibling of `doc/design/pluggable_interfaces.md` (engine/proxy).
+Status: **sketch (design only — no code shipped)** · Branch:
+`refactor/pluggable-interfaces` · Step (3) of the generic-HPC refactor. Sibling of
+`doc/design/pluggable_interfaces.md` (engine/proxy).
+
+> **Implementation status:** nothing in this document is built yet. Today's code
+> is PBS-only (`eval/lib/schedulers/pbs.py`, `run_executor` qsub/qstat,
+> `launch_cluster.sh` `$PBS_NODEFILE`/`mpiexec`). This is the plan for making it
+> pluggable; `SchedulerBackend`, the registry, the runtime env-var seam, and
+> `SlurmScheduler` are all **proposed**.
 
 ## Goal
 
