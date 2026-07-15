@@ -58,6 +58,38 @@ CFG_8B = ["Meta-Llama-3-8B-Instruct  ·  TP=1 (1 replica/node)  ·  64$\\rightar
           "110 req/s/node offered  ·  ALCF Aurora"]
 
 
+# --- tokens/s secondary axis (a UNIT CONVERSION of query/s) ------------------
+# Measured from usage (actual_prompt_tokens / actual_completion_tokens) across the
+# sweep for the 64->64 workload: 74.7 input tok/req (64 content tokens + the
+# chat-template overhead) + 64.0 output tok/req (generation always hits the
+# max_tokens=64 cap) = 138.7 total tok/req. tokens/s = query/s x TOK_TOTAL is a
+# DETERMINISTIC unit conversion, not an independent series -> a matplotlib
+# functional secondary axis (NOT twinx). The fixed factor means the two scales
+# cannot invent a correlation, so the "dual-axis" anti-pattern (which is about
+# independent measures with arbitrary alignment) does not apply.
+TOK_IN, TOK_OUT = 74.7, 64.0
+TOK_TOTAL = TOK_IN + TOK_OUT             # 138.7 total tok/req
+
+
+def _tok_secondary_axis(a, mult=TOK_TOTAL, label="Total throughput (tokens/s)"):
+    """Right-hand axis expressing the SAME curves in total tokens/s. Ticks at token
+    decades in 10^n (matching sparse_log_y), styled muted/recessive so it reads as
+    a derived reference scale rather than a second data series. label=None draws
+    ticks only (used on the interior panel to avoid crowding the column gap)."""
+    from matplotlib.ticker import (LogLocator, LogFormatterMathtext, NullFormatter)
+    sec = a.secondary_yaxis("right", functions=(lambda q: q * mult, lambda t: t / mult))
+    sec.yaxis.set_major_locator(LogLocator(base=10.0))
+    sec.yaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(np.arange(2, 10)), numticks=12))
+    sec.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
+    sec.yaxis.set_minor_formatter(NullFormatter())
+    if label:
+        sec.set_ylabel(label, color="#555555")
+    sec.tick_params(axis="y", which="both", colors="#888888")
+    for lbl in sec.get_yticklabels():
+        lbl.set_color("#555555")
+    return sec
+
+
 # --- per-run helpers (error bars) -------------------------------------------
 
 def _mean_std(vals):
@@ -258,15 +290,32 @@ def fig1_proxy_scaling(S, NS, wide=True):
     b = base.rps * base.success_rate if (base and not np.isnan(base.rps)) else None
 
     def _throughput_panel(a, src, mode, title):
+        top = None                                   # (n, succ_rps) of the peak curve at the largest N
         for p in PROXIES:
             xs, ys, es = _collect(src, p, "succ_rps")
             if xs:
                 ps.line(a, xs, ys, p, mode, yerr=es)
+                if xs[-1] == ALLNODES[-1] and (top is None or ys[-1] > top[1]):
+                    top = (xs[-1], ys[-1])
         if b is not None:
             a.plot(ALLNODES, [b * n for n in ALLNODES], "k--", lw=1.0, alpha=0.55, zorder=2)
         a.set_yscale("log"); ps.sparse_log_y(a, sci=True)   # 10^n superscript decades
         a.set_ylabel("Throughput (query/s)")
         a.set_title(title)
+        _tok_secondary_axis(a)                       # right axis: SAME curves in total tokens/s
+        # Headline callout: peak total tokens/s at the largest cluster -- the number
+        # that maps to token-throughput benchmarks (MLPerf et al.). Pinned to the
+        # top-left corner (empty in both panels; the curves rise from bottom-left),
+        # so it reads as a panel headline and never collides with the endpoint value
+        # labels or the centred title.
+        if top is not None:
+            n_top, rps_top = top
+            a.annotate(f"$\\approx${rps_top * TOK_TOTAL / 1e6:.1f}M tok/s @ {n_top}n",
+                       (0.035, 0.94), xycoords="axes fraction",
+                       ha="left", va="top", fontsize=6, fontweight="bold",
+                       color="#1a1a1a", zorder=7,
+                       bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#1a1a1a",
+                                 lw=0.7, alpha=0.95))
 
     # row 0) Successful throughput — STREAMING | NON-STREAM.
     _throughput_panel(a_tps, S,  "stream",    "Successful throughput — streaming")
@@ -307,7 +356,10 @@ def fig1_proxy_scaling(S, NS, wide=True):
         labels += [f"{ps.PROXY_LABEL[p]} (stream)", f"{ps.PROXY_LABEL[p]} (non-stream)"]
     _write_caption(OUT / out_name,
                    "Proxy scaling: throughput, TBT & TTFT attainment vs. cluster size",
-                   ["Streaming (solid) vs non-stream (dashed)"] + CFG_8B)
+                   ["Streaming (solid) vs non-stream (dashed)",
+                    "Right axis: total tokens/s = query/s $\\times$ 138.7 "
+                    "(74.7 in + 64.0 out tok/req; a unit conversion, not independent data)"]
+                   + CFG_8B)
     top = 0.99                                       # no main title; legend rides the top edge
     legh = leg_frac / fig.get_size_inches()[1]       # reserve the legend rows (more at column width)
     panel_top = top - legh

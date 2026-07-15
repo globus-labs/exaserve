@@ -214,7 +214,7 @@ tree but never enter the wheel.
 
 ## Console scripts
 
-The wheel installs seven `aurora-*` console scripts. They split into three
+The wheel installs seven `exaserve-*` console scripts. They split into three
 groups: high-level user entry points, internal subprocesses, and a couple
 of utilities.
 
