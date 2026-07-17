@@ -39,28 +39,27 @@ class VLLMEngine(EngineBackend):
             CollectingStatLogger,
         )
 
+        from ..vendors import get_vendor
+
         init_mono = time.monotonic()
         pid = os.getpid()
         hostname = socket.gethostname()
         self.model_id = spec.model_id
         self._collect_stats = spec.collect_stats
+        self._vendor = get_vendor()
         gpu_ids = list(spec.device_ids)
         device_id = gpu_ids[0] if gpu_ids else 0
 
-        # ---- Device isolation (Intel XPU; vendor layer will own this in step 4)
+        # ---- Device isolation (delegated to the vendor layer) ---------------
         t0 = time.monotonic()
+        self._vendor.isolate_devices(gpu_ids, "vllm")
         if gpu_ids:
-            affinity_mask = ",".join(str(g) for g in gpu_ids)
-            os.environ["ZE_AFFINITY_MASK"] = affinity_mask
-            os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
             print(
-                f"[VLLMEngine pid={pid}] Assigned GPU tiles {gpu_ids} "
-                f"ZE_AFFINITY_MASK={affinity_mask} ONEAPI_DEVICE_SELECTOR=<unset>",
+                f"[VLLMEngine pid={pid}] vendor={self._vendor.name} assigned "
+                f"devices {gpu_ids}",
                 flush=True,
             )
         else:
-            os.environ.pop("ZE_AFFINITY_MASK", None)
-            os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
             print(
                 f"[VLLMEngine pid={pid}] No Ray GPUs assigned to coordinator actor; "
                 f"waiting for vLLM Ray workers to claim GPUs",
@@ -79,8 +78,8 @@ class VLLMEngine(EngineBackend):
                     "Installed vLLM build does not expose pipeline_parallel_size on "
                     "AsyncEngineArgs. Validate the runtime before using PP."
                 )
-            os.environ.setdefault("EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG", "1")
-            os.environ.setdefault("EXASERVE_XPU_VLLM_FORCE_RAY_CHANNEL_TYPE", "auto")
+            for _k, _v in self._vendor.distributed_env("vllm").items():
+                os.environ.setdefault(_k, _v)
             # Node-local sitecustomize shim so the multiprocessing-spawn EngineCore
             # child applies the exaserve vLLM/PP patches at startup.
             shim_dir = "/tmp/exaserve_pp_shim"

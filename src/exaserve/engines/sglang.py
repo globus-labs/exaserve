@@ -29,29 +29,31 @@ class SGLangEngine(EngineBackend):
 
     def create(self, spec: EngineSpec) -> None:
         from ..server import print_red
+        from ..vendors import get_vendor
 
         init_start = time.monotonic()
         pid = os.getpid()
         hostname = socket.gethostname()
         self.model_id = spec.model_id
+        self._vendor = get_vendor()
         gpu_ids = list(spec.device_ids)
         device_id = gpu_ids[0] if gpu_ids else 0
 
-        # SGLang's XPU init needs a VALID ONEAPI_DEVICE_SELECTOR (unlike vLLM).
-        # Tile isolation stays with ZE_AFFINITY_MASK, which composes with level_zero.
-        os.environ["ONEAPI_DEVICE_SELECTOR"] = "opencl:gpu;level_zero:gpu"
-        if gpu_ids:
-            os.environ["ZE_AFFINITY_MASK"] = ",".join(str(g) for g in gpu_ids)
+        # Device isolation (delegated to the vendor layer; XPU sets a valid
+        # ONEAPI_DEVICE_SELECTOR + ZE_AFFINITY_MASK, CUDA/ROCm set their own).
+        self._vendor.isolate_devices(gpu_ids, "sglang")
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         os.environ.setdefault("RAYON_NUM_THREADS", "1")
         print(
-            f"[SGLangEngine pid={pid}] tile {gpu_ids} "
-            f"ZE_AFFINITY_MASK={os.environ.get('ZE_AFFINITY_MASK')}",
+            f"[SGLangEngine pid={pid}] vendor={self._vendor.name} tile {gpu_ids}",
             flush=True,
         )
 
         model_path = spec.local_path or spec.model_id
-        attention_backend = os.environ.get("EXASERVE_XPU_SGLANG_ATTENTION", "torch_native")
+        attention_backend = (
+            os.environ.get("EXASERVE_XPU_SGLANG_ATTENTION")
+            or self._vendor.sglang_default_attention()
+        )
 
         import sglang as sgl
         from transformers import AutoTokenizer
@@ -59,8 +61,7 @@ class SGLangEngine(EngineBackend):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         engine_kwargs = dict(
             model_path=model_path,
-            device="xpu",
-            attention_backend=attention_backend,
+            device=self._vendor.torch_device(),
             tp_size=spec.tensor_parallel_size,
             mem_fraction_static=spec.gpu_memory_utilization,
             context_length=spec.max_model_len,
@@ -73,6 +74,8 @@ class SGLangEngine(EngineBackend):
             # unique per node to avoid the get_free_port() race across 12 engines
             nccl_port=25100 + device_id,
         )
+        if attention_backend:
+            engine_kwargs["attention_backend"] = attention_backend
         engine_kwargs.update(spec.extra_engine_kwargs)
 
         # SGLang spawns its scheduler via multiprocessing 'spawn', re-importing
