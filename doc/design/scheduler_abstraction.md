@@ -12,8 +12,11 @@ generic-HPC refactor. Sibling of `doc/design/pluggable_interfaces.md`.
 >   `EXASERVE_MPILAUNCH` (mpiexec on PBS, **srun on Slurm**); `driver.py`
 >   `get_rank()` reads `SLURM_PROCID`. Selected by `EXASERVE_SCHEDULER` (default
 >   `pbs`). See `doc/deploy_slurm_amd.md`.
-> - **Not done**: the eval/benchmark harness (`eval/lib/schedulers/`) is still
->   PBS-only. Slurm end-to-end is unproven (no Slurm system on Aurora).
+> - **Eval/benchmark harness**: also pluggable — `eval/lib/schedulers/`
+>   (`EvalScheduler` PBS+Slurm, `get_scheduler(scheduler.type)`); `run_planner`
+>   renders per scheduler, `run_executor` submit/queue-count/replay-fanout and
+>   `backends/ray.py` nodefile all go through it.
+> - **Unproven**: Slurm end-to-end (no Slurm system on Aurora) — validates offsite.
 
 ## Goal
 
