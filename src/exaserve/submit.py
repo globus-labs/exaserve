@@ -25,10 +25,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
-import shlex
-import shutil
-import subprocess
 import sys
 import time
 from importlib import resources
@@ -36,64 +32,23 @@ from pathlib import Path
 from typing import Optional
 
 from .config import get_site_defaults
+from .schedulers import JobSpec, get_scheduler
 from .schemas import load_deployment_config, load_proxy_config
 
 
-_QSUB_TIMEOUT_S = 600
-_QSTAT_TIMEOUT_S = 600
-_JOB_ID_RE = re.compile(r"^(\d+\.[\w\-.]+)")
+# Default runtime-env setup for the job script. Aurora sources env_aurora (or
+# falls back to `module load frameworks`); other sites override via
+# EXASERVE_ENV_SETUP (e.g. `module load <...>; source <venv>/bin/activate`).
+_DEFAULT_ENV_SETUP = """if [ -f "$HOME/script/env_aurora" ]; then
+    source "$HOME/script/env_aurora"
+else
+    module load frameworks
+fi"""
 
 
 # ---------------------------------------------------------------------------
 # exaserve-serve-submit
 # ---------------------------------------------------------------------------
-
-
-def _render_job_pbs(
-    config_path: Path,
-    *,
-    launch_script: Path,
-    package_root: Path,
-    package_parent: Path,
-    num_nodes: int,
-    walltime: str,
-    queue: str,
-    project_account: str,
-    filesystems: str,
-    keep_flag: str,
-    job_name: str,
-    log_dir: Path,
-) -> str:
-    """Render a one-shot PBS script that calls exaserve-launch-cluster <config>."""
-    launch_script_q = shlex.quote(str(launch_script))
-    config_path_q = shlex.quote(str(config_path.resolve()))
-    package_root_q = shlex.quote(str(package_root))
-    package_parent_q = shlex.quote(str(package_parent))
-    return f"""#!/bin/bash -l
-#PBS -N {job_name}
-#PBS -A {project_account}
-#PBS -k {keep_flag}
-#PBS -l filesystems={filesystems}
-#PBS -l select={num_nodes}
-#PBS -l walltime={walltime}
-#PBS -q {queue}
-#PBS -o {log_dir}/
-#PBS -e {log_dir}/
-
-set -e
-unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M
-
-if [ -f "$HOME/script/env_aurora" ]; then
-    source "$HOME/script/env_aurora"
-else
-    module load frameworks
-fi
-
-export EXASERVE_PACKAGE_ROOT={package_root_q}
-export EXASERVE_PACKAGE_PARENT={package_parent_q}
-
-exec bash {launch_script_q} {config_path_q}
-"""
 
 
 def _package_paths() -> tuple[Path, Path, Path]:
@@ -139,44 +94,39 @@ def submit_serve(
     log_dir = Path(log_dir) if log_dir else cfg_path.parent / "pbs_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    job_pbs_text = _render_job_pbs(
-        cfg_path,
+    scheduler = get_scheduler()
+    env_setup = os.environ.get("EXASERVE_ENV_SETUP", _DEFAULT_ENV_SETUP)
+    job_spec = JobSpec(
+        config_path=cfg_path,
         launch_script=launch_script,
         package_root=package_root,
         package_parent=package_parent,
         num_nodes=deploy_cfg.num_nodes,
         walltime=walltime,
-        queue=queue,
-        project_account=project_account,
-        filesystems=defaults.filesystems,
-        keep_flag=defaults.keep_flag,
+        account=project_account,
         job_name=job_name,
         log_dir=log_dir,
+        queue=queue,
+        env_setup=env_setup,
+        vendor=os.environ.get("EXASERVE_VENDOR"),
+        gpus_per_node=getattr(deploy_cfg, "num_gpus_per_node", None),
+        filesystems=defaults.filesystems,   # PBS only; ignored by Slurm
+        keep_flag=defaults.keep_flag,        # PBS only; ignored by Slurm
     )
+    job_text = scheduler.render_job(job_spec)
 
-    job_pbs_path = log_dir / f"{cfg_path.stem}.pbs"
-    job_pbs_path.write_text(job_pbs_text)
+    ext = "sbatch" if scheduler.name == "slurm" else "pbs"
+    job_script_path = log_dir / f"{cfg_path.stem}.{ext}"
+    job_script_path.write_text(job_text)
 
     if dry_run:
-        sys.stderr.write(f"[exaserve-serve-submit] dry-run; would qsub {job_pbs_path}\n")
+        sys.stderr.write(
+            f"[exaserve-serve-submit] dry-run ({scheduler.name}); would submit {job_script_path}\n"
+        )
         sys.stderr.write(f"[exaserve-serve-submit] proxy port (from config): {proxy_cfg.port}\n")
         return ""
 
-    qsub_path = shutil.which("qsub")
-    if qsub_path is None:
-        raise RuntimeError("qsub not found on PATH; are you on a PBS-enabled host?")
-
-    proc = subprocess.run(
-        [qsub_path, str(job_pbs_path)],
-        check=True,
-        text=True,
-        capture_output=True,
-        timeout=_QSUB_TIMEOUT_S,
-    )
-    job_id = proc.stdout.strip().splitlines()[-1].strip()
-    if not _JOB_ID_RE.match(job_id):
-        raise RuntimeError(f"could not parse job id from qsub output: {proc.stdout!r}")
-
+    job_id = scheduler.submit(job_script_path)
     job_id_path = Path(job_id_file) if job_id_file else cfg_path.with_suffix(".jobid")
     job_id_path.write_text(job_id + "\n")
     return job_id
@@ -230,44 +180,6 @@ def serve_submit_main() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _qstat_field(job_id: str, field: str) -> Optional[str]:
-    """Return the named scalar field from ``qstat -f``, or None if absent."""
-    qstat_path = shutil.which("qstat")
-    if qstat_path is None:
-        raise RuntimeError("qstat not found on PATH")
-    proc = subprocess.run(
-        [qstat_path, "-f", job_id],
-        check=False,
-        text=True,
-        capture_output=True,
-        timeout=_QSTAT_TIMEOUT_S,
-    )
-    if proc.returncode != 0:
-        # PBS stops listing finished jobs in -f without -x.
-        proc = subprocess.run(
-            [qstat_path, "-fx", job_id],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=_QSTAT_TIMEOUT_S,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(f"qstat failed for {job_id}: {proc.stderr.strip()}")
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line.startswith(f"{field} ="):
-            return line.split("=", 1)[1].strip()
-    return None
-
-
-def _parse_head_node(exec_host: str) -> Optional[str]:
-    """exec_host looks like ``host1/0*208+host2/0*208+...`` — return host1."""
-    if not exec_host:
-        return None
-    head = exec_host.split("+", 1)[0]
-    return head.split("/", 1)[0]
-
-
 def serve_url(
     job_id: str,
     config_path: Optional[str | os.PathLike] = None,
@@ -280,10 +192,10 @@ def serve_url(
     """Resolve a job id to ``http://<head_node>:<port>``.
 
     Args:
-        job_id: PBS job id (e.g. ``8470000.aurora-pbs-0001``).
+        job_id: scheduler job id (PBS ``8470000.aurora-pbs-0001`` or Slurm ``12345``).
         config_path: optional deployment config; we read ``proxy_config.port``
             from it to populate the port. Falls back to ``port`` kwarg, then 4001.
-        wait: if True, poll until the job reaches state R.
+        wait: if True, poll until the job reaches the running state.
         poll_interval_s, timeout_s: poll loop control.
         port: explicit override (skips reading the config).
     """
@@ -293,12 +205,12 @@ def serve_url(
     if port is None:
         port = 4001
 
+    scheduler = get_scheduler()
     deadline = time.monotonic() + timeout_s
     while True:
-        state = _qstat_field(job_id, "job_state")
-        exec_host = _qstat_field(job_id, "exec_host")
-        if state == "R" and exec_host:
-            head = _parse_head_node(exec_host)
+        state = scheduler.job_state(job_id)
+        if state == "R":
+            head = scheduler.head_node(job_id)
             if head:
                 return f"http://{head}:{port}"
         if not wait:

@@ -1,12 +1,32 @@
 #!/bin/bash
 set -e # Fail fast if anything goes wrong
 
-# --- 1. Environment Setup ---
-# Check if we are inside a PBS job or interactive session
-if [ -z "$PBS_NODEFILE" ]; then
-    echo "ERROR: \$PBS_NODEFILE not found. Are you in a debug session (qsub -I)?"
-    exit 1
+# --- 1. Scheduler detection + runtime seam ---
+# Abstract the batch scheduler behind three env vars used everywhere below:
+#   EXASERVE_NODEFILE   one host per line (the allocation's nodes)
+#   EXASERVE_JOBID      the scheduler's job id
+#   EXASERVE_SCHEDULER  "pbs" (validated default) | "slurm"
+# PBS provides $PBS_NODEFILE directly; Slurm has no nodefile and no mpiexec, so
+# we materialize one from $SLURM_JOB_NODELIST and launch per-node work with srun
+# (see EXASERVE_MPILAUNCH below). Any of these may be pre-set to override.
+if [ -z "${EXASERVE_NODEFILE:-}" ]; then
+    if [ -n "${PBS_NODEFILE:-}" ]; then
+        EXASERVE_SCHEDULER="${EXASERVE_SCHEDULER:-pbs}"
+        EXASERVE_NODEFILE="$PBS_NODEFILE"
+        EXASERVE_JOBID="${EXASERVE_JOBID:-${PBS_JOBID:-}}"
+    elif [ -n "${SLURM_JOB_NODELIST:-}" ]; then
+        EXASERVE_SCHEDULER="${EXASERVE_SCHEDULER:-slurm}"
+        EXASERVE_JOBID="${EXASERVE_JOBID:-${SLURM_JOB_ID:-}}"
+        EXASERVE_NODEFILE="${TMPDIR:-/tmp}/exaserve_nodefile.${EXASERVE_JOBID:-$$}"
+        scontrol show hostnames "$SLURM_JOB_NODELIST" > "$EXASERVE_NODEFILE"
+    else
+        echo "ERROR: no scheduler allocation detected."
+        echo "       Need \$PBS_NODEFILE (PBS: qsub -I) or \$SLURM_JOB_NODELIST (Slurm: salloc/sbatch)."
+        exit 1
+    fi
 fi
+export EXASERVE_SCHEDULER="${EXASERVE_SCHEDULER:-pbs}"
+export EXASERVE_NODEFILE EXASERVE_JOBID
 
 # Get the absolute paths for the installed package and the working tree.
 # In a source checkout, SCRIPT_DIR is <repo>/src/exaserve/resources.
@@ -126,8 +146,21 @@ fi
 
 HOSTNAME_SHORT="$(hostname -s)"
 UNIQUE_NODES_FILE="$RUN_LOG_DIR/pbs_nodes.txt"
-sort -u "$PBS_NODEFILE" > "$UNIQUE_NODES_FILE"
+sort -u "$EXASERVE_NODEFILE" > "$UNIQUE_NODES_FILE"
 cp "$DEPLOYMENT_CONFIG_PATH" "$RUN_LOG_DIR/deployment_config.yaml"
+
+# Per-node launch prefix for MPI staging, cleanup, gather, and the driver.
+# PBS/PALS uses mpiexec; Slurm (Cray sites have no mpiexec) uses srun. One task
+# per node either way. EXASERVE_MPILAUNCH may be pre-set to override entirely.
+_EXA_NODE_COUNT="$(wc -l < "$UNIQUE_NODES_FILE")"
+if [ -z "${EXASERVE_MPILAUNCH:-}" ]; then
+    if [ "$EXASERVE_SCHEDULER" = "slurm" ]; then
+        EXASERVE_MPILAUNCH="srun --nodes=$_EXA_NODE_COUNT --ntasks-per-node=1 --cpu-bind=none"
+    else
+        EXASERVE_MPILAUNCH="mpiexec -n $_EXA_NODE_COUNT -ppn 1 --cpu-bind none"
+    fi
+fi
+export EXASERVE_MPILAUNCH
 
 finalize_run_logs() {
     # MPI-driven log/artifact collection (replaces the prior parallel-ssh
@@ -140,8 +173,9 @@ finalize_run_logs() {
         echo "run_timestamp_utc=$RUN_STAMP"
         echo "launcher_host=$HOSTNAME_SHORT"
         echo "deployment_config=$DEPLOYMENT_CONFIG_PATH"
-        echo "pbs_jobid=${PBS_JOBID:-}"
-        echo "pbs_nodefile=$PBS_NODEFILE"
+        echo "scheduler=${EXASERVE_SCHEDULER:-}"
+        echo "job_id=${EXASERVE_JOBID:-}"
+        echo "nodefile=$EXASERVE_NODEFILE"
         echo "exit_code=$exit_code"
     } > "$metadata_file"
 
@@ -203,10 +237,10 @@ PY
             "/tmp/ray/session_latest/logs/serve"
             "/tmp/exaserve_inst"
         )
-        echo "[finalize] mpiexec gather to $per_node_dir ($node_count rank(s))" | tee -a "$dbg"
+        echo "[finalize] gather to $per_node_dir ($node_count rank(s)) via ${EXASERVE_MPILAUNCH}" | tee -a "$dbg"
         # bound the whole collective at 5 min — at 256 nodes with ~100 MB each
         # writing in parallel to Lustre this is far longer than needed.
-        timeout 300 mpiexec -n "$node_count" -ppn 1 --cpu-bind none \
+        timeout 300 ${EXASERVE_MPILAUNCH} \
             "$gather_bin" "${gather_args[@]}" >>"$dbg" 2>&1
         echo "[finalize] gather rc=$?" >> "$dbg"
     fi
@@ -224,7 +258,7 @@ trap 'finalize_run_logs $?' EXIT
 
 echo "[System] Project Root: $PROJECT_ROOT"
 echo "[System] Package Root: $PACKAGE_ROOT"
-echo "[System] Nodefile: $PBS_NODEFILE"
+echo "[System] Scheduler: $EXASERVE_SCHEDULER | Nodefile: $EXASERVE_NODEFILE | Launch: $EXASERVE_MPILAUNCH"
 echo "[System] PYTHONPATH: $PYTHONPATH"
 echo "[System] Backend Python: $PYTHON_EXEC"
 echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
@@ -260,21 +294,26 @@ echo "[System] Total Nodes: $NODE_COUNT"
 # --- 4. Atomic Launch ---
 echo "[System] Launching Cluster..."
 
-export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
-export ZE_AFFINITY_MASK=""
-export CCL_PROCESS_LAUNCHER="hydra"
+# Accelerator (vendor) env. The Intel-XPU / Aurora oneAPI specifics only apply
+# on XPU; on CUDA/ROCm they are wrong, so gate them on EXASERVE_VENDOR (default
+# xpu keeps Aurora unchanged). Per-tile device isolation is done later by the
+# vendor layer (exaserve.vendors) inside each replica.
+if [ "${EXASERVE_VENDOR:-xpu}" = "xpu" ]; then
+    export ZE_FLAT_DEVICE_HIERARCHY="FLAT"
+    export ZE_AFFINITY_MASK=""
+    export CCL_PROCESS_LAUNCHER="hydra"
+    # Ray's Intel GPU runtime rewrites ONEAPI_DEVICE_SELECTOR to "level_zero:...".
+    # On Aurora that value crashes Triton's SYCL device probe. Keep Ray from
+    # touching the selector and rely on ZE_AFFINITY_MASK for device isolation.
+    export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR="1"
+    unset ONEAPI_DEVICE_SELECTOR
+fi
 
 # Aurora shells can inherit an unusually large per-thread stack size, which
 # causes Ray worker creation to fail once vLLM launches many distributed
 # workers. Clamp it before starting Ray so child processes can create threads.
+# Harmless on other sites.
 ulimit -s 8192 || true
-
-# Ray's Intel GPU runtime rewrites ONEAPI_DEVICE_SELECTOR to
-# "level_zero:...". On Aurora that value crashes Triton's SYCL device probe.
-# Keep Ray from touching the selector and rely on ZE_AFFINITY_MASK for all
-# device isolation instead.
-export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR="1"
-unset ONEAPI_DEVICE_SELECTOR
 
 # Whole-node PP launches many Ray core workers at once. On Aurora the default
 # per-worker gRPC/server thread fan-out can exhaust the node's process/thread
@@ -319,7 +358,7 @@ echo "[System] Deployment config: $DEPLOYMENT_CONFIG_PATH"
 # starts from a clean slate. See resources/cleanup_run.sh.
 if [ "${EXASERVE_CLEAN_STAGE:-0}" = "1" ]; then
     echo "[System] CLEAN-STAGE: wiping per-node run artifacts before staging"
-    timeout 180 mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+    timeout 180 ${EXASERVE_MPILAUNCH} \
         bash "$SCRIPT_DIR/cleanup_run.sh" \
         || echo "[System] WARN: clean-stage cleanup reported errors (continuing)"
 fi
@@ -343,9 +382,11 @@ export EXASERVE_VLLM_PATCH_PP_LAYER_FILTER="${EXASERVE_VLLM_PATCH_PP_LAYER_FILTE
 
 # Ray's compiled-DAG channels crash in the RayWorkerWrapper accelerator
 # context on XPU (ONEAPI_DEVICE_SELECTOR device-id mapping), so PP>1 must use
-# the uncompiled Ray executor fallback from _sitecustomize. Only affects
-# pipeline_parallel_size > 1; TP-only paths never consult this flag.
-export EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG="${EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG:-1}"
+# the uncompiled Ray executor fallback from _sitecustomize. XPU-only — on
+# CUDA/ROCm the compiled DAG works and is faster, so do NOT set it there.
+if [ "${EXASERVE_VENDOR:-xpu}" = "xpu" ]; then
+    export EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG="${EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG:-1}"
+fi
 
 # Scaling trace instrumentation: collects per-replica init timing and
 # driver phases via Ray object store (no Lustre file I/O).  Safe at any
@@ -460,7 +501,7 @@ export PYTHONUNBUFFERED=1
 # driver runs from the per-node /tmp/exaserve_src copy so all node-local
 # imports (exaserve.driver, .server, .model_paths, ...) come from
 # tmpfs, not Lustre. Invoke as a module so relative imports resolve.
-mpiexec -n $NODE_COUNT -ppn 1 --cpu-bind none \
+${EXASERVE_MPILAUNCH} \
     $PYTHON_EXEC -m exaserve.driver --config "$DEPLOYMENT_CONFIG_PATH"
 
 # Stop Copper if it was started

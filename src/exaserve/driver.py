@@ -125,10 +125,19 @@ def get_hsn_ip() -> str:
 
 def get_rank():
     """
-    Detects MPI Rank from environment variables provided by Hydra/PALS.
+    Detect this process's launch rank from the launcher's env vars.
+
+    Covers Hydra/PALS/MPICH (PBS + mpiexec, Aurora), Slurm srun (SLURM_PROCID),
+    and OpenMPI. The launcher runs one driver per node (``-ppn 1`` / one task per
+    node), so rank 0 is the head node and the rest are workers.
     """
-    # Check standard Hydra/MPICH variables
-    for var in ["PMI_RANK", "PMI_ID", "ALPS_APP_PE", "OMPI_COMM_WORLD_RANK"]:
+    for var in [
+        "PMI_RANK",          # MPICH / PALS (Aurora mpiexec)
+        "PMI_ID",
+        "ALPS_APP_PE",       # Cray ALPS
+        "SLURM_PROCID",      # Slurm srun (Delta / Cray-Slurm sites)
+        "OMPI_COMM_WORLD_RANK",  # OpenMPI
+    ]:
         if var in os.environ:
             return int(os.environ[var])
     return 0  # Default to 0 if not found (e.g. local testing)

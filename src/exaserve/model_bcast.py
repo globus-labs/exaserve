@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -95,6 +96,21 @@ def probe_cache_locally(path: Path) -> None:
     print(json.dumps(payload), flush=True)
 
 
+def mpi_launch_prefix(num_nodes: int) -> List[str]:
+    """Per-node launch prefix, matching launch_cluster.sh's EXASERVE_MPILAUNCH.
+
+    Honors an explicit ``EXASERVE_MPILAUNCH`` override (set by the launcher);
+    otherwise PBS/PALS uses ``mpiexec`` and Slurm uses ``srun`` (Cray/Slurm
+    sites have no mpiexec). One task per node either way.
+    """
+    override = os.environ.get("EXASERVE_MPILAUNCH")
+    if override:
+        return shlex.split(override)
+    if os.environ.get("EXASERVE_SCHEDULER", "").lower() == "slurm":
+        return ["srun", f"--nodes={num_nodes}", "--ntasks-per-node=1", "--cpu-bind=none"]
+    return ["mpiexec", "-n", str(num_nodes), "-ppn", "1", "--cpu-bind", "none"]
+
+
 def run_cache_probe(path: Path, num_nodes: int) -> List[Dict[str, str]]:
     """
     Probe the cache state on every allocated node via MPI.
@@ -102,14 +118,7 @@ def run_cache_probe(path: Path, num_nodes: int) -> List[Dict[str, str]]:
     # Invoke the module via -m (not by absolute path) so the package's
     # relative imports (`from .schemas import ...`) resolve. `python <abspath>`
     # would set __package__ to None and break the imports.
-    cmd = [
-        "mpiexec",
-        "-n",
-        str(num_nodes),
-        "-ppn",
-        "1",
-        "--cpu-bind",
-        "none",
+    cmd = mpi_launch_prefix(num_nodes) + [
         sys.executable,
         "-m",
         "exaserve.model_bcast",
@@ -240,14 +249,7 @@ def bcast_models(
                 flush=True,
             )
             subprocess.run(
-                [
-                    "mpiexec",
-                    "-n",
-                    str(num_nodes),
-                    "-ppn",
-                    "1",
-                    "--cpu-bind",
-                    "none",
+                mpi_launch_prefix(num_nodes) + [
                     str(binary_path),
                     str(bcast_source),
                     str(local_path),

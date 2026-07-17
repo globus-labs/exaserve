@@ -104,7 +104,7 @@ else
 fi
 
 echo "[distribute_to_nodes] bcast source ($(du -sh "$TMP_CLEAN" | awk '{print $1}')) to $NODE_COUNT node(s) -> $LOCAL_SRC"
-mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+${EXASERVE_MPILAUNCH} \
     "$BCAST_BIN" "$TMP_CLEAN/exaserve" "$LOCAL_SRC"
 
 # --- Optional: node-local engine venv (sglang) ---
@@ -147,7 +147,7 @@ if [ "${EXASERVE_STAGE_VENV:-0}" = "1" ] && [ -n "${EXASERVE_VENV_ROOT:-}" ]; th
         fi
     fi
     echo "[distribute_to_nodes] bcast venv ($(du -sh "$TMP_VENV_STAGE/exaserve_venv" | awk '{print $1}')) to $NODE_COUNT node(s) -> $LOCAL_VENV"
-    mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+    ${EXASERVE_MPILAUNCH} \
         "$BCAST_BIN" "$TMP_VENV_STAGE/exaserve_venv" "/tmp"
     rm -rf "$TMP_VENV_STAGE"
     if [ ! -x "$LOCAL_VENV/bin/python" ]; then
@@ -169,14 +169,14 @@ if [ "$INSTRUMENTATION" = "1" ]; then
     cp "$OVERLAY_SRC"/serve/_private/*.py "$TMP_PATCHES/serve/_private/"
 
     echo "[distribute_to_nodes] bcast overlay patches to $NODE_COUNT node(s) -> /tmp/overlay_patches"
-    mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+    ${EXASERVE_MPILAUNCH} \
         "$BCAST_BIN" "$TMP_PATCHES" "/tmp"
 
     SETUP_SCRIPT="$PACKAGE_ROOT/resources/setup_overlay.sh"
     if [ ! -x "$SETUP_SCRIPT" ]; then chmod +x "$SETUP_SCRIPT" || true; fi
     echo "[distribute_to_nodes] building per-node /tmp/exaserve_overlay symlink farm"
     PYTHON_EXEC="$PYTHON_EXEC" EXASERVE_OVERLAY_PATCHES_DIR="/tmp/overlay_patches" \
-    mpiexec -n "$NODE_COUNT" -ppn 1 --cpu-bind none \
+    ${EXASERVE_MPILAUNCH} \
         bash "$SETUP_SCRIPT"
 fi
 
