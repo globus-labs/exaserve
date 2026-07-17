@@ -308,9 +308,9 @@ class RayBackendAdapter(BackendAdapter):
                         if ip and ip not in nodes:
                             nodes.append(ip)
             if not nodes:
-                nodefile = os.environ.get("PBS_NODEFILE")
+                nodefile = os.environ.get("EXASERVE_NODEFILE") or os.environ.get("PBS_NODEFILE")
                 if not nodefile or not os.path.isfile(nodefile):
-                    raise RuntimeError("PBS_NODEFILE is required for direct-mode Ray execution")
+                    raise RuntimeError("EXASERVE_NODEFILE (or PBS_NODEFILE) is required for direct-mode Ray execution")
                 with open(nodefile, "r", encoding="utf-8") as handle:
                     for line in handle:
                         node = line.strip()
@@ -332,9 +332,9 @@ class RayBackendAdapter(BackendAdapter):
                     port = int(handle.read().strip())
                 except ValueError:
                     pass
-        # Use the head node hostname so MPI client ranks on other nodes
-        # can reach the proxy (0.0.0.0 only works on the head node itself).
-        nodefile = os.environ.get("PBS_NODEFILE")
+        # Use the head node hostname so client ranks on other nodes can reach
+        # the proxy (0.0.0.0 only works on the head node itself).
+        nodefile = os.environ.get("EXASERVE_NODEFILE") or os.environ.get("PBS_NODEFILE")
         head_host = "0.0.0.0"
         if nodefile and os.path.isfile(nodefile):
             with open(nodefile, "r", encoding="utf-8") as handle:

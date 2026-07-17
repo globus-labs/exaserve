@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import os
+from typing import Dict, Optional, Tuple
 
-from . import __doc__  # noqa: F401
+from .base import EvalScheduler
 
 
 def default_queue_and_walltime(num_nodes: int) -> tuple[str, str]:
@@ -13,66 +13,88 @@ def default_queue_and_walltime(num_nodes: int) -> tuple[str, str]:
     return "prod", "02:00:00"
 
 
-def render_pbs_job(
-    *,
-    job_name: str,
-    num_nodes: int,
-    queue: str,
-    walltime: str,
-    project: str,
-    filesystems: str,
-    keep_output: str,
-    stdout_dir: str,
-    stderr_dir: str,
-    mail_user: str,
-    mail_events: str,
-    code_root: str,
-    env_script: str,
-    run_yaml_path: str,
-    job_exports: dict[str, str] | None = None,
-) -> str:
-    mail_lines = ""
-    if mail_user:
-        mail_lines = f"#PBS -m {mail_events}\n#PBS -M {mail_user}\n"
+class PBSScheduler(EvalScheduler):
+    """PBS Pro (Aurora). VALIDATED — render output byte-identical to the prior
+    render_pbs_job; qsub/qstat submit + queue count moved in from run_executor."""
 
-    # Job-script-level exports, visible to the whole job (server launch,
-    # discover_targets, replay client). Emitted after `source env_script` so they
-    # win over anything the env script sets.
-    export_block = "".join(
-        f"export {key}={value}\n" for key, value in (job_exports or {}).items()
-    )
+    name = "pbs"
 
-    return f"""#!/bin/bash -l
-#PBS -N {job_name}
-{mail_lines}#PBS -l filesystems={filesystems}
-#PBS -A {project}
-#PBS -k {keep_output}
-#PBS -l select={num_nodes}
-#PBS -l walltime={walltime}
-#PBS -q {queue}
-#PBS -o {stdout_dir}/
-#PBS -e {stderr_dir}/
+    def render_job(
+        self,
+        *,
+        job_name: str,
+        num_nodes: int,
+        queue: str,
+        walltime: str,
+        project: str,
+        filesystems: str,
+        keep_output: str,
+        stdout_dir: str,
+        stderr_dir: str,
+        mail_user: str,
+        mail_events: str,
+        code_root: str,
+        env_script: str,
+        run_yaml_path: str,
+        job_exports: Optional[Dict[str, str]] = None,
+        gpus_per_node: Optional[int] = None,  # PBS ignores; select= is per-node
+    ) -> str:
+        mail_lines = ""
+        if mail_user:
+            mail_lines = f"#PBS -m {mail_events}\n#PBS -M {mail_user}\n"
+        header = (
+            "#!/bin/bash -l\n"
+            f"#PBS -N {job_name}\n"
+            f"{mail_lines}"
+            f"#PBS -l filesystems={filesystems}\n"
+            f"#PBS -A {project}\n"
+            f"#PBS -k {keep_output}\n"
+            f"#PBS -l select={num_nodes}\n"
+            f"#PBS -l walltime={walltime}\n"
+            f"#PBS -q {queue}\n"
+            f"#PBS -o {stdout_dir}/\n"
+            f"#PBS -e {stderr_dir}/\n\n"
+        )
+        return header + self._body(
+            code_root=code_root, env_script=env_script,
+            run_yaml_path=run_yaml_path, job_exports=job_exports,
+        )
 
-cd {code_root}
-unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M
-if [ -n "$PYTHONPATH" ]; then
-    CLEAN_PYTHONPATH=""
-    OLD_IFS="$IFS"
-    IFS=':'
-    for entry in $PYTHONPATH; do
-        case "$entry" in
-            *"/venv/"*"/site-packages"*|*"/.venv/"*"/site-packages"*)
+    def submit(self, job_path: str) -> Tuple[bool, str]:
+        try:
+            r = self._run(["qsub", job_path])
+        except Exception as exc:
+            return False, f"qsub failed: {exc}"
+        return r.returncode == 0, (r.stdout.strip() or r.stderr.strip())
+
+    def count_queued(self, user: str) -> Dict[str, int]:
+        try:
+            r = self._run(["qstat", "-u", user])
+        except Exception:
+            return {}
+        counts: Dict[str, int] = {}
+        for line in r.stdout.splitlines():
+            if user not in line:
                 continue
-                ;;
-        esac
-        CLEAN_PYTHONPATH="${{CLEAN_PYTHONPATH:+$CLEAN_PYTHONPATH:}}$entry"
-    done
-    IFS="$OLD_IFS"
-    export PYTHONPATH="$CLEAN_PYTHONPATH"
-fi
-# Prepend the snapshot repo root + its src/ subdir so 'from eval.X' and
-# 'from exaserve.X' both resolve when eval.cli imports backends.
-export PYTHONPATH="{code_root}:{code_root}/src${{PYTHONPATH:+:$PYTHONPATH}}"
-source "{env_script}"
-{export_block}python3 -m eval.cli run execute "{run_yaml_path}"
-"""
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            state = queue = None
+            for i, part in enumerate(parts):
+                if part in ("R", "Q", "H", "B", "E", "W", "S"):
+                    state = part
+                    if i >= 3:
+                        queue = parts[2]
+                    break
+            if state in ("R", "Q", "H", "B") and queue:
+                counts[queue] = counts.get(queue, 0) + 1
+        return counts
+
+    def slot_limits(self) -> Dict[str, Optional[int]]:
+        # 1 running + 1 queued on debug/debug-scaling; prod = unlimited queued.
+        return {"debug": 2, "debug-scaling": 2, "prod": None}
+
+
+# Back-compat module function (thin wrapper; some callers import it directly).
+def render_pbs_job(**kw) -> str:
+    return PBSScheduler().render_job(**kw)

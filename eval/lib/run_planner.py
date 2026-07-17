@@ -45,7 +45,7 @@ from .models import (
     VariantSpec,
     WorkloadSpec,
 )
-from .schedulers.pbs import default_queue_and_walltime, render_pbs_job
+from .schedulers import default_queue_and_walltime, get_scheduler
 from .catalog import spec_group_relpath
 from .spec_io import load_experiment_spec
 from .trace_store import materialize_trace_artifact
@@ -585,7 +585,13 @@ def _materialize_variant(
     runtime_env = adapter.runtime_env(run_plan)
 
     ensure_dir(os.path.dirname(bundle.job_path))
-    job_text = render_pbs_job(
+    job_exports = dict(adapter.job_env_exports(run_plan) or {})
+    # Bake EXASERVE_VENDOR into the job when set at materialize time (needed for
+    # AMD/NVIDIA sites; Aurora leaves it unset -> xpu default).
+    _vendor = os.environ.get("EXASERVE_VENDOR")
+    if _vendor:
+        job_exports.setdefault("EXASERVE_VENDOR", _vendor)
+    job_text = get_scheduler(getattr(scheduler, "type", "pbs")).render_job(
         job_name=f"{spec.name}_{run_group_id}_{variant.variant_name}",
         num_nodes=scheduler.nodes,
         queue=scheduler.queue,
@@ -600,7 +606,8 @@ def _materialize_variant(
         code_root=run_plan.repo_root,
         env_script=runtime_env.env_script,
         run_yaml_path=bundle.run_yaml_path,
-        job_exports=adapter.job_env_exports(run_plan),
+        job_exports=job_exports,
+        gpus_per_node=getattr(run_plan.deployment, "num_gpus_per_node", None),
     )
     with open(bundle.job_path, "w", encoding="utf-8") as handle:
         handle.write(job_text)

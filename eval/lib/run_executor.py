@@ -28,6 +28,7 @@ from typing import Iterable
 from .backends import get_backend_adapter
 from .backends.base import BackendRunContext
 from .run_planner import load_run_plan, resolve_run_group_dir, write_run_state
+from .schedulers import get_scheduler
 
 
 def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
@@ -95,16 +96,13 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
 def submit_run(target: str, *, dry_run: bool = False) -> int:
     run_yaml_path = _resolve_run_yaml(target)
     run_plan = load_run_plan(run_yaml_path)
-    cmd = ["qsub", run_plan.bundle.job_path]
+    scheduler = get_scheduler(getattr(run_plan.scheduler, "type", "pbs"))
     if dry_run:
-        print(" ".join(cmd))
+        print(f"[{scheduler.name}] submit {run_plan.bundle.job_path}")
         return 0
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    if result.returncode == 0:
-        print(result.stdout.strip())
-    else:
-        print(result.stderr.strip() or result.stdout.strip())
-    return result.returncode
+    ok, msg = scheduler.submit(run_plan.bundle.job_path)
+    print(msg)
+    return 0 if ok else 1
 
 
 def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
@@ -134,18 +132,33 @@ def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
     if run_plan.client.num_nodes > 1:
         hostfile = _build_hostfile(run_plan.client.num_nodes)
         try:
-            command = [
-                "mpiexec",
-                "-n",
-                str(run_plan.client.num_nodes),
-                "--ppn",
-                "1",
-                "--cpu-bind",
-                "none",
-                "--hostfile",
-                hostfile,
-                *replay_cmd,
-            ]
+            # Fan the load generator out to `client.num_nodes` client nodes.
+            # PBS/PALS uses mpiexec --hostfile; Slurm uses srun --nodelist
+            # (Cray/Slurm sites have no mpiexec).
+            if getattr(run_plan.scheduler, "type", "pbs") == "slurm":
+                with open(hostfile, "r", encoding="utf-8") as _hf:
+                    _nodes = [ln.strip() for ln in _hf if ln.strip()]
+                command = [
+                    "srun",
+                    f"--nodes={run_plan.client.num_nodes}",
+                    "--ntasks-per-node=1",
+                    "--cpu-bind=none",
+                    f"--nodelist={','.join(_nodes)}",
+                    *replay_cmd,
+                ]
+            else:
+                command = [
+                    "mpiexec",
+                    "-n",
+                    str(run_plan.client.num_nodes),
+                    "--ppn",
+                    "1",
+                    "--cpu-bind",
+                    "none",
+                    "--hostfile",
+                    hostfile,
+                    *replay_cmd,
+                ]
             return _run_command_with_tee(
                 command,
                 log_path=os.path.join(run_plan.bundle.logs_dir, "replay.log"),
@@ -167,9 +180,9 @@ def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
 
 
 def _build_hostfile(client_nodes: int) -> str:
-    nodefile = os.environ.get("PBS_NODEFILE")
+    nodefile = os.environ.get("EXASERVE_NODEFILE") or os.environ.get("PBS_NODEFILE")
     if not nodefile or not os.path.isfile(nodefile):
-        raise RuntimeError("PBS_NODEFILE is required for multi-node replay")
+        raise RuntimeError("EXASERVE_NODEFILE (or PBS_NODEFILE) is required for multi-node replay")
     nodes = []
     with open(nodefile, "r", encoding="utf-8") as handle:
         for line in handle:
@@ -303,13 +316,8 @@ def _resolve_run_yaml(target: str) -> str:
 # submit_all: batch-submit all pending runs for a spec
 # ---------------------------------------------------------------------------
 
-# Max jobs (running + queued) the scheduler accepts per queue.
-_QUEUE_SLOT_LIMITS: dict[str, int | None] = {
-    "debug": 2,           # 1 running + 1 queued
-    "debug-scaling": 2,   # 1 running + 1 queued
-    "prod": None,         # 1 running + unlimited queued
-}
-_DEFAULT_QUEUE_SLOTS = 2  # conservative fallback for unknown queues
+# Per-queue slot limits now live on the scheduler backend (scheduler.slot_limits()).
+_DEFAULT_QUEUE_SLOTS = 2  # conservative fallback for unknown queues/partitions
 _POLL_INTERVAL_S = 300    # 5 min between polls — minimizes qstat load on login node
 
 
@@ -449,10 +457,13 @@ def _submit_all_locked(
     total = len(pending)
     print(f"Found {total} pending run(s) for {spec_name!r} in {os.path.basename(group_dir)!r}")
 
+    scheduler = get_scheduler(getattr(pending[0].scheduler, "type", "pbs"))
+    slot_limits = scheduler.slot_limits()
+
     if dry_run:
         for run_plan in pending:
             print(
-                f"  [dry-run] qsub {run_plan.bundle.job_path}  "
+                f"  [dry-run] {scheduler.name} submit {run_plan.bundle.job_path}  "
                 f"({run_plan.run_group_id}/{run_plan.run_id}, queue={run_plan.scheduler.queue})"
             )
         return 0
@@ -460,21 +471,22 @@ def _submit_all_locked(
     remaining = list(pending)
     submitted: list[str] = []
     failed: dict[str, str] = {}
+    user = getpass.getuser()
 
     while remaining:
-        queue_counts = _count_queued_jobs()
+        queue_counts = scheduler.count_queued(user)
         next_round: list = []
 
         for run_plan in remaining:
             queue = run_plan.scheduler.queue
-            limit = _QUEUE_SLOT_LIMITS.get(queue, _DEFAULT_QUEUE_SLOTS)
+            limit = slot_limits.get(queue, _DEFAULT_QUEUE_SLOTS)
             current = queue_counts.get(queue, 0)
 
             if limit is not None and current >= limit:
                 next_round.append(run_plan)
                 continue
 
-            ok, msg = _try_qsub(run_plan)
+            ok, msg = scheduler.submit(run_plan.bundle.job_path)
             if ok:
                 submitted.append(run_plan.run_id)
                 queue_counts[queue] = current + 1
@@ -551,49 +563,5 @@ def _is_completed(run_dir: str) -> bool:
         return False
 
 
-def _count_queued_jobs() -> dict[str, int]:
-    """Count the current user's running + queued PBS jobs per queue."""
-    user = getpass.getuser()
-    try:
-        result = subprocess.run(
-            ["qstat", "-u", user],
-            capture_output=True, text=True, check=False, timeout=600,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return {}
-    counts: dict[str, int] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 6:
-            continue
-        # PBS table: Job_Id  Username  Queue  Jobname  SessID  NDS  TSK  Mem  Time  S  Elap
-        # We need the queue (col index 2) and state (col index 9 typically).
-        # Simpler: just match lines with our username and a known state letter.
-        if user not in line:
-            continue
-        # Find the single-letter state column: R, Q, H, E, B, etc.
-        state = None
-        queue = None
-        for i, part in enumerate(parts):
-            if part in ("R", "Q", "H", "B", "E", "W", "S"):
-                state = part
-                # Queue is earlier in the line — in standard PBS output it's column 2
-                if i >= 3:
-                    queue = parts[2]
-                break
-        if state in ("R", "Q", "H", "B") and queue:
-            counts[queue] = counts.get(queue, 0) + 1
-    return counts
-
-
-def _try_qsub(run_plan) -> tuple[bool, str]:
-    """Attempt qsub; return (success, message)."""
-    try:
-        result = subprocess.run(
-            ["qsub", run_plan.bundle.job_path],
-            capture_output=True, text=True, check=False, timeout=600,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "qsub timed out (600s)"
-    msg = (result.stdout.strip() or result.stderr.strip())
-    return result.returncode == 0, msg
+# Job submission and per-queue counting now live on the scheduler backend
+# (exaserve eval/lib/schedulers/): scheduler.submit() and scheduler.count_queued().
