@@ -11,8 +11,8 @@ is the source of truth for **what is built vs. proposed**.
 |---|---|---|---|
 | (1) | Rename `aurora_rayserver` → `exaserve` (package, CLI, env vars, brand) | — (commit `6a2faa9`) | **Done & validated on real compute** (1-node all-features, 2-node 24-replica proxy/internode; 405B PP re-smoke in progress) |
 | (2) | Pluggable **engine** interface (+ proxy polish) | [pluggable_interfaces.md](pluggable_interfaces.md) | **Partially built**: `engines/` ABC + `NullEngine` + registry shipped; `server.py` extraction (VLLM/SGLang engines behind one `EngineWorker`) **not started** |
-| (3) | Pluggable **scheduler** (PBS → Slurm) | [scheduler_abstraction.md](scheduler_abstraction.md) | **Design only** |
-| (4) | Pluggable **vendor** (XPU → CUDA/ROCm) + **site** config | [vendor_site_abstraction.md](vendor_site_abstraction.md) | **Design only** |
+| (3) | Pluggable **scheduler** (PBS → Slurm) | [scheduler_abstraction.md](scheduler_abstraction.md) | **Built** (`feature/slurm-amd-support`): package `SchedulerBackend` PBS+Slurm + srun/nodefile runtime seam. PBS validated, Slurm untested (offsite). Eval harness still PBS-only. |
+| (4) | Pluggable **vendor** (XPU → CUDA/ROCm) + **site** config | [vendor_site_abstraction.md](vendor_site_abstraction.md) | **Built** (`feature/slurm-amd-support`): `VendorBackend` XPU/CUDA/ROCm, engines delegate device isolation. XPU validated, CUDA/ROCm untested (offsite). `SiteConfig` object still deferred (env-var based). See [deploy_slurm_amd.md](../deploy_slurm_amd.md). |
 | (5) | Update `doc/exaserve.md`, README, paper to the generic framing | — | Not started (do last, once the above land) |
 
 ## The common pattern

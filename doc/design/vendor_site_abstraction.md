@@ -1,16 +1,19 @@
 # Design Sketch: Vendor & Site Abstraction (XPU → NVIDIA/AMD, Aurora → pluggable site)
 
-Status: **sketch (design only — no code shipped)** · Branch:
-`refactor/pluggable-interfaces` · Step (4) of the generic-HPC refactor. Builds on
-(2) engine and (3) scheduler.
+Status: **IMPLEMENTED (XPU validated, CUDA/ROCm untested)** · Step (4) of the
+generic-HPC refactor. Builds on (2) engine and (3) scheduler.
 
-> **Implementation status:** nothing here is built yet. Device isolation
-> (`ZE_AFFINITY_MASK`/`ONEAPI_DEVICE_SELECTOR`) still lives inline in the
-> `server.py` worker classes, and site facts are still spread across
-> `eval/site_config.py` + `SchedulerSpec` defaults. `VendorBackend`, `SiteConfig`,
-> and the CUDA/ROCm backends are all **proposed**. Best sequenced *after* the (2)
-> engine extraction, since the device code lives in the worker `__init__` that (2)
-> refactors.
+> **Implementation status:** the **vendor** half is built on branch
+> `feature/slurm-amd-support`: `src/exaserve/vendors/` — `VendorBackend` ABC +
+> `get_vendor()` registry, `XPUVendor` (reproduces the exact prior
+> `ZE_AFFINITY_MASK`/`ONEAPI` behavior), `CUDAVendor` (`CUDA_VISIBLE_DEVICES`),
+> `ROCmVendor` (`ROCR_VISIBLE_DEVICES`). Engines delegate device isolation, device
+> string, PP env, and SGLang attention default to the vendor. Selected by
+> `EXASERVE_VENDOR` (default `xpu`). The `launch_cluster.sh` XPU env block is
+> gated on the vendor. See `doc/deploy_slurm_amd.md`.
+> - **Not done**: a first-class `SiteConfig` object (site facts still flow via env
+>   vars: `EXASERVE_ENV_SETUP`, `EXASERVE_VENDOR`, per-config `num_gpus_per_node`).
+>   CUDA/ROCm end-to-end unproven (Aurora is XPU-only).
 
 ## Goal & the two distinct axes
 

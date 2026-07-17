@@ -1,14 +1,19 @@
 # Design Sketch: Scheduler Abstraction (PBS → pluggable, Slurm-ready)
 
-Status: **sketch (design only — no code shipped)** · Branch:
-`refactor/pluggable-interfaces` · Step (3) of the generic-HPC refactor. Sibling of
-`doc/design/pluggable_interfaces.md` (engine/proxy).
+Status: **IMPLEMENTED (PBS validated, Slurm untested)** · Step (3) of the
+generic-HPC refactor. Sibling of `doc/design/pluggable_interfaces.md`.
 
-> **Implementation status:** nothing in this document is built yet. Today's code
-> is PBS-only (`eval/lib/schedulers/pbs.py`, `run_executor` qsub/qstat,
-> `launch_cluster.sh` `$PBS_NODEFILE`/`mpiexec`). This is the plan for making it
-> pluggable; `SchedulerBackend`, the registry, the runtime env-var seam, and
-> `SlurmScheduler` are all **proposed**.
+> **Implementation status:** built on branch `feature/slurm-amd-support`.
+> - **Package submission**: `src/exaserve/schedulers/` — `SchedulerBackend` ABC +
+>   `get_scheduler()` registry, `PBSScheduler` (byte-identical to the old
+>   `submit.py`) + `SlurmScheduler` (sbatch/squeue). `submit.py` uses it.
+> - **Runtime seam**: `launch_cluster.sh` / `distribute_to_nodes.sh` /
+>   `model_bcast.py` detect the scheduler and use `EXASERVE_NODEFILE` +
+>   `EXASERVE_MPILAUNCH` (mpiexec on PBS, **srun on Slurm**); `driver.py`
+>   `get_rank()` reads `SLURM_PROCID`. Selected by `EXASERVE_SCHEDULER` (default
+>   `pbs`). See `doc/deploy_slurm_amd.md`.
+> - **Not done**: the eval/benchmark harness (`eval/lib/schedulers/`) is still
+>   PBS-only. Slurm end-to-end is unproven (no Slurm system on Aurora).
 
 ## Goal
 
