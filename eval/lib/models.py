@@ -182,14 +182,17 @@ class ClientSpec:
     sum_only: bool = False
     stream: bool = False
     startup_only: bool = False  # If True, exit after CLUSTER FULLY READY (skip replay)
-    # dest=direct dispatch-topology ablation. Empty = the historical behaviour
-    # (every client rank sprays across every node = "mesh"). When set, the
-    # replay client is run once per entry against the SAME bring-up, and each
-    # arm's results land in results/<topology>/. Arms:
-    #   mesh   — rank hits all N nodes (hash-routed); ~1-1/N of traffic remote
-    #   local  — rank hits only its own node (loopback, one peer)
-    #   paired — rank hits exactly one *remote* node (permutation; one peer)
-    # local vs paired separates "cross-node delivery" from "per-node peer fan-out".
+    # How a dest=direct rank picks its target node(s):
+    #   local  — its OWN node only. This is what "direct" means: no routing
+    #            layer, no cross-node hop. THE DEFAULT.
+    #   mesh   — hash-route across all N nodes. This was the accidental
+    #            historical behaviour (see doc/ and the direct_topology spec);
+    #            it makes every node stream to N remote peers and is a
+    #            *different experiment*, kept only for studying that effect.
+    #   paired — exactly one remote node (permutation): one peer, still remote.
+    direct_dispatch: str = "local"
+    # Ablation: replay once per entry against the SAME bring-up, each arm's
+    # results landing in results/<arm>/. Overrides direct_dispatch per arm.
     dispatch_topologies: list[str] = field(default_factory=list)
     saturation: SaturationSpec = field(default_factory=SaturationSpec)
 

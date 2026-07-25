@@ -82,7 +82,17 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
                     # which already paid for the bring-up.
                     exit_code = rc
         else:
-            exit_code = _run_replay_client(run_plan, base_urls)
+            # "direct" means node-local dispatch (the default); mesh must be
+            # asked for explicitly. Always pass it so the arm is on the record.
+            exit_code = _run_replay_client(
+                run_plan,
+                base_urls,
+                extra_env={
+                    "EXASERVE_DIRECT_TOPOLOGY": getattr(
+                        run_plan.client, "direct_dispatch", "local"
+                    )
+                },
+            )
         if exit_code == 0:
             # Collect per-replica vLLM stats before tearing down the cluster.
             if getattr(run_plan.deployment, "collect_stats", False):

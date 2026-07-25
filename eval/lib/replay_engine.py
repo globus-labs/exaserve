@@ -282,19 +282,27 @@ def _url_host(url: str) -> str:
     return host
 
 
-def _apply_direct_topology(base_urls: list[str], rank: int) -> list[str]:
+def _apply_direct_topology(base_urls: list[str], rank: int, mpi_size: int = 0) -> list[str]:
     """Narrow a direct-mode rank's target list per EXASERVE_DIRECT_TOPOLOGY.
 
-    mesh (default) leaves the list alone: the rank hash-routes across every
-    node, so all but 1/N of its traffic is remote and each server node fields
-    streams from N distinct peers. `local` pins the rank to its own node
-    (loopback, one peer); `paired` pins it to exactly one *remote* node
-    (one peer, still remote). Comparing the three separates the cost of
-    crossing the fabric from the cost of per-node peer fan-out.
+    `local` (THE DEFAULT) pins the rank to its own node: that is what direct
+    dispatch means -- no routing layer and no cross-node hop. `mesh` leaves the
+    list alone so the rank hash-routes across every node, which makes all but
+    1/N of its traffic remote and every server node field streams from N
+    distinct peers; that is a different experiment and must be asked for.
+    `paired` pins the rank to exactly one *remote* node (one peer, still
+    remote), which separates crossing the fabric from per-node peer fan-out.
     """
-    topology = os.environ.get("EXASERVE_DIRECT_TOPOLOGY", "mesh").strip().lower()
-    if topology in ("", "mesh"):
+    topology = os.environ.get("EXASERVE_DIRECT_TOPOLOGY", "local").strip().lower()
+    if topology == "mesh":
         return base_urls
+    if topology in ("local", "paired") and mpi_size and mpi_size != len(base_urls):
+        raise RuntimeError(
+            f"EXASERVE_DIRECT_TOPOLOGY={topology} pins each rank to one node, but there "
+            f"are {mpi_size} client ranks for {len(base_urls)} target nodes; "
+            f"{abs(len(base_urls) - mpi_size)} node(s) would be mis-loaded. "
+            "Set client.num_nodes == deployment.num_nodes."
+        )
     if topology not in ("local", "paired"):
         raise RuntimeError(
             f"EXASERVE_DIRECT_TOPOLOGY={topology!r} is not one of mesh/local/paired"
@@ -706,6 +714,70 @@ def _port_from_manifest(exp_config: EvalManifest, override_port: int | None) -> 
     return 8000
 
 
+def _trace_shard_dir(trace_path: str, mpi_size: int) -> str:
+    return os.path.join(os.path.dirname(trace_path), f"shards_n{mpi_size}")
+
+
+def _stage_trace_shards(trace_path: str, mpi_size: int) -> str | None:
+    """Split the trace into per-rank shards once, next to the trace itself.
+
+    Without this every rank streams and JSON-parses the WHOLE trace and then
+    keeps requests[rank::mpi_size] -- at 256 nodes that is 256 x 790 MB off one
+    Lustre file (~200 GB) plus 256x redundant parsing of 1.7 M records. The
+    shards preserve the rank::mpi_size partition exactly, are content-addressed
+    with the trace, and are reused by every later run at the same rank count.
+
+    Returns the shard directory, or None if staging failed (caller falls back
+    to the whole-file path). Safe under concurrent jobs: build into a private
+    temp dir, then rename into place; a loser just discards its copy.
+    """
+    shard_dir = _trace_shard_dir(trace_path, mpi_size)
+    done_marker = os.path.join(shard_dir, "_COMPLETE")
+    if os.path.isfile(done_marker):
+        return shard_dir
+    tmp_dir = tempfile.mkdtemp(
+        prefix=f".shards_n{mpi_size}_", dir=os.path.dirname(trace_path)
+    )
+    try:
+        handles = [
+            open(os.path.join(tmp_dir, f"rank{idx}.jsonl"), "w", encoding="utf-8")
+            for idx in range(mpi_size)
+        ]
+        try:
+            index = 0
+            last_line = ""
+            with open(trace_path, "r", encoding="utf-8") as source:
+                for line in source:
+                    # Cheap prefilter: only the metadata line carries __type__,
+                    # so avoid json.loads on the ~millions of request lines.
+                    if '"__type__"' in line and json.loads(line).get("__type__") == "metadata":
+                        continue
+                    handles[index % mpi_size].write(line)
+                    last_line = line
+                    index += 1
+        finally:
+            for handle in handles:
+                handle.close()
+        # The trace is emitted in arrival order, so the last request carries the
+        # trace span the dispatch-overhead diagnostic compares against.
+        last_timestamp = float(json.loads(last_line)["timestamp"]) if last_line else 0.0
+        with open(os.path.join(tmp_dir, "_COMPLETE"), "w", encoding="utf-8") as handle:
+            json.dump({"total": index, "last_timestamp": last_timestamp}, handle)
+        try:
+            os.rename(tmp_dir, shard_dir)
+        except OSError:
+            # Another job staged it first: theirs is equivalent, drop ours.
+            if not os.path.isfile(done_marker):
+                raise
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        return shard_dir
+    except Exception as exc:
+        print(f"[replay] WARNING: trace sharding failed ({exc}); "
+              "falling back to whole-file load", flush=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+
 def _load_trace_requests(trace_path: str) -> list[TraceRequest]:
     requests = []
     with open(trace_path, "r", encoding="utf-8") as handle:
@@ -906,7 +978,7 @@ async def replay_from_manifest(
             raise RuntimeError(health_error)
         _mpi_barrier(comm)
         # Health-check the whole fleet first, then narrow to this rank's arm.
-        base_urls = _apply_direct_topology(base_urls, rank)
+        base_urls = _apply_direct_topology(base_urls, rank, mpi_size)
 
     go_bin = _find_go_binary()
     if go_bin is None:
@@ -926,9 +998,35 @@ async def replay_from_manifest(
         _mpi_barrier(comm)
         return
 
-    requests = _load_trace_requests(trace_path)
-    rank_requests = requests[rank::mpi_size]
-    target_responses = int(len(requests) * early_stop) if early_stop and early_stop > 0 else None
+    # Per-rank trace shards: staged once by the root, then every rank reads only
+    # its own ~1/N slice instead of the whole multi-hundred-MB trace.
+    shard_dir = None
+    if mpi_size > 1:
+        stage_error = None
+        if is_root:
+            try:
+                shard_dir = _stage_trace_shards(trace_path, mpi_size)
+            except Exception as exc:  # pragma: no cover - defensive
+                stage_error = str(exc)
+        shard_dir = _mpi_bcast(comm, shard_dir, root=0)
+        stage_error = _mpi_bcast(comm, stage_error, root=0)
+        if stage_error:
+            print(f"[replay] WARNING: trace staging failed on root: {stage_error}", flush=True)
+            shard_dir = None
+        _mpi_barrier(comm)
+
+    if shard_dir:
+        rank_requests = _load_trace_requests(os.path.join(shard_dir, f"rank{rank}.jsonl"))
+        with open(os.path.join(shard_dir, "_COMPLETE"), "r", encoding="utf-8") as handle:
+            marker = json.load(handle)
+        total_requests = int(marker["total"])
+        trace_span_s = float(marker["last_timestamp"])
+    else:
+        requests = _load_trace_requests(trace_path)
+        rank_requests = requests[rank::mpi_size]
+        total_requests = len(requests)
+        trace_span_s = requests[-1].timestamp if requests else 0.0
+    target_responses = int(total_requests * early_stop) if early_stop and early_stop > 0 else None
 
     interrupted = False
     interrupt_event = threading.Event()
@@ -987,7 +1085,7 @@ async def replay_from_manifest(
                 sum_only,
             )
             if is_root and last_fire_time > 0:
-                trace_span = requests[-1].timestamp if requests else 0.0
+                trace_span = trace_span_s
                 actual_dispatch_s = last_fire_time - effective_run_t0
                 dispatch_timings.append(
                     {
@@ -1057,7 +1155,7 @@ async def replay_from_manifest(
         if is_root:
             _save_results(
                 exp_config,
-                requests,
+                total_requests,
                 all_runs_results[-1] if all_runs_results else [],
                 all_runs_results,
                 run_durations,
@@ -1081,7 +1179,7 @@ async def replay_from_manifest(
 
 def _save_results(
     exp_config: EvalManifest,
-    requests: list[TraceRequest],
+    total_requests: int,
     results,
     all_runs_results,
     run_durations,
@@ -1105,7 +1203,7 @@ def _save_results(
         _summarize_run_results(
             run_index,
             run_results,
-            len(requests),
+            total_requests,
             run_durations[run_index] if run_index < len(run_durations) else None,
         )
         for run_index, run_results in enumerate(all_runs_results)
@@ -1145,7 +1243,7 @@ def _save_results(
                 "total_input_tokens": total_input_tokens,
                 "total_output_tokens": total_output_tokens,
                 "requests_completed": completed_requests,
-                "requests_scheduled": results.get("requests_scheduled", len(requests)),
+                "requests_scheduled": results.get("requests_scheduled", total_requests),
                 "errors": results.get("errors", 0),
                 "p50_s": results.get("p50_s", 0.0),
                 "p99_s": results.get("p99_s", 0.0),
@@ -1229,7 +1327,7 @@ def _save_results(
                 "total_input_tokens": total_input_tokens,
                 "total_output_tokens": total_output_tokens,
                 "requests_completed": len(results),
-                "requests_scheduled": len(requests),
+                "requests_scheduled": total_requests,
                 "errors": sum(item["errors"] for item in per_model.values()),
                 "p50_s": (_percentile(successful_latencies, 0.50) if successful_latencies else None),
                 "p99_s": (_percentile(successful_latencies, 0.99) if successful_latencies else None),
