@@ -28,3 +28,6 @@ dist.bak.*/
 *.egg-info.bak*/
 # generated plot output
 eval/plot/output/
+
+# Claude Code / process crash dumps
+core.*
