@@ -1,0 +1,81 @@
+name: pp405b_pp2_n16_durtest
+# DEFINITIVE TEST for the weak-scaling "efficiency drop" (128n 81% -> 256n 67%).
+#
+# Analysis of the existing direct-mode sweep (proxy REMOVED, so HAProxy is not
+# involved) shows the drop is a fixed-window benchmark artifact, not a scaling
+# limit:
+#   * steady-state throughput tracks offered load (~97%) at every scale;
+#     TTFT p50 (~0.7s) and TBT (~0.23 s/tok) are INVARIANT across 4->256 nodes.
+#   * overall rps = requests / wall-clock, and wall-clock = 120s injection +
+#     a tail "overhang" spent draining the slowest requests. Measured:
+#       eff = T_inject / (T_inject + overhang)  reproduces the sweep EXACTLY
+#       (n64 77.5%, n128 73.4%, n256 60.6% -- overhang 34.8 / 43.4 / 77.9 s).
+#   * the tail is admission QUEUEING, not slow execution: slow requests differ
+#     from the bulk almost entirely in TTFT (n256 top-20: 66.6s TTFT vs 1.8s
+#     bulk) while their decode time / TBT match the bulk. Each replica is driven
+#     at 0.4 rps x ~17.3s service = ~6.9 concurrent vs max_num_seqs=8 (~85% of
+#     batch capacity), so P(replica transiently needs >8 slots) ~26%; excess
+#     requests wait a full ~15s decode cycle. More replicas -> the max over
+#     replicas of that wait grows -> longer drain -> lower wall-clock rps.
+#
+# TEST: hold scale FIXED at 16 nodes (8 replicas) and vary ONLY the injection
+# duration. If the drop is the fixed-window artifact, efficiency must rise along
+# T/(T+overhang) with overhang ~constant. n16 overhang measured = 28.2s, so:
+#     T=120s -> 81.0% (matches the measured n16 point)
+#     T=300s -> 91.4%
+#     T=600s -> 95.5%
+# A flat/!=predicted result would falsify the explanation. 16 nodes runs on the
+# capacity queue (2h walltime, fast bring-up), so this lands reliably -- unlike
+# the 192-node attempt, which lost 3/3 jobs to shard-aware deploy flakiness.
+matrix:
+  name_template: 'dur{duration}'
+  axes:
+  - name: duration
+    values: [120, 300, 600]
+    targets: [workload.duration]
+    label_template: 'dur{value}'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 120.0            # overridden per matrix point
+  input_len: 64
+  output_len: 64
+  rate_per_node: 0.2         # 0.4 rps/replica, identical to the sweep
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  num_nodes: 16              # 8 replicas (PP=2) -> capacity queue
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /tmp/pp405b_shard
+  models:
+  - model_id: meta-llama/Llama-3.1-405B-Instruct
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    num_replicas: 8
+    max_model_len: 4096
+    size: 405
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 8          # unchanged: the queueing headroom under test
+  replica_max_ongoing_requests: 16
+client:
+  num_runs: 2                # run0 warmup (discard) + run1 measured, as in the sweep
+  dest: direct               # proxy removed, matching the sweep the numbers came from
+  stream: true
+  num_go_procs: 8
+  num_go_workers: 4
+  go_concurrency: 256
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+      proxy:
+        type: none
+        backend_port: 8000
+scheduler:
+  type: pbs
+  nodes: 16
+  queue: capacity
+  walltime: '02:00:00'
