@@ -463,6 +463,7 @@ def load_run_plan(path: str) -> RunPlan:
         warmup_duration_s=float(client_raw["warmup_duration_s"]),
         sum_only=bool(client_raw["sum_only"]),
         startup_only=bool(client_raw.get("startup_only", False)),
+        dispatch_topologies=[str(item) for item in (client_raw.get("dispatch_topologies") or [])],
     )
     scheduler = SchedulerSpec(
         type=str(scheduler_raw["type"]),

@@ -151,6 +151,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         sum_only=bool(client_raw.get("sum_only", False)),
         stream=bool(client_raw.get("stream", False)),
         startup_only=bool(client_raw.get("startup_only", False)),
+        dispatch_topologies=[str(item) for item in (client_raw.get("dispatch_topologies") or [])],
         saturation=SaturationSpec.from_dict(client_raw.get("saturation", {})),
     )
     backend = BackendSpec(
@@ -223,6 +224,21 @@ def validate_experiment_spec(spec: ExperimentSpec) -> None:
         raise ValueError("client.dest must be 'proxy' or 'direct'")
     if spec.client.early_stop < 0.0 or spec.client.early_stop > 1.0:
         raise ValueError("client.early_stop must be between 0.0 and 1.0")
+    if spec.client.dispatch_topologies:
+        unknown = set(spec.client.dispatch_topologies) - {"mesh", "local", "paired"}
+        if unknown:
+            raise ValueError(
+                f"client.dispatch_topologies: unknown arm(s) {sorted(unknown)}; "
+                "allowed: mesh, local, paired"
+            )
+        if spec.client.dest != "direct":
+            raise ValueError("client.dispatch_topologies requires client.dest='direct'")
+        if spec.client.num_nodes != spec.deployment.num_nodes:
+            raise ValueError(
+                "client.dispatch_topologies requires one client rank per node "
+                f"(client.num_nodes={spec.client.num_nodes}, "
+                f"deployment.num_nodes={spec.deployment.num_nodes})"
+            )
     if not spec.deployment.models:
         raise ValueError("deployment.models must contain at least one model")
     for model in spec.deployment.models:

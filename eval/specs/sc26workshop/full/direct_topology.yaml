@@ -1,0 +1,86 @@
+name: direct_topology
+# WHY THIS EXPERIMENT
+# The paper reports direct-dispatch STREAMING per-node completions falling
+# 99 (n1) -> 71 (n256) QPS/node while non-streaming direct holds ~106 flat, and
+# attributes the gap, hedged, to Ray's control-plane footprint. Re-analysis of
+# the full-sweep shards (eval/plot + scratch analysis, 2026-07-25) says the
+# attribution is untested and probably wrong on the mechanism:
+#   * the client dispatches perfectly (issue span 60.0s, lag p50 0.00s) at
+#     every N -- the offered rate really is 110 QPS/node everywhere;
+#   * the per-node service rate is already lower in the FIRST 5s, before any
+#     queue exists: 99.6 (n4) / 97.3 (n16) / 91.2 (n64) / 84.6 (n128) /
+#     78.3 (n256) QPS/node;
+#   * for queue-free requests (issued in the first 3s) TTFT barely moves
+#     (0.16 -> 0.21s) but end-to-end grows 1.95 -> 2.64s, i.e. the whole cost
+#     is in the per-token DELIVERY phase, ~+10ms/token at 256 nodes;
+#   * non-streaming is immune (per-target mean latency spread 1.03x at n256,
+#     vs 3.7x streaming), so the nodes themselves are homogeneous.
+# The overlooked confound: "direct" is not node-local. The Go client picks
+#   target = fnv1a64(req_id) % len(base_urls)
+# over ALL N node URLs, so direct dispatch is a full N x N mesh -- every node
+# streams SSE to N remote peers. The spec comment claiming "one client per node
+# hits its LOCAL Ray Serve port" has never matched the code.
+#
+# ARMS (all three replayed against ONE bring-up, results/<arm>/):
+#   mesh   - today's behaviour: rank hash-routes across all N nodes
+#   local  - rank hits only its own node: loopback, one peer, zero fabric
+#   paired - rank hits exactly one REMOTE node: still crosses the fabric, but
+#            one peer per node instead of N
+# local vs mesh separates cross-node token delivery from everything that scales
+# with the cluster (Ray/GCS control plane, which is identical in all arms).
+# paired vs local then separates the fabric crossing itself from per-node peer
+# fan-out. Offered load is 110 QPS/node in every arm.
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [128, 192]
+    targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+    label_template: '{value}_nodes'
+  derived:
+  - path: scheduler.queue
+    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
+  - path: scheduler.walltime
+    expr: '"02:00:00" if num_nodes <= 16 else ("02:30:00" if num_nodes >= 256 else "01:00:00")'
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 110.0
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+  collect_stats: true
+client:
+  # 2 runs per arm (run0 warm-up, run1 data) x 3 arms keeps the whole ablation
+  # inside the 1h debug-scaling walltime even at 192 nodes, where serve.run
+  # alone costs ~10-15 min (tab:startup).
+  num_runs: 2
+  dest: direct
+  stream: true
+  num_go_procs: 8
+  num_go_workers: 4
+  dispatch_topologies: [mesh, local, paired]
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+      proxy:
+        type: none
+scheduler:
+  type: pbs

@@ -243,7 +243,85 @@ def _trace_path(exp_config: EvalManifest) -> str:
 
 
 def _result_dir(exp_config: EvalManifest) -> str:
-    return exp_config.pbs_result_dir
+    base = exp_config.pbs_result_dir
+    subdir = os.environ.get("EXASERVE_RESULT_SUBDIR", "").strip()
+    return os.path.join(base, subdir) if (base and subdir) else base
+
+
+def _local_addresses() -> set[str]:
+    """Every address this host answers to: hostnames plus bound interface IPs."""
+    import socket
+
+    names: set[str] = set()
+    for name in (socket.gethostname(), socket.getfqdn()):
+        if name:
+            names.add(name)
+            names.add(name.split(".")[0])
+    try:
+        out = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True, timeout=20
+        ).stdout
+        for line in out.splitlines():
+            fields = line.split()
+            if "inet" in fields:
+                names.add(fields[fields.index("inet") + 1].split("/")[0])
+    except Exception:
+        pass
+    for name in list(names):
+        try:
+            names.update(socket.gethostbyname_ex(name)[2])
+        except Exception:
+            pass
+    return {n for n in names if n}
+
+
+def _url_host(url: str) -> str:
+    import urllib.parse
+
+    host = urllib.parse.urlsplit(url).hostname or ""
+    return host
+
+
+def _apply_direct_topology(base_urls: list[str], rank: int) -> list[str]:
+    """Narrow a direct-mode rank's target list per EXASERVE_DIRECT_TOPOLOGY.
+
+    mesh (default) leaves the list alone: the rank hash-routes across every
+    node, so all but 1/N of its traffic is remote and each server node fields
+    streams from N distinct peers. `local` pins the rank to its own node
+    (loopback, one peer); `paired` pins it to exactly one *remote* node
+    (one peer, still remote). Comparing the three separates the cost of
+    crossing the fabric from the cost of per-node peer fan-out.
+    """
+    topology = os.environ.get("EXASERVE_DIRECT_TOPOLOGY", "mesh").strip().lower()
+    if topology in ("", "mesh"):
+        return base_urls
+    if topology not in ("local", "paired"):
+        raise RuntimeError(
+            f"EXASERVE_DIRECT_TOPOLOGY={topology!r} is not one of mesh/local/paired"
+        )
+    local = _local_addresses()
+    my_index = next(
+        (idx for idx, url in enumerate(base_urls) if _url_host(url) in local), None
+    )
+    if my_index is None:
+        raise RuntimeError(
+            f"rank {rank}: EXASERVE_DIRECT_TOPOLOGY={topology} could not match this host "
+            f"({sorted(local)[:6]}...) against any of the {len(base_urls)} target URLs"
+        )
+    if topology == "local":
+        chosen = base_urls[my_index]
+    else:
+        shift = int(os.environ.get("EXASERVE_DIRECT_PAIR_SHIFT", "1"))
+        if len(base_urls) < 2:
+            raise RuntimeError("EXASERVE_DIRECT_TOPOLOGY=paired needs at least 2 nodes")
+        shift = shift % len(base_urls) or 1
+        chosen = base_urls[(my_index + shift) % len(base_urls)]
+    print(
+        f"[replay] rank {rank}: topology={topology} node_index={my_index}/{len(base_urls)} "
+        f"-> {chosen}",
+        flush=True,
+    )
+    return [chosen]
 
 
 def _find_go_binary() -> str | None:
@@ -827,6 +905,8 @@ async def replay_from_manifest(
         if health_error:
             raise RuntimeError(health_error)
         _mpi_barrier(comm)
+        # Health-check the whole fleet first, then narrow to this rank's arm.
+        base_urls = _apply_direct_topology(base_urls, rank)
 
     go_bin = _find_go_binary()
     if go_bin is None:
@@ -836,7 +916,7 @@ async def replay_from_manifest(
     sat_cfg = getattr(replay_cfg, "saturation", {}) or {}
     if isinstance(sat_cfg, dict) and sat_cfg.get("enabled"):
         if is_root:
-            result_dir = pathlib.Path(exp_config.pbs_result_dir) if exp_config.pbs_result_dir else pathlib.Path(exp_config.pbs_working_dir) / "results"
+            result_dir = pathlib.Path(_result_dir(exp_config)) if exp_config.pbs_result_dir else pathlib.Path(exp_config.pbs_working_dir) / "results"
             result_dir.mkdir(parents=True, exist_ok=True)
             sat_output_path = result_dir / "saturation_output.json"
             _run_saturation_from_manifest(
@@ -922,7 +1002,7 @@ async def replay_from_manifest(
             # data (it hung / lost all results at 64 nodes when a node dropped).
             # No-op for proxy mode (mpi_size == 1). See _gather_results_via_shards.
             _shard_base = (
-                str(exp_config.pbs_result_dir)
+                str(_result_dir(exp_config))
                 if exp_config.pbs_result_dir
                 else os.path.join(str(exp_config.pbs_working_dir), "results")
             )

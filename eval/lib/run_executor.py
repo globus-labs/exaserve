@@ -59,7 +59,30 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
             return 0
 
         write_run_state(run_plan, "replaying", base_urls=base_urls)
-        exit_code = _run_replay_client(run_plan, base_urls)
+        arms = list(getattr(run_plan.client, "dispatch_topologies", []) or [])
+        if arms:
+            # Dispatch-topology ablation: one replay pass per arm against the
+            # SAME bring-up, so the arms differ only in which node(s) each
+            # client rank talks to. Results land in results/<arm>/.
+            exit_code = 0
+            for arm in arms:
+                print(f"[run_executor] dispatch topology arm: {arm}", flush=True)
+                rc = _run_replay_client(
+                    run_plan,
+                    base_urls,
+                    extra_env={
+                        "EXASERVE_DIRECT_TOPOLOGY": arm,
+                        "EXASERVE_RESULT_SUBDIR": arm,
+                    },
+                    log_name=f"replay_{arm}.log",
+                )
+                print(f"[run_executor] arm {arm} exited {rc}", flush=True)
+                if rc != 0:
+                    # Keep going: a failed arm should not cost us the others,
+                    # which already paid for the bring-up.
+                    exit_code = rc
+        else:
+            exit_code = _run_replay_client(run_plan, base_urls)
         if exit_code == 0:
             # Collect per-replica vLLM stats before tearing down the cluster.
             if getattr(run_plan.deployment, "collect_stats", False):
@@ -105,12 +128,20 @@ def submit_run(target: str, *, dry_run: bool = False) -> int:
     return 0 if ok else 1
 
 
-def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
+def _run_replay_client(
+    run_plan,
+    base_urls: Iterable[str],
+    *,
+    extra_env: dict[str, str] | None = None,
+    log_name: str = "replay.log",
+) -> int:
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = run_plan.repo_root + (
         os.pathsep + existing_pythonpath if existing_pythonpath else ""
     )
+    if extra_env:
+        env.update(extra_env)
     replay_cmd = [
         sys.executable,
         "-m",
@@ -147,6 +178,12 @@ def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
                     *replay_cmd,
                 ]
             else:
+                # PALS forwards the launcher environment, but the ablation arms
+                # differ ONLY by env var — pass them explicitly so a forwarding
+                # change can never silently collapse the arms into one.
+                env_flags: list[str] = []
+                for key, value in (extra_env or {}).items():
+                    env_flags.extend(["--env", f"{key}={value}"])
                 command = [
                     "mpiexec",
                     "-n",
@@ -155,13 +192,14 @@ def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
                     "1",
                     "--cpu-bind",
                     "none",
+                    *env_flags,
                     "--hostfile",
                     hostfile,
                     *replay_cmd,
                 ]
             return _run_command_with_tee(
                 command,
-                log_path=os.path.join(run_plan.bundle.logs_dir, "replay.log"),
+                log_path=os.path.join(run_plan.bundle.logs_dir, log_name),
                 cwd=run_plan.repo_root,
                 env=env,
             )
@@ -173,7 +211,7 @@ def _run_replay_client(run_plan, base_urls: Iterable[str]) -> int:
 
     return _run_command_with_tee(
         replay_cmd,
-        log_path=os.path.join(run_plan.bundle.logs_dir, "replay.log"),
+        log_path=os.path.join(run_plan.bundle.logs_dir, log_name),
         cwd=run_plan.repo_root,
         env=env,
     )
@@ -221,10 +259,18 @@ def _run_command_with_tee(cmd, *, log_path: str, cwd: str, env: dict[str, str]) 
 
 
 def _validate_replay_results(run_plan) -> dict[str, int | str]:
-    result_path = _latest_result_path(run_plan.bundle.results_dir)
+    # Topology-ablation arms write to results/<arm>/; validate the last arm.
+    search_dirs = [
+        os.path.join(run_plan.bundle.results_dir, arm)
+        for arm in reversed(list(getattr(run_plan.client, "dispatch_topologies", []) or []))
+    ] or [run_plan.bundle.results_dir]
+    result_path = next(
+        (p for p in (_latest_result_path(d) for d in search_dirs) if p is not None), None
+    )
     if result_path is None:
         raise RuntimeError(
-            f"Replay exited successfully but did not write any result*.json under {run_plan.bundle.results_dir}"
+            "Replay exited successfully but did not write any result*.json under "
+            + ", ".join(search_dirs)
         )
 
     with open(result_path, "r", encoding="utf-8") as handle:
