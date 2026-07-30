@@ -33,7 +33,29 @@ import plotstyle as ps
 # Retarget the extraction to the full sweep (separate cache from validation).
 P.RUNS_ROOT = Path("/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs/sc26workshop/full")
 P.CACHE_DIR = Path("/tmp/sc26_full_cache")
-OUT = Path(__file__).resolve().parent / "output" / "sc26_full" / "iter10"
+
+# --- run pinning -------------------------------------------------------------
+# resolve_cell() takes the HIGHEST runN that has results, so a later re-run of a
+# spec silently replaces the plotted data. proxycmp_direct{,_scale} gained a run1
+# on 2026-07-25 from the node-local direct-dispatch change, which is a DIFFERENT
+# configuration from the one the paper reports. Pin those stems to the run the
+# paper's figures and prose were built from; drop an entry here to adopt a re-run.
+RUN_PIN = {"proxycmp_direct": 0, "proxycmp_direct_scale": 0}
+
+_resolve_cell_newest = P.resolve_cell
+
+
+def _resolve_cell_pinned(spec_stem, node):
+    if spec_stem in RUN_PIN:
+        f = (P.RUNS_ROOT / spec_stem / f"run{RUN_PIN[spec_stem]}"
+             / f"n{node}" / "results" / "result0.json")
+        return f if f.exists() else None
+    return _resolve_cell_newest(spec_stem, node)
+
+
+P.resolve_cell = _resolve_cell_pinned      # module-global, so extract_cell sees it
+
+OUT = Path(__file__).resolve().parent / "output" / "sc26_full" / "iter13"
 OUT.mkdir(parents=True, exist_ok=True)
 
 # Exact IEEEtran widths (measured: \columnwidth=252pt, \textwidth=516pt) so
@@ -42,6 +64,37 @@ OUT.mkdir(parents=True, exist_ok=True)
 PT = 1.0 / 72.27
 COL_W = 252.0 * PT      # IEEEtran \columnwidth  (3.49 in)
 TEXT_W = 516.0 * PT     # IEEEtran \textwidth     (7.14 in)
+
+# iter11: the main title + subtitle block moved out of every paper figure and into
+# the LaTeX caption, so the vertical space they used to occupy is recovered by
+# shrinking the figures themselves. Every paper figure's height is scaled by HSCALE
+# (heights below are the pre-iter10 authored values x HSCALE). Widths are unchanged
+# so \includegraphics still renders 1:1 with no LaTeX scaling.
+# iter13 (PI font feedback): all rc + hardcoded font sizes bumped one
+# notch (rc 7/6 -> 8/7; value labels 5->6, 4.5->5.5); HSCALE relaxed
+# 0.85 -> 0.90 and HSCALE_SPARSE 0.80 -> 0.85 (10% height reduction
+# instead of 15%) to give the larger text room.
+# iter12: relaxed from 0.70 to 0.85. At 0.70 the point-sized text did not shrink
+# with the canvas, which cost two sets of value labels in fig1 and pushed the
+# attainment panels to a 2.0 ceiling; 15% buys those back.
+HSCALE = 0.90
+
+# iter12: the 405B and engine-generality figures are back to two separate
+# single-column floats (the merged side-by-side pair is still available as
+# fig_pp_engines). They are EXEMPT from HSCALE and authored taller than either
+# earlier version: each carries ~14 boxed point labels plus the two-line
+# node/(replica) tick axis, which the 0.70 scale could not host without shrinking
+# the labels and clipping the y-label.
+# The CDF grid is the one figure with real vertical slack (6 stacked panels of
+# monotone curves), so it takes 20% off where everything else takes 15%.
+HSCALE_SPARSE = 0.85
+
+# The 405B figure follows the shared 15%: at 20% it read as a flat horizontal band,
+# since a log y-axis spanning 2-3 decades needs the height. The engine figure spans
+# the widest y-range of any single-panel figure (10^1 to 10^4), so it gives back
+# least of all: 10%.
+H_PP405B = 1.7 * HSCALE
+H_ENGINES = 1.55 * 0.90
 
 plt = ps.apply()                     # load the project matplotlibrc theme once
 
@@ -53,8 +106,13 @@ MARKERS = ps.PROXY_MARKERS
 HATCHES = {"direct": "", "haproxy": "//", "envoy": "\\\\", "rayserve": "xx", "litellm": ".."}
 TTFT_THRS = P.TTFT_SLO_MULTI         # (1.0, 2.0, 3.0)
 
+# Aurora node = 6 PVC GPUs x 2 tiles; at TP=1 the auto replica planner fills every
+# tile, so a node carries 12 independent replicas (256 nodes = 3,072 replicas — the
+# count the paper quotes). The node axis reports both.
+REP_PER_NODE = 12
+
 # Multi-line config subtitle (shared by the Set-1 proxy figures).
-CFG_8B = ["Meta-Llama-3-8B-Instruct  ·  TP=1 (1 replica/node)  ·  64$\\rightarrow$64 tok",
+CFG_8B = ["Meta-Llama-3-8B-Instruct  ·  TP=1 (12 replicas/node, one per tile)  ·  64$\\rightarrow$64 tok",
           "110 req/s/node offered  ·  ALCF Aurora"]
 
 
@@ -71,7 +129,7 @@ TOK_IN, TOK_OUT = 74.7, 64.0
 TOK_TOTAL = TOK_IN + TOK_OUT             # 138.7 total tok/req
 
 
-def _tok_secondary_axis(a, mult=TOK_TOTAL, label="Total throughput (tokens/s)"):
+def _tok_secondary_axis(a, mult=TOK_TOTAL, label="tokens/s"):
     """Right-hand axis expressing the SAME curves in total tokens/s. Ticks at token
     decades in 10^n (matching sparse_log_y), styled muted/recessive so it reads as
     a derived reference scale rather than a second data series. label=None draws
@@ -231,8 +289,19 @@ def build(refresh=False):
 
 # --- shared axis setup ------------------------------------------------------
 
-def _node_axis(ax):
-    ax.set_xscale("log", base=2); ax.set_xticks(ALLNODES); ax.set_xticklabels(ALLNODES)
+def _node_axis(ax, nodes=None, per_node=REP_PER_NODE):
+    """log2 node axis whose ticks carry the REPLICA count in brackets underneath.
+
+    per_node=12 is the 8B TP=1 deployment (one replica per PVC tile, 6 GPUs x 2
+    tiles); pass a callable for other layouts (e.g. 405B PP=2 -> nodes // 2), or
+    None for bare node ticks."""
+    nodes = list(nodes or ALLNODES)
+    ax.set_xscale("log", base=2); ax.set_xticks(nodes)
+    if per_node is None:
+        ax.set_xticklabels([str(n) for n in nodes])
+    else:
+        rep = per_node if callable(per_node) else (lambda n: n * per_node)
+        ax.set_xticklabels([f"{n}\n({rep(n)})" for n in nodes])
 
 
 # --- figures ----------------------------------------------------------------
@@ -244,14 +313,14 @@ def _place(ax, x, v, proxy, mode, fmt, pos, dy=8):
                dashed=(mode == "nonstream"))
 
 
-def _place_txt(ax, x, y, text, color, pos="up", dy=8, dashed=False):
+def _place_txt(ax, x, y, text, color, pos="up", dy=8, dashed=False, fs=6):
     """Generic boxed value label (color-matched, dashed border optional) with
     explicit up/down placement — the proxy-agnostic core of _place, also used for
     multi-line throughput+efficiency callouts on the weak-scaling figures."""
     off = dy if pos == "up" else -dy
     ax.annotate(text, (x, y), textcoords="offset points", xytext=(0, off),
                 ha="center", va="bottom" if pos == "up" else "top",
-                fontsize=5, fontweight="bold", color=color, zorder=6,
+                fontsize=fs, fontweight="bold", color=color, zorder=6,
                 bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color,
                           lw=0.5, ls="--" if dashed else "-", alpha=0.92))
 
@@ -279,10 +348,10 @@ def fig1_proxy_scaling(S, NS, wide=True):
                   both and pick the layout that fits."""
     from matplotlib.lines import Line2D
     if wide:
-        fig, axg = plt.subplots(2, 2, figsize=(TEXT_W, 3.3))
+        fig, axg = plt.subplots(2, 2, figsize=(TEXT_W, 3.3 * HSCALE))
         out_name, leg_ncol, leg_frac = "fig1_proxy_scaling.png", 5, 0.34
     else:
-        fig, axg = plt.subplots(2, 2, figsize=(COL_W, 4.4))
+        fig, axg = plt.subplots(2, 2, figsize=(COL_W, 4.4 * HSCALE))
         out_name, leg_ncol, leg_frac = "fig1_proxy_scaling_col.png", 3, 0.66
     (a_tps, a_tpn), (a_tbt, a_ttft) = axg   # row0: throughput stream/non; row1: TBT / TTFT
 
@@ -300,8 +369,17 @@ def fig1_proxy_scaling(S, NS, wide=True):
         if b is not None:
             a.plot(ALLNODES, [b * n for n in ALLNODES], "k--", lw=1.0, alpha=0.55, zorder=2)
         a.set_yscale("log"); ps.sparse_log_y(a, sci=True)   # 10^n superscript decades
-        a.set_ylabel("Throughput (query/s)")
-        a.set_title(title)
+        # Headroom for the value labels: they are point-sized, so at the iter11
+        # height they no longer clear the panel title / x-axis on their own.
+        lo, hi = a.get_ylim()
+        a.set_ylim(lo / 1.4, hi * 1.7)
+        # Short y-labels: the panel TITLE already names the metric, and at the
+        # iter11 height a full rotated label is taller than its own axes box (the
+        # top and bottom panels' labels then overlap each other mid-column).
+        a.set_ylabel("query/s")
+        # Left-aligned: a centred title runs under the n=64..128 value labels once
+        # the panel is this short. Left of that the curves are low, so it is clear.
+        a.set_title(title, loc="left")
         _tok_secondary_axis(a)                       # right axis: SAME curves in total tokens/s
         # Headline callout: peak total tokens/s at the largest cluster -- the number
         # that maps to token-throughput benchmarks (MLPerf et al.). Pinned to the
@@ -312,7 +390,7 @@ def fig1_proxy_scaling(S, NS, wide=True):
             n_top, rps_top = top
             a.annotate(f"$\\approx${rps_top * TOK_TOTAL / 1e6:.1f}M tok/s @ {n_top}n",
                        (0.035, 0.94), xycoords="axes fraction",
-                       ha="left", va="top", fontsize=6, fontweight="bold",
+                       ha="left", va="top", fontsize=7, fontweight="bold",
                        color="#1a1a1a", zorder=7,
                        bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#1a1a1a",
                                  lw=0.7, alpha=0.95))
@@ -327,8 +405,14 @@ def fig1_proxy_scaling(S, NS, wide=True):
             xs, ys, es = _collect(src, p, "tbt")
             if xs:
                 ps.line(a_tbt, xs, ys, p, mode, yerr=es)
-    a_tbt.set_ylim(-0.05, 1.18); a_tbt.set_ylabel("TBT attainment")
-    a_tbt.set_title("TBT attainment — P99 TBT ≤ 250ms")
+    # Top is 1.8, not 1.18. AnnotationStacker flips a whole x-group DOWNWARD when
+    # its upward stack would hit the ceiling, and that drops the near-zero labels
+    # onto the x-tick row. The upper band is label space: a group needs min_gap
+    # (~6.5pt) per label plus base. 2.0 was needed at HSCALE 0.70; the 0.85 panel
+    # holds a 4-label group at 1.8.
+    a_tbt.set_ylim(-0.05, 1.8); a_tbt.set_ylabel("attainment")
+    a_tbt.set_yticks([0.0, 0.5, 1.0])      # the 0.25 steps drop out at iter11 height
+    a_tbt.set_title("TBT attainment — P99 TBT ≤ 250ms", loc="left")
 
     # row 1, right) TTFT attainment (2s budget) — both modes (merged from fig1_ttft).
     for p in PROXIES:
@@ -336,13 +420,17 @@ def fig1_proxy_scaling(S, NS, wide=True):
             xs, ys, es = _collect(src, p, "ttft2")
             if xs:
                 ps.line(a_ttft, xs, ys, p, mode, yerr=es)
-    a_ttft.set_ylim(-0.05, 1.18); a_ttft.set_ylabel("TTFT attainment (≤ 2s)")
-    a_ttft.set_title("TTFT attainment — TTFT ≤ 2s")
+    a_ttft.set_ylim(-0.05, 1.8); a_ttft.set_ylabel("attainment")
+    a_ttft.set_yticks([0.0, 0.5, 1.0])
+    a_ttft.set_title("TTFT attainment — TTFT ≤ 2s", loc="left")
 
-    for a in (a_tps, a_tpn, a_tbt, a_ttft):
+    # Replica counts ride the labelled (bottom) row only: a second tick line on the
+    # top row costs ~8pt of panel height for a number already given below it.
+    for a in (a_tps, a_tpn):
+        _node_axis(a, per_node=None)
+    for a in (a_tbt, a_ttft):
         _node_axis(a)
-    a_tbt.set_xlabel("Cluster size (nodes = replicas)")
-    a_ttft.set_xlabel("Cluster size (nodes = replicas)")
+        a.set_xlabel("Cluster size: nodes (replicas)")
 
     # Shared legend ABOVE the panels: full names, streaming (row 1) then
     # non-streaming (row 2), aligned by proxy (column-major fill).
@@ -364,7 +452,7 @@ def fig1_proxy_scaling(S, NS, wide=True):
     legh = leg_frac / fig.get_size_inches()[1]       # reserve the legend rows (more at column width)
     panel_top = top - legh
     fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, panel_top + 0.004),
-               ncol=leg_ncol, fontsize=6, frameon=True, columnspacing=0.9, handlelength=1.5, handletextpad=0.4)
+               ncol=leg_ncol, fontsize=7, frameon=True, columnspacing=0.9, handlelength=1.5, handletextpad=0.4)
 
     # --- hand-picked value labels (enabled=True bypasses the global-off default) ---
     def _val(src, p, n, kind):
@@ -382,10 +470,19 @@ def fig1_proxy_scaling(S, NS, wide=True):
                           (256, "envoy"): "down", (256, "haproxy"): "up"},
                "nonstream": {}}
     THR_OVR = {"stream": {},
-               "nonstream": {(256, "rayserve"): "up", (256, "haproxy"): "down"}}
+               "nonstream": {(256, "rayserve"): "up", (256, "haproxy"): "up"}}
     # Hug the line (default offset 8pt): litellm's up-label was floating up into
     # the envoy/haproxy numbers; rayserve's down-label was dropping onto the x-ticks.
     THR_DY = {"litellm": 4, "rayserve": 4}
+    # Per-point offsets, keyed (node, proxy).
+    THR_DY_AT = {"stream": {}, "nonstream": {}}
+    # litellm's up-label and the proxy down-label above it are ~24pt apart at 0.85
+    # (VERIFIED by render, not estimated) — still under the ~32pt the two boxes plus
+    # their offsets need, so one hides behind the other. Only 4 of the 5 series can
+    # carry a label at these x. litellm loses it: its curve is flat and it stays
+    # labelled at n=1/4/16, while the proxy value IS the collapse the paper argues.
+    THR_SKIP = {"stream": {(64, "litellm"), (128, "litellm"), (256, "litellm")},
+                "nonstream": set()}   # 256n litellm is clear now that haproxy goes UP
     for a, src, mode in ((a_tps, S, "stream"), (a_tpn, NS, "nonstream")):
         for n in ALLNODES:
             vals = {p: _val(src, p, n, "succ_rps") for p in PROXIES}
@@ -404,12 +501,18 @@ def fig1_proxy_scaling(S, NS, wide=True):
                 if nn == n and p in roles:
                     roles[p] = pos
             for p, pos in roles.items():
-                _place(a, n, vals[p], p, mode, "{:.0f}", pos, dy=THR_DY.get(p, 8))
+                if (n, p) in THR_SKIP[mode]:
+                    continue
+                dy = THR_DY_AT[mode].get((n, p), THR_DY.get(p, 8))
+                _place(a, n, vals[p], p, mode, "{:.0f}", pos, dy=dy)
     # TBT attainment: hand-picked (node, proxy, mode) points
     TBT_ANN = [(1, "litellm", "stream"), (1, "haproxy", "stream"),
                (4, "rayserve", "stream"), (4, "rayserve", "nonstream"), (4, "haproxy", "stream"),
                (16, "litellm", "nonstream"), (16, "rayserve", "stream"), (16, "haproxy", "stream"),
-               (64, "haproxy", "stream"), (64, "haproxy", "nonstream"), (64, "litellm", "nonstream"), (64, "direct", "stream"),
+               # the (64/128/256, haproxy, nonstream) 1.00 points are back at the
+               # 0.85 height (iter12): a 4-label x-group now fits the upward stack
+               (64, "haproxy", "stream"), (64, "haproxy", "nonstream"),
+               (64, "litellm", "nonstream"), (64, "direct", "stream"),
                (128, "haproxy", "nonstream"), (128, "envoy", "stream"), (128, "direct", "stream"),
                (256, "haproxy", "nonstream"), (256, "direct", "stream"), (256, "envoy", "stream")]
     for n, p, mode in TBT_ANN:
@@ -455,9 +558,9 @@ def fig1_ttft(S, NS):
                 stk.add_series(xs, ys, COLORS[p], dashed=ps.is_dashed(mode))
         _node_axis(axx); axx.set_ylim(-0.05, 1.18)
         axx.set_ylabel(f"TTFT attainment (≤ {sec}s)")
-        axx.set_xlabel("Cluster size (nodes = replicas)")
+        axx.set_xlabel("Cluster size: nodes (replicas)")
         axx.set_title(f"TTFT attainment — fraction of requests with TTFT ≤ {sec}s")
-        axx.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=6, borderaxespad=0.0)
+        axx.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=7, borderaxespad=0.0)
         top = ps.titles(fig, f"TTFT attainment at a {sec}s first-token budget vs. cluster size",
                         ["Streaming (solid) vs non-stream (dashed) · error bars = $\\pm$std over runs",
                          "non-stream TTFT is a coarse estimate (= full E2E latency L; no per-token timing captured)"]
@@ -470,7 +573,7 @@ def fig2_two_mode(S, NS):
     """Streaming vs non-stream end-to-end latency (p50 and p99) vs N, for the
     proxies that survive (direct / haproxy / envoy). Throughput now lives in
     fig1; this figure is the latency comparison."""
-    fig, ax = plt.subplots(2, 1, figsize=(COL_W, 3.36))
+    fig, ax = plt.subplots(2, 1, figsize=(COL_W, 3.36 * HSCALE))
     F2P = ["direct", "haproxy", "envoy"]
     # hand-picked callouts (node, proxy, mode) added on top of per-x max/min, per panel:
     ADDS = [[(1, "direct", "stream"), (256, "envoy", "stream"),          # p50
@@ -486,6 +589,23 @@ def fig2_two_mode(S, NS):
                (16, "haproxy", "stream"): "down", (64, "haproxy", "stream"): "down",
                (128, "haproxy", "stream"): "down", (256, "haproxy", "stream"): "down",
                (1, "direct", "nonstream"): "up"}]                                      # p99
+    # p50 non-stream is a flat 1.8s at every N, and it is the per-x minimum, so the
+    # min rule labelled all six — each one landing on the direct-stream label that
+    # F2_ADD forces DOWN 23pt above it (the two boxes need ~34pt). Keep the
+    # endpoints, which establish the flat line, and drop the covered interior ones.
+    # p99 has the same clash on its own flat non-stream floor (1.9-2.0s), which the
+    # min rule labels at every x — behind the 12.4 / 12.0 / 9.7 / 13.0 / 16.0
+    # streaming labels. Note the minimum is a DIFFERENT series at each x (envoy-ns
+    # at n=1, direct-ns at 4/128/256, haproxy-ns at 16/64), so each has to be named.
+    # The floor is kept once, as direct-ns at n=1 (lifted clear, see F2_DY); the
+    # panel still labels the non-stream RISE at 64/128/256, which is informative.
+    F2_SKIP = [{(n, "direct", "nonstream") for n in (4, 16, 64, 128)},
+               {(1, "envoy", "nonstream"), (4, "direct", "nonstream"),
+                (16, "haproxy", "nonstream"), (16, "direct", "nonstream"),
+                (64, "haproxy", "nonstream"), (128, "direct", "nonstream"),
+                (256, "direct", "nonstream")}]
+    # per-point label offsets, per panel
+    F2_DY = [{}, {(1, "direct", "nonstream"): 12}]
     for j, (attr, lab) in enumerate((("e2e_p50", "E2E p50 (s)"),
                                      ("e2e_p99", "E2E p99 (s)"))):
         vals = {}   # (proxy, mode, node) -> value, for max/min + callouts
@@ -502,8 +622,18 @@ def fig2_two_mode(S, NS):
                     xs.append(n); ys.append(v); vals[(p, mode, n)] = v
                 if xs:
                     ps.line(ax[j], xs, ys, p, mode, label=ps.plabel(p, mode))
-        _node_axis(ax[j]); ax[j].set_yscale("log")
-        ps.sparse_log_y(ax[j]) if j == 1 else ps.plain_log_y(ax[j])   # p99 spans 2 decades → sparse
+        _node_axis(ax[j], per_node=(REP_PER_NODE if j == 1 else None))   # brackets on the labelled axis
+        ax[j].set_yscale("log")
+        if j == 1:
+            ps.sparse_log_y(ax[j])            # p99 spans 2 decades → decades only
+        else:
+            # p50 lives inside one decade (~1.8-11s), so plain_log_y labelled every
+            # minor tick (2,3,...,10,20) and they collided. Label a chosen subset.
+            ps.fixed_log_y(ax[j], [2, 4, 8, 10, 20])
+        lo, hi = ax[j].get_ylim()      # headroom for the point-sized value labels
+        # p50 headroom is 1.9x so the view reaches the 20 tick (max point is 11.3);
+        # a FixedLocator tick outside the view limits is simply not drawn.
+        ax[j].set_ylim(lo / 1.5, hi * (2.2 if j == 1 else 1.9))
         ax[j].set_ylabel(lab)          # no per-panel legend (shared one, below)
         # explicit placement: per-x max (up) & min (down), callouts (up), then
         # hand-tuned additions/overrides; p99 forces every 256-node label above.
@@ -516,6 +646,8 @@ def fig2_two_mode(S, NS):
             pos_of[min(here)[1:] + (n,)] = "up"    # mins sit at the plot floor → above the point
         for (n, p, mode) in ADDS[j]:
             pos_of.setdefault((p, mode, n), "up")
+        for (n, p, mode) in F2_SKIP[j]:
+            pos_of.pop((p, mode, n), None)
         if j == 1:                                    # p99: cluster all 256n labels above ...
             for key in list(pos_of):
                 if key[2] == 256:
@@ -524,18 +656,21 @@ def fig2_two_mode(S, NS):
             pos_of[(p, mode, n)] = pos
         for (p, mode, n), pos in pos_of.items():
             if (p, mode, n) in vals:
-                _place(ax[j], n, vals[(p, mode, n)], p, mode, "{:.1f}", pos)
+                _place(ax[j], n, vals[(p, mode, n)], p, mode, "{:.1f}", pos,
+                       dy=F2_DY[j].get((n, p, mode), 8))
     ax[0].set_title("End-to-end latency p50")
     ax[1].set_title("End-to-end latency p99 (tail)")
-    ax[1].set_xlabel("Cluster size (nodes = replicas)")
+    ax[1].set_xlabel("Cluster size: nodes (replicas)")
     _write_caption(OUT / "fig2_two_mode.png",
                    "Streaming vs. non-streaming end-to-end latency", list(CFG_8B))
     # one shared legend riding the top edge (no main title); panels below it
     handles, labels = ax[0].get_legend_handles_labels()
     top = 0.99
-    panel_top = top - 0.08
+    # reserve the 2-row legend in INCHES (was a fixed 0.08 fraction, which shrank
+    # with the figure under HSCALE and let the legend sit on the top panel)
+    panel_top = top - 0.30 / fig.get_size_inches()[1]
     fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, top),
-               ncol=3, fontsize=6, frameon=True, columnspacing=1.2, handlelength=1.8)
+               ncol=3, fontsize=7, frameon=True, columnspacing=1.2, handlelength=1.8)
     return ps.finalize(fig, [], OUT / "fig2_two_mode.png", rect=(0, 0, 1, panel_top))
 
 
@@ -556,7 +691,7 @@ def fig3_workload(O, ONS):
             for b, v in zip(bars, vals):
                 if not np.isnan(v):
                     a.text(b.get_x() + b.get_width() / 2, v + dy, fmt.format(v), ha="center",
-                           va="bottom", fontsize=4.5, fontweight="bold", color=bar_colors[n])
+                           va="bottom", fontsize=5.5, fontweight="bold", color=bar_colors[n])
     for a in ax:
         a.set_xticks(x); a.set_xticklabels(labels, rotation=30, ha="right")
         a.grid(False, axis="x"); ps.legend(a)
@@ -588,7 +723,7 @@ def fig4_latency(S):
             b.set_hatch(h)
         for b, v in zip(bars, vals):
             ax[j].text(b.get_x() + b.get_width() / 2, v, f"{v:.2f}", ha="center",
-                       va="bottom", fontsize=5, fontweight="bold", color="#333333")
+                       va="bottom", fontsize=6, fontweight="bold", color="#333333")
         if slo:
             ax[j].axhline(slo, ls="--", color="#E94F37", lw=1.0, label=f"SLO {slo}s")
         ax[j].grid(False, axis="x"); ax[j].set_title(title); ax[j].set_ylabel("seconds")
@@ -607,7 +742,8 @@ def fig5_latency_cdf(S):
     requests are included as the denominator, so each curve caps at the cell's
     success rate (it never reaches 1.0) — the honest picture for saturating
     proxies (litellm/rayserve)."""
-    fig, axes = plt.subplots(len(CDF_NODES), 2, figsize=(COL_W, 1.53 * len(CDF_NODES)))
+    fig, axes = plt.subplots(len(CDF_NODES), 2,
+                             figsize=(COL_W, 1.53 * HSCALE_SPARSE * len(CDF_NODES)))
     for row, n in enumerate(CDF_NODES):
         axt, axb = axes[row]
         for p in PROXIES:
@@ -635,10 +771,10 @@ def fig5_latency_cdf(S):
         # visible (x is a multiplier on the log axis, y is the CDF value 0..1).
         ttx, tty = {4: (1.0, 0.12), 64: (2.5, 0.04), 128: (2.5, 0.04)}.get(n, (1.0, 0.04))
         axt.axvline(P.TTFT_SLO_S, color="k", ls="--", lw=0.8, alpha=0.7)
-        axt.text(P.TTFT_SLO_S * ttx, tty, " 2s SLO", fontsize=5, color="#333333")
+        axt.text(P.TTFT_SLO_S * ttx, tty, " 2s SLO", fontsize=6, color="#333333")
         btx, bty = {64: (1.0, 0.12), 128: (3.0, 0.14)}.get(n, (1.0, 0.04))
         axb.axvline(P.TBT_P99_SLO_S, color="k", ls="--", lw=0.8, alpha=0.7)
-        axb.text(P.TBT_P99_SLO_S * btx, bty, " 250ms SLO", fontsize=5, color="#333333")
+        axb.text(P.TBT_P99_SLO_S * btx, bty, " 250ms SLO", fontsize=6, color="#333333")
         axt.set_title(f"TTFT — {n}n"); axt.set_ylabel("CDF (of all requests)")
         axb.set_title(f"P99 TBT — {n}n")
         # right column reuses the left column's y-axis (drop duplicate label + ticks)
@@ -662,34 +798,26 @@ def fig5_latency_cdf(S):
     legh = 0.20 / fig.get_size_inches()[1]      # reserve the 1-row legend at the top
     panel_top = top - legh
     fig.legend(handles, [ps.PROXY_LABEL[p] for p in PROXIES], loc="lower center",
-               bbox_to_anchor=(0.5, panel_top + 0.004), ncol=5, fontsize=6, frameon=True,
+               bbox_to_anchor=(0.5, panel_top + 0.004), ncol=5, fontsize=7, frameon=True,
                columnspacing=1.2, handlelength=1.8)
     fig.tight_layout(rect=(0, 0, 1, panel_top)); out = OUT / "fig5_latency_cdf.png"
     fig.savefig(out); plt.close(fig); return out
 
 
 # Render jobs are stashed at module scope so forked workers inherit them (and the
-def fig6_sglang_backend(S):
-    """Backend swap under the identical serving stack: vLLM vs SGLang weak
-    scaling through the SAME HAProxy path, each offered ~0.9x its own measured
-    single-node saturation (vLLM 110, SGLang 15 req/s/node). Panel (a) delivered
-    successful throughput vs N (log-log, per-backend ideal slope-1 guides);
-    panel (b) weak-scaling efficiency normalized to each backend's n1.
-    SGLang points read directly from runs/sglang_haproxy_full/run8 (mean ± std
-    over the 5 post-warmup runs); vLLM reuses the fig1 haproxy-stream cells, so
-    it keeps its fig1 identity (color/marker). SGLang gets its own fixed
-    identity (blue, 'P') — orange/blue + distinct markers stays legible under
-    CVD. n256 omitted: the shared-HAProxy point is proxy-capped for both
-    backends (fig1); the SGLang direct-mode 256n companion is a separate run."""
+SGL_NODES = [1, 4, 16, 64, 128, 256]
+SGL_COLOR, SGL_MARKER = "#386cb0", "P"
+
+
+def _engine_points(S):
+    """(vLLM, SGLang-via-HAProxy, SGLang-direct) weak-scaling series as
+    {nodes: (successful rps, std)}. vLLM reuses the fig1 haproxy-stream cells so
+    it keeps its fig1 identity; SGLang reads its own sweeps."""
     import json
-    from matplotlib.lines import Line2D
-
-    SGL_NODES = [1, 4, 16, 64, 128, 256]
     SGL_ROOT = Path("/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs/sglang_haproxy_full/run8")
-    SGL_COLOR, SGL_MARKER = "#386cb0", "P"
+    _RUNS = Path("/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs")
 
-    def _sgl_point(n):
-        f = SGL_ROOT / f"n{n}" / "results" / "result0.json"
+    def _mean_of(f):
         if not f.exists():
             return None
         per_run = json.loads(f.read_text())["per_run"]
@@ -697,31 +825,32 @@ def fig6_sglang_backend(S):
               for r in per_run if r["run_index"] > 0]
         return (float(np.mean(rs)), float(np.std(rs))) if rs else None
 
-    sgl = {n: p for n in SGL_NODES if (p := _sgl_point(n))}
+    sgl = {n: p for n in SGL_NODES
+           if (p := _mean_of(SGL_ROOT / f"n{n}" / "results" / "result0.json"))}
+    # SGLang through Direct-MPI dispatch (no proxy): the proxy-free companion
+    # (sglang_direct_full n1-128 + sglang_direct_n256 run4 for 256) showing the
+    # backend itself scales past the HAProxy ceiling. Same green/circle identity
+    # as "Direct" in fig1.
+    sgl_direct = {n: p for n in SGL_NODES
+                  if (p := _mean_of(_RUNS / ("sglang_direct_n256/run4" if n == 256
+                                             else "sglang_direct_full/run0")
+                                    / f"n{n}" / "results" / "result0.json"))}
     vll = {}
     for n in SGL_NODES:
         st = S.get(("haproxy", n)) or cell(pstem("haproxy", n), n)
         if st and not np.isnan(st.rps):
             vll[n] = _pt(st, "succ_rps")
+    return vll, sgl, sgl_direct
 
-    # SGLang through Direct-MPI dispatch (no proxy): the proxy-free companion
-    # series (sglang_direct_full n1-128 + sglang_direct_n256 run4 for 256)
-    # showing the backend itself scales past the HAProxy ceiling. Same
-    # green/circle identity as "Direct" in fig1.
-    _RUNS = Path("/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs")
-    def _direct_point(n):
-        stem = ("sglang_direct_n256/run4" if n == 256 else "sglang_direct_full/run0")
-        f = _RUNS / stem / f"n{n}" / "results" / "result0.json"
-        if not f.exists():
-            return None
-        per_run = json.loads(f.read_text())["per_run"]
-        rs = [r["rps"] * (1 - r["errors"] / max(r["requests_completed"], 1))
-              for r in per_run if r["run_index"] > 0]
-        return (float(np.mean(rs)), float(np.std(rs))) if rs else None
 
-    sgl_direct = {n: p for n in SGL_NODES if (p := _direct_point(n))}
-
-    fig, a_tp = plt.subplots(figsize=(COL_W, 1.55))   # native single-column, compact height
+def _draw_engines(a_tp, S, *, label_fs=5, tick_nodes=None, ylabel=True):
+    """Engine-generality panel: vLLM vs SGLang weak scaling through the SAME
+    HAProxy path, each offered ~0.9x its own measured single-node saturation
+    (vLLM 110, SGLang 15 req/s/node), plus the proxy-free SGLang-direct
+    companion. SGLang gets a fixed identity (blue, 'P') — orange/blue with
+    distinct markers stays legible under CVD. Returns (handles, labels)."""
+    from matplotlib.lines import Line2D
+    vll, sgl, sgl_direct = _engine_points(S)
 
     def _series(a, pts, color, marker, label, zorder=3):
         xs = sorted(pts)
@@ -742,8 +871,12 @@ def fig6_sglang_backend(S):
         _series(a_tp, sgl_direct, COLORS["direct"], MARKERS["direct"],
                 "SGLang (direct)", zorder=2.8)
     a_tp.set_yscale("log"); ps.sparse_log_y(a_tp, sci=True)
-    a_tp.set_ylabel("Throughput (query/s)")
-    a_tp.set_xlabel("Cluster size (nodes)")
+    lo, hi = a_tp.get_ylim()                 # headroom for the value labels
+    a_tp.set_ylim(lo / 2.5, hi * 2.5)
+    if ylabel:
+        a_tp.set_ylabel("Throughput (query/s)")
+    a_tp.set_xlabel("nodes (replicas)" if tick_nodes
+                    else "Cluster size: nodes (replicas)")
 
     # Efficiency is annotated ON the throughput curve now (no separate panel): each
     # labelled point carries aggregate throughput (top line) and weak-scaling
@@ -755,31 +888,38 @@ def fig6_sglang_backend(S):
     def _tp(v):
         return f"{v/1000:.1f}k" if v >= 1000 else f"{v:.0f}"
 
+    # One line when the panel is full-column-wide (a 2-line box costs ~16pt of a
+    # ~0.5in panel); two lines in the merged half-width panel, where x positions
+    # are only ~12pt apart and a one-line box is twice that wide.
+    sep = " · " if label_fs >= 5 else "\n"
+
     def _label(pts, color, pos_of, dy_of=lambda n: 8):
         eff = _eff(pts)
         for n in SGL_NODES:
             if n in pts:
-                _place_txt(a_tp, n, pts[n][0], f"{_tp(pts[n][0])}\n{eff[n]:.0f}%",
-                           color, pos_of(n), dy=dy_of(n))
+                _place_txt(a_tp, n, pts[n][0], f"{_tp(pts[n][0])}{sep}{eff[n]:.0f}%",
+                           color, pos_of(n), dy=dy_of(n), fs=label_fs)
     # vLLM (top line) above everywhere; SGLang above at n1..64 but BELOW at
     # n128/n256 so it drops clear of the vLLM labels where the curves converge.
     # The n1..64 SGLang labels hug their own line (small offset) so they don't
     # rise into the vLLM line just above.
-    _label(vll, COLORS["haproxy"], lambda n: "up")
+    # At 256n the three series sit within ~0.4 of a decade, which is a few points
+    # apart: vLLM and SGLang-direct cannot both label upward (vLLM's box hid behind
+    # the direct one). vLLM drops below its point there, and SGLang drops far enough
+    # to clear vLLM's box — there is ~2.5 decades of empty axis under it.
+    _label(vll, COLORS["haproxy"], lambda n: "down" if n == 256 else "up")
+    # 256n drop only has to clear vLLM's box (one box-height, ~1.8x the font), not
+    # 3.2x — at HSCALE_SPARSE the larger offset put it below the axis onto the ticks.
     _label(sgl, SGL_COLOR, lambda n: "down" if n in (128, 256) else "up",
-           dy_of=lambda n: 8 if n in (128, 256) else 3)
+           dy_of=lambda n: (8 + 1.8 * label_fs) if n == 256 else (8 if n == 128 else 3))
     if sgl_direct and 256 in sgl_direct:     # only the 256n split is distinct from sgl
         eff = _eff(sgl_direct)
         _place_txt(a_tp, 256, sgl_direct[256][0],
-                   f"{_tp(sgl_direct[256][0])}\n{eff[256]:.0f}%", COLORS["direct"], "up")
+                   f"{_tp(sgl_direct[256][0])}{sep}{eff[256]:.0f}%", COLORS["direct"], "up",
+                   fs=label_fs)
 
-    _node_axis(a_tp)
+    _node_axis(a_tp, nodes=tick_nodes or SGL_NODES)
 
-    _write_caption(OUT / "fig6_sglang_backend.png",
-                   "Engine swap on the same serving stack: vLLM vs SGLang weak scaling",
-                   ["Meta-Llama-3-8B-Instruct  ·  TP=1 (12 replicas/node)  ·  64$\\rightarrow$64 tok  ·  HAProxy, streaming",
-                    "offered = 0.9$\\times$ own single-node saturation (vLLM 110, SGLang 15 req/s/node)  ·  ALCF Aurora",
-                    "dotted = ideal (slope-1); point labels = aggregate throughput and weak-scaling efficiency (per-node vs own n1)"])
     handles = [Line2D([0], [0], color=COLORS["haproxy"], marker=MARKERS["haproxy"],
                       lw=ps.LW, markersize=ps.MS, markerfacecolor=COLORS["haproxy"],
                       markeredgecolor="white", markeredgewidth=ps.MEW),
@@ -792,18 +932,43 @@ def fig6_sglang_backend(S):
                               lw=ps.LW, markersize=ps.MS, markerfacecolor=COLORS["direct"],
                               markeredgecolor="white", markeredgewidth=ps.MEW))
         labels.append("SGLang (direct)")
-    top = 0.99
-    legh = 0.20 / fig.get_size_inches()[1]
-    panel_top = top - legh
+    return handles, labels
+
+
+ENGINES_CAPTION = (
+    "Engine swap on the same serving stack: vLLM vs SGLang weak scaling",
+    ["Meta-Llama-3-8B-Instruct  ·  TP=1 (12 replicas/node)  ·  64$\\rightarrow$64 tok  ·  HAProxy, streaming",
+     "offered = 0.9$\\times$ own single-node saturation (vLLM 110, SGLang 15 req/s/node)  ·  ALCF Aurora",
+     "dotted = ideal (slope-1); point labels = aggregate throughput and weak-scaling efficiency (per-node vs own n1)"])
+
+
+def fig6_sglang_backend(S):
+    """Standalone single-column engine-generality figure — the layout the paper
+    uses (iter12), taller than iter11 (see H_ENGINES) for the same reason as
+    fig_pp405b. fig_pp_engines keeps the merged side-by-side pair available."""
+    fig, a_tp = plt.subplots(figsize=(COL_W, H_ENGINES))
+    handles, labels = _draw_engines(a_tp, S)
+    _write_caption(OUT / "fig6_sglang_backend.png", *ENGINES_CAPTION)
+    panel_top = 0.99 - 0.20 / fig.get_size_inches()[1]
     fig.legend(handles, labels, loc="lower center",
-               bbox_to_anchor=(0.5, panel_top + 0.004), ncol=len(labels), fontsize=6,
+               bbox_to_anchor=(0.5, panel_top + 0.004), ncol=len(labels), fontsize=7,
                frameon=True, columnspacing=0.9, handlelength=1.5, handletextpad=0.4)
     return ps.finalize(fig, [], OUT / "fig6_sglang_backend.png", rect=(0, 0, 1, panel_top))
 
 
 def _pp405b_points(stem):
     """Newest run per node-count for a 405B PP=2 sweep variant → list of dicts
-    (rep, srps=successful throughput, p50, p99, errfrac), sorted by replica count."""
+    (rep, srps=successful throughput, srps_std, p50, p99, errfrac), sorted by
+    replica count.
+
+    srps is the MEAN over the job's data iterations (run_index >= 1, dropping the
+    run0 warmup) with srps_std their standard deviation, matching the v2 protocol
+    and the mean+-std the cached 8B cells use (sc26_preview.extract_cell). The
+    "overall" block is NOT used for the rate: it holds only the LAST iteration
+    (verified: direct n256 per_run [26.43, 31.05] -> overall 31.05), so reading it
+    reported one iteration out of six and admitted no error bars. Falls back to
+    "overall" when per_run is absent.
+    """
     import glob
     import json
     import re
@@ -812,55 +977,140 @@ def _pp405b_points(stem):
         n = int(re.search(r"/n(\d+)/", rf).group(1))
         run = int(re.search(r"/run(\d+)/", rf).group(1))
         try:
-            o = json.load(open(rf)).get("overall", {})
+            d = json.load(open(rf))
         except Exception:
             continue
-        rps = o.get("rps")
-        if rps is None or np.isnan(rps):
+        o = d.get("overall", {})
+        data_runs = [pr for pr in (d.get("per_run") or [])
+                     if int(pr.get("run_index", 0)) >= 1]
+        if len(data_runs) < 1:                      # single-iteration job: use overall
+            data_runs = [o] if o.get("rps") is not None else []
+        srps_runs, comp_t, err_t, p50s, p99s = [], 0.0, 0.0, [], []
+        for pr in data_runs:
+            c = float(pr.get("requests_completed") or 0)
+            e = float(pr.get("errors") or 0)
+            dur = float(pr.get("duration_s") or 0)
+            if dur <= 0 or c <= 0:
+                continue
+            srps_runs.append((c - e) / dur)          # successful throughput, per iteration
+            comp_t += c; err_t += e
+            if pr.get("p50_s") is not None:
+                p50s.append(float(pr["p50_s"]))
+            if pr.get("p99_s") is not None:
+                p99s.append(float(pr["p99_s"]))
+        if not srps_runs:
             continue
-        comp = o.get("requests_completed") or 0
-        err = o.get("errors") or 0
-        sr = (comp - err) / comp if comp else 0.0
-        rec = dict(rep=n // 2, nodes=n, srps=rps * sr, p50=o.get("p50_s"), p99=o.get("p99_s"),
-                   errfrac=(err / comp if comp else 0.0))
+        a = np.asarray(srps_runs, float)
+        rec = dict(rep=n // 2, nodes=n, srps=float(a.mean()), srps_std=float(a.std()),
+                   n_iters=len(srps_runs),
+                   p50=(float(np.mean(p50s)) if p50s else o.get("p50_s")),
+                   p99=(float(np.mean(p99s)) if p99s else o.get("p99_s")),
+                   errfrac=(err_t / comp_t if comp_t else 0.0))
         if n not in best or run > best[n][0]:
             best[n] = (run, rec)
     return [best[n][1] for n in sorted(best)]
 
 
-def fig_pp405b(_ignored=None):
-    """405B (TP=8×PP=2, one replica per 2 nodes) shard-aware weak scaling: aggregate
-    successful throughput and weak-scaling efficiency vs replica count, DIRECT vs
-    HAProxy. Reads the pp405b_pp2_scale[_direct] sweeps directly (own x-axis)."""
+def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
+    """405B (TP=8×PP=2, one replica per 2 nodes) shard-aware weak-scaling panel:
+    aggregate successful throughput vs cluster size, DIRECT vs HAProxy, against an
+    ideal-linear guide. Returns (handles, labels, per_node base rate)."""
     variants = [("pp405b_pp2_scale_direct", "direct", "Direct"),
                 ("pp405b_pp2_scale", "haproxy", "HAProxy")]
     data = {key: _pp405b_points(stem) for stem, key, _ in variants}
     base = data["direct"][0]
     per_node = base["srps"] / base["nodes"]              # weak-scaling unit rate (per node)
     allnodes = sorted({p["nodes"] for pts in data.values() for p in pts})
-    xlabel = "nodes (PP=2 → 2 nodes/replica)"
-    fig, a = plt.subplots(figsize=(COL_W, 1.7))   # native single-column (one-col figure)
     a.plot(allnodes, [per_node * n for n in allnodes], ls=":", lw=1.0, color="#888888",
            zorder=2, label="ideal (linear)")
+    sep = " · " if label_fs >= 5 else "\n"
     for _, key, lab in variants:
         pts = data[key]
         ps.line(a, [p["nodes"] for p in pts], [p["srps"] for p in pts], key, "stream", label=lab)
-        # each point labelled with throughput (top line) and weak-scaling efficiency (%)
+        # spread over the job's data iterations (run_index >= 1); absent for
+        # single-iteration cells, where srps_std is 0 and no bar is drawn.
+        yerr = [p.get("srps_std", 0.0) or 0.0 for p in pts]
+        if any(e > 0 for e in yerr):
+            a.errorbar([p["nodes"] for p in pts], [p["srps"] for p in pts], yerr=yerr,
+                       fmt="none", ecolor=COLORS[key], elinewidth=0.8, capsize=2, zorder=4)
+        # each point labelled with throughput and weak-scaling efficiency (%)
         for p in pts:
             eff = p["srps"] / (per_node * p["nodes"]) * 100
             tp = f"{p['srps']/1000:.1f}k" if p["srps"] >= 1000 else f"{p['srps']:.1f}"
-            _place_txt(a, p["nodes"], p["srps"], f"{tp}\n{eff:.0f}%", COLORS[key],
-                       "up" if key == "direct" else "down")
-    a.set_xscale("log", base=2); a.set_yscale("log"); ps.sparse_log_y(a, sci=True)
-    a.set_xticks(allnodes); a.set_xticklabels([str(n) for n in allnodes])
-    a.set_xlabel(xlabel)
-    a.set_ylabel("Successful throughput (query/s)")
-    ps.legend(a, loc="upper left")
-    _write_caption(OUT / "fig7_pp405b.png",
-                   "Shard-aware pipeline-parallel weak scaling: Llama-3.1-405B (TP=8 × PP=2)",
-                   ["one replica per 2 nodes · 4–256 nodes (2–128 PP=2 replicas) · fixed offered rate/replica",
-                    f"successful throughput; point labels = throughput and weak-scaling efficiency vs the 4-node base ({per_node:.2f} query/s/node)"])
-    fig.tight_layout(); out = OUT / "fig7_pp405b.png"
+            _place_txt(a, p["nodes"], p["srps"], f"{tp}{sep}{eff:.0f}%", COLORS[key],
+                       "up" if key == "direct" else "down", fs=label_fs)
+    a.set_yscale("log"); ps.sparse_log_y(a, sci=True)
+    lo, hi = a.get_ylim()                    # headroom for the value labels
+    a.set_ylim(lo / 2.5, hi * 2.0)
+    # PP=2 means one replica spans TWO nodes, so the bracketed replica count is
+    # nodes//2 here — not the 12/node of the TP=1 8B deployment.
+    _node_axis(a, nodes=tick_nodes or allnodes, per_node=lambda n: n // 2)
+    a.set_xlabel("nodes (PP=2 replicas)" if tick_nodes
+                 else "Cluster size: nodes (PP=2 replicas)")
+    if ylabel:
+        # shortened from "Successful throughput (query/s)": the rotated label is
+        # taller than the iter11 axes box, which clipped it at both ends
+        a.set_ylabel("Throughput (query/s)")
+    handles, labels = a.get_legend_handles_labels()
+    return handles, labels, per_node
+
+
+def _pp405b_caption(per_node):
+    return ("Shard-aware pipeline-parallel weak scaling: Llama-3.1-405B (TP=8 × PP=2)",
+            ["one replica per 2 nodes · 4–256 nodes (2–128 PP=2 replicas) · fixed offered rate/replica",
+             "successful throughput; point labels = throughput and weak-scaling efficiency "
+             f"vs the 4-node base ({per_node:.2f} query/s/node)"])
+
+
+def fig_pp405b(_ignored=None):
+    """Standalone single-column 405B figure — the layout the paper uses (iter12).
+    Taller than the iter11 version (see H_PP405B): the point labels stay one-line
+    and the node/(replica) tick axis gets its second line without crowding."""
+    fig, a = plt.subplots(figsize=(COL_W, H_PP405B))
+    handles, labels, per_node = _draw_pp405b(a)
+    _write_caption(OUT / "fig7_pp405b.png", *_pp405b_caption(per_node))
+    panel_top = 0.99 - 0.20 / fig.get_size_inches()[1]
+    fig.legend(handles, labels, loc="lower center",
+               bbox_to_anchor=(0.5, panel_top + 0.004), ncol=len(labels), fontsize=7,
+               frameon=True, columnspacing=0.9, handlelength=1.5, handletextpad=0.4)
+    fig.tight_layout(rect=(0, 0, 1, panel_top)); out = OUT / "fig7_pp405b.png"
+    fig.savefig(out); plt.close(fig); return out
+
+
+def fig_pp_engines(S):
+    """MERGED one-column figure: (a) 405B shard-aware PP weak scaling and
+    (b) engine generality (vLLM vs SGLang), side by side. Both panels are sparse
+    horizontally, so pairing them costs one caption instead of two and ~40% of the
+    stacked height. The right panel drops the y-label — same unit (query/s), and it
+    keeps its own tick values, which are two decades above the left panel's.
+
+    Half-width panels force two compromises: x-ticks are thinned (the bracketed
+    replica counts are wider than the 128->256 gap at full tick density) and the
+    value labels go two-line at 4.2pt."""
+    LFS = 4.2
+    fig, (a_pp, a_eng) = plt.subplots(1, 2, figsize=(COL_W, 1.62))
+    h_pp, l_pp, per_node = _draw_pp405b(a_pp, label_fs=LFS, tick_nodes=[4, 16, 64, 256])
+    h_en, l_en = _draw_engines(a_eng, S, label_fs=LFS, tick_nodes=[1, 4, 16, 64, 256],
+                               ylabel=False)
+    a_pp.set_title("(a) Llama-3.1-405B, PP=2", loc="left", fontsize=7)
+    a_eng.set_title("(b) vLLM vs SGLang, 8B", loc="left", fontsize=7)
+
+    # Per-panel legends riding each panel's own top edge: the two panels do NOT
+    # share a series vocabulary (orange is HAProxy-405B on the left and vLLM on the
+    # right), so one shared legend would misread.
+    for a, h, l in ((a_pp, h_pp, l_pp), (a_eng, h_en, l_en)):
+        leg = a.legend(h, l, loc="lower left", bbox_to_anchor=(-0.02, 1.10),
+                       ncol=len(l), fontsize=5.6, frameon=True, columnspacing=0.6,
+                       handlelength=1.2, handletextpad=0.3, borderpad=0.25)
+        leg.get_frame().set_linewidth(0.4)
+
+    _write_caption(OUT / "fig_pp_engines.png",
+                   "Shard-aware pipeline parallelism and engine generality",
+                   ["(a) " + _pp405b_caption(per_node)[0] + " — " + _pp405b_caption(per_node)[1][0],
+                    "(b) " + ENGINES_CAPTION[0] + " — " + ENGINES_CAPTION[1][0],
+                    "point labels = aggregate throughput and weak-scaling efficiency; dotted = ideal (linear)"])
+    fig.tight_layout(rect=(0, 0, 1, 0.99), w_pad=0.6)
+    out = OUT / "fig_pp_engines.png"
     fig.savefig(out); plt.close(fig); return out
 
 
@@ -927,7 +1177,8 @@ def main():
                     (fig1_proxy_scaling, (S, NS, False)),   # fig1 native single-column variant
                     (fig2_two_mode, (S, NS)),           # fig3 workload is now a paper table
                     (fig4_latency, (S,)), (fig5_latency_cdf, (S,)),
-                    (fig6_sglang_backend, (S,)), (fig_pp405b, (S,))]
+                    (fig6_sglang_backend, (S,)), (fig_pp405b, (S,)),
+                    (fig_pp_engines, (S,))]     # merged 405B + engine pair (paper)
     # --only <substr>: render just the jobs whose function name contains substr.
     only = None
     if "--only" in sys.argv:

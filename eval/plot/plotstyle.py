@@ -93,7 +93,7 @@ def line(ax, xs, ys, proxy, mode="stream", label=None, yerr=None, alpha=0.95,
 
 
 def legend(ax, **kw):
-    kw.setdefault("fontsize", 6)
+    kw.setdefault("fontsize", 7)
     leg = ax.legend(**kw)
     if leg:
         leg.get_frame().set_linewidth(0.5)
@@ -106,13 +106,32 @@ def plain_log_y(ax):
     ax.yaxis.set_major_formatter(f); ax.yaxis.set_minor_formatter(f)
 
 
+def fixed_log_y(ax, ticks):
+    """Log y-axis labelled at exactly `ticks` (plain integers), minor ticks drawn
+    but unlabelled. For a series confined to ONE decade, where sparse_log_y would
+    label only that decade's endpoint and plain_log_y labels every minor tick and
+    they collide."""
+    from matplotlib.ticker import (FixedLocator, LogLocator, ScalarFormatter,
+                                   NullFormatter)
+    f = ScalarFormatter(); f.set_scientific(False)
+    ax.yaxis.set_major_locator(FixedLocator(list(ticks)))
+    ax.yaxis.set_major_formatter(f)
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(np.arange(2, 10)),
+                                          numticks=12))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+
+
 def sparse_log_y(ax, sci=False):
     """Log y-axis labelled ONLY at decades with unlabelled minor ticks — avoids the
     overlapping 5k/6k/... minor labels plain_log_y emits. sci=True uses 10^n
-    superscript (mathtext); sci=False uses plain integers (100, 1000)."""
+    superscript (mathtext); sci=False uses plain integers (100, 1000).
+
+    numticks is pinned (rather than left at 'auto') so EVERY decade keeps its
+    label: auto subsamples by axis length, which silently dropped alternate
+    decades once the figures were shortened."""
     from matplotlib.ticker import (LogLocator, ScalarFormatter,
                                    LogFormatterMathtext, NullFormatter)
-    ax.yaxis.set_major_locator(LogLocator(base=10.0))
+    ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=12))
     ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(np.arange(2, 10)), numticks=12))
     if sci:
         ax.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
@@ -130,7 +149,7 @@ class AnnotationStacker:
     individually legible and you can see several lines meet there. Dashed-line
     (non-stream) series get a dashed box border."""
 
-    def __init__(self, ax, fmt="{:.2f}", fontsize=5.0, enabled=None):
+    def __init__(self, ax, fmt="{:.2f}", fontsize=6.0, enabled=None):
         self.ax = ax
         self.fmt = fmt
         self.fs = fontsize
