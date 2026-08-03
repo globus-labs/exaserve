@@ -100,3 +100,10 @@ DONE (deployment/serving path): vendor abstraction (XPU/CUDA/ROCm, src/exaserve/
 [] First AMD bring-up verifications (doc/deploy_slurm_amd.md "Known-unverified"): ROCm device isolation var (ROCR_ vs HIP_VISIBLE_DEVICES), ROCm/torch/vLLM wheel versions vs /opt/rocm on Delta gpud01, MI210-vs-MI100 device indexing, haproxy availability off-Aurora, multi-node srun path, PP>1 on CUDA/ROCm.
 [] TACC has NO Slurm HPC system with AMD Instinct GPUs (only MI100 on Chameleon Cloud, which is OpenStack/Blazar not Slurm). Confirm the intended "TACC AMD machine" with the user — likely Chameleon (needs a non-Slurm provisioning path) or an off-TACC system (Frontier/LUMI MI250X, El Capitan MI300A).
 [] SiteConfig object still deferred — site facts flow via env vars (EXASERVE_ENV_SETUP/EXASERVE_VENDOR/num_gpus_per_node). Promote to a first-class SiteConfig per doc/design/vendor_site_abstraction.md §4b if site count grows.
+
+### ExaWorks PSI/J default scheduler — follow-ups (2026-08-03)
+DONE: PSI/J (psij-python) is the DEFAULT submit backend (alias exawork), validated end-to-end on Aurora (submit->R->ALL SERVICES READY->qdel, job 8731184); native pbs/slurm kept as alternatives; friction log doc/exawork_psij_notes.md (10 items found+reduced, 2 fatal path bugs measured).
+[] head_node() for psij executors WITHOUT a native helper (lsf/flux/cobalt): have launch_cluster.sh write a head-node marker file into the run dir and teach serve-url to read it.
+[] Exercise the eval-harness psij path on a real campaign cell (scheduler.type: psij in a smoke spec) — package path is validated; eval path is render/parse-validated only.
+[] On Delta bring-up, A/B psij vs native slurm backend and record friction items in doc/exawork_psij_notes.md.
+[] psij-python upstream is maintenance-mode (bus factor ~1): revisit yearly; if it goes dormant, the native backends are the escape hatch (or vendor the pbs/slurm mustache templates).

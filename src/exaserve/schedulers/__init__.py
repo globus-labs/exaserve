@@ -25,16 +25,24 @@ def _register() -> None:
     if _REGISTRY:
         return
     from .pbs import PBSScheduler
+    from .psij_backend import PSIJScheduler
     from .slurm import SlurmScheduler
 
+    _REGISTRY["psij"] = PSIJScheduler
+    _REGISTRY["exawork"] = PSIJScheduler  # alias
     _REGISTRY["pbs"] = PBSScheduler
     _REGISTRY["slurm"] = SlurmScheduler
 
 
 def get_scheduler(name: str | None = None) -> SchedulerBackend:
-    """Return an instantiated SchedulerBackend (default EXASERVE_SCHEDULER / pbs)."""
+    """Return an instantiated SchedulerBackend.
+
+    Default is the ExaWorks PSI/J backend (portable across PBS/Slurm/LSF/Flux;
+    executor auto-detected or EXASERVE_PSIJ_EXECUTOR). The hand-rolled native
+    backends remain available via EXASERVE_SCHEDULER=pbs|slurm.
+    """
     _register()
-    key = (name or os.environ.get("EXASERVE_SCHEDULER", "pbs")).lower()
+    key = (name or os.environ.get("EXASERVE_SCHEDULER", "psij")).lower()
     if key not in _REGISTRY:
         raise KeyError(f"unknown scheduler {key!r}; registered: {sorted(_REGISTRY)}")
     return _REGISTRY[key]()

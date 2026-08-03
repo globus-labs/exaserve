@@ -18,15 +18,20 @@ def _register() -> None:
     if _REGISTRY:
         return
     from .pbs import PBSScheduler
+    from .psij_backend import PSIJEvalScheduler
     from .slurm import SlurmScheduler
 
+    _REGISTRY["psij"] = PSIJEvalScheduler
+    _REGISTRY["exawork"] = PSIJEvalScheduler  # alias
     _REGISTRY["pbs"] = PBSScheduler
     _REGISTRY["slurm"] = SlurmScheduler
 
 
 def get_scheduler(name: str | None = None) -> EvalScheduler:
+    """Default is the ExaWorks PSI/J backend when a spec omits scheduler.type;
+    existing specs that pin ``type: pbs`` keep the native path."""
     _register()
-    key = (name or "pbs").lower()
+    key = (name or "psij").lower()
     if key not in _REGISTRY:
         raise KeyError(f"unknown scheduler {key!r}; registered: {sorted(_REGISTRY)}")
     return _REGISTRY[key]()

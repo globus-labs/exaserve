@@ -115,7 +115,7 @@ def submit_serve(
     )
     job_text = scheduler.render_job(job_spec)
 
-    ext = "sbatch" if scheduler.name == "slurm" else "pbs"
+    ext = {"slurm": "sbatch", "psij": "psij.sh"}.get(scheduler.name, "pbs")
     job_script_path = log_dir / f"{cfg_path.stem}.{ext}"
     job_script_path.write_text(job_text)
 

@@ -9,6 +9,16 @@ set -e # Fail fast if anything goes wrong
 # PBS provides $PBS_NODEFILE directly; Slurm has no nodefile and no mpiexec, so
 # we materialize one from $SLURM_JOB_NODELIST and launch per-node work with srun
 # (see EXASERVE_MPILAUNCH below). Any of these may be pre-set to override.
+#
+# Guard: EXASERVE_SCHEDULER is also the SUBMIT-side backend selector, where it
+# can hold "psij"/"exawork" (the ExaWorks PSI/J layer). Those are meaningless at
+# runtime — only pbs|slurm name a launch mechanism — so normalize anything else
+# to empty and re-detect from the allocation env.
+case "${EXASERVE_SCHEDULER:-}" in
+    pbs|slurm|"") ;;
+    *) echo "[System] EXASERVE_SCHEDULER='${EXASERVE_SCHEDULER}' is a submit-side selector; re-detecting runtime scheduler from the allocation"
+       unset EXASERVE_SCHEDULER ;;
+esac
 if [ -z "${EXASERVE_NODEFILE:-}" ]; then
     if [ -n "${PBS_NODEFILE:-}" ]; then
         EXASERVE_SCHEDULER="${EXASERVE_SCHEDULER:-pbs}"

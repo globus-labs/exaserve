@@ -12,7 +12,7 @@ changes, no YAML changes:
 
 | Env var | Values | Default | Effect |
 |---|---|---|---|
-| `EXASERVE_SCHEDULER` | `pbs` \| `slurm` | `pbs` | job submit + status (`exaserve-serve-submit`) |
+| `EXASERVE_SCHEDULER` | `psij` (alias `exawork`) \| `pbs` \| `slurm` | `psij` | job submit + status (`exaserve-serve-submit`). The default is the ExaWorks PSI/J portable layer (executor auto-detected; see [exawork_psij_notes.md](exawork_psij_notes.md)); `pbs`/`slurm` are the hand-rolled native fallbacks |
 | `EXASERVE_VENDOR` | `xpu` \| `cuda` \| `rocm` | `xpu` | device isolation + engine device string |
 | `EXASERVE_ENV_SETUP` | shell snippet | Aurora `env_aurora`/frameworks | how the job puts Ray + engine + toolchain on PATH |
 
@@ -37,7 +37,7 @@ So the MPI weight broadcast, log gather, and driver all work under `srun`.
 ## Path A — batch submit (`exaserve-serve-submit`)
 
 ```bash
-export EXASERVE_SCHEDULER=slurm
+export EXASERVE_SCHEDULER=slurm   # optional: default 'psij' auto-detects Slurm; set this to force the native backend
 export EXASERVE_VENDOR=rocm
 export EXASERVE_ENV_SETUP='module load gcc python
 export PATH=/opt/rocm/bin:$PATH
