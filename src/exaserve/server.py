@@ -1917,6 +1917,73 @@ def deploy_multi_model(
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _wait_for_proxies_fanout(client, tracer) -> list:
+    """The legacy O(N) proxy readiness fan-out (KI-A4).
+
+    Issues one actor RPC to EVERY proxy and ray.wait()s over all of them, from
+    the head, at the moment the cluster is busiest. Retained behind
+    EXASERVE_PROXY_FANOUT_WAIT=1 for run-to-run comparison; removed at the
+    WP13 cutover. Returns per-proxy completion times.
+    """
+    import statistics  # noqa: F401  (used by the block below)
+
+    # Step 4: Wait for proxies serving (with per-proxy timing)
+    import ray as _ray
+    t0 = time.monotonic()
+    proxy_handles = _ray.get(client._controller.get_proxies.remote())
+    t_get_proxies = time.monotonic() - t0
+    print(f"[ExaServe] Step 4a get_proxies: {t_get_proxies:.3f}s ({len(proxy_handles)} proxies)", flush=True)
+
+    t0 = time.monotonic()
+    serving_refs = [h.serving.remote(wait_for_applications_running=True) for h in proxy_handles.values()]
+    t_issue = time.monotonic() - t0
+    print(f"[ExaServe] Step 4b issue .serving.remote() x{len(serving_refs)}: {t_issue:.3f}s", flush=True)
+
+    t0 = time.monotonic()
+    # Track when each proxy finishes
+    remaining = list(serving_refs)
+    proxy_complete_times = []
+    wait_start = time.monotonic()
+    # PR-008: bound the overall wait. The old loop had only a per-wait 5s
+    # timeout and could hang forever on a stuck proxy. A proxy that never
+    # reports serving is a fail-closed readiness error.
+    proxy_deadline_s = float(os.environ.get("EXASERVE_PROXY_READY_DEADLINE_S", "900"))
+    while remaining:
+        done, remaining = _ray.wait(remaining, num_returns=1, timeout=5.0)
+        elapsed = time.monotonic() - wait_start
+        if done:
+            proxy_complete_times.append(elapsed)
+            if len(proxy_complete_times) % 10 == 0 or not remaining:
+                print(f"[ExaServe] Step 4c proxies ready: {len(proxy_complete_times)}/{len(serving_refs)} at +{elapsed:.1f}s", flush=True)
+        elif elapsed > proxy_deadline_s:
+            raise RuntimeError(
+                f"[ExaServe] {len(remaining)}/{len(serving_refs)} proxies did "
+                f"not report serving within {proxy_deadline_s:.0f}s; failing "
+                "closed rather than declaring readiness with unhealthy proxies."
+            )
+    t_wait = time.monotonic() - t0
+    tracer.record_phase("serve.run.wait_proxies", t_wait)
+
+    # Log proxy completion distribution
+    if proxy_complete_times:
+        import statistics
+        print(
+            f"[ExaServe] Step 4 wait_proxies: {t_wait:.1f}s total, "
+            f"proxy completion: first={proxy_complete_times[0]:.1f}s "
+            f"median={statistics.median(proxy_complete_times):.1f}s "
+            f"p90={proxy_complete_times[int(len(proxy_complete_times)*0.9)]:.1f}s "
+            f"last={proxy_complete_times[-1]:.1f}s",
+            flush=True,
+        )
+        tracer.set_metadata(
+            proxy_wait_first_s=round(proxy_complete_times[0], 2),
+            proxy_wait_median_s=round(statistics.median(proxy_complete_times), 2),
+            proxy_wait_last_s=round(proxy_complete_times[-1], 2),
+        )
+
+    return proxy_complete_times
+
 def main() -> None:
     """The deployment entry point (plan WP4.1).
 
@@ -2352,59 +2419,23 @@ def main() -> None:
         for step_name, step_dur in _deploy_step_times.items():
             tracer.record_phase(f"serve.run.deploy.{step_name}", step_dur)
 
-        # Step 4: Wait for proxies serving (with per-proxy timing)
-        import ray as _ray
-        t0 = time.monotonic()
-        proxy_handles = _ray.get(client._controller.get_proxies.remote())
-        t_get_proxies = time.monotonic() - t0
-        print(f"[ExaServe] Step 4a get_proxies: {t_get_proxies:.3f}s ({len(proxy_handles)} proxies)", flush=True)
-
-        t0 = time.monotonic()
-        serving_refs = [h.serving.remote(wait_for_applications_running=True) for h in proxy_handles.values()]
-        t_issue = time.monotonic() - t0
-        print(f"[ExaServe] Step 4b issue .serving.remote() x{len(serving_refs)}: {t_issue:.3f}s", flush=True)
-
-        t0 = time.monotonic()
-        # Track when each proxy finishes
-        remaining = list(serving_refs)
-        proxy_complete_times = []
-        wait_start = time.monotonic()
-        # PR-008: bound the overall wait. The old loop had only a per-wait 5s
-        # timeout and could hang forever on a stuck proxy. A proxy that never
-        # reports serving is a fail-closed readiness error.
-        proxy_deadline_s = float(os.environ.get("EXASERVE_PROXY_READY_DEADLINE_S", "900"))
-        while remaining:
-            done, remaining = _ray.wait(remaining, num_returns=1, timeout=5.0)
-            elapsed = time.monotonic() - wait_start
-            if done:
-                proxy_complete_times.append(elapsed)
-                if len(proxy_complete_times) % 10 == 0 or not remaining:
-                    print(f"[ExaServe] Step 4c proxies ready: {len(proxy_complete_times)}/{len(serving_refs)} at +{elapsed:.1f}s", flush=True)
-            elif elapsed > proxy_deadline_s:
-                raise RuntimeError(
-                    f"[ExaServe] {len(remaining)}/{len(serving_refs)} proxies did "
-                    f"not report serving within {proxy_deadline_s:.0f}s; failing "
-                    "closed rather than declaring readiness with unhealthy proxies."
-                )
-        t_wait = time.monotonic() - t0
-        tracer.record_phase("serve.run.wait_proxies", t_wait)
-
-        # Log proxy completion distribution
-        if proxy_complete_times:
-            import statistics
-            print(
-                f"[ExaServe] Step 4 wait_proxies: {t_wait:.1f}s total, "
-                f"proxy completion: first={proxy_complete_times[0]:.1f}s "
-                f"median={statistics.median(proxy_complete_times):.1f}s "
-                f"p90={proxy_complete_times[int(len(proxy_complete_times)*0.9)]:.1f}s "
-                f"last={proxy_complete_times[-1]:.1f}s",
-                flush=True,
-            )
-            tracer.set_metadata(
-                proxy_wait_first_s=round(proxy_complete_times[0], 2),
-                proxy_wait_median_s=round(statistics.median(proxy_complete_times), 2),
-                proxy_wait_last_s=round(proxy_complete_times[-1], 2),
-            )
+        # KI-A4: the fan-out below issues one actor RPC to EVERY proxy and
+        # ray.wait()s over all of them from the head at the busiest moment --
+        # the wait_proxies cliff. It is now redundant: the readiness gate
+        # checks every node's proxy health through ONE controller call per
+        # poll AND requires a real completion through the external route,
+        # which is strictly stronger than a proxy reporting 'serving'.
+        # EXASERVE_PROXY_FANOUT_WAIT=1 restores it; removed at WP13.
+        _gate_on = os.environ.get("EXASERVE_READINESS_GATE", "1") != "0"
+        if os.environ.get("EXASERVE_PROXY_FANOUT_WAIT", "0") == "1" or not _gate_on:
+            # The helper records its own phases/metadata.
+            _wait_for_proxies_fanout(client, tracer)
+        else:
+            tracer.record_phase("serve.run.wait_proxies", 0.0)
+            tracer.set_metadata(proxy_fanout_wait=False)
+            print("[ExaServe] Step 4 wait_proxies: skipped -- the readiness gate "
+                  "verifies per-node proxy health and canaries the external route "
+                  "(KI-A4: no fleet-wide polling)", flush=True)
         # Log proxy spawn timeline from monitor thread
         if _proxy_spawn_log:
             tracer.set_metadata(proxy_spawn_timeline=_proxy_spawn_log)
@@ -2579,6 +2610,14 @@ def main() -> None:
     except Exception as exc:
         print(f"[ExaServe] Serve shutdown error (continuing): {exc}", flush=True)
     finally:
+        # KI-A6: reap deployment-scoped collectors; detached actors outlive
+        # their creator by design, so nobody else will.
+        try:
+            from .compat.collector import shutdown_collector
+
+            shutdown_collector()
+        except Exception as exc:
+            print(f"[Compat] collector shutdown error (continuing): {exc}", flush=True)
         _deploy_manager.stop()
         print(f"[Deployment] terminal state={_deploy_manager.state} "
               f"first_cause={_deploy_manager.first_cause}", flush=True)

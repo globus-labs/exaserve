@@ -50,11 +50,22 @@ def collector_name() -> str:
     return f"exaserve_receipts_{deployment_scope()}"
 
 
+# KI-A6/PR-029: a detached actor that accumulates without bound and is never
+# reaped outlives its deployment and grows with the fleet. Two receipts per
+# replica at 256 nodes is thousands of dicts; the cap makes the memory a
+# constant and the drop count makes truncation visible rather than silent.
+_MAX_RECEIPTS = 8192
+
+
 class _ReceiptCollectorImpl:
     def __init__(self) -> None:
         self._receipts: list[dict] = []
+        self._dropped = 0
 
     def report(self, receipt: dict) -> None:
+        if len(self._receipts) >= _MAX_RECEIPTS:
+            self._dropped += 1
+            return
         self._receipts.append(receipt)
 
     def get_all(self) -> list[dict]:
@@ -62,6 +73,9 @@ class _ReceiptCollectorImpl:
 
     def count(self) -> int:
         return len(self._receipts)
+
+    def dropped(self) -> int:
+        return self._dropped
 
 
 def create_receipt_collector():
@@ -135,6 +149,33 @@ def publish_receipt(receipt: Any) -> bool:
     except Exception as exc:
         _warn_once(f"[Compat] role={role}: receipt publish failed: "
                    f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def shutdown_collector(timeout_s: float = 10.0) -> bool:
+    """Reap the collector at deployment teardown (KI-A6).
+
+    Detached actors survive their creator by design, so without this the
+    receipt store for every past deployment stays resident in a reused Ray
+    cluster.
+    """
+    collector = _get_collector()
+    if collector is None:
+        return False
+    try:
+        import ray
+
+        dropped = 0
+        try:
+            dropped = int(ray.get(collector.dropped.remote(), timeout=timeout_s))
+        except Exception:
+            pass
+        if dropped:
+            print(f"[Compat] receipt collector dropped {dropped} receipt(s) at the "
+                  f"cardinality cap before shutdown", flush=True)
+        ray.kill(collector)
+        return True
+    except Exception:
         return False
 
 
