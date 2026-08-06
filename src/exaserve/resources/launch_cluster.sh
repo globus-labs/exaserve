@@ -36,6 +36,11 @@ if [ -z "${EXASERVE_NODEFILE:-}" ]; then
     fi
 fi
 export EXASERVE_SCHEDULER="${EXASERVE_SCHEDULER:-pbs}"
+# Derive the job id INDEPENDENTLY of the nodefile branch above: a caller that
+# presets EXASERVE_NODEFILE (the scaling harness does) skips that branch
+# entirely, which left the id empty and every deployment sharing the name
+# "local" — colliding telemetry/receipt actors in a reused Ray cluster.
+EXASERVE_JOBID="${EXASERVE_JOBID:-${PBS_JOBID:-${SLURM_JOB_ID:-}}}"
 export EXASERVE_NODEFILE EXASERVE_JOBID
 
 # Generation + deployment identity for the whole allocation. Every artifact

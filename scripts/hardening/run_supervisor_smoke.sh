@@ -28,14 +28,14 @@ echo "supervisor_pid=$SUPER_PID"
 
 ready=0
 for i in $(seq 1 150); do
-  [ -s "$(ls "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)" ] && { ready=1; break; }
+  [ -s "$(ls -t "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)" ] && { ready=1; break; }
   grep -qE "\[Driver\] FATAL|Refusing to declare|refusing to declare|FIRST CAUSE" "$OUT/launch.log" && break
   kill -0 $SUPER_PID 2>/dev/null || break
   sleep 10
 done
 echo "ready_signal=$ready after $((i*10))s"
 
-SNAP=$(ls "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)
+SNAP=$(ls -t "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)
 gate_ok=0; gate_ready=""
 if [ -n "$SNAP" ]; then
   cp "$SNAP" "$OUT/readiness.json"
@@ -59,7 +59,7 @@ echo "receipts_collected=$receipts"
 
 canary_ok=0; leftover=99
 if [ "$gate_ok" = "1" ]; then
-  IPS=$(ls "$OUT"/run_logs/*/ray_node_ips.txt 2>/dev/null | head -1)
+  IPS=$(ls -t "$OUT"/run_logs/*/ray_node_ips.txt 2>/dev/null | head -1)
   IP=$(head -1 "$IPS" 2>/dev/null)
   RESP=$(curl -s --noproxy '*' -m 60 "http://${IP:-localhost}:8000/v1/completions" \
     -H 'Content-Type: application/json' \

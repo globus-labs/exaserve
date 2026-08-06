@@ -43,7 +43,7 @@ MAXIT=$((60 + NODES * 6))
 # The marker now prints only after the gate passes, so it is kept purely as a
 # fallback for a run with EXASERVE_READINESS_GATE=0.
 for i in $(seq 1 $MAXIT); do
-  SNAP=$(ls "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)
+  SNAP=$(ls -t "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)
   if [ -n "$SNAP" ] && grep -q '"ready": true' "$SNAP"; then ready=1; break; fi
   grep -q "ALL SERVICES READY" "$OUT/launch.log" && { ready=1; break; }
   grep -qE "\[Driver\] FATAL|\[ExaServe\] .*Refusing to declare|Critical Error:" "$OUT/launch.log" && break
@@ -62,7 +62,14 @@ if [ "$ready" = "1" ]; then
   # each rank saturating its own node, so the measurement is NOT limited by a
   # single head-node client at large N (baseline findings #4).
   sleep 5
-  IPS=$(ls "$OUT"/run_logs/*/ray_node_ips.txt 2>/dev/null | head -1)
+  # Prefer THIS run's directory (the one the readiness snapshot came from);
+  # a stale run_logs/ dir under the same $OUT previously sent the probe at a
+  # dead allocation's IPs and reported 100% errors on a healthy deploy.
+  if [ -n "$SNAP" ]; then
+    IPS="$(dirname "$SNAP")/ray_node_ips.txt"
+  else
+    IPS=$(ls -t "$OUT"/run_logs/*/ray_node_ips.txt 2>/dev/null | head -1)
+  fi
   SHARDS="$OUT/probe_shards"
   rm -rf "$SHARDS"; mkdir -p "$SHARDS"
   echo "--- throughput probe (Direct-MPI, $NODES ranks, ips=$IPS) ---"

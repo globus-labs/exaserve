@@ -36,7 +36,7 @@ echo "pr024_haproxy_check=$pr024 (want >=1)"
 
 canary_ok=0
 if [ "$ready" = "1" ]; then
-  PORT=$(cat "$OUT"/run_logs/*/proxy_out/proxy_port 2>/dev/null | head -1)
+  PORT=$(cat "$(ls -t "$OUT"/run_logs/*/proxy_out/proxy_port 2>/dev/null | head -1)" 2>/dev/null)
   PORT=${PORT:-4001}
   echo "proxy_port=$PORT"
   RESP=$(curl -s --noproxy '*' -m 60 "http://localhost:$PORT/v1/completions" \
