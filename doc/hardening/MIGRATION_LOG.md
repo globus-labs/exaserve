@@ -924,3 +924,23 @@ The pattern across this pass is worth stating plainly: **every identity that
 two processes must agree on needs a single normalization function, and the
 propagation must override rather than defer.** Three separate failures this
 pass were the same shape.
+
+### Proxy path validated against the gate
+
+`run_haproxy_smoke.sh` on 2 nodes: the gate reached READY
+(24/24 replicas, 2 healthy proxies, canary answered, all roles attested) and a
+completion then routed **through HAProxy** normally
+(`" Paris, located in the north-central part"`). The gate canaries the Serve
+route directly, so it neither depends on nor interferes with the front proxy —
+confirmed rather than assumed.
+
+### Keeping the gate off the KI-A4 cost curve
+
+The first implementation pulled full per-replica Serve details every 5s, which
+is O(replicas) per poll — precisely the fleet-wide polling profile that the
+`wait_proxies` cliff (KI-A4) is about, and a real hazard at 256 nodes.
+Declared targets and route prefixes are static within a generation, so the
+expensive call now happens **once per generation** and each poll refreshes only
+the volatile fields from the light status overview. An application that
+disappears reports `running=0 / MISSING`, so revocation still works and the
+cache cannot prop up a dead deployment.
