@@ -56,6 +56,15 @@ import json,sys
 try: print(json.load(open('$SNAP')).get('receipts',0))
 except Exception: print(0)" 2>/dev/null)
 echo "receipts_collected=$receipts"
+# EN-01: the engine must attest ITSELF, so it must not appear in the
+# externally-attested list.
+engine_self=$(python -c "
+import json
+try:
+    d = json.load(open('$SNAP'))
+    print('yes' if 'engine' not in (d.get('externally_attested_roles') or []) else 'no')
+except Exception: print('unknown')" 2>/dev/null)
+echo "engine_self_attested=$engine_self"
 
 canary_ok=0; leftover=99
 if [ "$gate_ok" = "1" ]; then
@@ -92,4 +101,5 @@ echo "marker_never_precedes_gate=$([ "$marker_before_gate" = 0 ] && echo PASS ||
 echo "receipts=$([ "${receipts:-0}" -ge 5 ] && echo "PASS ($receipts)" || echo "FAIL ($receipts)")"
 echo "canary=$([ "$canary_ok" = 1 ] && echo PASS || echo FAIL)"
 echo "tree_reaped=$([ "${leftover:-99}" -le 0 ] && echo PASS || echo "FAIL ($leftover left)")"
+echo "engine_self_attested=$([ "$engine_self" = "yes" ] && echo PASS || echo "FAIL ($engine_self)")"
 echo "SUPERVISOR_SMOKE_DONE"

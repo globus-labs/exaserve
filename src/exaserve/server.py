@@ -991,6 +991,24 @@ class EngineWorker:
         replica_info.update(self._publish_compat_receipts(null_compute))
         report_replica_stats(replica_info)
 
+    def _collect_engine_self_receipts(self) -> list:
+        """Receipts the spawned EngineCore wrote about itself (EN-01).
+
+        Bounded: the engine writes during its own startup, which has already
+        completed by the time this runs, so a short wait covers only clock and
+        filesystem skew. Absence is not an error — the caller falls back to
+        owner attestation.
+        """
+        from .compat import engine_shim
+
+        directory = getattr(getattr(self, "backend", None), "_engine_receipt_dir", None)
+        if not directory:
+            return []
+        try:
+            return engine_shim.collect(directory, timeout_s=5.0)
+        except Exception:
+            return []
+
     def _publish_compat_receipts(self, null_compute: bool) -> None:
         """IMP-B04: attest THIS replica's compatibility, and the engine it owns.
 
@@ -1025,6 +1043,10 @@ class EngineWorker:
             outcome["compat_applied"] = sorted(receipt.patch_results)
             outcome["compat_not_applicable"] = list(receipt.not_applicable)
             outcome["compat_published"] = publish_receipt(receipt)
+            # EN-01: prefer the engine's OWN receipt, written from inside the
+            # spawned EngineCore by the sitecustomize shim. Owner attestation
+            # is the fallback, and the evidence class actually used is recorded
+            # rather than left ambiguous.
             engine_probe = "null_compute" if null_compute else ""
             if not engine_probe:
                 try:
@@ -1033,9 +1055,26 @@ class EngineWorker:
                     engine_probe = f"vllm {_vllm.__version__}"
                 except Exception:
                     engine_probe = "engine"
-            outcome["compat_engine_published"] = publish_receipt(
-                activator.attest_external("engine", executable=_sys.executable,
-                                          version_probe=engine_probe))
+
+            self_receipts = self._collect_engine_self_receipts()
+            if self_receipts:
+                from .compat.collector import receipt_from_dict
+
+                published = 0
+                for payload in self_receipts:
+                    receipt = receipt_from_dict(payload)
+                    if receipt is not None and publish_receipt(receipt):
+                        published += 1
+                outcome["compat_engine_evidence"] = "self"
+                outcome["compat_engine_published"] = published > 0
+                outcome["compat_engine_receipts"] = published
+                outcome["compat_engine_patches_delivered"] = bool(
+                    self_receipts[0].get("patches_delivered"))
+            else:
+                outcome["compat_engine_evidence"] = "owner"
+                outcome["compat_engine_published"] = publish_receipt(
+                    activator.attest_external("engine", executable=_sys.executable,
+                                              version_probe=engine_probe))
         except ActivationError as exc:
             print(f"[EngineWorker pid={os.getpid()}] compatibility activation "
                   f"FAILED (no receipt published; readiness will block): {exc}",

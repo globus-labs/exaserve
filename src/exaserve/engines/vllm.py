@@ -8,6 +8,7 @@ inside ``create()`` / generation (transformers-pin isolation).
 from __future__ import annotations
 
 import os
+import platform
 import socket
 import time
 import uuid
@@ -40,6 +41,7 @@ class VLLMEngine(EngineBackend):
         )
 
         from ..vendors import get_vendor
+        from ..compat import engine_shim as _shim
 
         init_mono = time.monotonic()
         pid = os.getpid()
@@ -67,9 +69,32 @@ class VLLMEngine(EngineBackend):
             )
         device_isolation_s = time.monotonic() - t0
 
+        # ---- Engine self-attestation shim (EN-01) ---------------------------
+        # Installed for every engine so the spawned EngineCore can attest what
+        # it received. Patch DELIVERY is unchanged: only PP asks the shim to
+        # import the patch module, exactly as before this existed.
+        pp = spec.pipeline_parallel_size
+        self._engine_receipt_dir = _shim.receipt_dir_for(
+            os.environ.get("EXASERVE_DEPLOYMENT_ID", "unknown"),
+            int(os.environ.get("EXASERVE_GENERATION", "0") or 0))
+        _shim_versions = {"python": platform.python_version()}
+        for _mod in ("ray", "vllm"):
+            try:
+                _shim_versions[_mod] = __import__(_mod).__version__
+            except Exception:
+                pass
+        if not _shim.install(
+                "/tmp/exaserve_pp_shim", self._engine_receipt_dir,
+                import_patches=(pp > 1),
+                deployment_id=os.environ.get("EXASERVE_DEPLOYMENT_ID", "unknown"),
+                generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
+                vendor=os.environ.get("EXASERVE_VENDOR", "xpu"),
+                versions=_shim_versions):
+            print(f"[VLLMEngine pid={pid}] WARNING: engine shim setup failed; "
+                  "the engine will fall back to owner attestation", flush=True)
+
         # ---- Distributed init port ------------------------------------------
         t0 = time.monotonic()
-        pp = spec.pipeline_parallel_size
         master_addr = "127.0.0.1"
         bind_host = "127.0.0.1"
         if pp > 1:
@@ -80,31 +105,6 @@ class VLLMEngine(EngineBackend):
                 )
             for _k, _v in self._vendor.distributed_env("vllm").items():
                 os.environ.setdefault(_k, _v)
-            # Node-local sitecustomize shim so the multiprocessing-spawn EngineCore
-            # child applies the exaserve vLLM/PP patches at startup.
-            shim_dir = "/tmp/exaserve_pp_shim"
-            try:
-                os.makedirs(shim_dir, exist_ok=True)
-                shim_path = os.path.join(shim_dir, "sitecustomize.py")
-                if not os.path.exists(shim_path):
-                    with open(shim_path, "w", encoding="utf-8") as shim_fh:
-                        shim_fh.write(
-                            "try:\n"
-                            "    import exaserve._sitecustomize  # noqa: F401\n"
-                            "except Exception:\n"
-                            "    pass\n"
-                        )
-                existing_pp = os.environ.get("PYTHONPATH", "")
-                if shim_dir not in existing_pp.split(os.pathsep):
-                    os.environ["PYTHONPATH"] = (
-                        shim_dir + (os.pathsep + existing_pp if existing_pp else "")
-                    )
-            except OSError as shim_exc:
-                print(
-                    f"[VLLMEngine pid={pid}] WARNING: PP sitecustomize shim setup "
-                    f"failed: {shim_exc}",
-                    flush=True,
-                )
             master_addr = get_ray_node_ip() or get_hsn_ip()
             bind_host = "0.0.0.0"
             os.environ["VLLM_HOST_IP"] = master_addr
