@@ -26,6 +26,11 @@ cp scripts/hardening/config.direct.8b.yaml "$OUT/config.yaml"
 sed -i "s/^  num_nodes: .*/  num_nodes: $NODES/" "$OUT/config.yaml"
 echo "=== scaling smoke: $NODES nodes ($(hostname)) ==="
 
+# Artifacts from a PREVIOUS run live under the same $OUT. Newest-first is not
+# enough: before this run writes anything, the newest readiness.json IS the
+# previous run's, which reported ready in 10s and sent the probe at a dead
+# allocation. Everything below must be NEWER than this instant.
+RUN_START=$(date +%s)
 bash src/exaserve/resources/launch_cluster.sh "$OUT/config.yaml" > "$OUT/launch.log" 2>&1 &
 LPID=$!
 ready=0
@@ -43,7 +48,7 @@ MAXIT=$((60 + NODES * 6))
 # The marker now prints only after the gate passes, so it is kept purely as a
 # fallback for a run with EXASERVE_READINESS_GATE=0.
 for i in $(seq 1 $MAXIT); do
-  SNAP=$(ls -t "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)
+  SNAP=$(find "$OUT"/run_logs -name readiness.json -newermt "@$RUN_START" 2>/dev/null | head -1)
   if [ -n "$SNAP" ] && grep -q '"ready": true' "$SNAP"; then ready=1; break; fi
   grep -q "ALL SERVICES READY" "$OUT/launch.log" && { ready=1; break; }
   grep -qE "\[Driver\] FATAL|\[ExaServe\] .*Refusing to declare|Critical Error:" "$OUT/launch.log" && break
@@ -52,6 +57,7 @@ for i in $(seq 1 $MAXIT); do
 done
 READY_S=$((i*10))
 echo "ready=$ready after ${READY_S}s (source=$([ -n "$SNAP" ] && echo snapshot || echo marker))"
+SNAP=${SNAP:-$(find "$OUT"/run_logs -name readiness.json -newermt "@$RUN_START" 2>/dev/null | head -1)}
 [ -n "$SNAP" ] && cp "$SNAP" "$OUT/readiness.json"
 grep -m1 "All .* GPUs registered" "$OUT/launch.log" | tee "$OUT/gpus.txt"
 
@@ -68,7 +74,7 @@ if [ "$ready" = "1" ]; then
   if [ -n "$SNAP" ]; then
     IPS="$(dirname "$SNAP")/ray_node_ips.txt"
   else
-    IPS=$(ls -t "$OUT"/run_logs/*/ray_node_ips.txt 2>/dev/null | head -1)
+    IPS=$(find "$OUT"/run_logs -name ray_node_ips.txt -newermt "@$RUN_START" 2>/dev/null | head -1)
   fi
   SHARDS="$OUT/probe_shards"
   rm -rf "$SHARDS"; mkdir -p "$SHARDS"
