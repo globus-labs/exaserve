@@ -2266,6 +2266,14 @@ def main() -> None:
         generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0))
     _deploy_manager.prepare()          # staging completed above this point
 
+    # KI-D4/TD-PP-MULTI/KI-A5: check the config against declared capabilities
+    # before deploying. A capability whose absence changes the ANSWER refuses
+    # here; one that only changes performance degrades loudly and is recorded.
+    from .capabilities import validate_deployment as _validate_capabilities
+
+    _capability_report = _validate_capabilities(config)
+    print(f"[Capability] {_capability_report}", flush=True)
+
     if planner_enabled:
         with tracer.phase("build_node_inventory"):
             planner_nodes = build_node_inventory()
@@ -2562,7 +2570,8 @@ def main() -> None:
         )
         _readiness_snapshot = _deploy_manager.validate()
         tracer.set_metadata(readiness=_readiness_snapshot.to_dict(),
-                            deployment=_deploy_manager.to_dict())
+                            deployment=_deploy_manager.to_dict(),
+                            capabilities=_capability_report)
         print(f"[Deployment] state={_deploy_manager.state} "
               f"(deployment {_deploy_manager.deployment_id} "
               f"gen {_deploy_manager.generation})", flush=True)

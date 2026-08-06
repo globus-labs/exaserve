@@ -237,9 +237,18 @@ class VLLMEngine(EngineBackend):
         except ValueError as exc:
             if "chat_template" not in str(exc):
                 raise
+            # TD-CHATTPL: flattening messages to plain text is a DIFFERENT
+            # prompt than the model was tuned on, so outputs are not comparable
+            # to a correctly templated run. That is an answer-changing
+            # substitution and must be requested, not assumed.
+            from ..capabilities import degrade_or_refuse
+
+            degrade_or_refuse("chat_template_fallback",
+                              f"model {self.model_id} has no chat template")
             print(
                 "[ExaServe] Tokenizer has no chat template; "
-                f"falling back to plain-text prompt for {self.model_id}",
+                f"falling back to plain-text prompt for {self.model_id} "
+                "(EXASERVE_ALLOW_CHAT_TEMPLATE_FALLBACK=1)",
                 flush=True,
             )
             return _chat_messages_to_plain_prompt(
