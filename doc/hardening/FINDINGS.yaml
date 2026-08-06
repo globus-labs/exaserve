@@ -42,15 +42,18 @@ findings:
   - {id: PR-004, source: audit, severity: blocker,
      invariant: "Native staging failures cannot report success; no shell-string construction",
      primary_work_package: WP6, affected_regions: "resources/bcast.c",
-     acceptance_tests: [AC-DIST-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-DIST-01], status: FIXED, owner: claude,
+     evidence: "bcast.c checks pclose on BOTH the producer and extractor tars, aggregates local_fail across every rank with MPI_Allreduce so any rank's failure fails the whole broadcast, uses shquote for the one shell string and mkdir via syscall rather than system(). Demonstrated live on 2026-08-06: a staging fault produced rank exit 1 -> launcher nonzero -> supervisor FIRST CAUSE, with no success reported."}
   - {id: PR-005, source: audit, severity: blocker,
      invariant: "Model cache completeness is manifest-based and staging is transactional",
      primary_work_package: WP6, affected_regions: "model_staging.py",
-     acceptance_tests: [AC-DIST-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-DIST-01], status: FIXED, owner: claude,
+     evidence: "model_staging.check_model_exists verifies the marker inventory (name+size) against disk and rejects tokenizer_only markers as full models; staging is transactional (download to a staging dir, validate, marker, then os.replace publish under a lease). tests/test_model_staging.py (5)."}
   - {id: PR-006, source: audit, severity: high,
      invariant: "Config coercion is strict; unknown keys and invalid values are rejected",
      primary_work_package: WP1, affected_regions: "schemas.py manual coercion",
-     acceptance_tests: [AC-PLAN-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-PLAN-01], status: FIXED, owner: claude,
+     evidence: "Unknown keys rejected at both DeploymentConfig and ModelConfig with the accepted set named; strict numeric coercion refuses bools and non-integral floats while accepting YAML's 4096.0. tests/test_config_strictness.py (15), incl. the num_node/num_nodes typo."}
   - {id: PR-007, source: audit, severity: high,
      invariant: "Derived model identities (storage/route) are collision-checked",
      primary_work_package: WP1, affected_regions: "model_paths.py; schemas.py uniqueness",
@@ -76,19 +79,23 @@ findings:
   - {id: PR-010, source: audit, severity: blocker,
      invariant: "Exposure model is explicit; admin surfaces are not open by default",
      primary_work_package: WP7, affected_regions: "server.py 0.0.0.0; haproxy stats admin; litellm master_key; sglang trust_remote_code",
-     acceptance_tests: [AC-PROXY-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-PROXY-01], status: FIXED, owner: claude,
+     evidence: "nginx /nginx-status is loopback-only by default (was `allow all`), widening is an explicit named-source opt-in; Envoy admin is loopback; HAProxy stats admin requires auth. tests/test_exposure_model.py (6)."}
   - {id: PR-011, source: audit, severity: high,
      invariant: "Request validation returns typed 4xx; model field honored or rejected",
      primary_work_package: WP7, affected_regions: "server.py handlers/_parse_sampling",
-     acceptance_tests: [AC-OBS-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-OBS-01], status: FIXED, owner: claude,
+     evidence: "require_object_body + typed model check + strict_flag wired into both handlers; absent model allowed, unknown/non-string rejected as 400. tests/test_request_validation.py (12)."}
   - {id: PR-012, source: audit, severity: high,
      invariant: "Ports are owned (bind-to-zero/lease); advertised URLs are verified bound URLs",
      primary_work_package: WP7, affected_regions: "server.py get_open_port; submit.py serve_url",
-     acceptance_tests: [AC-PROXY-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-PROXY-01], status: FIXED, owner: claude,
+     evidence: "state/ports.PortLease: O_EXCL reservation held until release, so it outlives the probe socket that made get_open_port a TOCTOU race at 12+ replicas/node; released after the engine binds, including on the failure path. Exhaustion raises. tests/test_port_ownership.py (9)."}
   - {id: PR-013, source: audit, severity: high,
      invariant: "Submission is idempotent with durable job identity and atomic leases",
      primary_work_package: WP8, affected_regions: "eval/lib/run_executor.py submit-all",
-     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude,
+     evidence: "Durable job identity + atomic lease + submitting-intent state closes the submit-then-persist crash window. tests/test_submit_idempotency.py."}
   - {id: PR-014, source: audit, severity: high,
      invariant: "Scheduler observation failures fail closed and are distinguishable",
      primary_work_package: WP8, affected_regions: "eval+pkg scheduler count/status paths",
@@ -96,7 +103,8 @@ findings:
   - {id: PR-015, source: audit, severity: high,
      invariant: "Job scripts render with validated, quoted fields; no directive injection",
      primary_work_package: WP8, affected_regions: "both scheduler stacks' render paths",
-     acceptance_tests: [], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [], status: FIXED, owner: claude,
+     evidence: "Shell-variable indirection for every rendered field in both scheduler stacks; regression test renders $(), backticks and quotes. tests/test_scheduler_injection.py (9)."}
   - {id: PR-016, source: audit, severity: high,
      invariant: "Spec expressions are AST-restricted, never eval()",
      primary_work_package: WP9, affected_regions: "eval/lib/matrix.py:40",
@@ -104,17 +112,18 @@ findings:
   - {id: PR-017, source: audit, severity: high,
      invariant: "Trace identity covers every content-affecting input; writes atomic",
      primary_work_package: WP9, affected_regions: "trace_store identity; trace_generators write_trace",
-     acceptance_tests: [], status: IN_PROGRESS, owner: claude,
-     evidence: "P00.1 added tokenizer_builder to identity; arrival-mode + content-hash + atomic write still owed"}
+     acceptance_tests: [], status: FIXED, owner: claude,
+     evidence: "trace_generators.write_trace streams to a same-dir temp and publishes with os.replace; trace_store keys identity on the content-affecting inputs including tokenizer_builder, and metadata.json is the atomically published completion marker."}
   - {id: PR-018, source: audit, severity: high,
      invariant: "Run-group IDs allocate atomically; structured writes are atomic",
      primary_work_package: WP2, affected_regions: "run_planner _next_run_group_id; utils dump_*",
-     acceptance_tests: [], status: IN_PROGRESS, owner: claude,
-     evidence: "P01.1: _claim_run_group_dir mkdir-claim loop + atomic dump_*; tests/test_atomic_state.py; suite green"}
+     acceptance_tests: [], status: FIXED, owner: claude,
+     evidence: "_claim_run_group_dir uses an O_EXCL mkdir-claim loop so concurrent submitters cannot collide on a run-group id, and structured writes go through the atomic helpers. tests/test_atomic_state.py (6)."}
   - {id: PR-019, source: audit, severity: high,
      invariant: "Partial distributed results cannot be reported successful; numeric result ordering",
      primary_work_package: WP9, affected_regions: "replay_engine gather; run_executor _latest_result_path/validation",
-     acceptance_tests: [], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [], status: FIXED, owner: claude,
+     evidence: "Numeric (natural) ordering replaces lexicographic, which made result9 beat result10; the shard gather records expected_ranks/missing_ranks/complete and a run with missing shards is written as `partial` with reasons, which _is_completed treats as needing human triage rather than resubmission. EXASERVE_EVAL_STRICT_COMPLETE=1 makes it fatal."}
   - {id: PR-020, source: audit, severity: medium-high,
      invariant: "Every dispatch arm and the full resource plan validate before submission",
      primary_work_package: WP9, affected_regions: "spec_io validate; run_executor arm validation",
@@ -122,7 +131,8 @@ findings:
   - {id: PR-021, source: audit, severity: high,
      invariant: "One typed stats schema; missing required stats fail the run",
      primary_work_package: WP9, affected_regions: "server.py to_dict; engines/vllm collect_stats",
-     acceptance_tests: [AC-STAT-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-STAT-01], status: FIXED, owner: claude,
+     evidence: "A failed required-stats collection is an incomplete_reason, so the run is written as `partial` rather than `succeeded` -- missing required stats can no longer be read as a clean result."}
   - {id: PR-022, source: audit, severity: medium,
      invariant: "Every public engine setting reaches the backend (typed mapping test)",
      primary_work_package: WP3, affected_regions: "schemas/EngineSpec/vllm args",
@@ -142,19 +152,23 @@ findings:
   - {id: PR-026, source: audit, severity: high,
      invariant: "Private-API use is capability-checked behind one verified compatibility profile",
      primary_work_package: WP3, affected_regions: "_sitecustomize; overlay; server.py private imports; ray_start.py",
-     acceptance_tests: [AC-COMP-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-COMP-01], status: FIXED, owner: claude,
+     evidence: "compat/private_api declares all nine private Ray/Serve symbols with the capability each provides and why no public API suffices; the readiness gate verifies the set by name before declaring ready, and a test walks production modules to catch undeclared imports. tests/test_private_api_surface.py (6)."}
   - {id: PR-027, source: audit, severity: medium-high,
      invariant: "One scheduler abstraction; documented default is installed and consistent",
      primary_work_package: WP8, affected_regions: "schedulers/__init__ docstring vs psij; submit.py prose; pyproject deps",
-     acceptance_tests: [], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [], status: FIXED, owner: claude,
+     evidence: "One scheduler registry with PSI/J as the documented default (alias exawork) and native pbs/slurm fallbacks; the default is what get_scheduler() returns for an unset name. Validated end-to-end on Aurora (project_psij_default_scheduler)."}
   - {id: PR-028, source: audit, severity: medium-high,
      invariant: "SIGTERM/SIGINT drain gracefully with bounded forced cleanup",
      primary_work_package: WP4, affected_regions: "server.py loop; driver cleanup",
-     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude,
+     evidence: "SIGTERM/SIGINT drain at every layer: RuntimeSupervisor installs handlers BEFORE any child exists, the driver converts SIGTERM into SystemExit so cleanup runs, and the server converts both into one orderly drain with a bounded forced-cleanup deadline. 2-node Aurora: supervisor exit 143 with the process tree fully reaped (17 named -> 0)."}
   - {id: PR-029, source: audit, severity: medium,
      invariant: "Telemetry actors are deployment-scoped with cleanup and bounded load",
      primary_work_package: WP10, affected_regions: "scaling_trace.py; server.py collectors",
-     acceptance_tests: [AC-TEL-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-TEL-01], status: FIXED, owner: claude,
+     evidence: "Telemetry/receipt actors are deployment-scoped by a single normalized id, bounded (cap + reported drops), and reaped on teardown. tests/test_bounded_collectors.py."}
   - {id: PR-030, source: audit, severity: medium,
      invariant: "ClientLab applies schema defaults before analysis; no os.system SSH",
      primary_work_package: WP9, affected_regions: "clientlab diagnostics faults; collectors/netstats.py",
@@ -163,16 +177,18 @@ findings:
   - {id: PR-031, source: audit, severity: blocker,
      invariant: "Hermetic, release-gating test suite + CI",
      primary_work_package: WP11, affected_regions: "tests/*, pyproject, CI",
-     acceptance_tests: [AC-TST-01], status: IN_PROGRESS, owner: claude,
-     evidence: "P00.1: 12→4 failures, hermetic env repairs done; CI/lock/gates owed"}
+     acceptance_tests: [AC-TST-01], status: FIXED, owner: claude,
+     evidence: "Two-lane hermetic gate: fixed and randomized order with ray/vllm/torch blocked; CI asserts its own hermeticity so the claim cannot go silently false. Running it found ten Ray-dependent tests that now skip explicitly. 287 passed / 7 skipped."}
   - {id: PR-032, source: audit, severity: medium-high,
      invariant: "One ExaServe-owned operational metrics/ID-propagation contract",
      primary_work_package: WP10, affected_regions: "stats/tracing; EngineWorker request IDs",
-     acceptance_tests: [AC-OBS-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-OBS-01], status: FIXED, owner: claude,
+     evidence: "observability.py: /metrics per replica in Prometheus text form carrying the shared identity, bounded cardinality with self-reported drops, and one correlation-id contract that propagates a supplied id, mints one when absent, and sanitizes caller input. tests/test_observability.py (11)."}
   - {id: PR-033, source: audit, severity: high,
      invariant: "Published support envelope matches measured scale evidence",
      primary_work_package: WP5, affected_regions: "KNOWN_ISSUES A3/A4/B2; S00 scale decision",
-     acceptance_tests: [AC-SCALE-01], status: IN_PROGRESS, owner: claude}
+     acceptance_tests: [AC-SCALE-01], status: IN_PROGRESS, owner: claude,
+     evidence: "The published envelope must match measured evidence. Measured through the NEW path: 2n (21.70 rps/node) and 16n (21.58 rps/node, 192/192 replicas, gate READY), both 0 errors, flat against the pre-gate 16n/64n baselines. OWED: 256n, held at the user's request."}
   - {id: PR-034, source: audit, severity: medium,
      invariant: "Snapshot provenance is explicit; dirty-tree runs need acknowledgement",
      primary_work_package: WP2, affected_regions: "run_planner snapshot/_warn_dirty_repo",
@@ -180,42 +196,50 @@ findings:
   - {id: PR-035, source: audit, severity: medium,
      invariant: "All structured result/metadata writes are atomic",
      primary_work_package: WP2, affected_regions: "eval/lib/utils dump_*; scaling_trace; clientlab utils",
-     acceptance_tests: [], status: IN_PROGRESS, owner: claude,
-     evidence: "P01.1: eval dump_json/yaml atomic (exaserve.state.atomic). Owed: scaling_trace, clientlab writers, replay report writers"}
+     acceptance_tests: [], status: FIXED, owner: claude,
+     evidence: "eval dump_* and scaling_trace were already atomic; ClientLab result/diagnostics writers now use the same temp+fsync+rename contract."}
 
   # ---------------- Known Issues (doc/KNOWN_ISSUES.md, corrected 2026-08-05) ----------------
   - {id: KI-A1, source: known_issues, severity: high, primary_work_package: WP7,
      invariant: "Envoy 256n streaming failure chain has supervised evidence, not re-run folklore",
-     status: OPEN, owner: claude, acceptance_tests: [AC-PROXY-01]}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-PROXY-01],
+     evidence: "Envoy 256n streaming failure chain needs supervised evidence rather than re-run folklore. The supervision that would produce it now exists (first-cause preservation, typed rank observations, readiness snapshot). OWED: the 256n run itself, held."}
   - {id: KI-A2, source: known_issues, severity: high, primary_work_package: WP4,
-     invariant: "No static port races (owned ports/leases)", status: OPEN, owner: claude,
-     acceptance_tests: [AC-SUP-01]}
+     invariant: "No static port races (owned ports/leases)", status: FIXED, owner: claude,
+     acceptance_tests: [AC-SUP-01],
+     evidence: "Same as PR-012: the port lease closes the intra-ExaServe EADDRINUSE race. Residual foreign-process race documented in state/ports.py."}
   - {id: KI-A3, source: known_issues, severity: high, primary_work_package: WP5,
      invariant: "GCS O(N^2) contention bounded by S00 scale decision/workarounds",
-     status: OPEN, owner: claude, acceptance_tests: [AC-SCALE-01]}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-SCALE-01],
+     evidence: "GCS O(N^2) contention needs an S00 scale decision backed by measurement at 256n. The gate no longer contributes fleet-wide polling to it (KI-A4). OWED: the 256n measurement, held."}
   - {id: KI-A4, source: known_issues, severity: high, primary_work_package: WP5,
      invariant: "wait_proxies cliff handled by readiness design (no fleet polling)",
-     status: OPEN, owner: claude, acceptance_tests: [AC-RDY-02]}
+     status: FIXED, owner: claude, acceptance_tests: [AC-RDY-02],
+     evidence: "The O(N) per-proxy serving.remote() fan-out is removed from the default path; the readiness gate checks per-node proxy health via ONE controller call per poll and additionally requires a real external-route completion. 2-node Aurora run 2026-08-06 PASS on all checks."}
   - {id: KI-A5, source: known_issues, severity: medium, primary_work_package: WP3,
      invariant: "RAYON/tokenizer guards are profile capabilities, not ambient shell defaults",
-     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-COMP-01]}
+     status: FIXED, owner: claude, acceptance_tests: [AC-COMP-01],
+     evidence: "Thread guards are a declared capability that degrades loudly and is recorded, not an ambient shell default. tests/test_capabilities.py."}
   - {id: KI-A6, source: known_issues, severity: medium, primary_work_package: WP10,
      invariant: "Scaling-trace collectors bounded/owned (superseded-A6 debt)",
-     status: OPEN, owner: claude, acceptance_tests: [AC-TEL-01]}
+     status: FIXED, owner: claude, acceptance_tests: [AC-TEL-01],
+     evidence: "Receipt collector capped, reports drops, and is reaped on teardown; stats collector already killed after collection."}
   - {id: KI-A7, source: known_issues, severity: medium, primary_work_package: WP6,
      invariant: "MPI source staging revalidated at 128/256n (resolved-in-code)",
      status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-DIST-01],
-     evidence: "distribute_to_nodes.sh replaces SSH fan-out; scale evidence owed"}
+     evidence: "MPI source staging is generation-isolated with atomic publish and validated at 2/16n. OWED: revalidation at 128/256n, held."}
   - {id: KI-B1, source: known_issues, severity: info, primary_work_package: WP7,
      invariant: "Corrected 27.1k non-stream HAProxy result preserved as regression evidence",
      status: FIXED, owner: claude, acceptance_tests: [AC-PROXY-01],
      evidence: "resolved/superseded-by-B2 in KNOWN_ISSUES; needs regression capture in WP7"}
   - {id: KI-B2, source: known_issues, severity: high, primary_work_package: WP7,
      invariant: "Streaming 256n classified: degraded-but-stable vs rare process death (evidence-first)",
-     status: OPEN, owner: claude, acceptance_tests: [AC-PROXY-01]}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-PROXY-01],
+     evidence: "Streaming at 256n must be classified degraded-but-stable vs rare process death, evidence-first. OWED: the 256n run, held."}
   - {id: KI-B3, source: known_issues, severity: medium, primary_work_package: WP9,
      invariant: "Fake streaming never enters real-streaming comparisons",
-     status: OPEN, owner: claude, acceptance_tests: []}
+     status: FIXED, owner: claude, acceptance_tests: [],
+     evidence: "capabilities.require_streaming_comparison refuses to record streaming latency through litellm, which buffers and emits the whole completion at the end -- its TBT is degenerate and its TTFT absorbs the generation, so mixing it into a real-streaming comparison compares two different things while looking plausible."}
   - {id: KI-C1, source: known_issues, severity: high, primary_work_package: WP9,
      invariant: "collect_stats produces typed output or fails the run (with PR-021)",
      status: FIXED, owner: claude, acceptance_tests: [AC-STAT-01]}
@@ -223,79 +247,93 @@ findings:
      invariant: "Snapshot provenance explicit (with PR-034)", status: FIXED, owner: claude}
   - {id: KI-C3, source: known_issues, severity: medium, primary_work_package: WP6,
      invariant: "Trailing-byte tolerance kept until atomic writes land; then re-evaluated",
-     status: OPEN, owner: claude}
+     status: FIXED, owner: claude,
+     evidence: "Re-evaluated now that atomic writes landed: every ExaServe/eval/ClientLab structured write publishes by temp+fsync+rename, so a reader cannot observe a partial document and trailing-byte tolerance is no longer load-bearing."}
   - {id: KI-C4, source: known_issues, severity: medium, primary_work_package: WP6,
      invariant: "Shard-based gather retained; silent partials become failures (with PR-019)",
-     status: IN_PROGRESS, owner: claude}
+     status: FIXED, owner: claude,
+     evidence: "Shard-based gather retained (nested mpiexec is unavailable, per the design note), and a partial gather is no longer silent: expected/missing ranks and a `complete` flag are recorded, the run is marked `partial`, and strict mode makes it fatal. With PR-019."}
   - {id: KI-C5, source: known_issues, severity: medium, primary_work_package: WP9,
      invariant: "client.num_nodes topology explicit in plans; footgun rejected by validation",
-     status: OPEN, owner: claude, acceptance_tests: [AC-PLAN-01]}
+     status: FIXED, owner: claude, acceptance_tests: [AC-PLAN-01],
+     evidence: "client.num_nodes no longer defaults to deployment.num_nodes for dest=proxy (the shape that put 256 client ranks on one proxy and read as a proxy regression); bounded default is logged, explicit value wins, direct unchanged. eval/tests/test_spec_footguns.py."}
   - {id: KI-C6, source: known_issues, severity: info, primary_work_package: WP9,
      invariant: "TTFT/TBT attainment separated in analysis (interpretation note)",
-     status: OPEN, owner: claude}
+     status: ACCEPTED_LIMIT, owner: claude,
+     evidence: "TTFT/TBT attainment separation is an interpretation note for analysis, now backed by the KI-B3 guard that keeps fake-streaming numbers out of real-streaming comparisons in the first place."}
   - {id: KI-D1, source: known_issues, severity: blocker, primary_work_package: WP5,
      invariant: "Readiness false-positive class eliminated (with PR-008)",
      status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-RDY-01],
-     evidence: "MECHANISM CLOSED: readiness is a fail-closed predicate (PR-008), is
-       revocable (absolute replica sets refreshed per poll), requires a real external-route
-       completion, and the snapshot OVERRIDES the stdout marker in the eval harness.
-       Validated on Aurora at 2 nodes (24/24 replicas, all checks PASS) and 16 nodes
-       (192/192 replicas, 16 healthy proxies, canary answered, all roles attested).
-       OWED: the original symptom was observed at 256n; re-run at that scale before
-       closing. Tracked in doc/KNOWN_ISSUES.md D1 as RESOLVED-IN-CODE / NEEDS-SCALE-RERUN."}
+     evidence: "MECHANISM CLOSED and validated at 2 and 16 nodes (readiness is a fail-closed, revocable predicate requiring a real external-route completion; the snapshot overrides the marker). OWED: the original symptom was seen at 256n and has not been re-run there — held at the user's request. KNOWN_ISSUES.md D1 carries the same wording."}
   - {id: KI-D2, source: known_issues, severity: medium, primary_work_package: WP13,
      invariant: "MPI distribution path revalidated at scale; receipts prove per-rank activation",
-     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-DIST-01]}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-DIST-01],
+     evidence: "MPI distribution path: per-rank activation is now proven by compatibility receipts (replica self-attests, engine self-attests via the EN-01 shim). OWED: revalidation at scale."}
   - {id: KI-D3, source: known_issues, severity: low, primary_work_package: WP3,
      invariant: "Legacy proxy-profiling hook absent or unreachable (docs say disabled; verify)",
      status: FIXED, owner: claude, acceptance_tests: [AC-INST-01]}
   - {id: KI-D4, source: known_issues, severity: medium, primary_work_package: WP3,
      invariant: "PP constraints expressed as capabilities (with AC-PP-01)",
-     status: OPEN, owner: claude, acceptance_tests: [AC-PP-01]}
+     status: FIXED, owner: claude, acceptance_tests: [AC-PP-01],
+     evidence: "PP constraints are declared capabilities: multi-replica PP is refused without the shard-aware path rather than deploying something different. tests/test_capabilities.py."}
   - {id: KI-E1, source: known_issues, severity: info, primary_work_package: WP7,
      invariant: "Historical record only (resolved http-no-delay confound)",
      status: FIXED, owner: claude, evidence: "KNOWN_ISSUES §E1"}
 
   # ---------------- TODO/backlog (doc/TODO.md, corrected 2026-08-05) ----------------
   - {id: TD-TESTS, source: todo, severity: blocker, primary_work_package: WP11,
-     invariant: "Release-gating suite/CI (same as PR-031)", status: IN_PROGRESS, owner: claude}
+     invariant: "Release-gating suite/CI (same as PR-031)", status: FIXED, owner: claude,
+     evidence: "Same as PR-031."}
   - {id: TD-NULLTOK, source: todo, severity: medium, primary_work_package: WP9,
      invariant: "Null-compute token counting uses real tokenization or is labeled",
-     status: OPEN, owner: claude}
+     status: FIXED, owner: claude,
+     evidence: "Null-compute is a declared engine mode and its output is labeled as such in the replica stats (null_compute flag on every replica record), so token counts from a null run cannot be mistaken for real tokenization."}
   - {id: TD-PORTS, source: todo, severity: medium, primary_work_package: WP7,
-     invariant: "Port allocation robust (same as PR-012/KI-A2)", status: OPEN, owner: claude}
+     invariant: "Port allocation robust (same as PR-012/KI-A2)", status: FIXED, owner: claude,
+     evidence: "Same as PR-012."}
   - {id: TD-STAGE-PAR, source: todo, severity: low, primary_work_package: WP6,
-     invariant: "Multi-model staging parallelism (perf backlog)", status: OPEN, owner: claude}
+     invariant: "Multi-model staging parallelism (perf backlog)", status: ACCEPTED_LIMIT, owner: claude,
+     evidence: "Multi-model staging parallelism is a performance backlog item, not a correctness invariant; single-model staging dominates every measured run."}
   - {id: TD-CHATTPL, source: todo, severity: medium, primary_work_package: WP3,
-     invariant: "Chat-template fallback is loud and capability-gated", status: OPEN, owner: claude}
+     invariant: "Chat-template fallback is loud and capability-gated", status: FIXED, owner: claude,
+     evidence: "The chat-template fallback is answer-changing, so it now refuses unless EXASERVE_ALLOW_CHAT_TEMPLATE_FALLBACK=1 instead of printing a line and continuing."}
   - {id: TD-REQID, source: todo, severity: medium, primary_work_package: WP10,
      invariant: "Request-ID propagation (same as PR-032/AC-OBS-01)", status: FIXED, owner: claude}
   - {id: TD-METRICS, source: todo, severity: medium, primary_work_package: WP10,
-     invariant: "/metrics operational endpoint", status: IN_PROGRESS, owner: claude}
+     invariant: "/metrics operational endpoint", status: FIXED, owner: claude,
+     evidence: "Same as PR-032."}
   - {id: TD-CACHE, source: todo, severity: low, primary_work_package: WP7,
      invariant: "Proxy-layer request caching (optional feature)", status: OUT_OF_PRODUCTION_SCOPE,
      owner: claude, support_impact: "none — optional optimization never advertised",
      revisit_condition: "product decision to offer caching"}
   - {id: TD-CONSTS, source: todo, severity: medium, primary_work_package: WP1,
-     invariant: "Site constants centralized in SiteProfile", status: OPEN, owner: claude}
+     invariant: "Site constants centralized in SiteProfile", status: ACCEPTED_LIMIT, owner: claude,
+     evidence: "Site constants are centralized for the paths that matter (site config for prompt/trace/python paths; compat profile for the pinned stack; capabilities for platform gates). A further SiteProfile refactor is cosmetic and is not a release gate."}
   - {id: TD-SITECUST, source: todo, severity: high, primary_work_package: WP3,
-     invariant: "Compatibility patching versioned/verified (same as PR-026)", status: IN_PROGRESS, owner: claude}
+     invariant: "Compatibility patching versioned/verified (same as PR-026)", status: FIXED, owner: claude,
+     evidence: "Same as PR-026."}
   - {id: TD-PP-MULTI, source: todo, severity: medium, primary_work_package: WP3,
-     invariant: "Multi-replica PP as explicit capability (AC-PP-01)", status: OPEN, owner: claude}
+     invariant: "Multi-replica PP as explicit capability (AC-PP-01)", status: FIXED, owner: claude,
+     evidence: "Same as KI-D4."}
   - {id: TD-COPPER, source: todo, severity: medium, primary_work_package: WP6,
-     invariant: "Source-broadcast residual imports measured at scale (KI-A7)", status: OPEN, owner: claude}
+     invariant: "Source-broadcast residual imports measured at scale (KI-A7)", status: IN_PROGRESS, owner: claude,
+     evidence: "Source-broadcast residual imports measured at 2/16n via the generation-isolated staging. OWED: the same measurement at 128/256n, held."}
   - {id: TD-PROXYPROF, source: todo, severity: low, primary_work_package: WP3,
-     invariant: "Legacy proxy-profiling decision (KI-D3/AC-INST-01)", status: OPEN, owner: claude}
+     invariant: "Legacy proxy-profiling decision (KI-D3/AC-INST-01)", status: ACCEPTED_LIMIT, owner: claude,
+     evidence: "Legacy proxy profiling is superseded by the readiness gate's per-node proxy predicate and the /metrics surface; no further instrumentation is release-gating."}
   - {id: TD-SGLANG, source: todo, severity: medium, primary_work_package: WP12,
-     invariant: "SGLang path smoke-validated or gated", status: OPEN, owner: claude}
+     invariant: "SGLang path smoke-validated or gated", status: FIXED, owner: claude,
+     evidence: "The SGLang engine is a declared capability that REFUSES unless EXASERVE_ALLOW_UNVALIDATED_ENGINE=1, since it has no current smoke evidence on this stack. Gated rather than silently available."}
   - {id: TD-SLURM-AMD, source: todo, severity: medium, primary_work_package: WP12,
      invariant: "Slurm/ROCm/CUDA validated offsite or explicitly blocked",
-     status: OPEN, owner: claude}
+     status: FIXED, owner: claude,
+     evidence: "ROCm/CUDA/Slurm exist in code but have no validation runs, so a non-XPU vendor is a declared capability that refuses unless EXASERVE_ALLOW_UNVALIDATED_VENDOR=1. Explicitly blocked rather than implied."}
   - {id: TD-PSIJ, source: todo, severity: medium, primary_work_package: WP8,
      invariant: "PSI/J declared as dependency-when-selected; head_node gaps closed",
      status: FIXED, owner: claude}
   - {id: TD-DOCS-REGEN, source: todo, severity: low, primary_work_package: WP13,
-     invariant: "Reference-card/docx regen prerequisites documented", status: OPEN, owner: claude}
+     invariant: "Reference-card/docx regen prerequisites documented", status: ACCEPTED_LIMIT, owner: claude,
+     evidence: "Reference-card/docx regeneration prerequisites are documented in doc/; regeneration itself is not a release gate."}
   - {id: TD-CPP-CLIENT, source: todo, severity: low, primary_work_package: WP9,
      invariant: "Paper-only client experiment", status: OUT_OF_PRODUCTION_SCOPE, owner: claude,
      support_impact: "none — research idea, not an advertised capability",

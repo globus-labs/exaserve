@@ -55,6 +55,34 @@ CAPABILITIES: tuple[Capability, ...] = (
         "correctly templated run.",
     ),
     Capability(
+        "real_streaming_metrics",
+        "Per-token streaming latency (TBT) measured against a real streaming "
+        "transport.",
+        "a proxy that forwards SSE token-by-token (direct, haproxy, envoy, "
+        "nginx, pingora) — NOT litellm",
+        "refuse",
+        "litellm buffers and emits the whole completion at the end, so its TBT "
+        "distribution is degenerate (~0) and its TTFT absorbs the entire "
+        "generation. Mixing it into a real-streaming comparison compares two "
+        "different things.",
+    ),
+    Capability(
+        "sglang_engine",
+        "Serving with the SGLang engine instead of vLLM.",
+        "EXASERVE_ALLOW_UNVALIDATED_ENGINE=1 (SGLang is not smoke-validated on "
+        "this stack)",
+        "refuse",
+        "the SGLang path has no current smoke evidence on this platform.",
+    ),
+    Capability(
+        "non_xpu_vendor",
+        "Running on ROCm/CUDA rather than the validated Intel XPU stack.",
+        "EXASERVE_ALLOW_UNVALIDATED_VENDOR=1 (only XPU has scale evidence)",
+        "refuse",
+        "Slurm/ROCm/CUDA support exists in code but has no validation runs; "
+        "results from it are not comparable to the recorded envelope.",
+    ),
+    Capability(
         "thread_oversubscription_guard",
         "Bounded tokenizer/rayon thread counts so forks cannot oversubscribe a node.",
         "RAYON_NUM_THREADS and TOKENIZERS_PARALLELISM set in the environment",
@@ -85,8 +113,26 @@ def _thread_guards_present() -> bool:
                 and os.environ.get("TOKENIZERS_PARALLELISM"))
 
 
+def _real_streaming(dest_or_proxy: str = "") -> bool:
+    """litellm is the only supported proxy that fake-streams."""
+    return "litellm" not in str(dest_or_proxy).lower()
+
+
+def _sglang_allowed() -> bool:
+    return (os.environ.get("EXASERVE_ENGINE", "vllm").lower() != "sglang"
+            or os.environ.get("EXASERVE_ALLOW_UNVALIDATED_ENGINE") == "1")
+
+
+def _vendor_allowed() -> bool:
+    return (os.environ.get("EXASERVE_VENDOR", "xpu").lower() == "xpu"
+            or os.environ.get("EXASERVE_ALLOW_UNVALIDATED_VENDOR") == "1")
+
+
 _PROBES: dict[str, Callable[[], bool]] = {
     "pp_multi_replica": _shard_aware,
+    "real_streaming_metrics": lambda: True,   # checked per-run, see require_streaming
+    "sglang_engine": _sglang_allowed,
+    "non_xpu_vendor": _vendor_allowed,
     "chat_template_fallback": _chat_fallback_allowed,
     "thread_oversubscription_guard": _thread_guards_present,
 }
@@ -130,6 +176,23 @@ def degrade_or_refuse(name: str, context: str = "",
     return False
 
 
+def require_streaming_comparison(proxy_type: str, streaming: bool) -> None:
+    """KI-B3: refuse to record streaming latency from a fake-streaming proxy.
+
+    litellm buffers the completion and emits it in one burst, so its TBT is
+    degenerate and its TTFT absorbs the whole generation. A run that records
+    those numbers alongside real-streaming numbers is comparing two different
+    things, and the comparison looks plausible.
+    """
+    if not streaming:
+        return
+    if not _real_streaming(proxy_type):
+        capability = get("real_streaming_metrics")
+        raise CapabilityUnavailable(
+            f"streaming metrics requested through proxy {proxy_type!r}: "
+            f"{capability.degraded_meaning} Enable with: {capability.enabled_by}.")
+
+
 def validate_deployment(config, *, log: Callable[[str], None] = print) -> dict:
     """Check a deployment config against declared capabilities (KI-D4).
 
@@ -147,6 +210,10 @@ def validate_deployment(config, *, log: Callable[[str], None] = print) -> dict:
             require("pp_multi_replica",
                     f"{model.model_id}: pipeline_parallel_size={pp} with "
                     f"num_replicas={replicas}")
+
+    for gated in ("sglang_engine", "non_xpu_vendor"):
+        if not report[gated]:
+            require(gated, "deployment environment")
 
     if not report["thread_oversubscription_guard"]:
         degrade_or_refuse("thread_oversubscription_guard",

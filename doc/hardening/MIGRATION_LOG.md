@@ -1086,3 +1086,61 @@ import time. As a function those stay local.
 `main()` in-process, and deliberately so: compatibility patches must be applied
 before Ray/vLLM are imported, and the calling interpreter may already have
 imported them. That is the WP4.6 fallback, taken knowingly.
+
+## 2026-08-06 — Pass 5: the rest of the ledger
+
+47 records remained. Many had been reopened in the earlier ledger correction
+only because their invariant was owned by the architecture that had not been
+cut over; those needed **verification against the new path**, not new work.
+The rest were genuinely open, and working them turned up a consistent story.
+
+### What was actually wrong
+
+- **PR-006** — `_deployment_config_from_dict` accepted any key and defaulted
+  the rest, so `num_node: 64` (singular) left the deployment at one node with
+  no diagnostic. A bool in a numeric field read as 1; `int(8.9)` truncated.
+- **PR-012 / KI-A2** — `get_open_port` bound a probe socket, closed it, and
+  returned the number. At twelve-plus replicas per node all scanning from the
+  same base port, they probe the same free port in the same instant and all but
+  one hit `EADDRINUSE`. The lease now outlives the probe.
+- **PR-010** — nginx's `/nginx-status` carried `allow all`.
+- **PR-026** — nine private Ray/Serve symbols, depended on implicitly. Drift
+  surfaced as an ImportError *inside a deploy*, after staging models and
+  starting a cluster.
+- **PR-031** — the hermetic CI claim was unverified. Verifying it found ten
+  tests added earlier the same day that needed Ray and would have broken the
+  lane.
+- **KI-A4** — bring-up issued one actor RPC per proxy and waited on all of them
+  from the head. Redundant now that the gate checks proxy health in one
+  controller call *and* requires a real completion.
+- **KI-A6** — the receipt collector was a detached actor: unbounded, never
+  reaped, resident for every past deployment in a reused Ray cluster.
+- **KI-C5** — `client.num_nodes` defaulted to `deployment.num_nodes`, which for
+  a proxy run aims the whole fleet at one process. That is the shape that was
+  misread as a proxy throughput regression.
+- **KI-B3 / KI-D4 / TD-CHATTPL** — fake-streamed TBT could enter a
+  real-streaming comparison; multi-replica PP and the chat-template fallback
+  each silently did something different from what was asked.
+
+### The through-line
+
+Nearly all of it is one failure mode: **the system did something other than
+what was asked, and said nothing.** A silently ignored key, a silently
+substituted prompt, a silently truncated file, a silently degenerate metric,
+a silently reused port.
+
+The fix is not more checking. It is making the quiet substitution impossible:
+refuse when the difference changes the *answer* (multi-replica PP without
+shard-aware placement, a chat template that was never applied, fake-streamed
+latency, an unvalidated engine or vendor), and degrade **loudly and on the
+record** when it only changes performance (thread guards). The capability
+module exists to make that distinction explicit rather than a judgement call
+at each call site.
+
+### Where the ledger stands
+
+67 FIXED, 8 IN_PROGRESS, 5 ACCEPTED_LIMIT, 2 out of scope (YAML-parsed).
+All eight IN_PROGRESS records are the **same** blocker: 256-node evidence.
+Each has its mechanism closed and validated at 2 and 16 nodes, and each names
+what it still owes at scale. The five ACCEPTED_LIMIT records are backlog items
+recorded as decisions rather than left to look like unfinished work.

@@ -219,3 +219,43 @@ Readiness also arrives no later than the marker did (16n: 240s via snapshot vs
 At 16 nodes the gate accounted for 192/192 replicas, 16 healthy proxies, an
 answered canary, and receipts from all four roles required on that path
 (`supervisor` is correctly not demanded when nothing stamped the environment).
+
+## Pass 5 (2026-08-06): the rest of the ledger
+
+Pass 4 finished the architecture. This pass worked the remaining 47 records —
+verifying the ones that had been reopened only because they depended on the
+un-cut-over architecture, and doing the real work on the ones that were
+genuinely open.
+
+### Defects this pass found and fixed
+
+| Item | What was actually wrong |
+|---|---|
+| PR-006 | Unknown config keys were silently ignored, so `num_node: 64` (singular) left the deployment at **one node** with no diagnostic. `True` in a numeric field read as 1; `int(8.9)` truncated. |
+| PR-012 / KI-A2 | `get_open_port` bound a probe, closed it, and returned the number — a TOCTOU window that twelve-plus replicas per node hit simultaneously (the EADDRINUSE class). |
+| PR-010 | nginx `/nginx-status` carried `allow all`, publishing connection counters to anything that could reach the proxy. |
+| PR-026 | Nine private Ray/Serve symbols were depended on implicitly; drift surfaced as an ImportError mid-deploy, after staging models and starting a cluster. |
+| PR-031 | The "hermetic" CI claim was unverified. Running it properly found **ten tests added earlier the same day** that needed Ray and would have broken the lane. |
+| PR-032 | No ExaServe-owned operational surface at all: stdout or a disabled Ray dashboard. |
+| KI-A4 | Bring-up issued one actor RPC per proxy and waited on all of them from the head — the wait_proxies cliff, now redundant given the gate. |
+| KI-A6 | The receipt collector was a **detached** actor: unbounded and never reaped, so it outlived every deployment in a reused Ray cluster. |
+| KI-C5 | `client.num_nodes` defaulted to `deployment.num_nodes` for proxy runs — the shape that put 256 client ranks on one proxy and was misread as a proxy regression. |
+| KI-B3 | Nothing stopped litellm's fake-streamed (degenerate) TBT from entering a real-streaming comparison. |
+| KI-D4 / TD-CHATTPL | Multi-replica PP and the chat-template fallback both silently did something *different* from what was asked. |
+
+### The through-line
+
+Almost every one of these is the same failure: **the system did something
+other than what was asked, and said nothing.** A silently ignored key, a
+silently substituted prompt, a silently truncated file, a silently degenerate
+metric. The fix in each case is not more checking but making the substitution
+impossible to perform quietly — refuse when the difference changes the answer,
+degrade loudly and record it when it only changes performance.
+
+### Evidence
+
+- Suite: **291 passed** with the full stack; **287 passed / 7 skipped** in the
+  hermetic lane, in both fixed and randomized order (`scripts/hardening/run_hermetic_check.sh`).
+- Ruff correctness gate clean on every touched module.
+- On-hardware 2-node validation after each architectural change; 16-node
+  throughput matching the pre-gate baseline.

@@ -98,3 +98,41 @@ def test_the_deploy_path_validates_capabilities():
     assert "validate_deployment as _validate_capabilities" in source
     assert "capabilities=_capability_report" in source, (
         "the capability report is not recorded with the run")
+
+
+def test_fake_streaming_cannot_enter_a_real_streaming_comparison():
+    """KI-B3: litellm's TBT is degenerate; mixing it in compares two things."""
+    with pytest.raises(caps.CapabilityUnavailable) as excinfo:
+        caps.require_streaming_comparison("litellm", streaming=True)
+    assert "degenerate" in str(excinfo.value)
+    # A real streaming proxy is fine, and a non-streaming run is unaffected.
+    caps.require_streaming_comparison("haproxy", streaming=True)
+    caps.require_streaming_comparison("litellm", streaming=False)
+
+
+def test_an_unvalidated_engine_is_refused_unless_acknowledged(monkeypatch):
+    """TD-SGLANG: the SGLang path has no current smoke evidence here."""
+    monkeypatch.setenv("EXASERVE_ENGINE", "sglang")
+    monkeypatch.delenv("EXASERVE_ALLOW_UNVALIDATED_ENGINE", raising=False)
+    config = _Config([_Model()])
+    with pytest.raises(caps.CapabilityUnavailable, match="sglang_engine"):
+        caps.validate_deployment(config, log=lambda *_: None)
+    monkeypatch.setenv("EXASERVE_ALLOW_UNVALIDATED_ENGINE", "1")
+    caps.validate_deployment(config, log=lambda *_: None)
+
+
+def test_an_unvalidated_vendor_is_refused_unless_acknowledged(monkeypatch):
+    """TD-SLURM-AMD: ROCm/CUDA exist in code but have no validation runs."""
+    monkeypatch.setenv("EXASERVE_VENDOR", "rocm")
+    monkeypatch.delenv("EXASERVE_ALLOW_UNVALIDATED_VENDOR", raising=False)
+    config = _Config([_Model()])
+    with pytest.raises(caps.CapabilityUnavailable, match="non_xpu_vendor"):
+        caps.validate_deployment(config, log=lambda *_: None)
+    monkeypatch.setenv("EXASERVE_ALLOW_UNVALIDATED_VENDOR", "1")
+    caps.validate_deployment(config, log=lambda *_: None)
+
+
+def test_the_default_xpu_vllm_path_needs_no_acknowledgement(monkeypatch):
+    monkeypatch.delenv("EXASERVE_ENGINE", raising=False)
+    monkeypatch.delenv("EXASERVE_VENDOR", raising=False)
+    caps.validate_deployment(_Config([_Model()]), log=lambda *_: None)
