@@ -944,3 +944,27 @@ expensive call now happens **once per generation** and each poll refreshes only
 the volatile fields from the light status overview. An application that
 disappears reports `running=0 / MISSING`, so revocation still works and the
 cache cannot prop up a dead deployment.
+
+### 16-node throughput through the gate (final)
+
+```
+[Compat] replicas: 192/192 published a receipt
+[Readiness] READY — membership: 16 nodes | components: 16 healthy |
+            model default: 192/192 replicas | routes: 1 healthy |
+            canaries: 1/1 routes answered | receipts: all required roles attested
+deploy_ready=PASS ready_s=200 (source=snapshot)
+aggregate_rps=345.3 per_node_rps=21.58 err=0.0 p50=1.466s p99=1.576s
+```
+
+Against the pre-gate baseline (344.4 agg / 21.53 per node / 0 err / p50 1.465 /
+p99 1.593) this is identical within noise, and READY arrived at 200s versus
+260s for the marker-based run. Weak scaling stays flat: 21.66 (2n, new path),
+21.58 (16n, new path), 21.53 (16n, baseline), 21.47 (64n, baseline).
+
+Reaching this number took three attempts, and the first two failed for the same
+reason in different disguises: **artifact staleness**. `ls | head -1` is
+alphabetical, so it picked an *old* run directory; `ls -t | head -1` is
+newest-first, but before a run writes its own snapshot the newest one still
+belongs to the previous run — which reported ready in 10 seconds and aimed 7.8M
+requests at an allocation that no longer existed. The harness now stamps
+`RUN_START` and selects with `find -newermt`, because ordering is not freshness.

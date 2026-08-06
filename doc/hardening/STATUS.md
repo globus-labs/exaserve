@@ -166,14 +166,20 @@ satisfied: membership: 2 nodes | components: 2 healthy |
 
 ### Weak-scaling through the gate
 
-| Nodes | Source of READY | Ready (s) | Aggregate RPS | Per-node RPS | Errors |
+| Nodes | Source of READY | Aggregate RPS | Per-node RPS | Errors | p50 / p99 |
 |---|---|---|---|---|---|
-| 2 | snapshot | 130 | 43.3 | **21.66** | 0 |
-| 16 | snapshot | 240 | *(re-run in flight)* | — | — |
-| 16 (baseline, pre-gate) | marker | 260 | 344.4 | 21.53 | 0 |
-| 64 (baseline, pre-gate) | marker | 300 | 1373.9 | 21.47 | 0 |
+| 2 (new path) | snapshot | 43.3 | **21.66** | 0 | 1.459 / 1.607 s |
+| 16 (new path) | snapshot | 345.3 | **21.58** | 0 | 1.466 / 1.576 s |
+| 16 (baseline, pre-gate) | marker | 344.4 | 21.53 | 0 | 1.465 / 1.593 s |
+| 64 (baseline, pre-gate) | marker | 1373.9 | 21.47 | 0 | 1.469 / 1.585 s |
 
-Per-node RPS is flat at 21.5–21.7 across 2→64 nodes, so the readiness gate and
-receipt collection cost nothing measurable in throughput, and readiness is
-reached no later than the marker-based baseline (2n and 16n both arrived
-*sooner*).
+Per-node RPS is flat at 21.5–21.7 across 2→64 nodes and 16-node throughput
+through the gate matches its pre-gate baseline within noise (345.3 vs 344.4,
+zero errors both). The readiness gate, the per-role receipt collection, and
+generation-isolated staging cost nothing measurable in throughput or latency.
+Readiness also arrives no later than the marker did (16n: 240s via snapshot vs
+260s via marker), so the gate is not a bring-up tax.
+
+At 16 nodes the gate accounted for 192/192 replicas, 16 healthy proxies, an
+answered canary, and receipts from all four roles required on that path
+(`supervisor` is correctly not demanded when nothing stamped the environment).
