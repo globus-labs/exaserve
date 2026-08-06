@@ -357,3 +357,20 @@ def test_a_ray_worker_exiting_zero_is_fatal_for_the_rank():
             return
         time.sleep(0.1)
     pytest.fail("a Ray worker exiting 0 was not fatal for the rank")
+
+
+def test_a_rank_drains_when_shutdown_is_requested():
+    """The supervise loop ignored its own shutdown flag, so SIGTERM left the
+    rank spinning and its children orphaned (2-node: tree_reaped FAIL)."""
+    import threading
+    import time
+
+    node = NodeSupervisor(deployment_id="d", generation=1, plan_hash="h", rank=0)
+    node.adopt(ray_component([sys.executable, "-c", "import time; time.sleep(60)"]))
+    node.start_all()
+    threading.Timer(0.5, lambda: node._supervisor.request_shutdown("test")).start()
+    start = time.monotonic()
+    node.supervise()
+    assert time.monotonic() - start < 20, "supervise() ignored the shutdown request"
+    node.shutdown(drain_s=10)
+    assert node.exit_code() == 143

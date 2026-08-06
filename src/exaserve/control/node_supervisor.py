@@ -93,6 +93,11 @@ class NodeSupervisor:
                   timeout_s: Optional[float] = None) -> Optional[object]:
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         while True:
+            # A SIGTERM sets the flag on the owned RuntimeSupervisor; this loop
+            # ignored it, so a rank never drained and its children survived as
+            # orphans (caught on 2 nodes: tree_reaped FAIL, 15 left).
+            if self._supervisor._shutdown_requested:  # noqa: SLF001
+                return self._supervisor.first_cause
             cause = self.observe_once()
             if cause is not None:
                 return cause
