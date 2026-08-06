@@ -1036,3 +1036,53 @@ of what each engine process actually received:
 Verified on 2 nodes: `engine_self_attested=PASS`, and a child interpreter with
 only the shim on `PYTHONPATH` and no `exaserve` importable still starts cleanly,
 so the shim cannot break an engine.
+
+### WP4.4's second failure signal is now wired
+
+The plan asks for two **independent** rank-failure signals. Launcher exit
+aggregation was already used; the other one existed only as a hook
+(`rank_result_check(lambda: None)` — a callable that could never report
+anything). That gap mattered: exit aggregation cannot distinguish "rank 3's
+raylet died" from "mpiexec returned nonzero", and it cannot act until the whole
+launch unwinds.
+
+`control/channel_runtime.py` supplies the missing piece — a threaded runtime so
+the authenticated §3.2 channel can run inside processes that are not asyncio
+applications. The head binds an ephemeral port **before** launching ranks and
+hands the address and per-deployment secret to ranks through the launcher env;
+each rank registers and reports its own lifecycle (ray head/worker RUNNING,
+deployment/proxy FAILED with the child's exit code, and a terminal observation
+from the driver's `finally` so the head hears it as the rank disappears).
+
+Two behaviours follow, and both are what the plan asks for: a fatal rank
+observation ends the run **immediately** instead of waiting for the launch to
+unwind, and a lost control lease counts as a failure of that rank — a rank the
+head can no longer observe is not a quiet event. A zero exit from the launcher
+is refused while any rank failure stands.
+
+Both sides degrade rather than fail. An absent or unreachable channel falls
+back to launcher exit aggregation (`EXASERVE_CONTROL_CHANNEL=0` disables it
+outright), so a channel problem cannot take down a deployment that would
+otherwise serve.
+
+Validated on 2 Aurora nodes:
+
+```
+[supervisor] control channel listening on port 44557 for 2 rank(s)
+[Driver] Rank 0 registered on the control channel
+[Driver] Rank 1 registered on the control channel      <- remote node, over HSN
+```
+
+### server.py is a callable entry point
+
+The last piece of WP4.1. `server.py`'s deployment lived in a bare
+`if __name__ == "__main__":` block, so it could only be run by executing the
+module — nothing could call it. Converting it to `main()` also fixed a latent
+scope bug the block had: every name it bound leaked into module scope, and
+`for app in built_apps:` silently rebound the module-level FastAPI `app` at
+import time. As a function those stay local.
+
+`cli.server()` still re-execs `python -m exaserve.server` rather than calling
+`main()` in-process, and deliberately so: compatibility patches must be applied
+before Ray/vLLM are imported, and the calling interpreter may already have
+imported them. That is the WP4.6 fallback, taken knowingly.
