@@ -45,6 +45,18 @@ jobs:
         run: |
           # AC-TST-01: the suite must not require ripgrep or other host bins.
           if command -v rg >/dev/null 2>&1; then echo "note: rg present"; fi
+      - name: Assert the heavy stack really is absent
+        run: |
+          # This lane's whole value is that Ray/vLLM are missing. If a future
+          # dependency change pulls them in, the "hermetic" claim is silently
+          # false and Aurora-only breakage stops being caught here.
+          python - <<'PY'
+          import importlib.util, sys
+          present = [m for m in ("ray", "vllm", "torch") if importlib.util.find_spec(m)]
+          if present:
+              sys.exit(f"hermetic lane is not hermetic: {present} installed")
+          print("hermetic: ray/vllm/torch absent as expected")
+          PY
       - name: Run hermetic suite (fixed order)
         if: matrix.order == 'fixed'
         env:

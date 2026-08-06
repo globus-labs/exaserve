@@ -409,6 +409,11 @@ def _stub_cluster(monkeypatch, *, running: int, target: int = 2, canary_ok: bool
 
     monkeypatch.setattr(sr, "_build_receipt_store",
                         lambda *a, **k: (_Store(), ["replica"]))
+    # These exercise the readiness predicate, not the private-API surface;
+    # without a real Ray the surface check would fail first and mask them.
+    import exaserve.compat.private_api as _pa
+
+    monkeypatch.setattr(_pa, "verify", lambda strict=True: {"stubbed": True})
 
 
 def test_gate_raises_when_the_predicate_fails(monkeypatch, tmp_path):

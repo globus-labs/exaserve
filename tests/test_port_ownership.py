@@ -106,6 +106,7 @@ def test_release_all_reports_what_it_freed(tmp_path):
 
 
 def test_server_get_open_port_uses_the_lease(monkeypatch, tmp_path):
+    pytest.importorskip("ray", exc_type=ImportError)          # exaserve.server imports Ray
     monkeypatch.setenv("EXASERVE_PORT_LEASE_DIR", str(tmp_path))
     from exaserve import server
 

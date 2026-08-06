@@ -8,7 +8,12 @@ from exaserve.compat import private_api
 
 
 def test_the_running_stack_provides_every_required_capability():
-    """Drift must fail at bring-up, so this is the canary for it."""
+    """Drift must fail at bring-up, so this is the canary for it.
+
+    Needs a real Ray: the hermetic CI lane has none, and "Ray is absent" is
+    not the drift this is watching for.
+    """
+    pytest.importorskip("ray", exc_type=ImportError)
     results = private_api.verify(strict=True)
     assert results, "no private surface declared"
     for symbol in private_api.PRIVATE_SURFACE:
@@ -33,6 +38,7 @@ def test_an_optional_symbol_degrades_instead_of_failing(monkeypatch):
     optional = private_api.PrivateSymbol(
         "optional_thing", "ray.serve._private.constants", "NO_SUCH_ATTR",
         "test", required=False)
+    pytest.importorskip("ray", exc_type=ImportError)
     monkeypatch.setattr(private_api, "PRIVATE_SURFACE",
                         private_api.PRIVATE_SURFACE + (optional,))
     results = private_api.verify(strict=True)
@@ -43,6 +49,7 @@ def test_require_explains_why_the_private_symbol_is_needed():
     with pytest.raises(private_api.PrivateApiUnavailable, match="undeclared"):
         private_api.require("not_a_capability")
     # A declared one resolves on this stack.
+    pytest.importorskip("ray", exc_type=ImportError)
     assert private_api.require("serve_default_app_name") is not None
 
 

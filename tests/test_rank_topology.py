@@ -291,6 +291,7 @@ def test_the_site_adapter_execs_the_supervisor():
 
 def test_the_deployment_entry_point_is_callable():
     """WP4.1: the deployment was a bare `__main__` block, callable by nobody."""
+    pytest.importorskip("ray", exc_type=ImportError)
     import inspect
 
     from exaserve import server
@@ -306,6 +307,7 @@ def test_the_deployment_entry_point_is_callable():
 def test_the_module_level_app_is_not_clobbered_by_the_entry_point():
     """As a block, `for app in built_apps:` rebound the module-level FastAPI
     object at import time. As a function, that loop variable stays local."""
+    pytest.importorskip("ray", exc_type=ImportError)
     from fastapi import FastAPI
 
     from exaserve import server
