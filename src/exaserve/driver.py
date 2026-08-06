@@ -533,6 +533,17 @@ def main():
     rank = get_rank()
     hostname = socket.gethostname()
     print(f"[Driver] Node: {hostname} | Rank: {rank} | Role: {'HEAD' if rank == 0 else 'WORKER'}", flush=True)
+
+    # WP4.4: report this rank's lifecycle to the head over the authenticated
+    # control channel. This is the failure signal that does NOT wait for the
+    # launch to unwind. A channel that is absent or unreachable degrades to
+    # launcher exit aggregation rather than failing the rank.
+    from .control.channel_runtime import RankClient
+    from .control.contracts import ComponentState as _CS
+
+    _channel = RankClient(rank=rank, node_id=hostname)
+    if _channel.connect():
+        print(f"[Driver] Rank {rank} registered on the control channel", flush=True)
     print(
         f"[Driver] Cluster config: head_ip={cluster.head_ip} "
         f"port={cluster.port} node_cpus={cluster.node_cpus}",
@@ -572,6 +583,7 @@ def main():
             # 1. Start Ray Head (Background)
             t0 = time.monotonic()
             ray_process = start_ray_head(cluster, num_gpus, vendor)
+            _channel.observe("ray_head", _CS.RUNNING.value, role="ray_head")
             _driver_phase("start_ray_head.launch", time.monotonic() - t0)
 
             # 2. Launch ExaServe as a non-blocking subprocess so that the
@@ -680,6 +692,9 @@ def main():
                 ):
                     # Essential gateway died: fail the deployment.
                     exit_code = proxy_process.returncode or 1
+                    _channel.observe("proxy", _CS.FAILED.value, role="proxy",
+                                     reason_code="UNEXPECTED_EXIT",
+                                     detail=f"proxy exited {proxy_process.returncode}")
                     print(
                         f"[Driver] Proxy ({proxy_config.type}) exited with code "
                         f"{proxy_process.returncode} while serving; terminating "
@@ -692,6 +707,9 @@ def main():
                 # PR-001: a failed serving child must surface as a nonzero
                 # scheduler-visible driver exit, not a log line.
                 exit_code = serve_process.returncode
+                _channel.observe("deployment", _CS.FAILED.value, role="deployment",
+                                 reason_code="UNEXPECTED_EXIT",
+                                 detail=f"exaserve.server exited {exit_code}")
                 print(
                     f"[Driver] ExaServe exited with code {serve_process.returncode}.",
                     flush=True,
@@ -713,6 +731,7 @@ def main():
             # This process will stay alive as long as the Raylet is running.
             t0 = time.monotonic()
             ray_process = start_ray_worker(cluster, num_gpus, vendor)
+            _channel.observe("ray_worker", _CS.RUNNING.value, role="ray_worker")
             _driver_phase("start_ray_worker.launch", time.monotonic() - t0)
             ray_process.wait()  # Block until Ray dies or is killed
             if ray_process.returncode not in (0, None):
@@ -731,9 +750,23 @@ def main():
         import traceback as _traceback
 
         exit_code = exit_code or 1
+        _channel.observe(f"rank{rank}", _CS.FAILED.value, role="rank",
+                         reason_code="RANK_ERROR", detail=str(e)[:400])
         print(f"[Driver] Critical Error: {e}", flush=True)
         _traceback.print_exc()
     finally:
+        # Report the terminal state before tearing down, so the head hears it
+        # even when this rank is about to disappear.
+        try:
+            _channel.observe(
+                f"rank{rank}",
+                _CS.FAILED.value if exit_code else _CS.STOPPED.value,
+                role="rank",
+                reason_code=("EXIT" if exit_code else None),
+                detail=(f"rank exit {exit_code}" if exit_code else None))
+            _channel.close()
+        except Exception:
+            pass
         # Stop the proxy before shutting down Ray
         if rank == 0:
             stop_proxy(proxy_backend, proxy_process)

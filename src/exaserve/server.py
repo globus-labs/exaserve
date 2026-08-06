@@ -1879,7 +1879,20 @@ def deploy_multi_model(
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+def main() -> None:
+    """The deployment entry point (plan WP4.1).
+
+    This was a bare ``__main__`` block, which meant the deployment could
+    only ever be run by executing the module: nothing could call it, and
+    every name it bound leaked into module scope (the ``for app in ...``
+    loop below silently rebound the module-level FastAPI ``app``). As a
+    function its locals stay local and the lifecycle is callable.
+
+    ``cli.server()`` still re-execs ``python -m exaserve.server`` rather
+    than calling this in-process: compatibility patches must be applied
+    before Ray/vLLM are imported, and the calling interpreter may already
+    have imported them.
+    """
     overall_start = time.time()
 
     parser = argparse.ArgumentParser(description="Ray Serve LLM inference on Aurora")
@@ -2531,3 +2544,7 @@ if __name__ == "__main__":
         _deploy_manager.stop()
         print(f"[Deployment] terminal state={_deploy_manager.state} "
               f"first_cause={_deploy_manager.first_cause}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

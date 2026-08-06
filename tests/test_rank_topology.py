@@ -289,20 +289,25 @@ def test_the_site_adapter_execs_the_supervisor():
     assert legacy == 1, f"expected one legacy fallback invocation, found {legacy}"
 
 
-def test_server_drives_the_deployment_through_the_manager():
-    """WP4.1: the deploy path goes through the addressable lifecycle.
+def test_the_deployment_entry_point_is_callable():
+    """WP4.1: the deployment was a bare `__main__` block, callable by nobody."""
+    import inspect
 
-    `server.py` still exposes its CLI as a `__main__` block rather than a
-    callable `main()` — that restructuring is the remaining half of WP4.1 — so
-    this asserts on the module source, and deliberately pins the guard's
-    position so the calls cannot drift out of the executed path.
-    """
-    from importlib import resources
+    from exaserve import server
 
-    source = (resources.files("exaserve") / "server.py").read_text()
-    guard = source.index('if __name__ == "__main__":')
+    assert callable(server.main)
+    source = inspect.getsource(server.main)
     for call in ("_deploy_manager.prepare()", "_deploy_manager.deploy()",
                  "_deploy_manager.validate()", "_deploy_manager.drain(",
                  "_deploy_manager.stop()"):
-        assert call in source, f"the deploy path does not drive {call}"
-        assert source.index(call) > guard, f"{call} is outside the executed block"
+        assert call in source, f"main() does not drive {call}"
+
+
+def test_the_module_level_app_is_not_clobbered_by_the_entry_point():
+    """As a block, `for app in built_apps:` rebound the module-level FastAPI
+    object at import time. As a function, that loop variable stays local."""
+    from fastapi import FastAPI
+
+    from exaserve import server
+
+    assert isinstance(server.app, FastAPI)
