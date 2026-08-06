@@ -30,6 +30,9 @@ scheduler = [
 dev = [
     "build>=1",
     "pytest>=8",
+    # IMP-H07: the randomized-order CI job needs this plugin present on a
+    # clean runner; `pytest -p randomly` fails without it.
+    "pytest-randomly>=3",
 ]
 
 [project.scripts]

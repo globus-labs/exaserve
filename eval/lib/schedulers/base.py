@@ -92,9 +92,14 @@ class EvalScheduler(ABC):
         # The launcher auto-detects the scheduler from the allocation env
         # ($PBS_NODEFILE / $SLURM_JOB_NODELIST), so nothing extra is injected —
         # the PBS body stays byte-identical to the pre-abstraction template.
-        # PR-015: shell-quote every interpolated data field. Export values are
-        # quoted; keys are validated as identifiers. env_setup-style raw shell
-        # is not accepted on this path.
+        # PR-015: shell-quote every interpolated data field.
+        #
+        # CRITICAL (IMP-B09): a shlex.quote()'d value must NEVER be pasted
+        # inside a double-quoted string — single quotes lose their quoting
+        # power there, so `"'/tmp/$(cmd)'"` still runs `$(cmd)`. Any value that
+        # must appear inside a double-quoted expression is first assigned to a
+        # shell variable using the single-quoted form (safe), then referenced
+        # as "$var" (bash does not re-evaluate a variable's value).
         code_q = shlex.quote(str(code_root))
         env_q = shlex.quote(str(env_script))
         run_q = shlex.quote(str(run_yaml_path))
@@ -105,11 +110,13 @@ class EvalScheduler(ABC):
             export_lines.append(f"export {k}={shlex.quote(str(v))}\n")
         export_block = "".join(export_lines)
         return (
-            f"cd {code_q}\n"
+            f"_ES_CODE_ROOT={code_q}\n"
+            'cd "$_ES_CODE_ROOT"\n'
             f"{_PYTHONPATH_SANITIZE}\n"
             "# Prepend the snapshot repo root + its src/ so 'from eval.X' and\n"
             "# 'from exaserve.X' both resolve when eval.cli imports backends.\n"
-            f'export PYTHONPATH="{code_q}:{code_q}/src${{PYTHONPATH:+:$PYTHONPATH}}"\n'
+            'export PYTHONPATH="$_ES_CODE_ROOT:$_ES_CODE_ROOT/src'
+            '${PYTHONPATH:+:$PYTHONPATH}"\n'
             f"source {env_q}\n"
             f"{export_block}python3 -m eval.cli run execute {run_q}\n"
         )

@@ -22,11 +22,14 @@ import hashlib
 import hmac
 import secrets as _secrets
 import struct
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from .contracts import (
     MAX_MESSAGE_BYTES,
+    OwnerScope,
     SCHEMA_VERSION,
     ComponentObservation,
     ContractError,
@@ -39,6 +42,9 @@ from .contracts import (
 )
 
 _LEN = struct.Struct(">I")
+# IMP-B06: bound listener memory (dedup keys retained per session).
+_MAX_DEDUP_KEYS = 4096
+_MAX_AUDIT_RECORDS = 1000
 _MAC_BYTES = 32
 SUPERVISOR_RANK = -1
 
@@ -78,8 +84,23 @@ class SessionInfo:
     node_id: str
     registered: bool = False
     last_seq: int = -1
-    # dedup memory for at-least-once observation delivery
-    seen_obs: set[tuple[str, int, str, str, int]] = field(default_factory=set)
+    # dedup memory for at-least-once observation delivery. IMP-B06: bounded —
+    # keep only the most recent keys so listener state stays O(planned
+    # components) rather than O(events) over a long deployment.
+    seen_obs: "OrderedDict[tuple[str, int, str, str, int], None]" = field(
+        default_factory=OrderedDict)
+    # highest sequence seen per (component_id, instance_id)
+    last_component_seq: dict[tuple[str, str], int] = field(default_factory=dict)
+    last_seen_at: float = 0.0   # receiver-side heartbeat/lease timestamp
+
+    def remember(self, key) -> bool:
+        """Record a dedup key; return False if it was already seen."""
+        if key in self.seen_obs:
+            return False
+        self.seen_obs[key] = None
+        while len(self.seen_obs) > _MAX_DEDUP_KEYS:
+            self.seen_obs.popitem(last=False)
+        return True
 
 
 @dataclass
@@ -151,6 +172,8 @@ class ControlListener:
     def _audit(self, reason: str, detail: str, rank: int | None = None,
                node_id: str | None = None) -> None:
         self.audit.append(AuditRecord(reason=reason, detail=detail, rank=rank, node_id=node_id))
+        if len(self.audit) > _MAX_AUDIT_RECORDS:  # IMP-B06: bounded
+            del self.audit[: len(self.audit) - _MAX_AUDIT_RECORDS]
 
     async def _emit_session_change(self, rank: int, connected: bool) -> None:
         if self._on_session_change is None:
@@ -231,23 +254,60 @@ class ControlListener:
                         try:
                             obs = validate_observation(item)
                         except ContractError as exc:
-                            self._audit(str(exc), "observation rejected", rank=session.rank)
-                            continue
+                            # IMP-B06: fail CLOSED. A malformed observation on
+                            # an authenticated session is a protocol violation,
+                            # not something to skip.
+                            self._audit(str(exc), "observation rejected — closing session",
+                                        rank=session.rank)
+                            return
                         if (obs.deployment_id != self.deployment_id
                                 or obs.plan_hash != self.plan_hash
                                 or obs.generation != self.generation):
                             self._audit(RejectReason.STALE_GENERATION.value,
                                         f"obs {obs.component_id}", rank=session.rank)
-                            continue
+                            return
+                        # IMP-B06: bind observation identity to the
+                        # AUTHENTICATED session. Without this an authenticated
+                        # rank could publish another rank's state, or forge a
+                        # GLOBAL (supervisor-owned) observation such as
+                        # "gateway READY".
+                        if obs.owner_scope != OwnerScope.RANK.value:
+                            self._audit(RejectReason.RANK_MISMATCH.value,
+                                        f"rank {session.rank} sent owner_scope="
+                                        f"{obs.owner_scope} (only the supervisor "
+                                        "may publish GLOBAL observations)",
+                                        rank=session.rank)
+                            return
+                        if obs.owner_rank != session.rank:
+                            self._audit(RejectReason.RANK_MISMATCH.value,
+                                        f"rank {session.rank} sent owner_rank="
+                                        f"{obs.owner_rank}", rank=session.rank)
+                            return
+                        if obs.node_id != session.node_id:
+                            self._audit(RejectReason.NODE_MISMATCH.value,
+                                        f"rank {session.rank} ({session.node_id}) sent "
+                                        f"node_id={obs.node_id}", rank=session.rank)
+                            return
+                        # Per-component sequence must advance (stale/replayed
+                        # component state is rejected, not just deduped).
+                        comp_key = (obs.component_id, obs.instance_id)
+                        last = session.last_component_seq.get(comp_key, -1)
+                        if obs.sequence < last:
+                            self._audit(RejectReason.SEQUENCE_REGRESSION.value,
+                                        f"{obs.component_id} seq {obs.sequence} < {last}",
+                                        rank=session.rank)
+                            return
+                        session.last_component_seq[comp_key] = max(last, obs.sequence)
                         key = obs.dedup_key()
-                        if key in session.seen_obs:
+                        if not session.remember(key):
                             continue  # at-least-once duplicate: idempotent drop
-                        session.seen_obs.add(key)
                         result = self._on_observation(session.rank, obs)
                         if asyncio.iscoroutine(result):
                             await result
                 elif env.kind == EnvelopeKind.HEARTBEAT.value:
-                    pass  # arrival time is the receiver-side liveness signal
+                    # IMP-B06: record receiver-side arrival so a watchdog can
+                    # expire a silent rank's lease.
+                    session.last_seen_at = time.monotonic()
                 elif env.kind == EnvelopeKind.GOODBYE.value:
                     break
                 # COMMAND/COMMAND_RESULT handling is added with the command
@@ -255,6 +315,9 @@ class ControlListener:
         finally:
             if session is not None and session.registered:
                 session.registered = False
+                # IMP-B06: registration is no longer "all present" once a rank
+                # drops; readiness must not keep believing the set is complete.
+                self._all_registered.clear()
                 await self._emit_session_change(session.rank, False)
             writer.close()
 

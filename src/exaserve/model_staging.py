@@ -72,9 +72,29 @@ def check_model_exists(model_path: Path) -> bool:
     if not model_path.exists():
         return False
 
+    # IMP-B05: the marker's EXISTENCE is not proof. Verify its recorded
+    # inventory against what is actually on disk (every file present with the
+    # recorded size) — deleting a weight file after the marker was written
+    # previously still reported "complete". A marker that fails this check is
+    # stale/corrupt and the directory is treated as incomplete.
     marker = model_path / COMPLETION_MARKER
     if marker.is_file():
-        return True
+        try:
+            manifest = json.loads(marker.read_text())
+            files = manifest.get("files") or {}
+            if not files:
+                return False  # empty/degenerate marker proves nothing
+            if manifest.get("kind") == "tokenizer_only":
+                return False  # tokenizer staging never certifies a full model
+            for name, size in files.items():
+                candidate = model_path / name
+                if not candidate.is_file() or candidate.stat().st_size != int(size):
+                    print(f"[ModelStaging] stale completion marker at {model_path}: "
+                          f"{name} missing or size-changed", flush=True)
+                    return False
+            return True
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            return False
 
     complete, _reason = _validate_model_dir(model_path)
     if complete:
@@ -86,7 +106,7 @@ def check_model_exists(model_path: Path) -> bool:
     return complete
 
 
-def _write_completion_marker(model_path: Path) -> None:
+def _write_completion_marker(model_path: Path, *, tokenizer_only: bool = False) -> None:
     from exaserve.state.atomic import atomic_write_json
 
     inventory = {
@@ -96,6 +116,9 @@ def _write_completion_marker(model_path: Path) -> None:
     }
     atomic_write_json(model_path / COMPLETION_MARKER, {
         "version": 1,
+        # IMP-B05: record WHAT was staged. A tokenizer-only download must not
+        # certify the directory as a complete model.
+        "kind": "tokenizer_only" if tokenizer_only else "full_model",
         "file_count": len(inventory),
         "total_bytes": sum(inventory.values()),
         "files": inventory,
@@ -257,7 +280,7 @@ def download_model(model_id: str, local_path: Path, tokenizer_only: bool = False
                 if not complete:
                     raise RuntimeError(
                         f"downloaded {model_id} failed validation: {reason}")
-            _write_completion_marker(staging)
+            _write_completion_marker(staging, tokenizer_only=tokenizer_only)
             # Atomic publish. If final exists (partial), clear it first — we
             # hold the lease so no other writer is active.
             if local_path.exists():

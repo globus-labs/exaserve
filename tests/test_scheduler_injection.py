@@ -60,4 +60,32 @@ def test_eval_body_quotes_and_validates():
         stdout_dir="/tmp", stderr_dir="/tmp", mail_user="", mail_events="",
         code_root="/tmp/repo", env_script="/tmp/env", run_yaml_path="/tmp/run.yaml",
     )
-    assert "cd /tmp/repo" in script and "python3 -m eval.cli run execute /tmp/run.yaml" in script
+    assert "_ES_CODE_ROOT=/tmp/repo" in script
+    assert 'cd "$_ES_CODE_ROOT"' in script
+    assert "python3 -m eval.cli run execute /tmp/run.yaml" in script
+
+
+def test_eval_body_never_expands_metacharacters_in_paths():
+    """IMP-B09 regression: a shlex.quote()'d value pasted INSIDE double quotes
+    still executes `$(...)`. Every interpolated path must be inert."""
+    from eval.lib.schedulers.pbs import PBSScheduler
+
+    evil = "/tmp/$(touch /tmp/PWNED)`id`"
+    script = PBSScheduler().render_job(
+        job_name="ok", num_nodes=1, queue="debug", walltime="01:00:00",
+        project="AuroraGPT", filesystems="home:flare", keep_output="doe",
+        stdout_dir="/tmp", stderr_dir="/tmp", mail_user="", mail_events="",
+        code_root=evil, env_script=evil, run_yaml_path=evil,
+    )
+    for line in script.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        # No line may contain an unquoted (double-quote-context) substitution
+        # of attacker text. The only permitted occurrences of the payload are
+        # inside single quotes.
+        if "touch /tmp/PWNED" in line or "`id`" in line:
+            # find every occurrence and require it be single-quoted
+            assert line.count("'") >= 2, f"payload not single-quoted: {line}"
+            in_double = line.split("=", 1)[1].startswith('"') if "=" in line else False
+            assert not in_double, f"payload inside double quotes (would expand): {line}"

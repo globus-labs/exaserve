@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import secrets as _secrets
 import socket
 import tempfile
 import time
@@ -101,6 +102,10 @@ class ExclusiveLease:
         self.ttl_s = float(ttl_s)
         self.owner_note = owner_note
         self._held = False
+        # IMP-B07: a unique fencing token per acquisition. release() and
+        # renew() only act when the on-disk lease still carries OUR token, so
+        # a stale holder can never delete or extend a successor's lease.
+        self._token: str | None = None
 
     # -- helpers -----------------------------------------------------------
     def _identity(self) -> dict[str, Any]:
@@ -110,7 +115,16 @@ class ExclusiveLease:
             "acquired_at": time.time(),
             "ttl_s": self.ttl_s,
             "note": self.owner_note,
+            "token": self._token,
         }
+
+    def _current_token(self) -> str | None:
+        owner = self.read_owner()
+        return owner.get("token") if owner else None
+
+    def holds_lease(self) -> bool:
+        """True iff the on-disk lease is still ours (fencing check)."""
+        return bool(self._held and self._token and self._current_token() == self._token)
 
     def read_owner(self) -> dict[str, Any] | None:
         try:
@@ -151,6 +165,7 @@ class ExclusiveLease:
         if self._held:  # idempotent for the holder (with-statement re-entry)
             return self
         while True:
+            self._token = _secrets.token_hex(16)  # fresh fencing token
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
@@ -159,16 +174,41 @@ class ExclusiveLease:
                     continue  # vanished between EXCL failure and read: retry
                 if not self._expired(owner):
                     raise LeaseHeldError(self.path, owner) from None
-                # Expired: steal by atomic rename of a fresh lease file so two
-                # stealers cannot both win a partial write.
-                takeover = self.path + f".takeover.{socket.gethostname()}.{os.getpid()}"
-                with open(takeover, "w", encoding="utf-8") as handle:
-                    json.dump(self._identity() | {"stole_from": owner}, handle)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(takeover, self.path)
-                self._held = True
-                return self
+                # IMP-B07: expired-lease takeover must elect EXACTLY ONE
+                # winner. `os.replace` alone does not — two stealers can both
+                # rename over the lease. Instead, take a per-path arbitration
+                # lock via O_EXCL on a sidecar, re-verify expiry under it, and
+                # only then publish. The loser sees a live lease and retries.
+                arb = self.path + ".takeover.lock"
+                try:
+                    afd = os.open(arb, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                except FileExistsError:
+                    # Another stealer is arbitrating. If its lock is itself
+                    # stale (crashed mid-takeover), clear it; else retry.
+                    try:
+                        if time.time() - os.stat(arb).st_mtime > 60:
+                            os.unlink(arb)
+                    except OSError:
+                        pass
+                    time.sleep(0.05)
+                    continue
+                try:
+                    current = self.read_owner()
+                    if current is not None and not self._expired(current):
+                        # Someone else already took over while we waited.
+                        raise LeaseHeldError(self.path, current) from None
+                    takeover = arb + ".new"
+                    with open(takeover, "w", encoding="utf-8") as handle:
+                        json.dump(self._identity() | {"stole_from": owner}, handle)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(takeover, self.path)
+                    self._held = True
+                    return self
+                finally:
+                    os.close(afd)
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(arb)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(self._identity(), handle)
                 handle.flush()
@@ -176,11 +216,25 @@ class ExclusiveLease:
             self._held = True
             return self
 
+    def renew(self) -> bool:
+        """Extend the TTL if we still hold the lease (IMP-B07: long
+        downloads/submission loops must not silently outlive their TTL).
+        Returns False if the lease was lost — the caller must stop."""
+        if not self.holds_lease():
+            return False
+        atomic_write_json(self.path, self._identity(), fsync=False)
+        return True
+
     def release(self) -> None:
+        # IMP-B07: only delete the lease if it is STILL OURS. A stale holder
+        # releasing after its TTL expired previously deleted the successor's
+        # live lease.
         if self._held:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(self.path)
+            if self.holds_lease():
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.path)
             self._held = False
+            self._token = None
 
     def __enter__(self) -> "ExclusiveLease":
         return self.acquire()

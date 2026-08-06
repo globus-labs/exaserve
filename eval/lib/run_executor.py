@@ -95,23 +95,38 @@ def execute_run(run_yaml_path: str, *, dry_run: bool = False) -> int:
             )
         if exit_code == 0:
             # Collect per-replica vLLM stats before tearing down the cluster.
+            # IMP-B08: if stats were REQUESTED and collection failed, the run is
+            # telemetry-incomplete and must not be labelled succeeded.
+            stats_error = None
             if getattr(run_plan.deployment, "collect_stats", False):
                 try:
                     from .server_stats import collect_server_stats
                     collect_server_stats(run_plan.bundle.results_dir)
                 except Exception as e:
+                    stats_error = str(e)
                     print(f"[run_executor] WARNING: server stats collection failed: {e}", flush=True)
             replay_summary = _validate_replay_results(run_plan)
+            # IMP-B08 / PR-019: distinguish PARTIAL from SUCCEEDED. A run with
+            # request errors, an incomplete dispatch, or a missing rank shard is
+            # not a success — labelling it so contaminates downstream analysis.
+            incomplete_reasons = list(replay_summary.get("incomplete_reasons", []))
+            if stats_error:
+                incomplete_reasons.append(f"required stats collection failed: {stats_error}")
+            state = "succeeded" if not incomplete_reasons else "partial"
             write_run_state(
                 run_plan,
-                "succeeded",
+                state,
                 base_urls=base_urls,
                 exit_code=exit_code,
                 result_path=replay_summary["result_path"],
                 requests_completed=replay_summary["requests_completed"],
                 requests_scheduled=replay_summary["requests_scheduled"],
                 errors=replay_summary["errors"],
+                incomplete_reasons=incomplete_reasons or None,
             )
+            if incomplete_reasons:
+                print(f"[run_executor] run marked PARTIAL (not succeeded): "
+                      f"{'; '.join(incomplete_reasons)}", flush=True)
         else:
             write_run_state(run_plan, "failed", base_urls=base_urls, exit_code=exit_code)
         return exit_code
@@ -328,12 +343,24 @@ def _validate_replay_results(run_plan) -> dict[str, int | str]:
             f"result_path={result_path}"
         )
 
-    if errors > 0 or requests_completed < requests_scheduled:
+    # IMP-B08: report incompleteness as DATA the caller acts on, not just a
+    # printed line that a "succeeded" state then contradicts.
+    incomplete_reasons: list[str] = []
+    if errors > 0:
+        incomplete_reasons.append(f"{errors} request error(s)")
+    if requests_completed < requests_scheduled:
+        incomplete_reasons.append(
+            f"only {requests_completed}/{requests_scheduled} requests completed")
+    gather = (payload.get("meta") or {}).get("gather") if isinstance(payload, dict) else None
+    if gather and not gather.get("complete", True):
+        incomplete_reasons.append(
+            f"incomplete gather: {gather.get('collected_ranks')}/"
+            f"{gather.get('expected_ranks')} rank shards "
+            f"(missing {gather.get('missing_ranks')})")
+    if incomplete_reasons:
         print(
-            "Replay completed with partial request failures: "
-            f"successes={successful_requests}, errors={errors}, "
-            f"completed={requests_completed}, scheduled={requests_scheduled}, "
-            f"result_path={result_path}",
+            "Replay completed with partial results: "
+            f"{'; '.join(incomplete_reasons)}; result_path={result_path}",
             flush=True,
         )
 
@@ -342,6 +369,7 @@ def _validate_replay_results(run_plan) -> dict[str, int | str]:
         "requests_completed": requests_completed,
         "requests_scheduled": requests_scheduled,
         "errors": errors,
+        "incomplete_reasons": incomplete_reasons,
     }
 
 
@@ -673,6 +701,11 @@ def _is_completed(run_dir: str) -> bool:
     status = state.get("status")
     if status in _IN_FLIGHT_STATES:
         # Idempotency: don't resubmit a run we already handed to the scheduler.
+        return True
+    if status == "partial":
+        # IMP-B08: a partial run HAS executed. Do not silently resubmit it
+        # (that would loop); it needs an explicit human decision. It is also
+        # not "succeeded" — downstream analysis must see the partial state.
         return True
     if status != "succeeded":
         return False

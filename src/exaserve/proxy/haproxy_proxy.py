@@ -69,14 +69,16 @@ class HAProxyProxy(ProxyBackend):
         check_rise = int(options.get("check_rise", 2))
         stats_port = int(options.get("stats_port", 9999))
         maxconn = int(options.get("maxconn", 50000))
-        http_no_delay = bool(options.get("http_no_delay", True))
+        http_no_delay = _strict_opt_bool(options.get("http_no_delay", True),
+                                         "proxy.options.http_no_delay")
         # `option abortonclose` propagates a client close to the backend even
         # while the response is pending (zero bytes sent). Without it a wedged
         # stream is only reaped by `timeout server` (330s) and the engine keeps
         # decoding the abandoned request. Off by default to keep configs
         # byte-identical to prior runs; enable for saturation probing, where
         # zombie decodes deflate the measured ceiling.
-        abortonclose = bool(options.get("abortonclose", False))
+        abortonclose = _strict_opt_bool(options.get("abortonclose", False),
+                                        "proxy.options.abortonclose")
         # HAProxy parallelism = threads (modern HAProxy is threaded, not multi-proc).
         # 0/unset -> omit nbthread (HAProxy auto-detects = bound CPUs). Set
         # options.nbthread (alias: num_workers) to pin more accept/processing threads

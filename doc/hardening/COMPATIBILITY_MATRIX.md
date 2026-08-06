@@ -1,6 +1,7 @@
 # ExaServe Supported Configuration & Scale Matrix
 
-**Status:** provisional (this hardening program is in progress). This file is
+**Status:** provisional. Scale tiers below record FEASIBILITY SMOKE on the
+legacy path, not WP12 qualification — see audit IMP-H08. This file is
 the single place that states what is *claimed as supported* versus *validated*
 versus *explicitly not a production claim* (PR-033 / AC-SCALE-01). It is
 derived from `decisions/ADR-000-production-envelope.md` and updated as WP12
@@ -42,8 +43,8 @@ user/product-owner approval.
 |---|---|---|
 | 1 node | validated (lifecycle, engine, canary) | P00 S03; P04 battery |
 | 2 nodes | validated (ownership, staging, readiness, pp=2 canary, SIGTERM drain) | P00 S01/S02/S03; P04 battery (2026-08-06) |
-| 16 nodes | **VALIDATED** (0 err, 21.53 rps/node, 344 agg) | scaling-smoke n16 |
-| 64 nodes | **VALIDATED** (0 err, 21.47 rps/node flat vs 16n, 1374 agg ~100% eff) | scaling-smoke n64 (job 8737093) |
+| 16 nodes | **feasibility smoke only** (0 err, 21.53 rps/node, 344 agg) — NOT a WP12 qualification: legacy path, `proxy_config: none`, no predeclared provenance (audit IMP-H08) | scaling-smoke n16 |
+| 64 nodes | **feasibility smoke only** (0 err, 21.47 rps/node flat vs 16n, 1374 agg) — NOT a WP12 qualification (audit IMP-H08); production-gateway + target-architecture qualification still owed | scaling-smoke n64 (job 8737093) |
 | 128 / 256 nodes | NOT a production claim for this program | historical `findings/` data only |
 
 ## Known scale constraints (architectural, not tuning)

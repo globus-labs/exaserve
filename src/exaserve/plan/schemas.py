@@ -71,6 +71,8 @@ def strict_float(value: Any, path: str, *, minimum: float | None = None,
         except (TypeError, ValueError):
             raise PlanError(f"{path}: expected a number, got {value!r}") from None
     value = float(value)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise PlanError(f"{path}: must be a finite number, got {value!r}")
     if minimum is not None and value < minimum:
         raise PlanError(f"{path}: {value} < minimum {minimum}")
     if maximum is not None and value > maximum:
@@ -97,6 +99,17 @@ def reject_unknown_keys(raw: Mapping[str, Any], known: set[str], path: str) -> N
 
 def _route_name(storage_name: str) -> str:
     return storage_name.replace(".", "-")
+
+
+def _deep_freeze(value: Any) -> Any:
+    """IMP-H01: recursively convert caller-owned containers into immutable
+    equivalents. A frozen dataclass holding a live dict is not immutable: the
+    caller could mutate plan content while plan_hash stayed unchanged."""
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _deep_freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
 
 
 # ------------------------------ schemas -------------------------------------
@@ -176,8 +189,14 @@ class DeploymentPlan:
     plan_hash: str = ""
 
     def to_canonical_dict(self) -> dict[str, Any]:
+        """Canonical form for hashing: SEMANTIC INTENT only.
+
+        IMP-H01: ``source_path`` is provenance, not intent — identical
+        configuration stored at two paths must produce the same plan_hash.
+        """
         data = asdict(self)
         data.pop("plan_hash", None)
+        data.pop("source_path", None)
         return data
 
 
@@ -255,6 +274,21 @@ def compile_deployment_plan(raw: Mapping[str, Any], *, source_path: str = "<dict
     inputs compile once into the new contract (WP1 action 6). Never mutates
     ``raw``.
     """
+    if envelope is None and isinstance(raw.get("envelope"), Mapping):
+        env_raw = raw["envelope"]
+        reject_unknown_keys(env_raw, {"qualification_target_nodes",
+                                      "supported_max_nodes", "validation_mode"},
+                            "envelope")
+        envelope = ScaleEnvelope(
+            qualification_target_nodes=strict_int(
+                env_raw.get("qualification_target_nodes", 64),
+                "envelope.qualification_target_nodes", minimum=1),
+            supported_max_nodes=strict_int(
+                env_raw.get("supported_max_nodes", 2),
+                "envelope.supported_max_nodes", minimum=1),
+            validation_mode=strict_bool(
+                env_raw.get("validation_mode", False), "envelope.validation_mode"),
+        )
     envelope = envelope or ScaleEnvelope()
     top_known = {"ray_cluster_config", "model_deployment_config", "proxy_config",
                  "scheduler", "envelope"}
@@ -295,14 +329,18 @@ def compile_deployment_plan(raw: Mapping[str, Any], *, source_path: str = "<dict
         port=strict_int(proxy_raw.get("port", 4001), "proxy_config.port",
                         minimum=1, maximum=65535),
         benchmark_only=gw_type not in PRODUCTION_GATEWAYS,
-        options=tuple(sorted(
-            (k, v) for k, v in proxy_raw.items() if k not in {"type", "port"})),
+        options=_deep_freeze(
+            {k: v for k, v in proxy_raw.items() if k not in {"type", "port"}}),
     )
 
     sched_raw = raw.get("scheduler") or {}
     sched_type = strict_str(sched_raw.get("type", "pbs"), "scheduler.type",
                             choices=SCHEDULER_TYPES)
     reservation = sched_raw.get("reservation_topology")
+    if reservation is not None:
+        # IMP-H01: a falsy non-string (e.g. `false`) previously satisfied the
+        # "is a named topology declared?" test and bypassed node-agreement.
+        reservation = strict_str(reservation, "scheduler.reservation_topology")
     if "nodes" in sched_raw and sched_raw["nodes"] is not None:
         sched_nodes = strict_int(sched_raw["nodes"], "scheduler.nodes", minimum=1)
         if sched_nodes != num_nodes and reservation is None:

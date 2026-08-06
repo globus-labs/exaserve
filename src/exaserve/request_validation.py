@@ -38,10 +38,26 @@ def _req_int(body: dict, key: str, *, lo: int, hi: int) -> int:
     return value
 
 
+def strict_flag(body: dict, key: str, default: bool) -> bool:
+    """IMP-H04: boolean protocol fields must not use truthiness — the string
+    ``"false"`` previously became True for stream/ignore_eos/etc."""
+    if key not in body or body[key] is None:
+        return default
+    value = body[key]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes"):
+            return True
+        if low in ("false", "0", "no"):
+            return False
+    raise RequestValidationError(f"{key} must be a boolean, got {value!r}")
+
+
 def parse_sampling(body: dict) -> dict:
     """Validate + normalize OpenAI sampling params. Raises on bad input."""
-    if not isinstance(body, dict):
-        raise RequestValidationError("request body must be a JSON object")
+    require_object_body(body)
     sampling: dict = {}
     if "temperature" in body:
         sampling["temperature"] = _req_float(body, "temperature", lo=0.0, hi=2.0)
@@ -62,20 +78,38 @@ def parse_sampling(body: dict) -> dict:
                 or (isinstance(stop, list) and all(isinstance(s, str) for s in stop))):
             raise RequestValidationError("stop must be a string or list of strings")
         sampling["stop"] = stop
-    if body.get("ignore_eos"):
+    if strict_flag(body, "ignore_eos", False):
         sampling["ignore_eos"] = True
     sampling.setdefault("temperature", 0.7)
     sampling.setdefault("max_tokens", 1024)
     return sampling
 
 
+def require_object_body(body: Any) -> dict:
+    """IMP-H04: the body must be a JSON object before any field access.
+
+    A list body previously reached ``body.get`` and escaped as AttributeError
+    (HTTP 500); callers must funnel every request through this first.
+    """
+    if not isinstance(body, dict):
+        raise RequestValidationError(
+            f"request body must be a JSON object, got {type(body).__name__}")
+    return body
+
+
 def validate_model_field(body: dict, allowed: Iterable[str]) -> None:
     """PR-011: a model-specific deployment must not silently ignore a
     mismatched ``model`` field. Absent model is fine (this deployment's model
     is implied); a present-but-unknown model is a 400."""
+    require_object_body(body)
     requested = body.get("model")
     if requested is None:
         return
+    # IMP-H04: a non-string model (e.g. a list) previously raised TypeError
+    # from the set membership test.
+    if not isinstance(requested, str):
+        raise RequestValidationError(
+            f"model must be a string, got {type(requested).__name__}")
     allowed_set = set(allowed)
     if requested not in allowed_set:
         raise RequestValidationError(

@@ -1,82 +1,96 @@
 # ExaServe Production-Hardening — Status
 
-**Updated:** 2026-08-06. Companion to `MIGRATION_LOG.md` (chronological) and
-`FINDINGS.yaml` (authoritative ledger).
+**Updated:** 2026-08-06, after the implementation audit
+(`doc/PRODUCTION_HARDENING_IMPLEMENTATION_AUDIT.md`) of commit `e73f3eb`.
+Companion to `MIGRATION_LOG.md` (chronological) and `FINDINGS.yaml`
+(authoritative ledger, 82 records).
 
-## Headline
+## Headline — read this first
 
-- **Audit findings: 34 / 35 FIXED**, 1 IN_PROGRESS (PR-031 CI — workflow
-  written and locally green; enabling GitHub Actions is a repo-admin step).
-- **All findings (audit + Known Issues + TODO): 50 FIXED / 6 IN_PROGRESS /
-  19 OPEN / 1 out-of-scope.** OPEN are backlog/experimental (parallel
-  staging, request caching, C++ client, offsite Slurm/AMD, the deferred A2
-  vLLM-internal port race) — none are unaddressed production blockers.
-- **Hermetic suite: 102 passed / 0 failed** (was 24/12 at baseline).
-  Ruff correctness-gate clean tree-wide. Wheel builds + imports clean.
-- **Compute-validated on Aurora (1–2 nodes):** S00–S03 spikes, P04 battery
-  (5/5), HAProxy smoke (4/4), fail-closed readiness non-regression, direct +
-  HAProxy serving with 0 errors.
+**NOT production ready. The target architecture is not yet wired into the
+production path.**
 
-## What was hardened (by area)
+An earlier version of this file claimed "34 of 35 audit findings fixed" and
+that no open item was a production blocker. **That claim was wrong** and has
+been withdrawn. The work in `e73f3eb` is genuine and useful, but it is
+P00/P01-class foundations plus incremental repairs to the *legacy* path — not
+the WP4/WP5/WP13 cutover that owns the blocker invariants.
 
-| Area | Findings closed | Compute-validated |
+Current ledger (YAML-parsed, not regex-counted — the previous count was also
+wrong):
+
+| Status | All records (82) | Audit findings (35) |
 |---|---|---|
-| Truthful failure / exit codes | PR-001, PR-028 | P04 (SIGTERM drain) |
-| Vendor/accelerator config | PR-002 | P04 ("GPUs=12 vendor=xpu") |
-| Native staging (bcast.c) | PR-004 | P04 (round-trip + fail-loudly) |
-| Model staging transactional | PR-005 | (hermetic; scale in flight) |
-| Immutable config / plan schema | PR-003, PR-006, PR-007, PR-020 | P04 (source unmutated) |
-| Fail-closed readiness | PR-008, PR-023 | P04 (healthy→READY, unhealthy→fail) |
-| Proxy supervision + config validate | PR-009, PR-024 | HAProxy smoke (kill→terminate; haproxy -c) |
-| Ports / URLs | PR-012 | — |
-| Security boundary | PR-010, PR-025 | HAProxy smoke |
-| Request validation | PR-011 | scaling probe (unknown model→400) |
-| Scheduler safety/idempotency | PR-013, PR-014, PR-015, PR-027 | hermetic |
-| Eval correctness | PR-016, PR-017, PR-019, PR-021, PR-030 | hermetic |
-| Atomic state/artifacts | PR-018, PR-035 | hermetic (crash-injection) |
-| Compatibility profile | PR-022, PR-026, PR-029 | P04/S03 (receipts, spawn reach) |
-| Observability | PR-032 | — |
-| Scale envelope / matrix | PR-033 | COMPATIBILITY_MATRIX.md |
-| Test/CI floor | PR-031 (IN_PROGRESS) | — |
+| FIXED | 27 | 12 |
+| IN_PROGRESS | 31 | 23 |
+| OPEN | 22 | 0 |
+| OUT_OF_PRODUCTION_SCOPE | 2 | 0 |
 
-## New architecture substrate (plan §3)
+A record is `FIXED` only when its invariant holds **on the path a production
+deployment actually takes**. Anything owned by the un-cut-over architecture is
+`IN_PROGRESS` with the narrow completed slice named in its `evidence` field.
 
-- `src/exaserve/control/{contracts,transport}.py` — typed authenticated
-  control channel (S01-proven on 2 nodes).
-- `src/exaserve/state/{atomic,status}.py` — atomic writes, cross-host leases,
-  CAS status machines.
-- `src/exaserve/plan/schemas.py` — immutable validated plan compiler.
-- `src/exaserve/request_validation.py` — OpenAI request validation.
-- ADR-000..003 in `decisions/`.
+## What is genuinely complete (narrow, verified)
 
-## Scale validation (WP12) — in progress
+- Source config copied before runtime head-IP mutation (PR-003 slice).
+- Derived model-identity collision checks (PR-007).
+- AST-restricted matrix expressions (PR-016), with escape-attempt tests.
+- Required-model default placement failure (PR-023).
+- HAProxy admin lockdown + `haproxy -c` / `nginx -t` preflight (PR-024 slice).
+- ClientLab `faults` default + argv-vector SSH (PR-030).
+- Spec enum/bound validation (PR-020); benchmark-gateway marking (PR-025).
+- Scheduler/eval job-body shell quoting **after** the IMP-B09 fix below.
+- Atomic single-writer publication helpers; lifecycle enums/transition tables.
 
-| Tier | Status |
-|---|---|
-| 1 node | PASS (S03, canary) |
-| 2 nodes | PASS (deploy READY, direct 22.1 RPS / 11.0 per-node / 0 err; HAProxy 0-err) |
-| 16 nodes | **PASS** — 10,821 req / 0 err / 344.4 RPS / **21.53 per-node** / p99 1.59s; 192/192 GPUs |
-| 64 nodes | **PASS** — 43,207 req / 0 err / 1373.9 RPS / **21.47 per-node** / p99 1.585s; 768/768 GPUs; READY 300s |
+## Defects found by the audit and now fixed (this pass)
 
-**Weak scaling is linear and regression-free to 64 nodes:** per-node RPS flat
-16→64n (21.53→21.47, 0.3% over a 4× cluster), aggregate 344→1374 RPS (~100%
-efficiency), p99 flat (1.59→1.585s), **0 errors across 43,207 requests at 768
-replicas**. The hardened orchestration adds no scaling penalty. Full scale
-ladder (1→2→16→64) complete and passing.
+Each has a regression test in `tests/test_audit_regressions.py` (17 tests):
 
-Weak-scaling criterion: per-node RPS holds flat 2→64 at fixed per-node
-concurrency (Direct-MPI probe, one client rank/node, avoids the single-
-fat-client ceiling the baseline documented).
+| ID | Defect | Fix |
+|---|---|---|
+| IMP-B09 | **Self-inflicted shell injection**: my PR-015 "fix" pasted `shlex.quote` output *inside* double quotes, where single quotes lose their power — `$(cmd)` in a path executed | assign to a shell var (single-quoted), reference as `"$var"`; regression test renders `$()`/backtick payloads |
+| IMP-B05 | completion marker trusted by existence; deleting weights still read "complete"; tokenizer-only download wrote a full-model marker | marker inventory verified against disk (name+size); `kind` recorded; tokenizer-only never certifies a model |
+| IMP-B07 | lease takeover unfenced (stale holder's `release()` deleted the successor's live lease); two stealers could both win; status CAS had an ABA hole; a record could initialize directly as READY | per-acquisition fencing token + `holds_lease()`/`renew()`; O_EXCL arbitration for takeover; `expected_revision` CAS; initial states restricted to PLANNED |
+| IMP-B06 | an authenticated rank could forge another rank's or a **GLOBAL** observation; malformed observations were skipped not fail-closed; `all_registered` stayed true after disconnect; unbounded listener state | observation identity bound to the authenticated session (scope/rank/node); fail-closed termination; registration cleared on disconnect; bounded dedup/audit; per-component sequence enforcement; heartbeat recorded as a lease timestamp |
+| IMP-H01 | `plan_hash` included `source_path` (same intent → different identity); frozen plan held caller-owned mutable dicts (content changed, hash didn't); `nan` accepted; `reservation_topology: false` bypassed node-agreement; top-level `envelope` ignored | hash covers semantic intent only; deep-freeze of nested options; non-finite rejected; reservation topology must be a non-empty string; `envelope` block honored |
+| IMP-H04 | list/scalar bodies escaped as `AttributeError`/`TypeError` (500 not 400); `"false"` was truthy for `stream`/`ignore_eos`/HAProxy options | `require_object_body()` + typed model check + `strict_flag()` wired into both handlers and HAProxy options |
+| IMP-B08 | partial replay / missing rank shards / failed required stats still wrote `succeeded` | incomplete runs are written as `partial` with reasons; `_is_completed` treats partial as needing human triage, not resubmission |
+| IMP-H04b | `serve_url` looked for `proxy_out/proxy_port` beside the **source** config while the launcher writes it beside the run-scoped runtime config | search run-log tree (newest first), then legacy location |
+| IMP-H07 | randomized CI job used `pytest -p randomly` without declaring `pytest-randomly` | added to `[dev]` extra |
+| IMP-B10 | ledger recorded labels, not demonstrated closure; record count itself was wrong | 23 audit findings reopened as IN_PROGRESS; all 82 records now carry required plan §8 fields; counts YAML-parsed |
 
-## Not done / explicitly deferred
+**Suite: 123 passed / 0 failed.**
 
-- PR-031: CI provider enablement (repo-admin).
-- The full WP4/WP5 `RuntimeSupervisor`/`ReadinessCoordinator` REWRITE: the
-  invariants (fail-closed readiness, child supervision, typed exit) are met
-  incrementally in driver.py/server.py; the clean-architecture extraction and
-  legacy-path deletion (WP13 cutover) remain.
-- Offsite Slurm/CUDA/ROCm gates (no access from here) — EXTERNAL_BLOCKER.
-- KI-A2 vLLM-internal torch.distributed port race — transient, Serve-retry
-  recovers; race-free ports are the deferred fix.
-- Git commits/branches: not authorized by the active request; all work is a
-  reviewed working-tree checkpoint.
+## What remains — the real work (unchanged by this pass)
+
+These are the audit's release blockers and they are **not** optional cleanup:
+
+- **IMP-B01 / WP4+WP5+WP13:** no `RuntimeSupervisor`, `RankLauncher`,
+  `NodeSupervisor`, `DeploymentManager`, or `ReadinessCoordinator` in the
+  production path. `launch_cluster.sh` (533 lines) + per-rank
+  `exaserve.driver` remain the active topology.
+- **IMP-B02:** stdout markers (`CLUSTER FULLY READY` / `ALL SERVICES READY`)
+  are still the authoritative readiness protocol in driver, server, and eval;
+  READY cannot be revoked after component loss.
+- **IMP-B04:** no `compat/{profile,activator,receipt}` system; `apply_all()`
+  is fail-open (`strict=False`); READY is not receipt-gated.
+- **IMP-B03:** essential-child supervision gaps (Ray head unpolled;
+  exit-code-0 unexpected exits read as success; no process groups).
+- **IMP-B09 residue / WP8:** two scheduler stacks; submit-then-persist crash
+  window remains.
+- **IMP-H02/H03:** distribution is not generation-isolated or receipt-based;
+  Bash remains a coequal control plane.
+- **IMP-H08:** the 16/64-node results are **direct-mode weak-scaling
+  feasibility smoke** (legacy path, `proxy_config: none`, no predeclared
+  provenance) — they do **not** close WP12/AC-SCALE-01. They are retained and
+  relabelled as such in `COMPATIBILITY_MATRIX.md`.
+
+## Correct next step
+
+Follow the canonical packet order in
+`doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md` §8 of the audit: ledger
+correction (done), then primitives (done for lease/status/plan), then the
+compatibility profile + receipts, then the supervisor/readiness coordinator,
+then staging generation-isolation, then eval/ClientLab onto shared contracts,
+then reduce Bash to a site adapter and delete marker consumers — and only
+then re-run qualifying Aurora evidence through the **new** path.

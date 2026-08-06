@@ -391,6 +391,80 @@ part" through HAProxy), pr009_proxy_supervision.
 config + wheel-build gate written and locally green; enablement in the GitHub
 Actions provider is a repo-admin step outside this environment.
 
+## 2026-08-06 — Slice P07: implementation-audit corrections (IMP-*)
+
+Codex audited commit `e73f3eb` (`doc/PRODUCTION_HARDENING_IMPLEMENTATION_AUDIT.md`,
+verdict NOT PRODUCTION READY). **The audit is substantially correct.** I
+verified its reproducible claims with an independent script before changing
+anything; 7/7 defect classes reproduced. All are now fixed with regressions,
+and the overstated ledger/status claims are withdrawn.
+
+**Verified-then-fixed defects** (regressions in `tests/test_audit_regressions.py`):
+- **IMP-B09 (worst, self-inflicted):** my PR-015 "injection fix" pasted
+  `shlex.quote()` output INSIDE double quotes in the eval job body, where
+  single quotes lose their quoting power — `code_root=/tmp/$(touch X)`
+  rendered an *executing* substitution. Fixed by assigning the quoted value to
+  `_ES_CODE_ROOT` and referencing `"$_ES_CODE_ROOT"` (bash does not
+  re-evaluate a variable's value). Regression renders `$()`+backtick payloads
+  and asserts no payload sits in a double-quote context.
+- **IMP-B05:** `check_model_exists()` returned True on marker existence alone
+  (deleting the only weight file still read "complete"); tokenizer-only
+  downloads wrote a full-model marker. Marker inventory is now verified
+  against disk (name + size), `kind` is recorded, empty/corrupt markers fail.
+- **IMP-B07:** lease takeover was unfenced — a stale holder's `release()`
+  deleted the successor's LIVE lease; two stealers could both `os.replace`;
+  status CAS compared only the enum (ABA-stale writer accepted); a record
+  could initialize directly as READY. Added per-acquisition fencing tokens,
+  `holds_lease()`/`renew()`, O_EXCL arbitration for takeover,
+  `expected_revision` CAS, and PLANNED-only initial states.
+- **IMP-B06:** an authenticated rank could publish another rank's — or a
+  GLOBAL (supervisor-owned) — observation; malformed observations were
+  skipped rather than fail-closed; `_all_registered` never cleared on
+  disconnect; dedup/audit state grew unbounded. Observation identity is now
+  bound to the authenticated session, violations terminate the session,
+  registration clears on disconnect, state is bounded, per-component
+  sequences are enforced, heartbeats record a receiver-side lease timestamp.
+- **IMP-H01:** `plan_hash` included `source_path` (same intent, different
+  identity); the frozen plan held caller-owned dicts (content could mutate
+  while the hash stayed); `nan` passed bounds; `reservation_topology: false`
+  bypassed node-agreement; a top-level `envelope` block was ignored. All fixed.
+- **IMP-H04:** list/scalar request bodies escaped as AttributeError/TypeError
+  (500 instead of 400); `"false"` was truthy for `stream`/`ignore_eos` and the
+  HAProxy `http_no_delay`/`abortonclose` options; `serve_url` looked for the
+  published port beside the SOURCE config while the launcher writes it beside
+  the run-scoped runtime config. All fixed.
+- **IMP-B08:** partial replay, missing rank shards, or a failed REQUIRED stats
+  collection still wrote `succeeded`. Incomplete runs are now written as
+  `partial` with reasons; `_is_completed` treats partial as needing triage
+  (not resubmission).
+- **IMP-H07:** the randomized CI job ran `pytest -p randomly` without
+  declaring `pytest-randomly`; added to the `dev` extra.
+
+**IMP-B10 — ledger/status honesty (the audit's central complaint):**
+- The "34/35 FIXED / no open production blocker" headline was **wrong** and is
+  withdrawn. 23 audit findings whose invariant is owned by the un-cut-over
+  architecture (or whose own evidence said work remained) are reopened as
+  IN_PROGRESS. A record is FIXED only when its invariant holds on the path a
+  production deployment actually takes.
+- My record COUNT was also wrong (76 by regex vs 82 actual). Counts are now
+  YAML-parsed. All 82 records carry the plan §8 required fields.
+- Ledger now: **27 FIXED / 31 IN_PROGRESS / 22 OPEN / 2 out-of-scope**;
+  audit findings: **12 FIXED / 23 IN_PROGRESS**.
+- The 16/64-node results are relabelled in COMPATIBILITY_MATRIX.md as
+  **direct-mode feasibility smoke on the legacy path**, explicitly NOT WP12
+  qualification (legacy topology, `proxy_config: none`, no predeclared
+  provenance) — per IMP-H08.
+
+**Not fixed (correctly remains the real work):** IMP-B01/B02/B03/B04 — the
+supervisor/readiness/compat-receipt architecture and the WP13 cutover. These
+own the blocker invariants; they are the next packets, not cleanup.
+
+**Verification:** suite **123 passed / 0 failed** (was 102); ruff correctness
+gate clean; the audit's own reproduction script now fails to reproduce any of
+the 7 defect classes.
+
+---
+
 ## 2026-08-06 — Slice P06.3: 64-NODE weak-scaling smoke — PASS. Scaling ladder COMPLETE.
 
 Job 8737093 (64-node debug-scaling batch). Direct-MPI probe, 64/64 shards.

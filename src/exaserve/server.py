@@ -1027,15 +1027,16 @@ class EngineWorker:
         except Exception:
             return JSONResponse({"error": "malformed JSON body"}, status_code=400)
         try:
+            _rv.require_object_body(body)   # IMP-H04: list/scalar body -> 400
             _rv.validate_model_field(body, self._served_model_names())
             _rv.validate_messages(body.get("messages"))
             sampling = self._parse_sampling(body)
+            stream = _rv.strict_flag(body, "stream", False)
+            add_generation_prompt = _rv.strict_flag(body, "add_generation_prompt", True)
+            continue_final_message = _rv.strict_flag(body, "continue_final_message", False)
         except _rv.RequestValidationError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         messages = body.get("messages", [])
-        stream = body.get("stream", False)
-        add_generation_prompt = bool(body.get("add_generation_prompt", True))
-        continue_final_message = bool(body.get("continue_final_message", False))
 
         prompt = self.backend.build_chat_prompt(
             messages,
@@ -1065,15 +1066,16 @@ class EngineWorker:
         except Exception:
             return JSONResponse({"error": "malformed JSON body"}, status_code=400)
         try:
+            _rv.require_object_body(body)   # IMP-H04: list/scalar body -> 400
             _rv.validate_model_field(body, self._served_model_names())
             sampling = self._parse_sampling(body)
+            stream = _rv.strict_flag(body, "stream", False)
         except _rv.RequestValidationError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         prompt = body.get("prompt", "")
         if not isinstance(prompt, (str, list)):
             return JSONResponse({"error": "prompt must be a string or list"},
                                 status_code=400)
-        stream = body.get("stream", False)
         request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
         sampling["_request_id"] = request_id
         sampling["_correlation_id"] = request.headers.get("x-request-id") or request_id  # PR-032

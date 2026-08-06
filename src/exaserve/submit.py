@@ -180,6 +180,32 @@ def serve_submit_main() -> int:
 # ---------------------------------------------------------------------------
 
 
+def _find_published_port_file(config_path: Optional[str | os.PathLike]) -> Optional[str]:
+    """Locate the driver-published proxy_port file for this deployment."""
+    if config_path is None:
+        return None
+    candidates: list[str] = []
+    run_root = os.environ.get("EXASERVE_RUN_LOG_DIR")
+    if run_root:
+        candidates.append(os.path.join(run_root, "proxy_out", "proxy_port"))
+    import glob as _glob
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(str(config_path))))
+    for pattern in (
+        os.path.join(project_root, "run_logs", "*", "proxy_out", "proxy_port"),
+        os.path.join(os.path.dirname(os.path.abspath(str(config_path))),
+                     "run_logs", "*", "proxy_out", "proxy_port"),
+    ):
+        candidates.extend(sorted(_glob.glob(pattern), key=os.path.getmtime, reverse=True))
+    # legacy/source-adjacent location
+    candidates.append(os.path.join(
+        os.path.dirname(os.path.abspath(str(config_path))), "proxy_out", "proxy_port"))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _read_published_port(port_file: Optional[str]) -> Optional[int]:
     if not port_file:
         return None
@@ -209,11 +235,11 @@ def serve_url(
         poll_interval_s, timeout_s: poll loop control.
         port: explicit override (skips reading the config).
     """
-    published_port_file = None
-    if config_path is not None:
-        published_port_file = os.path.join(
-            os.path.dirname(os.path.abspath(str(config_path))), "proxy_out", "proxy_port"
-        )
+    # IMP-H04: the driver writes proxy_out/proxy_port beside the RUN-SCOPED
+    # runtime config (PR-003), not beside the operator's source config. Search
+    # the run-log tree for the newest published port, then fall back to the
+    # source-adjacent location for pre-PR-003 runs.
+    published_port_file = _find_published_port_file(config_path)
     if port is None and config_path is not None:
         # PR-012: prefer the port the proxy ACTUALLY bound (published by the
         # driver) over the configured one — LiteLLM and friends fall back to

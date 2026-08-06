@@ -153,9 +153,20 @@ class StatusStore:
                         f"status lease busy beyond {_LEASE_WAIT_S}s: {exc}") from exc
                 time.sleep(_LEASE_POLL_S)
 
+    # IMP-B07: a record may only be created in a legitimate INITIAL state.
+    # Initializing directly as READY/SUCCEEDED would fabricate a terminal or
+    # ready deployment without traversing its state machine.
+    _INITIAL_STATES = {"deployment": {DeploymentState.PLANNED},
+                       "run": {RunState.PLANNED}}
+
     def initialize(self, record_id: str, state: Enum,
                    provenance: dict[str, Any] | None = None,
                    data: dict[str, Any] | None = None) -> StatusRecord:
+        allowed = self._INITIAL_STATES[self.kind]
+        if self._enum(state) not in allowed:
+            raise IllegalTransition(
+                f"{self.kind} records must start in "
+                f"{sorted(s.value for s in allowed)}, got {self._enum(state).value}")
         with self._acquire_lease():
             if self.load() is not None:
                 raise StatusConflict(f"{self.path} already initialized")
@@ -170,7 +181,16 @@ class StatusStore:
 
     def transition(self, expected: Enum | str, new: Enum | str, *,
                    reason_code: str, detail: str | None = None,
-                   data_update: dict[str, Any] | None = None) -> StatusRecord:
+                   data_update: dict[str, Any] | None = None,
+                   expected_revision: int | None = None) -> StatusRecord:
+        """Compare-and-set a lifecycle transition.
+
+        IMP-B07: comparing only the state enum admits an ABA race — a writer
+        that observed READY at revision 5 could still commit after the record
+        went READY→VALIDATING→READY at revision 7. Callers that read a record
+        should pass ``expected_revision=record.revision``; the transition then
+        fails closed if anything changed in between.
+        """
         expected_state = self._enum(expected)
         new_state = self._enum(new)
         if new_state not in self._transitions[expected_state]:
@@ -183,6 +203,11 @@ class StatusStore:
             if record.state != expected_state.value:
                 raise StatusConflict(
                     f"expected {expected_state.value}, found {record.state}")
+            if expected_revision is not None and record.revision != expected_revision:
+                raise StatusConflict(
+                    f"stale writer: expected revision {expected_revision}, "
+                    f"found {record.revision} (state cycled back to "
+                    f"{record.state}; ABA)")
             record.state = new_state.value
             record.revision += 1
             record.updated_at = time.time()

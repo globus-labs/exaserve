@@ -135,19 +135,73 @@ def test_sequence_regression_and_stale_observation_rejected():
         await ch.connect_and_register()
 
         await ch.send_observation(_obs(0, seq=1))
-        # Stale-generation observation inside a valid envelope is rejected
-        # by validate/scope checks at the observation layer.
+        # IMP-B06: a stale-generation observation is now FAIL-CLOSED — the
+        # offending session is terminated rather than the message skipped.
         await ch.send_observation(_obs(0, seq=2, generation=1))
-        await asyncio.sleep(0.1)
-        # Envelope-level sequence regression terminates the session.
-        ch._seq = 0  # force regression
-        await ch.send_observation(_obs(0, seq=3))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.15)
 
         states = [o.generation for _, o in received]
-        assert states == [3]  # stale-generation observation rejected + audited
+        assert states == [3]  # only the valid observation was accepted
         assert any(a.reason == RejectReason.STALE_GENERATION.value for a in listener.audit)
+        await listener.stop()
+
+    _run(scenario())
+
+
+def test_envelope_sequence_regression_terminates_session():
+    async def scenario():
+        received, changes = [], []
+        secret = new_deployment_secret()
+        listener = await _listener(received, changes, expected_ranks=1, secret=secret)
+        ch = _channel(listener, secret, 0)
+        await ch.connect_and_register()
+        await ch.send_observation(_obs(0, seq=1))
+        await asyncio.sleep(0.1)
+        ch._seq = 0  # force envelope-level sequence regression (replay)
+        await ch.send_observation(_obs(0, seq=2))
+        await asyncio.sleep(0.15)
         assert any(a.reason == RejectReason.SEQUENCE_REGRESSION.value for a in listener.audit)
+        assert len(received) == 1  # the replayed frame was not delivered
+        await listener.stop()
+
+    _run(scenario())
+
+
+def test_rank_cannot_forge_global_or_other_rank_observations():
+    """IMP-B06: observation identity must bind to the authenticated session."""
+    async def scenario():
+        received, changes = [], []
+        secret = new_deployment_secret()
+        listener = await _listener(received, changes, expected_ranks=2, secret=secret)
+        ch = _channel(listener, secret, 0)
+        await ch.connect_and_register()
+        forged = ComponentObservation(
+            schema_version=SCHEMA_VERSION, deployment_id=DEP["deployment_id"],
+            plan_hash=DEP["plan_hash"], generation=DEP["generation"],
+            component_id="gateway", instance_id="i0", sequence=1,
+            owner_scope="GLOBAL", owner_rank=None, role="gateway",
+            node_id="head", state="READY", observed_at=0.0)
+        await ch.send_observation(forged)
+        await asyncio.sleep(0.15)
+        assert received == []  # GLOBAL forgery rejected
+        assert any(a.reason == RejectReason.RANK_MISMATCH.value for a in listener.audit)
+        await listener.stop()
+
+    _run(scenario())
+
+
+def test_all_registered_clears_when_a_rank_disconnects():
+    """IMP-B06: readiness must not keep believing the rank set is complete."""
+    async def scenario():
+        received, changes = [], []
+        secret = new_deployment_secret()
+        listener = await _listener(received, changes, expected_ranks=1, secret=secret)
+        ch = _channel(listener, secret, 0)
+        await ch.connect_and_register()
+        assert await listener.wait_all_registered(2)
+        await ch.close()
+        await asyncio.sleep(0.15)
+        assert not await listener.wait_all_registered(0.2)
         await listener.stop()
 
     _run(scenario())

@@ -11,12 +11,19 @@ meta:
   baseline_revision: "005891e"
   baseline_doc: doc/hardening/BASELINE.md
 
+# 2026-08-06 LEDGER CORRECTION (implementation audit IMP-B10):
+#   The previous headline ("34/35 FIXED") was not supported by reachable
+#   production code. Records whose invariant is owned by the un-cut-over
+#   target architecture (supervisor/readiness/compat-receipts/WP13), or whose
+#   own evidence said work remained, are reopened as IN_PROGRESS with the
+#   narrow completed slice named in `evidence`. A record is FIXED only when
+#   its invariant holds on the path a production deployment actually takes.
 findings:
   # ---------------- Audit findings ----------------
   - {id: PR-001, source: audit, severity: blocker,
      invariant: "Fatal child/driver errors produce nonzero scheduler-visible exit",
      primary_work_package: WP4, affected_regions: "driver.py wait/except paths",
-     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-002, source: audit, severity: blocker,
      invariant: "Ray resources and vendor env derive from validated config, never hardcoded",
      primary_work_package: WP3, affected_regions: "driver.py get_ray_env/ray start cmds",
@@ -28,15 +35,15 @@ findings:
   - {id: PR-004, source: audit, severity: blocker,
      invariant: "Native staging failures cannot report success; no shell-string construction",
      primary_work_package: WP6, affected_regions: "resources/bcast.c",
-     acceptance_tests: [AC-DIST-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-DIST-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-005, source: audit, severity: blocker,
      invariant: "Model cache completeness is manifest-based and staging is transactional",
      primary_work_package: WP6, affected_regions: "model_staging.py",
-     acceptance_tests: [AC-DIST-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-DIST-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-006, source: audit, severity: high,
      invariant: "Config coercion is strict; unknown keys and invalid values are rejected",
      primary_work_package: WP1, affected_regions: "schemas.py manual coercion",
-     acceptance_tests: [AC-PLAN-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-PLAN-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-007, source: audit, severity: high,
      invariant: "Derived model identities (storage/route) are collision-checked",
      primary_work_package: WP1, affected_regions: "model_paths.py; schemas.py uniqueness",
@@ -44,27 +51,27 @@ findings:
   - {id: PR-008, source: audit, severity: blocker,
      invariant: "Readiness is fail-closed, deadline-bounded, and predicate-based",
      primary_work_package: WP5, affected_regions: "server.py GPU wait/proxy wait/FULLY READY",
-     acceptance_tests: [AC-RDY-01, AC-RDY-02], status: FIXED, owner: claude}
+     acceptance_tests: [AC-RDY-01, AC-RDY-02], status: IN_PROGRESS, owner: claude}
   - {id: PR-009, source: audit, severity: high,
      invariant: "Every essential child is supervised for the deployment lifetime",
      primary_work_package: WP4, affected_regions: "driver.py proxy/ray wait paths",
-     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-010, source: audit, severity: blocker,
      invariant: "Exposure model is explicit; admin surfaces are not open by default",
      primary_work_package: WP7, affected_regions: "server.py 0.0.0.0; haproxy stats admin; litellm master_key; sglang trust_remote_code",
-     acceptance_tests: [AC-PROXY-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-PROXY-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-011, source: audit, severity: high,
      invariant: "Request validation returns typed 4xx; model field honored or rejected",
      primary_work_package: WP7, affected_regions: "server.py handlers/_parse_sampling",
-     acceptance_tests: [AC-OBS-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-OBS-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-012, source: audit, severity: high,
      invariant: "Ports are owned (bind-to-zero/lease); advertised URLs are verified bound URLs",
      primary_work_package: WP7, affected_regions: "server.py get_open_port; submit.py serve_url",
-     acceptance_tests: [AC-PROXY-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-PROXY-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-013, source: audit, severity: high,
      invariant: "Submission is idempotent with durable job identity and atomic leases",
      primary_work_package: WP8, affected_regions: "eval/lib/run_executor.py submit-all",
-     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-014, source: audit, severity: high,
      invariant: "Scheduler observation failures fail closed and are distinguishable",
      primary_work_package: WP8, affected_regions: "eval+pkg scheduler count/status paths",
@@ -72,7 +79,7 @@ findings:
   - {id: PR-015, source: audit, severity: high,
      invariant: "Job scripts render with validated, quoted fields; no directive injection",
      primary_work_package: WP8, affected_regions: "both scheduler stacks' render paths",
-     acceptance_tests: [], status: FIXED, owner: claude}
+     acceptance_tests: [], status: IN_PROGRESS, owner: claude}
   - {id: PR-016, source: audit, severity: high,
      invariant: "Spec expressions are AST-restricted, never eval()",
      primary_work_package: WP9, affected_regions: "eval/lib/matrix.py:40",
@@ -80,17 +87,17 @@ findings:
   - {id: PR-017, source: audit, severity: high,
      invariant: "Trace identity covers every content-affecting input; writes atomic",
      primary_work_package: WP9, affected_regions: "trace_store identity; trace_generators write_trace",
-     acceptance_tests: [], status: FIXED, owner: claude,
+     acceptance_tests: [], status: IN_PROGRESS, owner: claude,
      evidence: "P00.1 added tokenizer_builder to identity; arrival-mode + content-hash + atomic write still owed"}
   - {id: PR-018, source: audit, severity: high,
      invariant: "Run-group IDs allocate atomically; structured writes are atomic",
      primary_work_package: WP2, affected_regions: "run_planner _next_run_group_id; utils dump_*",
-     acceptance_tests: [], status: FIXED, owner: claude,
+     acceptance_tests: [], status: IN_PROGRESS, owner: claude,
      evidence: "P01.1: _claim_run_group_dir mkdir-claim loop + atomic dump_*; tests/test_atomic_state.py; suite green"}
   - {id: PR-019, source: audit, severity: high,
      invariant: "Partial distributed results cannot be reported successful; numeric result ordering",
      primary_work_package: WP9, affected_regions: "replay_engine gather; run_executor _latest_result_path/validation",
-     acceptance_tests: [], status: FIXED, owner: claude}
+     acceptance_tests: [], status: IN_PROGRESS, owner: claude}
   - {id: PR-020, source: audit, severity: medium-high,
      invariant: "Every dispatch arm and the full resource plan validate before submission",
      primary_work_package: WP9, affected_regions: "spec_io validate; run_executor arm validation",
@@ -98,7 +105,7 @@ findings:
   - {id: PR-021, source: audit, severity: high,
      invariant: "One typed stats schema; missing required stats fail the run",
      primary_work_package: WP9, affected_regions: "server.py to_dict; engines/vllm collect_stats",
-     acceptance_tests: [AC-STAT-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-STAT-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-022, source: audit, severity: medium,
      invariant: "Every public engine setting reaches the backend (typed mapping test)",
      primary_work_package: WP3, affected_regions: "schemas/EngineSpec/vllm args",
@@ -118,19 +125,19 @@ findings:
   - {id: PR-026, source: audit, severity: high,
      invariant: "Private-API use is capability-checked behind one verified compatibility profile",
      primary_work_package: WP3, affected_regions: "_sitecustomize; overlay; server.py private imports; ray_start.py",
-     acceptance_tests: [AC-COMP-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-COMP-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-027, source: audit, severity: medium-high,
      invariant: "One scheduler abstraction; documented default is installed and consistent",
      primary_work_package: WP8, affected_regions: "schedulers/__init__ docstring vs psij; submit.py prose; pyproject deps",
-     acceptance_tests: [], status: FIXED, owner: claude}
+     acceptance_tests: [], status: IN_PROGRESS, owner: claude}
   - {id: PR-028, source: audit, severity: medium-high,
      invariant: "SIGTERM/SIGINT drain gracefully with bounded forced cleanup",
      primary_work_package: WP4, affected_regions: "server.py loop; driver cleanup",
-     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-029, source: audit, severity: medium,
      invariant: "Telemetry actors are deployment-scoped with cleanup and bounded load",
      primary_work_package: WP10, affected_regions: "scaling_trace.py; server.py collectors",
-     acceptance_tests: [AC-TEL-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-TEL-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-030, source: audit, severity: medium,
      invariant: "ClientLab applies schema defaults before analysis; no os.system SSH",
      primary_work_package: WP9, affected_regions: "clientlab diagnostics faults; collectors/netstats.py",
@@ -144,11 +151,11 @@ findings:
   - {id: PR-032, source: audit, severity: medium-high,
      invariant: "One ExaServe-owned operational metrics/ID-propagation contract",
      primary_work_package: WP10, affected_regions: "stats/tracing; EngineWorker request IDs",
-     acceptance_tests: [AC-OBS-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-OBS-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-033, source: audit, severity: high,
      invariant: "Published support envelope matches measured scale evidence",
      primary_work_package: WP5, affected_regions: "KNOWN_ISSUES A3/A4/B2; S00 scale decision",
-     acceptance_tests: [AC-SCALE-01], status: FIXED, owner: claude}
+     acceptance_tests: [AC-SCALE-01], status: IN_PROGRESS, owner: claude}
   - {id: PR-034, source: audit, severity: medium,
      invariant: "Snapshot provenance is explicit; dirty-tree runs need acknowledgement",
      primary_work_package: WP2, affected_regions: "run_planner snapshot/_warn_dirty_repo",
@@ -156,7 +163,7 @@ findings:
   - {id: PR-035, source: audit, severity: medium,
      invariant: "All structured result/metadata writes are atomic",
      primary_work_package: WP2, affected_regions: "eval/lib/utils dump_*; scaling_trace; clientlab utils",
-     acceptance_tests: [], status: FIXED, owner: claude,
+     acceptance_tests: [], status: IN_PROGRESS, owner: claude,
      evidence: "P01.1: eval dump_json/yaml atomic (exaserve.state.atomic). Owed: scaling_trace, clientlab writers, replay report writers"}
 
   # ---------------- Known Issues (doc/KNOWN_ISSUES.md, corrected 2026-08-05) ----------------
@@ -174,13 +181,13 @@ findings:
      status: OPEN, owner: claude, acceptance_tests: [AC-RDY-02]}
   - {id: KI-A5, source: known_issues, severity: medium, primary_work_package: WP3,
      invariant: "RAYON/tokenizer guards are profile capabilities, not ambient shell defaults",
-     status: FIXED, owner: claude, acceptance_tests: [AC-COMP-01]}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-COMP-01]}
   - {id: KI-A6, source: known_issues, severity: medium, primary_work_package: WP10,
      invariant: "Scaling-trace collectors bounded/owned (superseded-A6 debt)",
      status: OPEN, owner: claude, acceptance_tests: [AC-TEL-01]}
   - {id: KI-A7, source: known_issues, severity: medium, primary_work_package: WP6,
      invariant: "MPI source staging revalidated at 128/256n (resolved-in-code)",
-     status: FIXED, owner: claude, acceptance_tests: [AC-DIST-01],
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-DIST-01],
      evidence: "distribute_to_nodes.sh replaces SSH fan-out; scale evidence owed"}
   - {id: KI-B1, source: known_issues, severity: info, primary_work_package: WP7,
      invariant: "Corrected 27.1k non-stream HAProxy result preserved as regression evidence",
@@ -202,7 +209,7 @@ findings:
      status: OPEN, owner: claude}
   - {id: KI-C4, source: known_issues, severity: medium, primary_work_package: WP6,
      invariant: "Shard-based gather retained; silent partials become failures (with PR-019)",
-     status: OPEN, owner: claude}
+     status: IN_PROGRESS, owner: claude}
   - {id: KI-C5, source: known_issues, severity: medium, primary_work_package: WP9,
      invariant: "client.num_nodes topology explicit in plans; footgun rejected by validation",
      status: OPEN, owner: claude, acceptance_tests: [AC-PLAN-01]}
@@ -211,10 +218,10 @@ findings:
      status: OPEN, owner: claude}
   - {id: KI-D1, source: known_issues, severity: blocker, primary_work_package: WP5,
      invariant: "Readiness false-positive class eliminated (with PR-008)",
-     status: FIXED, owner: claude, acceptance_tests: [AC-RDY-01]}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-RDY-01]}
   - {id: KI-D2, source: known_issues, severity: medium, primary_work_package: WP13,
      invariant: "MPI distribution path revalidated at scale; receipts prove per-rank activation",
-     status: FIXED, owner: claude, acceptance_tests: [AC-DIST-01]}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-DIST-01]}
   - {id: KI-D3, source: known_issues, severity: low, primary_work_package: WP3,
      invariant: "Legacy proxy-profiling hook absent or unreachable (docs say disabled; verify)",
      status: FIXED, owner: claude, acceptance_tests: [AC-INST-01]}
@@ -271,19 +278,35 @@ findings:
      revisit_condition: "paper direction requires it"}
 
   # ---------------- Baseline test failures (detail in BASELINE.md) ----------------
-  - {id: F-01..F-06, source: baseline, primary_work_package: WP0, status: FIXED, owner: claude,
+  - {id: F-01..F-06, source: baseline, severity: medium,
+     invariant: \"unit tests are hermetic (no live HF across forkserver workers)\",
+     primary_work_package: WP0, status: FIXED, owner: claude,
      evidence: "P00.1 tokenizer_builder seam + offline guard; suite 32/4 at 2026-08-05"}
-  - {id: F-07, source: baseline, primary_work_package: WP0, status: FIXED, owner: claude,
+  - {id: F-07, source: baseline, severity: medium,
+     invariant: \"child processes inherit the source-layout contract\",
+     primary_work_package: WP0, status: FIXED, owner: claude,
      evidence: "P00.1 child PYTHONPATH contract"}
-  - {id: F-08, source: baseline, primary_work_package: WP9, status: FIXED, owner: claude,
+  - {id: F-08, source: baseline, severity: medium,
+     invariant: \"ClientLab analysis applies schema defaults\",
+     primary_work_package: WP9, status: FIXED, owner: claude,
      evidence: "P02.2 with PR-030 (defect fixed, not the test)"}
-  - {id: F-09, source: baseline, primary_work_package: WP7, status: FIXED, owner: claude,
+  - {id: F-09, source: baseline, severity: medium,
+     invariant: \"HAProxy health-check tests match the intended /-/healthz design\",
+     primary_work_package: WP7, status: FIXED, owner: claude,
      evidence: "P02.2: test updated to adjudicated /-/healthz design + asserts absence of old pattern"}
-  - {id: F-10, source: baseline, primary_work_package: WP7, status: FIXED, owner: claude,
+  - {id: F-10, source: baseline, severity: medium,
+     invariant: \"HAProxy multi-model health-check tests match the intended design\",
+     primary_work_package: WP7, status: FIXED, owner: claude,
      evidence: "same as F-09"}
-  - {id: F-11, source: baseline, primary_work_package: WP8, status: FIXED, owner: claude,
+  - {id: F-11, source: baseline, severity: medium,
+     invariant: \"submit tests pin both the PSI/J default and the PBS renderer\",
+     primary_work_package: WP8, status: FIXED, owner: claude,
      evidence: "P02.2: PBS tested explicitly; NEW test pins PSI/J default artifact"}
-  - {id: F-12, source: baseline, primary_work_package: WP0, status: FIXED, owner: claude,
+  - {id: F-12, source: baseline, severity: medium,
+     invariant: \"no test depends on an undeclared host executable\",
+     primary_work_package: WP0, status: FIXED, owner: claude,
      evidence: "in-process scan; passes with PATH=/usr/bin:/bin (AC-TST-01)"}
-  - {id: F-COLLECT, source: baseline, primary_work_package: WP0, status: FIXED, owner: claude,
+  - {id: F-COLLECT, source: baseline, severity: medium,
+     invariant: \"every test subtree is independently collectible\",
+     primary_work_package: WP0, status: FIXED, owner: claude,
      evidence: "root conftest contract; all three subtrees collect standalone"}
