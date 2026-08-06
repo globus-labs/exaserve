@@ -683,6 +683,9 @@ def init_ray_cluster(
 # ═══════════════════════════════════════════════════════════════════════════
 app = FastAPI()
 
+# PR-032: one correlation-id contract for every handler.
+from .observability import correlation_id as _correlation_id  # noqa: E402
+
 
 class CollectingStatLogger:
     """Buffers vLLM scheduler and per-request stats for post-run collection.
@@ -1118,6 +1121,20 @@ class EngineWorker:
     async def health_check(self):
         return JSONResponse({"status": "healthy", "model": self.model_id})
 
+    @app.get("/metrics")
+    async def metrics(self):
+        """PR-032/TD-METRICS: the ExaServe-owned operational surface.
+
+        Ray's dashboard is disabled on this stack and stdout is not a contract,
+        so this is how an operator asks a live replica how it is doing.
+        """
+        from fastapi.responses import PlainTextResponse
+
+        from .observability import render_metrics
+
+        return PlainTextResponse(render_metrics(),
+                                 media_type="text/plain; version=0.0.4")
+
     @app.get("/stats")
     async def stats(self):
         pid = os.getpid()
@@ -1181,7 +1198,7 @@ class EngineWorker:
         # PR-032: preserve a caller-supplied correlation id (linked to, not
         # conflated with, our completion id) so a request can be traced
         # gateway -> Serve -> engine.
-        sampling["_correlation_id"] = request.headers.get("x-request-id") or request_id
+        sampling["_correlation_id"] = _correlation_id(request.headers, request_id)
         if stream:
             return StreamingResponse(
                 self._chat_stream(request_id, prompt, sampling),
@@ -1206,9 +1223,10 @@ class EngineWorker:
         if not isinstance(prompt, (str, list)):
             return JSONResponse({"error": "prompt must be a string or list"},
                                 status_code=400)
+        _t_start = time.monotonic()
         request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
         sampling["_request_id"] = request_id
-        sampling["_correlation_id"] = request.headers.get("x-request-id") or request_id  # PR-032
+        sampling["_correlation_id"] = _correlation_id(request.headers, request_id)  # PR-032
         if stream:
             return StreamingResponse(
                 self._completion_stream(request_id, prompt, sampling),
