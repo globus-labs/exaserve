@@ -21,14 +21,15 @@ wrong):
 
 | Status | All records (82) | Audit findings (35) |
 |---|---|---|
-| FIXED | 29 | 14 |
-| IN_PROGRESS | 29 | 21 |
+| FIXED | 30 | 15 |
+| IN_PROGRESS | 28 | 20 |
 | OPEN | 22 | 0 |
 | OUT_OF_PRODUCTION_SCOPE | 2 | 0 |
 
 (Counts are YAML-parsed from `FINDINGS.yaml`, not regex-counted. Pass 3 moved
 **PR-008 to FIXED** on the on-hardware evidence below, and pass 4 moved
-**PR-009 to FIXED** (per-rank ownership). **KI-D1 stays
+**PR-009 to FIXED** (per-rank ownership) and **PR-001 to FIXED** (two
+independent nonzero-producing failure signals). **KI-D1 stays
 IN_PROGRESS**: the mechanism is closed and validated at 2 and 16 nodes, but the
 original false-ready symptom was observed at **256n** and has not been re-run
 there — the ledger and `KNOWN_ISSUES.md` agree on that wording deliberately.)
@@ -150,19 +151,28 @@ gate_ready / marker_never_precedes_gate / receipts / canary / tree_reaped /
 engine_self_attested **all PASS**; supervisor exits 143 with the tree reaped
 (17 named processes → 0). Suite: **219 passed / 0 failed**.
 
+### Closed in this pass
+
+- **`server.py` is a callable entry point.** The `__main__` block became
+  `main()`, which also fixed a latent scope bug: as a block, `for app in
+  built_apps:` silently rebound the module-level FastAPI `app` at import time.
+- **The control channel's second failure signal is wired.** The head binds an
+  ephemeral port before rank launch and hands ranks the address and secret;
+  ranks register and report their own lifecycle. A fatal rank observation ends
+  the run immediately rather than waiting for the launch to unwind, and a lost
+  lease counts as that rank's failure. Verified across nodes on Aurora
+  (`Rank 0`/`Rank 1 registered on the control channel`, rank 1 remote over HSN).
+
 ### What still remains (honest scope)
 
-- **`server.py` is still a `__main__` block.** `DeploymentManager` drives the
-  lifecycle, but the deployment code is not yet a callable entry point, so it
-  cannot be driven in-process by anything else. That restructuring is the
-  remaining half of WP4.1.
-- **Control-channel rank observations are not yet consumed by the head.**
-  `NodeSupervisor` emits typed observations and `RankLauncher` has the hook
-  (`rank_result_check`), but the head still learns of rank failure through
-  launcher exit aggregation alone. Wiring the §3.2 listener in replaces one
-  callable without touching the ownership structure.
 - **Scale evidence.** The gate is validated at 2 and 16 nodes; KI-D1's original
-  256n symptom has not been re-run at that scale.
+  256n symptom has not been re-run at that scale (held at the user's request).
+- **`cli.server()` still re-execs** rather than calling `main()` in-process:
+  compatibility patches must be applied before Ray/vLLM import and the calling
+  interpreter may already have imported them. This is the WP4.6 fallback,
+  taken knowingly rather than by omission.
+- **Command dispatch over the channel** (head → rank commands, snapshots on
+  reconnect) is not implemented; ranks currently publish and the head consumes.
 - Legacy switches (`EXASERVE_READINESS_GATE=0`, `EXASERVE_USE_SUPERVISOR=0`,
   `EXASERVE_PYTHON_RANK_LAUNCH=0`, `EXASERVE_ALLOW_DEGRADED_READINESS=1`) are
   present by design and are removed at the WP13 cutover.

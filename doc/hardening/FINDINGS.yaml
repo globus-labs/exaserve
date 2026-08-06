@@ -22,8 +22,15 @@ findings:
   # ---------------- Audit findings ----------------
   - {id: PR-001, source: audit, severity: blocker,
      invariant: "Fatal child/driver errors produce nonzero scheduler-visible exit",
-     primary_work_package: WP4, affected_regions: "driver.py wait/except paths",
-     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
+     primary_work_package: WP4, affected_regions: "supervisor_main.py; control/{supervisor,rank_launcher,channel_runtime}.py; driver.py",
+     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude,
+     evidence: "Two INDEPENDENT signals per WP4.4, both nonzero-producing: launcher exit
+       aggregation (unit test drives a failing launch to rc=7 through the head), and the
+       authenticated control channel, where a fatal rank observation ends the run without
+       waiting for the launch to unwind and a lost lease counts as that rank's failure.
+       A zero launcher exit is refused while any rank failure stands. 2-node Aurora run
+       2026-08-06: both ranks registered on the channel (rank 1 remote over HSN);
+       supervisor exit 143 on SIGTERM with the tree reaped (17 named processes to 0)."}
   - {id: PR-002, source: audit, severity: blocker,
      invariant: "Ray resources and vendor env derive from validated config, never hardcoded",
      primary_work_package: WP3, affected_regions: "driver.py get_ray_env/ray start cmds",
