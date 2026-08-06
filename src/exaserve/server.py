@@ -2137,6 +2137,17 @@ if __name__ == "__main__":
     except Exception as _diag_e:
         print(f"[ExaServe] DIAG constants import failed: {_diag_e}", flush=True)
 
+    # WP4.1: the deployment lifecycle is an addressable object with typed
+    # operations and a state machine, not a straight line through main(). The
+    # manager owns prepare -> deploy -> validate -> drain -> stop; the
+    # operations themselves are the existing, validated internals.
+    from .control.deployment import DeploymentManager as _DeploymentManager
+
+    _deploy_manager = _DeploymentManager(
+        deployment_id=_deployment_scope(),
+        generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0))
+    _deploy_manager.prepare()          # staging completed above this point
+
     if planner_enabled:
         with tracer.phase("build_node_inventory"):
             planner_nodes = build_node_inventory()
@@ -2409,6 +2420,7 @@ if __name__ == "__main__":
         with tracer.phase("deploy_multi_model"):
             deploy_multi_model(config, model_path_map, total_gpus)
 
+    _deploy_manager.deploy()
     tracer.record_phase("stage3.total", time.monotonic() - stage3_start)
     print_red(
         f"[ExaServe] ✓ Model Deploy completed in {time.monotonic() - stage3_start:.2f}s"
@@ -2458,7 +2470,7 @@ if __name__ == "__main__":
         from .control import serve_readiness as _readiness
 
         _base_url = f"http://{get_ray_node_ip() or 'localhost'}:8000"
-        _readiness_snapshot = _readiness.enforce_readiness(
+        _deploy_manager._validate_fn = lambda: _readiness.enforce_readiness(
             deployment_id=_deployment_scope(),
             generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
             plan_hash=str(getattr(tracer, "config_hash", "") or "plan"),
@@ -2466,7 +2478,12 @@ if __name__ == "__main__":
             snapshot_dir=os.path.dirname(trace_path) if trace_path else "",
             timeout_s=float(os.environ.get("EXASERVE_READINESS_TIMEOUT_S", "900")),
         )
-        tracer.set_metadata(readiness=_readiness_snapshot.to_dict())
+        _readiness_snapshot = _deploy_manager.validate()
+        tracer.set_metadata(readiness=_readiness_snapshot.to_dict(),
+                            deployment=_deploy_manager.to_dict())
+        print(f"[Deployment] state={_deploy_manager.state} "
+              f"(deployment {_deploy_manager.deployment_id} "
+              f"gen {_deploy_manager.generation})", flush=True)
 
     print_red(
         f"[ExaServe] ✓✓✓ CLUSTER FULLY READY ✓✓✓ Total time: {total_time:.2f}s"
@@ -2504,8 +2521,13 @@ if __name__ == "__main__":
 
     _killer = threading.Thread(target=_forced_exit, daemon=True)
     _killer.start()
+    _deploy_manager._drain_fn = lambda _s: serve.shutdown()
     try:
-        serve.shutdown()
+        _deploy_manager.drain(deadline_s=30.0)
         print("[ExaServe] Ray Serve shut down cleanly.", flush=True)
     except Exception as exc:
         print(f"[ExaServe] Serve shutdown error (continuing): {exc}", flush=True)
+    finally:
+        _deploy_manager.stop()
+        print(f"[Deployment] terminal state={_deploy_manager.state} "
+              f"first_cause={_deploy_manager.first_cause}", flush=True)

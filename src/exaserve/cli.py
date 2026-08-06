@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import os
 import sys
-from importlib import resources
 
 
 def launch_cluster() -> None:
