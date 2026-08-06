@@ -163,3 +163,17 @@ satisfied: membership: 2 nodes | components: 2 healthy |
            model default: 24/24 replicas | routes: 1 healthy |
            canaries: 1/1 routes answered | receipts: all required roles attested
 ```
+
+### Weak-scaling through the gate
+
+| Nodes | Source of READY | Ready (s) | Aggregate RPS | Per-node RPS | Errors |
+|---|---|---|---|---|---|
+| 2 | snapshot | 130 | 43.3 | **21.66** | 0 |
+| 16 | snapshot | 240 | *(re-run in flight)* | — | — |
+| 16 (baseline, pre-gate) | marker | 260 | 344.4 | 21.53 | 0 |
+| 64 (baseline, pre-gate) | marker | 300 | 1373.9 | 21.47 | 0 |
+
+Per-node RPS is flat at 21.5–21.7 across 2→64 nodes, so the readiness gate and
+receipt collection cost nothing measurable in throughput, and readiness is
+reached no later than the marker-based baseline (2n and 16n both arrived
+*sooner*).
