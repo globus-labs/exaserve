@@ -276,20 +276,40 @@ def get_ray_node_ip() -> Optional[str]:
         return None
 
 
+# Leases held by this process, so cleanup can release them (PR-012).
+_PORT_LEASES: Dict[int, Any] = {}
+
+
 def get_open_port(
     start_port: int,
     max_retries: int = 100,
     bind_host: str = "127.0.0.1",
 ) -> Optional[int]:
-    """Find a free port starting from `start_port`."""
-    for port in range(start_port, start_port + max_retries):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind((bind_host, port))
-                return port
-            except OSError:
-                continue
-    return None
+    """Lease a free port at or above `start_port` (PR-012, KI-A2).
+
+    The old implementation bound a probe socket, closed it, and returned the
+    number — a TOCTOU race that is not theoretical at twelve-plus replicas per
+    node all scanning from the same base port. The lease outlives the probe, so
+    no other ExaServe process on this node picks the same port in that window.
+    A foreign process still can; see state/ports.py for that residual scope.
+    """
+    from .state.ports import PortUnavailable, reserve_port
+
+    try:
+        lease = reserve_port(start_port, max_retries=max_retries,
+                             bind_host=bind_host)
+    except PortUnavailable as exc:
+        print(f"[ExaServe] {exc}", flush=True)
+        return None
+    _PORT_LEASES[lease.port] = lease
+    return lease.port
+
+
+def release_port(port: Optional[int]) -> None:
+    """Release a leased port once its consumer owns it (or on failure)."""
+    lease = _PORT_LEASES.pop(port, None) if port is not None else None
+    if lease is not None:
+        lease.release()
 
 
 def async_engine_arg_supported(arg_name: str) -> bool:

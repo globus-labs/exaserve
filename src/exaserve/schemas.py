@@ -108,8 +108,75 @@ def _strict_bool(value: Any, field: str) -> bool:
     raise ValueError(f"{field} must be a boolean, got {value!r}")
 
 
+
+def _reject_unknown_keys(data: Dict[str, Any], allowed: set, what: str) -> None:
+    """PR-006: an unrecognized key is a typo, not an extension point.
+
+    Silently ignoring `num_node: 64` (singular) left the deployment at the
+    default of 1 with no diagnostic. Every accepted key is declared, so the
+    config either means what it says or fails to load.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{what} must be a mapping, got {type(data).__name__}")
+    unknown = sorted(k for k in data if k not in allowed)
+    if unknown:
+        raise ValueError(
+            f"unknown key(s) in {what}: {unknown}. "
+            f"Accepted keys: {sorted(allowed)}")
+
+
+_MODEL_CONFIG_KEYS = {
+    "model_id", "tensor_parallel_size", "pipeline_parallel_size", "max_model_len",
+    "size", "gpu_memory_utilization", "enforce_eager", "enable_log_requests",
+    "max_num_seqs", "num_replicas", "num_cpus_per_replica",
+}
+
+_DEPLOYMENT_CONFIG_KEYS = {
+    "num_nodes", "model_configs", "model_storage_path", "local_stage_path",
+    "deployment_name", "replica_max_ongoing_requests", "num_gpus_per_node",
+    "collect_stats",
+}
+
+
+def _strict_int(value: Any, field: str, default: int | None = None) -> Any:
+    """Coerce to int, but reject values that would silently change meaning.
+
+    ``int("8.9")`` raises, but ``int(8.9)`` returns 8 — so a float in YAML
+    quietly truncates. A bool is an int in Python, so ``enforce_eager: true``
+    landing in an int field would read as 1.
+    """
+    if value is None:
+        if default is None:
+            raise ValueError(f"{field} is required")
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer, got boolean {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{field} must be an integer, got {value!r}")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be an integer, got {value!r}") from None
+
+
+def _strict_float(value: Any, field: str, default: float | None = None) -> Any:
+    if value is None:
+        if default is None:
+            raise ValueError(f"{field} is required")
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a number, got boolean {value!r}")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be a number, got {value!r}") from None
+
+
 def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
     """Build ModelConfig from a dict (e.g. YAML-loaded)."""
+    _reject_unknown_keys(d, _MODEL_CONFIG_KEYS, "model_configs entry")
+    if "model_id" not in d:
+        raise ValueError("model_configs entry is missing required key 'model_id'")
     raw_replicas = d.get("num_replicas")
     if raw_replicas is None:
         num_replicas = None
@@ -125,35 +192,40 @@ def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
             ) from None
     return ModelConfig(
         model_id=d["model_id"],
-        tensor_parallel_size=int(d.get("tensor_parallel_size", 1)),
-        pipeline_parallel_size=int(d.get("pipeline_parallel_size", 1)),
-        max_model_len=int(d.get("max_model_len", 4096)),
-        size=int(d.get("size", 8)),
-        gpu_memory_utilization=float(d.get("gpu_memory_utilization", 0.90)),
+        tensor_parallel_size=_strict_int(d.get("tensor_parallel_size"), "tensor_parallel_size", 1),
+        pipeline_parallel_size=_strict_int(d.get("pipeline_parallel_size"), "pipeline_parallel_size", 1),
+        max_model_len=_strict_int(d.get("max_model_len"), "max_model_len", 4096),
+        size=_strict_int(d.get("size"), "size", 8),
+        gpu_memory_utilization=_strict_float(
+            d.get("gpu_memory_utilization"), "gpu_memory_utilization", 0.90),
         enforce_eager=_strict_bool(d.get("enforce_eager", True), "enforce_eager"),
         enable_log_requests=_strict_bool(
             d.get("enable_log_requests", True), "enable_log_requests"),
-        max_num_seqs=int(d["max_num_seqs"]) if d.get("max_num_seqs") is not None else None,
+        max_num_seqs=(_strict_int(d["max_num_seqs"], "max_num_seqs")
+                      if d.get("max_num_seqs") is not None else None),
         num_replicas=num_replicas,
-        num_cpus_per_replica=int(d.get("num_cpus_per_replica", 4)),
+        num_cpus_per_replica=_strict_int(
+            d.get("num_cpus_per_replica"), "num_cpus_per_replica", 4),
     )
 
 
 def _deployment_config_from_dict(d: Dict[str, Any]) -> DeploymentConfig:
     """Build DeploymentConfig from a dict (e.g. YAML-loaded)."""
+    _reject_unknown_keys(d, _DEPLOYMENT_CONFIG_KEYS, "model_deployment_config")
     model_configs = [
         _model_config_from_dict(m) if isinstance(m, dict) else m
         for m in d.get("model_configs", [])
     ]
     return DeploymentConfig(
-        num_nodes=int(d.get("num_nodes", 1)),
+        num_nodes=_strict_int(d.get("num_nodes"), "num_nodes", 1),
         model_configs=model_configs,
         model_storage_path=str(d.get("model_storage_path", "")),
         local_stage_path=str(d.get("local_stage_path", "")),
         deployment_name=str(d.get("deployment_name", "exaserve_serve")),
-        replica_max_ongoing_requests=int(d.get("replica_max_ongoing_requests", 32)),
-        num_gpus_per_node=int(d.get("num_gpus_per_node", 12)),
-        collect_stats=bool(d.get("collect_stats", False)),
+        replica_max_ongoing_requests=_strict_int(
+            d.get("replica_max_ongoing_requests"), "replica_max_ongoing_requests", 32),
+        num_gpus_per_node=_strict_int(d.get("num_gpus_per_node"), "num_gpus_per_node", 12),
+        collect_stats=_strict_bool(d.get("collect_stats", False), "collect_stats"),
     )
 
 

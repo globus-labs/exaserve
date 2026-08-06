@@ -24,6 +24,8 @@ patterns=(
   /tmp/ray/session_*      # Ray session scratch (Ray usually clears on stop)
   /tmp/replay_rank*       # replay client per-run Go JSONL scratch (mkdtemp, never self-removed)
   /tmp/exaserve_pp_shim     # PP sitecustomize shim dir written by VLLMWorker.__init__
+  /tmp/exaserve_ports       # port leases (PR-012); a finished job owns none
+  /tmp/exaserve_engine_receipts_*  # per-generation engine receipts (EN-01)
 )
 patterns+=("$@")
 

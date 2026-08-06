@@ -28,6 +28,8 @@ class VLLMEngine(EngineBackend):
 
     # ---- lifecycle -----------------------------------------------------------
 
+    _leased_port = None
+
     def create(self, spec: EngineSpec) -> None:
         from ..server import (
             async_engine_arg_supported,
@@ -109,9 +111,12 @@ class VLLMEngine(EngineBackend):
             bind_host = "0.0.0.0"
             os.environ["VLLM_HOST_IP"] = master_addr
 
+        # PR-012/KI-A2: the port stays LEASED until the engine has bound it,
+        # so a sibling replica starting in the same instant cannot pick it.
         port = get_open_port(23000 + device_id * 100, bind_host=bind_host)
         if port is None:
             raise RuntimeError(f"No free port for distributed init (device {device_id})")
+        self._leased_port = port
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(port)
         dist_setup_s = time.monotonic() - t0
@@ -156,7 +161,16 @@ class VLLMEngine(EngineBackend):
         extra_engine_kwargs: Dict[str, Any] = {}
         if self._collect_stats:
             extra_engine_kwargs["stat_loggers"] = [CollectingStatLogger]
-        self.engine = AsyncLLMEngine.from_engine_args(engine_args, **extra_engine_kwargs)
+        try:
+            self.engine = AsyncLLMEngine.from_engine_args(engine_args, **extra_engine_kwargs)
+        finally:
+            # The engine has bound (or failed to bind) MASTER_PORT by now, so
+            # the lease has done its job. Releasing on the failure path too
+            # keeps a crashed replica from permanently reserving a port.
+            from ..server import release_port
+
+            release_port(self._leased_port)
+            self._leased_port = None
         engine_create_s = time.monotonic() - engine_start
         print_red(f"[VLLMEngine pid={pid}] Engine creation: {engine_create_s:.2f}s")
 
