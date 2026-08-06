@@ -1,5 +1,29 @@
 # ExaServe Production-Hardening — Status
 
+> **2026-08-06 — CLAIM WITHDRAWN.**
+> `doc/PRODUCTION_HARDENING_COMPLETION_CLAIM_AUDIT_2026-08-06.md` audited the
+> "67 FIXED / only 256-node work remains" claim and rejected it: **0 of 18
+> canonical finding groups are closed**, and 0 of 12 release-definition clauses
+> are demonstrated end-to-end. That audit is correct and this file's earlier
+> accounting was wrong.
+>
+> The central error was mine and it is worth naming precisely: I built
+> primitives, unit-tested them, and recorded them as closed **without checking
+> that the production path used them**. The decisive example is one line of my
+> own code — `supervisor_main.py` launched `python -m exaserve.driver`, so
+> `NodeSupervisor` had no production consumer at all. Several tests encoded the
+> weaker behaviour and so passed, which is worse than no test.
+>
+> 38 records have been reopened as IN_PROGRESS. Their prior evidence is
+> retained for reference, not as closure.
+>
+> **Fixed since the audit:** the rank entry point (§4.1.1) — `exaserve.rank_main`
+> now runs `NodeSupervisor` on every rank, which creates the children it owns
+> and treats an unexpected exit as fatal regardless of status.
+>
+> Everything else in that audit is open work and is not claimed.
+
+
 **Updated:** 2026-08-06, after the implementation audit
 (`doc/PRODUCTION_HARDENING_IMPLEMENTATION_AUDIT.md`) of commit `e73f3eb`.
 Companion to `MIGRATION_LOG.md` (chronological) and `FINDINGS.yaml`
