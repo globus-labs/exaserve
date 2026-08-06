@@ -134,8 +134,22 @@ class NGINXProxy(ProxyBackend):
                 lines.append(f"            proxy_pass http://{up_name};")
                 lines.append("        }")
             lines.append("        location / { return 404 \"missing or unknown model route prefix\\n\"; }")
-        # /nginx-status is a tiny status endpoint usable as a TCP/HTTP health probe.
-        lines.append("        location = /nginx-status { stub_status; allow all; }")
+        # PR-010: /nginx-status exposes connection and request counters. It is
+        # useful as a health probe, but `allow all` published it to anything
+        # that could reach the proxy. Loopback by default; widening it is an
+        # explicit, per-deployment opt-in that must name the allowed sources.
+        status_allow = options.get("status_allow_from", ["127.0.0.1"])
+        if isinstance(status_allow, str):
+            status_allow = [status_allow]
+        if not isinstance(status_allow, (list, tuple)) or not status_allow:
+            raise ValueError(
+                "proxy.options.status_allow_from must be a non-empty list of "
+                "CIDRs/addresses (or the string 'all' to publish it)")
+        allow_rules = " ".join(
+            "allow all;" if str(a).strip().lower() == "all" else f"allow {a};"
+            for a in status_allow)
+        lines.append(
+            f"        location = /nginx-status {{ stub_status; {allow_rules} deny all; }}")
         lines.append("    }")
         lines.append("}")
 

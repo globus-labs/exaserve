@@ -361,6 +361,20 @@ def enforce_readiness(*, deployment_id: str, generation: int, plan_hash: str,
     expected_replicas = {name: max(int(i["target"]), 1) for name, i in apps.items()}
     routes = tuple(apps)
 
+    # PR-026: verify the declared private-API surface once, by capability
+    # name, so drift is reported here rather than as an ImportError inside a
+    # later deploy. Already past staging at this point, but still before the
+    # gate declares anything ready.
+    from ..compat.private_api import PrivateApiUnavailable, verify as _verify_private
+
+    try:
+        _private = _verify_private(strict=True)
+        _missing = sorted(k for k, ok in _private.items() if not ok)
+        if _missing:
+            log(f"[Readiness] optional private capabilities unavailable: {_missing}")
+    except PrivateApiUnavailable as exc:
+        raise RuntimeError(f"[Readiness] {exc}") from exc
+
     store, roles = _build_receipt_store(deployment_id, generation, log)
     # Probe every route when there are few; sample deterministically when a
     # shard-aware deployment exposes hundreds. The sample is RECORDED, so the
@@ -419,6 +433,7 @@ def enforce_readiness(*, deployment_id: str, generation: int, plan_hash: str,
         "externally_attested_roles": store.externally_attested_roles(),
         "expected_replicas": expected_replicas,
         "degraded_discovery": any(a.get("degraded_source") for a in apps.values()),
+        "private_api": _private,
     })
     if path:
         log(f"[Readiness] snapshot -> {path}")
