@@ -38,6 +38,14 @@ fi
 export EXASERVE_SCHEDULER="${EXASERVE_SCHEDULER:-pbs}"
 export EXASERVE_NODEFILE EXASERVE_JOBID
 
+# Generation + deployment identity for the whole allocation. Every artifact
+# that must not outlive its run (staged source, receipts, readiness snapshots,
+# telemetry actors) is keyed by these, so a re-launch inside the SAME job can
+# never be satisfied by a previous generation's leftovers.
+EXASERVE_GENERATION="${EXASERVE_GENERATION:-$(date +%s)}"
+export EXASERVE_GENERATION
+export EXASERVE_DEPLOYMENT_ID="${EXASERVE_DEPLOYMENT_ID:-${EXASERVE_JOBID:-local}}"
+
 # Get the absolute paths for the installed package and the working tree.
 # In a source checkout, SCRIPT_DIR is <repo>/src/exaserve/resources.
 # In an installed wheel, SCRIPT_DIR is <site-packages>/exaserve/resources.

@@ -261,6 +261,7 @@ class RayBackendAdapter(BackendAdapter):
             process=process,
             log_path=os.path.join(run_plan.bundle.logs_dir, "backend", "service.log"),
             ready_marker=self.ready_marker,
+            readiness_dir=env["EXASERVE_RUN_LOG_ROOT"],
         ).start()
         return LaunchedBackend(
             monitor=monitor,

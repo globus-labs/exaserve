@@ -60,6 +60,15 @@ if [ "$INSTRUMENTATION" = "1" ] && [ ! -d "$OVERLAY_SRC/serve/_private" ]; then
     exit 1
 fi
 
+# IMP-H02: stage into a GENERATION-ISOLATED directory. A stable shared path
+# lets a new run import files left behind by an older source tree (deleted
+# modules stay importable). The generation id comes from the run-log stamp /
+# job id; `exaserve_src` remains as a symlink so existing PYTHONPATH entries
+# and docs keep working, but it always points at THIS run's tree.
+EXASERVE_GENERATION="${EXASERVE_GENERATION:-${EXASERVE_JOBID:-$$}}"
+EXASERVE_GENERATION="${EXASERVE_GENERATION%%.*}"
+EXASERVE_GENERATION="$(printf '%s' "$EXASERVE_GENERATION" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-32)"
+LOCAL_SRC_GEN="/tmp/exaserve_src.${EXASERVE_GENERATION}"
 LOCAL_SRC="/tmp/exaserve_src"
 LOCAL_OVERLAY="/tmp/exaserve_overlay"
 NODE_COUNT="$(wc -l < "$UNIQUE_NODES_FILE")"
@@ -103,9 +112,23 @@ else
     find "$TMP_CLEAN" -name '*.pyc' -type f -delete
 fi
 
-echo "[distribute_to_nodes] bcast source ($(du -sh "$TMP_CLEAN" | awk '{print $1}')) to $NODE_COUNT node(s) -> $LOCAL_SRC"
+echo "[distribute_to_nodes] bcast source ($(du -sh "$TMP_CLEAN" | awk '{print $1}')) to $NODE_COUNT node(s) -> $LOCAL_SRC_GEN (gen $EXASERVE_GENERATION)"
 ${EXASERVE_MPILAUNCH} \
-    "$BCAST_BIN" "$TMP_CLEAN/exaserve" "$LOCAL_SRC"
+    "$BCAST_BIN" "$TMP_CLEAN/exaserve" "$LOCAL_SRC_GEN"
+# Publish the stable name atomically on every rank. `ln -sfn` + `mv -T` is a
+# rename(2), so a reader sees either the old tree or the new one, never a mix.
+# A pre-existing REAL directory at the stable path is a leftover from before
+# generation isolation; rename cannot replace a directory with a symlink, so
+# retire it first. Older generations are collected here too — /tmp is node
+# tmpfs and a long-lived allocation would otherwise accumulate source trees.
+${EXASERVE_MPILAUNCH} bash -c "
+    set -e
+    if [ -d '$LOCAL_SRC' ] && [ ! -L '$LOCAL_SRC' ]; then rm -rf '$LOCAL_SRC'; fi
+    ln -sfn '$LOCAL_SRC_GEN' '${LOCAL_SRC}.new.\$\$'
+    mv -Tf '${LOCAL_SRC}.new.\$\$' '$LOCAL_SRC'
+    find /tmp -maxdepth 1 -name 'exaserve_src.*' -type d -mmin +360 \
+        -exec rm -rf {} + 2>/dev/null || true
+    exit 0"
 
 # --- Optional: node-local engine venv (sglang) ---
 # PYTHON_EXEC may point at a venv on shared $HOME (gecko), and Triton lives in

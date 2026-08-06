@@ -603,14 +603,29 @@ def _submit_all_locked(
                 next_round.append(run_plan)
                 continue
 
+            # IMP-B09 residue: close the submit-then-persist crash window.
+            # Write a SUBMITTING intent BEFORE calling the scheduler, so a
+            # crash between submit() and the success write still leaves
+            # evidence that this run may already own a scheduler job. A later
+            # invocation must reconcile rather than blindly resubmit.
+            from .run_planner import write_run_state
+
+            try:
+                write_run_state(run_plan, "submitting",
+                                submit_attempt=attempts.get(run_plan.run_id, 0) + 1)
+            except Exception as exc:
+                # If we cannot even record intent, do NOT submit — an
+                # unrecorded submission is exactly the duplicate-job hazard.
+                failed[run_plan.run_id] = f"could not record submit intent: {exc}"
+                print(f"  [{len(submitted)}/{total}] FAILED    "
+                      f"{run_plan.run_id}: cannot persist submit intent: {exc}",
+                      flush=True)
+                continue
+
             ok, msg = scheduler.submit(run_plan.bundle.job_path)
             if ok:
-                # PR-013: record the scheduler job identity durably BEFORE
-                # counting the submission, so a crash after qsub does not lose
-                # the job id and a re-invocation sees this run as submitted.
+                # PR-013: record the scheduler job identity durably.
                 try:
-                    from .run_planner import write_run_state
-
                     write_run_state(run_plan, "submitted", scheduler_job_id=msg)
                 except Exception as exc:  # persistence failure is not fatal here
                     print(f"  WARNING: failed to persist submitted state for "
@@ -626,6 +641,12 @@ def _submit_all_locked(
                 # qsub rejected. Retry a bounded number of times (queue-full is
                 # transient); after the cap, record a permanent failure instead
                 # of retrying forever (PR-013).
+                # Scheduler REJECTED the submission: no job exists, so clear
+                # the intent marker back to a retryable state.
+                try:
+                    write_run_state(run_plan, "planned", last_submit_error=msg)
+                except Exception:
+                    pass
                 attempts[run_plan.run_id] = attempts.get(run_plan.run_id, 0) + 1
                 if attempts[run_plan.run_id] >= _MAX_SUBMIT_ATTEMPTS:
                     failed[run_plan.run_id] = msg
@@ -684,7 +705,10 @@ def _discover_pending_runs(group_dir: str):
 # PR-013: a run in any of these states already has (or had) a scheduler job;
 # re-running submit-all must NOT create a second job for it. "succeeded"
 # additionally requires results on disk (below).
-_IN_FLIGHT_STATES = {"submitted", "running", "replaying"}
+# "submitting" means a submit call may have reached the scheduler before we
+# crashed — ambiguous, so it is treated as in-flight and requires explicit
+# reconciliation rather than a blind resubmit (IMP-B09).
+_IN_FLIGHT_STATES = {"submitting", "submitted", "running", "replaying"}
 
 
 def _is_completed(run_dir: str) -> bool:

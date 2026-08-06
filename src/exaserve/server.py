@@ -545,10 +545,19 @@ def build_actor_runtime_env(
         "EXASERVE_SCALING_TRACE",
         "RAYON_NUM_THREADS",
         "TOKENIZERS_PARALLELISM",
+        # IMP-B04: deployment identity must travel WITH the deployment. A
+        # replica derives the receipt-channel name and its receipt's
+        # deployment/generation fields from these; relying on ambient env
+        # reaching every worker raylet made receipts silently unroutable.
+        "EXASERVE_DEPLOYMENT_ID",
+        "EXASERVE_GENERATION",
+        "EXASERVE_VENDOR",
     ):
         value = os.environ.get(key)
         if value:
             env_vars[key] = value
+    # The scope the head actually used, even if it fell back past the env vars.
+    env_vars.setdefault("EXASERVE_DEPLOYMENT_ID", _deployment_scope())
     if extra_env_vars:
         env_vars.update(extra_env_vars)
 
@@ -974,7 +983,67 @@ class EngineWorker:
         init_stats = getattr(self.backend, "init_stats", None)
         if callable(init_stats):
             replica_info.update(init_stats())
+        # Compat outcome rides along on the stats channel too: replica stdout
+        # does not reach the driver log, so without this a receipt failure is
+        # invisible and the readiness gate can only report the symptom.
+        replica_info.update(self._publish_compat_receipts(null_compute))
         report_replica_stats(replica_info)
+
+    def _publish_compat_receipts(self, null_compute: bool) -> None:
+        """IMP-B04: attest THIS replica's compatibility, and the engine it owns.
+
+        The replica self-attests (it is our code and can verify its own patch
+        post-conditions). The engine core is an unmodified vLLM process the
+        replica started, so it is attested by its owner rather than described
+        as self-reporting.
+
+        A replica that cannot prove it is correctly patched publishes NO
+        receipt, so the readiness gate blocks with a named blocker
+        ("no compatibility receipt from role(s): ['replica']"). The failure is
+        still closed, but the decision belongs to the readiness authority
+        rather than to an exception in a replica constructor — a patch-
+        accounting bug must not tear down a cluster that is otherwise serving.
+        EXASERVE_COMPAT_ENFORCE=1 makes it fatal in the replica instead.
+
+        Returns a small dict recorded alongside the replica's init stats.
+        """
+        import sys as _sys
+
+        from .compat.activator import ActivationError, CompatibilityActivator
+        from .compat.collector import collector_name, publish_receipt
+
+        outcome: Dict[str, Any] = {"compat_collector": collector_name()}
+        try:
+            activator = CompatibilityActivator()
+            outcome["compat_deployment_id"] = activator.deployment_id
+            outcome["compat_generation"] = activator.generation
+            # Patches are applied at interpreter start by _sitecustomize; the
+            # post-condition re-proves they took effect in THIS process.
+            receipt = activator.activate("replica", apply_fn=lambda: None)
+            outcome["compat_applied"] = sorted(receipt.patch_results)
+            outcome["compat_not_applicable"] = list(receipt.not_applicable)
+            outcome["compat_published"] = publish_receipt(receipt)
+            engine_probe = "null_compute" if null_compute else ""
+            if not engine_probe:
+                try:
+                    import vllm as _vllm
+
+                    engine_probe = f"vllm {_vllm.__version__}"
+                except Exception:
+                    engine_probe = "engine"
+            outcome["compat_engine_published"] = publish_receipt(
+                activator.attest_external("engine", executable=_sys.executable,
+                                          version_probe=engine_probe))
+        except ActivationError as exc:
+            print(f"[EngineWorker pid={os.getpid()}] compatibility activation "
+                  f"FAILED (no receipt published; readiness will block): {exc}",
+                  flush=True)
+            outcome["compat_error"] = f"{type(exc).__name__}: {exc}"
+            if os.environ.get("EXASERVE_COMPAT_ENFORCE") == "1":
+                raise
+        except Exception as exc:      # transport/import faults are diagnosable
+            outcome["compat_error"] = f"{type(exc).__name__}: {exc}"
+        return outcome
 
     async def reconfigure(self, user_config):
         """Serve awaits this pre-healthy when a deployment sets user_config (see
@@ -1845,6 +1914,11 @@ if __name__ == "__main__":
     from .scaling_trace import create_stats_collector, collect_replica_stats
     create_stats_collector()
 
+    # IMP-B04: the compatibility receipt channel. Unlike the stats collector it
+    # is ALWAYS created — readiness must not depend on an optional tracing flag.
+    from .compat.collector import create_receipt_collector
+    create_receipt_collector()
+
     _verify_core_env()
 
     # Patch proxy timeouts in *this* (driver) process before serve.start()
@@ -2302,6 +2376,19 @@ if __name__ == "__main__":
     # ---- Collect per-replica stats via Ray actor (no filesystem I/O) ---------
     replica_stats = collect_replica_stats()
 
+    # IMP-B04 diagnostics: replica stdout does not reach this log, so the
+    # compat outcome each replica recorded on the stats channel is summarized
+    # here. Without it a receipt-routing fault is only visible as the readiness
+    # gate blaming the replica role.
+    _compat_pub = sum(1 for r in replica_stats if r.get("compat_published"))
+    _compat_err = {r.get("compat_error") for r in replica_stats if r.get("compat_error")}
+    if replica_stats:
+        print(f"[Compat] replicas: {_compat_pub}/{len(replica_stats)} published a "
+              f"receipt; collectors={sorted({r.get('compat_collector') for r in replica_stats if r.get('compat_collector')})}",
+              flush=True)
+        for _err in sorted(_compat_err):
+            print(f"[Compat] replica error: {_err}", flush=True)
+
     for rs in replica_stats:
         tracer.record_replica_init(rs)
     if replica_stats:
@@ -2317,6 +2404,29 @@ if __name__ == "__main__":
     total_time = time.time() - overall_start
     tracer.set_metadata(total_time_s=round(total_time, 4))
     trace_path = tracer.save()
+
+    # ---- Readiness gate (IMP-B02) -------------------------------------------
+    # The marker below used to BE readiness: reaching this line printed it.
+    # Now an explicit predicate decides — exact node membership, healthy proxy
+    # per node, target replica count per application, app RUNNING, a real
+    # completion through the external route, and a compatibility receipt from
+    # every required role. The marker is printed only after that holds, so no
+    # consumer can observe READY before the cluster can serve.
+    _readiness_snapshot = None
+    if os.environ.get("EXASERVE_READINESS_GATE", "1") != "0":
+        from .control import serve_readiness as _readiness
+
+        _base_url = f"http://{get_ray_node_ip() or 'localhost'}:8000"
+        _readiness_snapshot = _readiness.enforce_readiness(
+            deployment_id=_deployment_scope(),
+            generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
+            plan_hash=str(getattr(tracer, "config_hash", "") or "plan"),
+            base_url=_base_url,
+            snapshot_dir=os.path.dirname(trace_path) if trace_path else "",
+            timeout_s=float(os.environ.get("EXASERVE_READINESS_TIMEOUT_S", "900")),
+        )
+        tracer.set_metadata(readiness=_readiness_snapshot.to_dict())
+
     print_red(
         f"[ExaServe] ✓✓✓ CLUSTER FULLY READY ✓✓✓ Total time: {total_time:.2f}s"
     )

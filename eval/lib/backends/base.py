@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import abc
 import collections
+import glob
+import json
 import os
 import signal
 import subprocess
@@ -41,6 +43,14 @@ class ProcessMonitor:
     process: subprocess.Popen[str] | None
     log_path: str
     ready_marker: str = ""
+    # IMP-B02 cutover: the AUTHORITATIVE readiness signal is a structured
+    # snapshot written by the readiness gate, not a line of stdout. When the
+    # directory is provided we consume the file; the marker survives only as a
+    # fallback for a backend that predates the gate, and taking that path is
+    # logged so the migration is visible rather than silent.
+    readiness_dir: str = ""
+    readiness_marker_grace_s: float = 120.0
+    readiness_source: str = ""
     ready_event: threading.Event = field(default_factory=threading.Event)
     recent_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=40)
@@ -69,6 +79,28 @@ class ProcessMonitor:
         self._thread.start()
         return self
 
+    def readiness_snapshot(self) -> dict | None:
+        """Newest readiness.json under readiness_dir, or None."""
+        if not self.readiness_dir:
+            return None
+        newest = None
+        for path in glob.glob(os.path.join(self.readiness_dir, "**", "readiness.json"),
+                              recursive=True):
+            try:
+                stamp = os.path.getmtime(path)
+            except OSError:
+                continue
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, path)
+        if newest is None:
+            return None
+        try:
+            with open(newest[1], encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
     def wait_for_ready(self, timeout_s: float) -> bool:
         # Poll for the process dying DURING the wait: when launch_cluster crashes
         # without emitting the ready marker, the marker event is never set, so a
@@ -76,12 +108,32 @@ class ProcessMonitor:
         # the walltime) instead of failing fast. Check poll() every couple seconds
         # so a failed launch aborts the job in seconds, not hours.
         deadline = time.monotonic() + timeout_s
+        marker_at: float | None = None
         while time.monotonic() < deadline:
-            if self.ready_event.wait(timeout=min(2.0, max(0.0, deadline - time.monotonic()))):
-                return True
+            snapshot = self.readiness_snapshot()
+            if snapshot is not None:
+                if snapshot.get("ready") is True:
+                    self.readiness_source = "snapshot"
+                    return True
+                # A snapshot that says NOT ready overrides the marker: the text
+                # can outrun the fact, the file cannot.
+                marker_at = None
+            elif self.ready_event.is_set():
+                now = time.monotonic()
+                marker_at = now if marker_at is None else marker_at
+                if not self.readiness_dir or now - marker_at >= self.readiness_marker_grace_s:
+                    self.readiness_source = "marker"
+                    if self.readiness_dir:
+                        print("[ProcessMonitor] WARNING: readiness accepted from the "
+                              "stdout marker; no readiness.json appeared under "
+                              f"{self.readiness_dir} within "
+                              f"{self.readiness_marker_grace_s:.0f}s (legacy backend).",
+                              flush=True)
+                    return True
             if self.process is not None and self.process.poll() is not None:
-                return False  # exited before the ready marker → launch failed
-        return self.ready_event.is_set()
+                return False  # exited before becoming ready → launch failed
+            time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+        return False
 
     def close(self) -> None:
         if self.process is not None and self.process.stdout is not None:

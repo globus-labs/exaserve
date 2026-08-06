@@ -7,7 +7,6 @@ behavior is locked in. Hermetic: temp dirs + loopback only.
 from __future__ import annotations
 
 import json
-import os
 import time
 
 import pytest

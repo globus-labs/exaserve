@@ -26,12 +26,13 @@ from importlib import resources
 
 
 def launch_cluster() -> None:
-    package_root = resources.files("exaserve")
-    package_parent = package_root.parent
-    script = package_root / "resources" / "launch_cluster.sh"
-    os.environ.setdefault("EXASERVE_PACKAGE_ROOT", str(package_root))
-    os.environ.setdefault("EXASERVE_PACKAGE_PARENT", str(package_parent))
-    os.execvp("bash", ["bash", str(script), *sys.argv[1:]])
+    # IMP-B01: the CLI no longer replaces itself with bash. It hands off to the
+    # Python RuntimeSupervisor, which owns signals, the process group, first
+    # cause, and the exit code. EXASERVE_USE_SUPERVISOR=0 restores the legacy
+    # exec until the WP13 cutover deletes it.
+    from .launcher import main as _launcher_main
+
+    _launcher_main()
 
 
 def driver() -> None:

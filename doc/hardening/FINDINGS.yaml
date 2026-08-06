@@ -50,8 +50,12 @@ findings:
      acceptance_tests: [AC-PLAN-01], status: FIXED, owner: claude}
   - {id: PR-008, source: audit, severity: blocker,
      invariant: "Readiness is fail-closed, deadline-bounded, and predicate-based",
-     primary_work_package: WP5, affected_regions: "server.py GPU wait/proxy wait/FULLY READY",
-     acceptance_tests: [AC-RDY-01, AC-RDY-02], status: IN_PROGRESS, owner: claude}
+     primary_work_package: WP5, affected_regions: "server.py enforce_readiness gate; control/serve_readiness.py",
+     acceptance_tests: [AC-RDY-01, AC-RDY-02], status: FIXED, owner: claude,
+     evidence: "control.serve_readiness.enforce_readiness gates the CLUSTER FULLY READY
+       marker on the production path: node membership + per-node proxy health +
+       target_num_replicas running + app RUNNING + real external-route completion +
+       per-role receipts, deadline-bounded, each blocker named. 2-node Aurora run 2026-08-06: gate_ready/marker_never_precedes_gate/receipts/canary/tree_reaped all PASS"}
   - {id: PR-009, source: audit, severity: high,
      invariant: "Every essential child is supervised for the deployment lifetime",
      primary_work_package: WP4, affected_regions: "driver.py proxy/ray wait paths",
@@ -218,7 +222,12 @@ findings:
      status: OPEN, owner: claude}
   - {id: KI-D1, source: known_issues, severity: blocker, primary_work_package: WP5,
      invariant: "Readiness false-positive class eliminated (with PR-008)",
-     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-RDY-01]}
+     status: FIXED, owner: claude, acceptance_tests: [AC-RDY-01],
+     evidence: "Readiness is revocable (absolute replica sets refreshed per poll) and
+       requires a real completion through the external route; the stdout marker prints
+       only after the predicate holds and a not-ready snapshot OVERRIDES the marker in
+       eval/lib/backends/base.py. Unit coverage: tests/test_serve_readiness.py,
+       eval/tests/test_readiness_consumption.py. 2-node Aurora run 2026-08-06: gate_ready/marker_never_precedes_gate/receipts/canary/tree_reaped all PASS"}
   - {id: KI-D2, source: known_issues, severity: medium, primary_work_package: WP13,
      invariant: "MPI distribution path revalidated at scale; receipts prove per-rank activation",
      status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-DIST-01]}

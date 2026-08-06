@@ -69,3 +69,31 @@ READY fails closed on: GPU registration shortfall
 (`EXASERVE_ALLOW_DEGRADED_PROXIES=1` to override). Serve app-RUNNING is
 necessary but not sufficient (measured 2.0s RUNNING→serving gap and ~120s
 replica-death blindness at 2 nodes with default constants).
+
+## Evidence classes for compatibility receipts (added 2026-08-06)
+
+A receipt is not just "present" — it carries an evidence class, and the two are
+not interchangeable:
+
+| Attestation | Who signs | Evidence | Used for |
+|---|---|---|---|
+| `self` | our own code, in-process | each required patch proved by an `_exaserve_*` sentinel on the patched symbol | `replica` |
+| `supervisor` | the owning process | executable + prepared environment + version probe; every required patch declared **not provable here** | `ray_head`, `ray_worker`, `engine`, `supervisor` |
+
+An external attestation cannot reach inside an unmodified daemon for a
+sentinel, so it must **declare** the required set as unprovable rather than
+report it applied; a `supervisor` receipt that claims applied patches is
+rejected. The readiness snapshot records `externally_attested_roles`, so a
+reader can always see which roles rest on the weaker evidence.
+
+**Known limitation.** The vLLM `EngineCore` subprocess is currently attested by
+its owning replica. Patches reach it through the EN-01 generated
+`sitecustomize` shim, but the engine does not yet self-report, so `EN-01` and
+the `SC-*` set are not proved *inside* the engine process. Closing this means
+having the shim publish a receipt from the engine process itself; until then
+the engine's row above is the honest description of what is known.
+
+A patch is only required where its gate requests it: `PatchSpec.env_gate`
+scopes the required set to what `EXASERVE_VLLM_PATCH_PP_LAYER_FILTER` (and
+future gates) actually enable, and a patch whose target module is not imported
+in a process is recorded as `not_applicable`, never as applied.

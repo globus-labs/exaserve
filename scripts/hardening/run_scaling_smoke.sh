@@ -14,6 +14,12 @@ TAG="n${NODES}"
 OUT=$PWD/artifacts/hardening/scaling-smoke/$TAG
 mkdir -p "$OUT"
 export EXASERVE_RUN_LOG_ROOT=$OUT/run_logs EXASERVE_VENDOR=xpu
+# A large allocation is scarce: record the readiness verdict (blockers and all)
+# but do not throw the allocation away if the gate is unsatisfied. The snapshot
+# is archived either way, and the throughput measurement still runs. Strict
+# fail-closed behaviour is validated on the 2-node lease, where a re-run costs
+# minutes rather than a queue slot.
+export EXASERVE_ALLOW_DEGRADED_READINESS="${EXASERVE_ALLOW_DEGRADED_READINESS:-1}"
 export no_proxy="localhost,127.0.0.1,$(hostname)"
 export EXASERVE_NODEFILE="$PBS_NODEFILE"
 cp scripts/hardening/config.direct.8b.yaml "$OUT/config.yaml"
@@ -33,14 +39,20 @@ MAXIT=$((60 + NODES * 6))
 # Serve retries the replica (RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT).
 # Only a driver-level FATAL/Refusing (fail-closed readiness) or process exit
 # is terminal.
+# IMP-B02: readiness comes from the GATE's snapshot, not the stdout marker.
+# The marker now prints only after the gate passes, so it is kept purely as a
+# fallback for a run with EXASERVE_READINESS_GATE=0.
 for i in $(seq 1 $MAXIT); do
+  SNAP=$(ls "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)
+  if [ -n "$SNAP" ] && grep -q '"ready": true' "$SNAP"; then ready=1; break; fi
   grep -q "ALL SERVICES READY" "$OUT/launch.log" && { ready=1; break; }
   grep -qE "\[Driver\] FATAL|\[ExaServe\] .*Refusing to declare|Critical Error:" "$OUT/launch.log" && break
   kill -0 $LPID 2>/dev/null || break
   sleep 10
 done
 READY_S=$((i*10))
-echo "ready=$ready after ${READY_S}s"
+echo "ready=$ready after ${READY_S}s (source=$([ -n "$SNAP" ] && echo snapshot || echo marker))"
+[ -n "$SNAP" ] && cp "$SNAP" "$OUT/readiness.json"
 grep -m1 "All .* GPUs registered" "$OUT/launch.log" | tee "$OUT/gpus.txt"
 
 if [ "$ready" = "1" ]; then

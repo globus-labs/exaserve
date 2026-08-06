@@ -6,6 +6,24 @@ Modules:
 - ``transport``: authenticated length-prefixed framing and session handling.
   No readiness policy.
 
-Later work packages add ``supervisor``, ``rank_launcher``,
-``node_supervisor``, and ``readiness`` per the normative code-ownership table.
+- ``readiness``: pure indexed readiness projection (no process launch, no log
+  reads) — a stdout marker can never make a deployment ready.
+- ``supervisor``: ``RuntimeSupervisor`` + ``ManagedComponent`` — typed child
+  lifecycle, process-group ownership, first-cause capture, bounded cleanup.
+
+``rank_launcher``/``node_supervisor`` (the MPI rank-set split) land with the
+WP13 cutover; until then the supervisor drives the legacy launcher as one
+managed component behind the EXASERVE_USE_SUPERVISOR switch.
 """
+
+from .readiness import (  # noqa: F401
+    ReadinessCoordinator,
+    ReadinessPlan,
+    ReadinessSnapshot,
+)
+from .supervisor import (  # noqa: F401
+    FirstCause,
+    ManagedComponent,
+    RuntimeSupervisor,
+    SupervisorError,
+)

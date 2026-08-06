@@ -21,10 +21,14 @@ wrong):
 
 | Status | All records (82) | Audit findings (35) |
 |---|---|---|
-| FIXED | 27 | 12 |
-| IN_PROGRESS | 31 | 23 |
+| FIXED | 29 | 13 |
+| IN_PROGRESS | 29 | 22 |
 | OPEN | 22 | 0 |
 | OUT_OF_PRODUCTION_SCOPE | 2 | 0 |
+
+(Counts are YAML-parsed from `FINDINGS.yaml`, not regex-counted. Pass 3 moved
+PR-008 and KI-D1 to FIXED on the strength of the on-hardware evidence below;
+nothing else changed status.)
 
 A record is `FIXED` only when its invariant holds **on the path a production
 deployment actually takes**. Anything owned by the un-cut-over architecture is
@@ -59,38 +63,101 @@ Each has a regression test in `tests/test_audit_regressions.py` (17 tests):
 | IMP-H07 | randomized CI job used `pytest -p randomly` without declaring `pytest-randomly` | added to `[dev]` extra |
 | IMP-B10 | ledger recorded labels, not demonstrated closure; record count itself was wrong | 23 audit findings reopened as IN_PROGRESS; all 82 records now carry required plan §8 fields; counts YAML-parsed |
 
-**Suite: 123 passed / 0 failed.**
+**Suite at that pass: 123 passed / 0 failed.**
 
-## What remains — the real work (unchanged by this pass)
 
-These are the audit's release blockers and they are **not** optional cleanup:
+## Pass 3 (2026-08-06): the architecture reaches the production path
 
-- **IMP-B01 / WP4+WP5+WP13:** no `RuntimeSupervisor`, `RankLauncher`,
-  `NodeSupervisor`, `DeploymentManager`, or `ReadinessCoordinator` in the
-  production path. `launch_cluster.sh` (533 lines) + per-rank
-  `exaserve.driver` remain the active topology.
-- **IMP-B02:** stdout markers (`CLUSTER FULLY READY` / `ALL SERVICES READY`)
-  are still the authoritative readiness protocol in driver, server, and eval;
-  READY cannot be revoked after component loss.
-- **IMP-B04:** no `compat/{profile,activator,receipt}` system; `apply_all()`
-  is fail-open (`strict=False`); READY is not receipt-gated.
-- **IMP-B03:** essential-child supervision gaps (Ray head unpolled;
-  exit-code-0 unexpected exits read as success; no process groups).
-- **IMP-B09 residue / WP8:** two scheduler stacks; submit-then-persist crash
-  window remains.
-- **IMP-H02/H03:** distribution is not generation-isolated or receipt-based;
-  Bash remains a coequal control plane.
-- **IMP-H08:** the 16/64-node results are **direct-mode weak-scaling
-  feasibility smoke** (legacy path, `proxy_config: none`, no predeclared
-  provenance) — they do **not** close WP12/AC-SCALE-01. They are retained and
-  relabelled as such in `COMPATIBILITY_MATRIX.md`.
+The blocker in the previous section was that the target architecture existed
+but nothing on a real deployment's path used it. That is no longer true for
+readiness, supervision, and compatibility.
 
-## Correct next step
+### What a deployment now does that it did not before
 
-Follow the canonical packet order in
-`doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md` §8 of the audit: ledger
-correction (done), then primitives (done for lease/status/plan), then the
-compatibility profile + receipts, then the supervisor/readiness coordinator,
-then staging generation-isolation, then eval/ClientLab onto shared contracts,
-then reduce Bash to a site adapter and delete marker consumers — and only
-then re-run qualifying Aurora evidence through the **new** path.
+1. **Readiness is a predicate, not a print.** `server.py` calls
+   `control.serve_readiness.enforce_readiness()` before the
+   `CLUSTER FULLY READY` marker. It requires exact node membership, a healthy
+   proxy per node, `target_num_replicas` running per application, app status
+   RUNNING, a **real completion through the external route**, and a
+   compatibility receipt from every required role. Unsatisfied → the process
+   fails closed with each blocker named.
+2. **Readiness is revocable.** Observations refresh every poll and replica sets
+   are absolute, so a replica that dies lowers the count below target and
+   readiness goes back off. The old marker could only ever latch.
+3. **Consumers read a fact, not text.** The gate writes `readiness.json`;
+   `eval/lib/backends/base.py` consumes it, and a snapshot that says *not
+   ready* **overrides** the stdout marker. The marker path survives only as a
+   logged fallback for pre-gate backends.
+4. **The launch is supervised.** `cli.launch_cluster` hands off to
+   `RuntimeSupervisor` (signals installed before any child, own process group,
+   unexpected exit-0 is fatal, first cause preserved, typed exit code).
+5. **Compatibility is attested per role.** Replicas self-attest with
+   sentinel-proved patches; Ray daemons and the engine core are attested by
+   their owner. Receipts flow over a named Ray actor and gate READY.
+6. **Staging is generation-isolated.** `/tmp/exaserve_src.<generation>` with an
+   atomic symlink publish, so a run cannot import a previous run's deleted
+   modules.
+
+### Evidence
+
+- Unit/contract suite: **182 passed / 0 failed** (`tests/`, `eval/tests/`,
+  `clientlab/tests/`); ruff correctness gate (E9,F63,F7,F82,F401,F841) clean on
+  all touched modules.
+- On-hardware 2-node runs on Aurora drove every fix below; each failure was
+  found by running the gate on a real cluster, not by inspection.
+
+### Defects this pass found in its OWN new code
+
+| Defect | Why it mattered |
+|---|---|
+| Atomic staging publish could not replace a pre-existing real directory | first live run failed staging outright (`mv: cannot overwrite directory`) |
+| `ComponentObservation` built without its mandatory §3.1 fields | the live collector would have raised `TypeError` on first use; caught by a unit test before it ran |
+| `get_serve_details()` returns a **dict**, not a model | attribute-only access silently fell back to a path where target == running, so a dead replica could not revoke readiness |
+| SC-11 sentinel hidden behind a `staticmethod` wrapper | a correctly patched replica was judged half-patched; **all 24 replicas** refused to publish and the gate blamed the wrong subsystem |
+| receipt-channel identity depended on ambient env; collector name normalized differently from the head | receipts were unroutable in principle whenever `PBS_JOBID` was the id source |
+| external attestation had no evidence class | an unmodified daemon can never prove an in-process sentinel, so `engine` could never satisfy a profile that demanded one |
+| one canary result was applied to **every** route | claimed routes had answered that were never probed |
+
+The recurring lesson, and the one worth carrying forward: **a fail-closed check
+is only as strong as the evidence it can actually see.** Three separate times
+this pass, a check that could not observe a correct state reported a healthy
+cluster as broken and named the wrong cause. Fail-closed is right; blind is
+not.
+
+### What still remains (honest scope)
+
+- **IMP-B01 / WP13 topology.** `RankLauncher` / `NodeSupervisor` /
+  `DeploymentManager` do not exist; `launch_cluster.sh` still fans out per-rank
+  `exaserve.driver` processes. The supervisor now *owns* that launch and
+  reports its first cause, but the in-allocation topology is unchanged. Bash
+  is still a coequal control plane (IMP-H03).
+- **Engine self-attestation.** The engine core is attested by its owning
+  replica, not by itself (see `COMPATIBILITY_MATRIX.md`).
+- **Scale evidence through the new path.** AC-SCALE-01 requires qualifying
+  runs; those recorded so far predate the gate.
+- Legacy switches (`EXASERVE_READINESS_GATE=0`,
+  `EXASERVE_USE_SUPERVISOR=0`, `EXASERVE_ALLOW_DEGRADED_READINESS=1`) are still
+  present by design and are removed at the WP13 cutover.
+
+### On-hardware verdict (2 nodes, Aurora, 2026-08-06)
+
+`scripts/hardening/run_supervisor_smoke.sh`, 8B direct mode, 24 replicas
+across 2 nodes, driven through the packaged CLI (`exaserve.cli.launch_cluster`
+→ `RuntimeSupervisor` → `launch_cluster.sh`):
+
+| Check | Result |
+|---|---|
+| `gate_ready` — the predicate, not the marker | **PASS** |
+| `marker_never_precedes_gate` | **PASS** |
+| `receipts` from all required roles | **PASS** |
+| `canary` — real completion via the external route | **PASS** (`" Paris, located in the north-central part"`) |
+| `tree_reaped` on SIGTERM | **PASS** (process group 4→0, named ExaServe/Ray processes 17→0) |
+| supervisor exit code | 143 (typed SIGTERM) |
+
+Snapshot recorded by the gate:
+
+```
+satisfied: membership: 2 nodes | components: 2 healthy |
+           model default: 24/24 replicas | routes: 1 healthy |
+           canaries: 1/1 routes answered | receipts: all required roles attested
+```

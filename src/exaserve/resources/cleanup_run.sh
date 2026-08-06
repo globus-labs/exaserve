@@ -17,7 +17,8 @@ host="$(hostname)"
 patterns=(
   /tmp/hf_home            # staged model weights (default local_stage_path)
   /tmp/hf_home_*          # custom/variant stage paths
-  /tmp/exaserve_src         # bcast'd exaserve source
+  /tmp/exaserve_src         # bcast'd exaserve source (symlink to the generation)
+  /tmp/exaserve_src.*       # per-generation source trees (IMP-H02)
   /tmp/exaserve_inst        # instrumentation probe outputs
   /tmp/exaserve_overlay     # Ray Serve overlay (instrumentation builds)
   /tmp/ray/session_*      # Ray session scratch (Ray usually clears on stop)
@@ -29,7 +30,10 @@ patterns+=("$@")
 removed=0
 for pat in "${patterns[@]}"; do
   for path in $pat; do            # word-split + glob-expand intentionally
-    [ -e "$path" ] || continue
+    # -e is false for a DANGLING symlink; /tmp/exaserve_src is a symlink to a
+    # generation tree that a prior pattern may already have removed, and it
+    # must still be cleaned up rather than left pointing at nothing.
+    [ -e "$path" ] || [ -L "$path" ] || continue
     if rm -rf -- "$path" 2>/dev/null; then
       echo "[cleanup $host] removed $path"
       removed=$((removed + 1))

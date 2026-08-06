@@ -747,3 +747,131 @@ readiness to a deadline (measures the RUNNING→serving gap) and kills a
 replica via OS signal instead of the state API; rerun in flight.
 
 ---
+
+## 2026-08-06 — Pass 3: the readiness authority reaches the production path
+
+This pass closes the consumer half of IMP-B02 and the transport half of
+IMP-B04. Where pass 2 built the mechanisms, this one puts them **in the way of
+a deployment**: `server.py` cannot print `CLUSTER FULLY READY` until an
+explicit predicate holds, and the eval harness no longer trusts that text.
+
+### New production seams
+
+- `src/exaserve/control/serve_readiness.py` — the live binding of
+  `ReadinessCoordinator`. Turns Ray/Serve state into typed observations,
+  requires a real completion through the **external route**, drains
+  compatibility receipts, writes `readiness.json`, and raises unless the
+  predicate holds. Expected replica counts come from each application's
+  `target_num_replicas` (the applied config), never from what happens to be
+  running — so a dead replica drops the count below target and **revokes**
+  readiness rather than being invisible.
+- `src/exaserve/compat/collector.py` — the receipt channel. Receipts come from
+  processes whose stdout we do not own (replicas scattered across the
+  allocation), so they travel over a named detached Ray actor. Always created;
+  deliberately not gated on the tracing flag, because readiness must not depend
+  on an optional instrumentation switch.
+- `server.py` — readiness gate before the marker; receipt collector created
+  after `ray.init` and before `serve.run`; every replica self-attests and
+  attests the engine core it owns.
+- `eval/lib/backends/base.py` — `ProcessMonitor` consumes `readiness.json`.
+  A snapshot that says *not ready* **overrides** the marker. The marker is
+  accepted only after a grace window with no snapshot, and taking that path
+  prints a warning, so the legacy fallback is visible rather than silent.
+
+### Migration switches (plan §4.1)
+
+| Switch | Default | Removal |
+|---|---|---|
+| `EXASERVE_READINESS_GATE` | `1` | WP13 — `0` restores marker-only readiness |
+| `EXASERVE_ALLOW_DEGRADED_READINESS` | unset | WP13 — starts despite named blockers |
+| `EXASERVE_REQUIRED_RECEIPT_ROLES` | derived | WP13 — overrides the required role set |
+| `EXASERVE_COMPAT_ENFORCE` | unset | WP13 — makes replica activation failure fatal in-replica |
+| `EXASERVE_USE_SUPERVISOR` | `1` | WP13 — `0` restores `exec bash` |
+
+The `supervisor` role is required **only when a supervisor stamped the
+environment**. The legacy `exec bash` path has no supervisor to attest, and
+demanding a receipt nobody can issue would fail closed for a reason unrelated
+to compatibility.
+
+### Patch accounting: gates and the third state
+
+Two corrections were forced by running this on hardware rather than reasoning
+about it:
+
+1. **Gated patches.** Every `SC-*` patch is requested by
+   `EXASERVE_VLLM_PATCH_PP_LAYER_FILTER`. Demanding proof that a patch applied
+   when it was never requested fails closed on a *correct* configuration, so
+   `PatchSpec.env_gate` now scopes the required set. Head and replica read the
+   same environment and derive the same set.
+2. **Not-applicable is not applied.** A patch whose target module is not
+   imported in a process neither applied nor was needed. The postcondition is
+   tri-state (`True` / `False` / `None`) and the receipt carries
+   `not_applicable` separately from `patch_results`. A receipt must never claim
+   a patch took effect when it did not; `False` with the target loaded remains
+   fatal (a half-patched process).
+
+### Generation-isolated staging (IMP-H02)
+
+`distribute_to_nodes.sh` stages into `/tmp/exaserve_src.<generation>` and
+publishes the stable `/tmp/exaserve_src` name by `rename(2)` on a symlink, so
+a reader sees the old tree or the new one, never a mix, and a deleted module
+cannot survive into the next run. `launch_cluster.sh` exports
+`EXASERVE_GENERATION` / `EXASERVE_DEPLOYMENT_ID` for the whole allocation.
+`cleanup_run.sh` removes generation trees and dangling links.
+
+First on-hardware attempt **failed** (`mv: cannot overwrite directory
+'/tmp/exaserve_src' with non-directory`): rename cannot replace a pre-existing
+real directory with a symlink. Retiring the legacy directory before publishing
+fixed it. The supervisor reported this correctly as
+`FIRST CAUSE: launch_cluster: UNEXPECTED_EXIT (exit=1)` — the supervision
+machinery working as designed on its first real failure.
+
+### Receipt routing: the first cluster run named the wrong culprit
+
+The gate's first live run reported
+`receipts: no compatibility receipt from role(s): ['replica', 'engine']` — which
+reads as a compatibility failure but was a **routing** failure. Two fixes, both
+of the same shape:
+
+1. **Identity travels with the deployment.** `EXASERVE_DEPLOYMENT_ID` /
+   `EXASERVE_GENERATION` / `EXASERVE_VENDOR` are now propagated through
+   `build_actor_runtime_env`, so a replica derives the receipt-channel name and
+   its receipt's deployment/generation fields from the same values the head
+   used, instead of hoping ambient env reached every worker raylet.
+2. **No silent swallow.** `create_receipt_collector` proves the channel is
+   resolvable *by name* immediately after creating it, `publish_receipt`
+   `ray.get()`s the report so a transport failure surfaces at the sender, and
+   both print the reason once per process. Receipts are re-drained on every
+   readiness poll, since replicas publish as they finish starting.
+
+This is the audit's own lesson applied to new code: a swallowed exception turns
+a transport bug into a false accusation against an unrelated subsystem.
+
+### The receipt that would not arrive: three faults, one lesson
+
+Three consecutive 2-node runs blocked on
+`no compatibility receipt from role(s): ['replica','engine']`. Each fix
+exposed the next fault, and none was the one the message implied:
+
+1. **Invisible replica output.** Serve replica stdout does not reach the driver
+   log, so the replica's own error print was unreachable. Fixed by recording
+   the compat outcome (`compat_published`, `compat_error`, `compat_collector`)
+   on the replica-stats channel — which was already proven to work — and
+   summarizing it head-side. *Every subsequent diagnosis depended on this.*
+2. **Cross-namespace lookup.** The channel lived in its own Ray namespace while
+   the one proven reachable from a replica used `serve`. Moved to `serve`; the
+   actor name is already deployment-scoped, so no isolation was lost.
+3. **The actual cause — a sentinel behind a `staticmethod`.** SC-11 sets its
+   marker on a function, then installs it as
+   `manager.get_current_process_visible_accelerator_ids = staticmethod(fn)`.
+   The postcondition read `vars(cls)` raw, found the `staticmethod` **object**
+   (whose attribute lookup does not forward to the wrapped function), and
+   concluded the patch had not applied. A correctly patched replica was
+   reported half-patched, and every replica declined to publish.
+
+The lesson is the audit's own: **a fail-closed check is only as good as its
+evidence**. A postcondition that cannot see a correct state does not make the
+system safer, it makes it unavailable — and the operator is handed a message
+that accuses the wrong subsystem. Both the sentinel resolution and the
+staticmethod shape are now covered by unit tests
+(`tests/test_serve_readiness.py`).
