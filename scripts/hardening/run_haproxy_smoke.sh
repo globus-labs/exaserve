@@ -19,10 +19,13 @@ sed -i "s/^  num_nodes: .*/  num_nodes: $NODES/" "$OUT/config.yaml"
 echo "=== HAProxy smoke on $NODES nodes ($(hostname)) ==="
 command -v haproxy >/dev/null 2>&1 && echo "haproxy: $(haproxy -v 2>&1 | head -1)" || echo "HAPROXY_MISSING"
 
+RUN_START=$(date +%s)   # artifacts must be NEWER than this run (see scaling smoke)
 bash src/exaserve/resources/launch_cluster.sh "$OUT/config.yaml" > "$OUT/launch.log" 2>&1 &
 LPID=$!
 ready=0
 for i in $(seq 1 150); do
+  SNAP=$(find "$OUT"/run_logs -name readiness.json -newermt "@$RUN_START" 2>/dev/null | head -1)
+  if [ -n "$SNAP" ] && grep -q '"ready": true' "$SNAP"; then ready=1; break; fi
   grep -q "ALL SERVICES READY" "$OUT/launch.log" && { ready=1; break; }
   grep -qiE "FATAL|Critical Error|Traceback|failed .haproxy -c." "$OUT/launch.log" && break
   kill -0 $LPID 2>/dev/null || break
@@ -36,7 +39,7 @@ echo "pr024_haproxy_check=$pr024 (want >=1)"
 
 canary_ok=0
 if [ "$ready" = "1" ]; then
-  PORT=$(cat "$(ls -t "$OUT"/run_logs/*/proxy_out/proxy_port 2>/dev/null | head -1)" 2>/dev/null)
+  PORT=$(cat "$(find "$OUT"/run_logs -path '*/proxy_out/proxy_port' -newermt "@$RUN_START" 2>/dev/null | head -1)" 2>/dev/null)
   PORT=${PORT:-4001}
   echo "proxy_port=$PORT"
   RESP=$(curl -s --noproxy '*' -m 60 "http://localhost:$PORT/v1/completions" \

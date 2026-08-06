@@ -311,3 +311,61 @@ def test_activator_normalizes_a_raw_scheduler_job_id(monkeypatch):
     monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID",
                        "8736431.aurora-pbs-0001.hostmgmt.example")
     assert CompatibilityActivator().deployment_id == "8736431"
+
+
+def test_discovery_caches_targets_but_not_running_counts(monkeypatch):
+    """The gate must not become an O(replicas) fleet-wide poller (KI-A4).
+
+    Declared targets are static within a generation, so the expensive
+    per-replica detail call happens once; running counts come from the light
+    status overview on every pass, and a vanished app revokes readiness.
+    """
+    calls = {"details": 0}
+
+    def _details():
+        calls["details"] += 1
+        return {"applications": {"app": {
+            "route_prefix": "/", "status": "RUNNING",
+            "deployments": {"d": {"target_num_replicas": 4,
+                                  "replicas": [{"state": "RUNNING"}] * 4}}}}}
+
+    monkeypatch.setattr(sr, "_serve_details", _details)
+    sr.reset_discovery_cache()
+    first = sr.discover_applications(use_cache=False)
+    assert first["app"]["target"] == 4 and calls["details"] == 1
+
+    class _Serve:
+        @staticmethod
+        def status():
+            return {"applications": {"app": {
+                "status": "RUNNING",
+                "deployments": {"d": {"replica_states": {"RUNNING": 2}}}}}}
+
+    import sys
+    import types
+
+    module = types.ModuleType("ray")
+    module.serve = _Serve
+    monkeypatch.setitem(sys.modules, "ray", module)
+    second = sr.discover_applications()
+    assert calls["details"] == 1          # no second expensive call
+    assert second["app"]["target"] == 4   # target remembered
+    assert second["app"]["running"] == 2  # running refreshed
+
+
+def test_a_vanished_application_revokes_readiness(monkeypatch):
+    sr.reset_discovery_cache()
+    monkeypatch.setattr(sr, "_serve_details", lambda: {"applications": {"app": {
+        "route_prefix": "/", "status": "RUNNING",
+        "deployments": {"d": {"target_num_replicas": 2,
+                              "replicas": [{"state": "RUNNING"}] * 2}}}}})
+    sr.discover_applications(use_cache=False)
+
+    import sys
+    import types
+
+    module = types.ModuleType("ray")
+    module.serve = type("S", (), {"status": staticmethod(lambda: {"applications": {}})})
+    monkeypatch.setitem(sys.modules, "ray", module)
+    gone = sr.discover_applications()
+    assert gone["app"]["running"] == 0 and gone["app"]["status"] == "MISSING"

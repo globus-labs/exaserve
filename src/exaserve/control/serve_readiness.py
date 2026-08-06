@@ -79,15 +79,32 @@ def _serve_details():
 
 
 def _running_from_overview(dep_status) -> int:
-    states = getattr(dep_status, "replica_states", None) or {}
+    # _get, not getattr: the overview is dataclasses in production but a plain
+    # mapping in other paths, and attribute access on a mapping silently
+    # returns nothing — reporting zero running replicas for a healthy app.
+    states = _get(dep_status, "replica_states", {}) or {}
     return sum(int(c) for s, c in states.items() if _state_name(s).upper() == "RUNNING")
 
 
-def discover_applications() -> dict[str, dict]:
+# Declared targets and route prefixes come from the applied config and do not
+# change within a generation, so the EXPENSIVE per-replica detail call is made
+# once and cached. Polling it every pass would make the readiness gate an
+# O(replicas) fleet-wide poller — exactly the cost profile KI-A4 warns about.
+_STATIC_CACHE: dict[str, dict] = {}
+
+
+def reset_discovery_cache() -> None:
+    _STATIC_CACHE.clear()
+
+
+def discover_applications(use_cache: bool = True) -> dict[str, dict]:
     """{app_name: {"route_prefix", "target", "running", "status"}} from live Serve.
 
-    ``target`` is the *declared* replica count of the applied config.
+    ``target`` is the *declared* replica count of the applied config; ``running``
+    is always read fresh from the light status overview.
     """
+    if use_cache and _STATIC_CACHE:
+        return _merge_running(_STATIC_CACHE)
     apps: dict[str, dict] = {}
     details = _serve_details()
     if details is not None:
@@ -104,6 +121,8 @@ def discover_applications() -> dict[str, dict]:
                 "status": _state_name(_get(app, "status", "")).upper(),
             }
         if apps:
+            _STATIC_CACHE.clear()
+            _STATIC_CACHE.update({k: dict(v) for k, v in apps.items()})
             return apps
     # Fallback: status overview has no target counts; treat running as target
     # so the predicate still requires app RUNNING + healthy proxies + canary.
@@ -116,6 +135,28 @@ def discover_applications() -> dict[str, dict]:
                            "running": running, "degraded_source": True,
                            "status": _state_name(_get(app, "status", "")).upper()}
     return apps
+
+
+def _merge_running(static: dict[str, dict]) -> dict[str, dict]:
+    """Refresh only the volatile fields (running count, app status)."""
+    from ray import serve
+
+    overview = _get(serve.status(), "applications", {})
+    merged: dict[str, dict] = {}
+    for name, info in static.items():
+        app = overview.get(name)
+        entry = dict(info)
+        if app is not None:
+            entry["running"] = sum(_running_from_overview(d)
+                                   for d in _get(app, "deployments", {}).values())
+            entry["status"] = _state_name(_get(app, "status", "")).upper()
+        else:
+            # The application vanished from the overview: report it as gone so
+            # readiness is revoked rather than kept alive by a cached target.
+            entry["running"] = 0
+            entry["status"] = "MISSING"
+        merged[name] = entry
+    return merged
 
 
 def collect_observations(coord: ReadinessCoordinator, *, node_id: str,
@@ -312,7 +353,8 @@ def enforce_readiness(*, deployment_id: str, generation: int, plan_hash: str,
     import ray
 
     node_ids = [str(n["NodeID"]) for n in ray.nodes() if n.get("Alive")]
-    apps = discover_applications()
+    reset_discovery_cache()          # this generation's targets, not a prior one's
+    apps = discover_applications(use_cache=False)
     if not apps:
         raise RuntimeError("[Readiness] no Serve applications are deployed; "
                            "refusing to declare readiness.")
