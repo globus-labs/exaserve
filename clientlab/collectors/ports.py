@@ -87,4 +87,7 @@ class PortCollector(object):
 def write_port_metrics(path, payload):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # PR-035: atomic publish so a polling reader never sees a partial file.
+    from ..utils import _atomic_write
+
+    _atomic_write(target, json.dumps(payload, indent=2, sort_keys=True) + "\n")

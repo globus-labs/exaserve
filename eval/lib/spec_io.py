@@ -186,6 +186,10 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
     return normalize_experiment_spec(spec)
 
 
+# KI-C5: a bounded default for proxy runs (see normalize()).
+DEFAULT_PROXY_CLIENT_NODES = 4
+
+
 def normalize_experiment_spec(spec: ExperimentSpec) -> ExperimentSpec:
     normalized = replace(spec)
     normalized.deployment = replace(spec.deployment)
@@ -195,7 +199,25 @@ def normalize_experiment_spec(spec: ExperimentSpec) -> ExperimentSpec:
     normalized.workload = replace(spec.workload)
     normalized.backend = replace(spec.backend, args={key: dict(value) for key, value in spec.backend.args.items()})
     if normalized.client.num_nodes < 1:
-        normalized.client.num_nodes = normalized.deployment.num_nodes
+        # KI-C5: this default is only right for dest=direct, where one client
+        # rank per node is exactly what saturates the fleet. For dest=proxy it
+        # points EVERY rank at a single front proxy -- at 256 nodes that is 256
+        # client ranks on one process, which was misread as a proxy throughput
+        # regression until the harness was examined. Proxy runs get a bounded
+        # default and say so; set client.num_nodes explicitly to override.
+        if normalized.client.dest == "proxy":
+            normalized.client.num_nodes = min(normalized.deployment.num_nodes,
+                                              DEFAULT_PROXY_CLIENT_NODES)
+            if normalized.deployment.num_nodes > DEFAULT_PROXY_CLIENT_NODES:
+                print(
+                    f"[spec] client.num_nodes defaulted to "
+                    f"{normalized.client.num_nodes} for dest=proxy "
+                    f"(deployment.num_nodes={normalized.deployment.num_nodes}); "
+                    "one rank per node would aim the whole fleet at a single "
+                    "proxy. Set client.num_nodes explicitly to override.",
+                    flush=True)
+        else:
+            normalized.client.num_nodes = normalized.deployment.num_nodes
     if normalized.scheduler.nodes < 1:
         normalized.scheduler.nodes = normalized.deployment.num_nodes
     if not normalized.trace.input_prompt_path:

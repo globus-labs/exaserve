@@ -55,20 +55,41 @@ def load_yaml_file(path):
     return payload
 
 
-def dump_yaml_file(path, data):
-    target = Path(path)
+
+def _atomic_write(target: Path, text: str) -> None:
+    """PR-035: same-directory temp + fsync + rename.
+
+    A reader that polls these files while a run is still writing them would
+    otherwise see a truncated document and mis-parse it as a completed result.
+    ClientLab does not depend on the exaserve package, so this is a local
+    implementation of the same contract rather than a shared import.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as handle:
-        if yaml is not None:
-            yaml.safe_dump(copy.deepcopy(data), handle, sort_keys=False)
-        else:
-            json.dump(copy.deepcopy(data), handle, indent=2, sort_keys=False)
-            handle.write("\n")
+    tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def dump_yaml_file(path, data):
+    payload = copy.deepcopy(data)
+    if yaml is not None:
+        text = yaml.safe_dump(payload, sort_keys=False)
+    else:
+        text = json.dumps(payload, indent=2, sort_keys=False) + "\n"
+    _atomic_write(Path(path), text)
 
 
 def dump_json_file(path, data):
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as handle:
-        json.dump(copy.deepcopy(data), handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    _atomic_write(
+        Path(path),
+        json.dumps(copy.deepcopy(data), indent=2, sort_keys=True) + "\n")
