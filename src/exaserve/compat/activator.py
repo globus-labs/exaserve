@@ -93,8 +93,12 @@ class CompatibilityActivator:
                  vendor: str | None = None) -> None:
         self.profile = profile or default_profile(
             vendor or os.environ.get("EXASERVE_VENDOR", "xpu"))
-        self.deployment_id = deployment_id or os.environ.get(
-            "EXASERVE_DEPLOYMENT_ID", "unknown")
+        # NORMALIZED, never the raw env value: a raw PBS_JOBID carries a
+        # ".aurora-pbs-..." suffix that the head strips, and a receipt built
+        # from the raw string is rejected as "wrong deployment".
+        from .collector import deployment_scope
+
+        self.deployment_id = deployment_id or deployment_scope()
         self.generation = generation or int(
             os.environ.get("EXASERVE_GENERATION", "0") or 0)
         self.receipt: CompatibilityReceipt | None = None

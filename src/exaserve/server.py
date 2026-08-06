@@ -556,8 +556,10 @@ def build_actor_runtime_env(
         value = os.environ.get(key)
         if value:
             env_vars[key] = value
-    # The scope the head actually used, even if it fell back past the env vars.
-    env_vars.setdefault("EXASERVE_DEPLOYMENT_ID", _deployment_scope())
+    # OVERRIDE with the scope the head actually used. setdefault is wrong here:
+    # the raw env value is already present and is NOT normalized the same way,
+    # so replicas would build receipts under a different deployment id.
+    env_vars["EXASERVE_DEPLOYMENT_ID"] = _deployment_scope()
     if extra_env_vars:
         env_vars.update(extra_env_vars)
 

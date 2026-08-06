@@ -291,3 +291,23 @@ def test_redelivered_receipts_do_not_inflate_the_count():
     assert store.add(receipt) == (True, "ok")
     assert store.add(receipt) == (True, "duplicate")
     assert store.count() == 1
+
+
+def test_activator_normalizes_a_raw_scheduler_job_id(monkeypatch):
+    """A raw PBS_JOBID must not produce a receipt the head rejects.
+
+    The head scopes the deployment id (`split('.')[0][:40]`); an activator that
+    read the raw env value built receipts under a different id and every one
+    was rejected as "wrong deployment".
+    """
+    from exaserve.compat.activator import CompatibilityActivator
+
+    for var in ("EXASERVE_DEPLOYMENT_ID", "EXASERVE_SCALING_TRACE_TOKEN",
+                "EXASERVE_JOBID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PBS_JOBID", "8736431.aurora-pbs-0001.hostmgmt.example")
+    assert CompatibilityActivator().deployment_id == "8736431"
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID",
+                       "8736431.aurora-pbs-0001.hostmgmt.example")
+    assert CompatibilityActivator().deployment_id == "8736431"
