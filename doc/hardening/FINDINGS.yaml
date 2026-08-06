@@ -222,12 +222,14 @@ findings:
      status: OPEN, owner: claude}
   - {id: KI-D1, source: known_issues, severity: blocker, primary_work_package: WP5,
      invariant: "Readiness false-positive class eliminated (with PR-008)",
-     status: FIXED, owner: claude, acceptance_tests: [AC-RDY-01],
-     evidence: "Readiness is revocable (absolute replica sets refreshed per poll) and
-       requires a real completion through the external route; the stdout marker prints
-       only after the predicate holds and a not-ready snapshot OVERRIDES the marker in
-       eval/lib/backends/base.py. Unit coverage: tests/test_serve_readiness.py,
-       eval/tests/test_readiness_consumption.py. 2-node Aurora run 2026-08-06: gate_ready/marker_never_precedes_gate/receipts/canary/tree_reaped all PASS"}
+     status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-RDY-01],
+     evidence: "MECHANISM CLOSED: readiness is a fail-closed predicate (PR-008), is
+       revocable (absolute replica sets refreshed per poll), requires a real external-route
+       completion, and the snapshot OVERRIDES the stdout marker in the eval harness.
+       Validated on Aurora at 2 nodes (24/24 replicas, all checks PASS) and 16 nodes
+       (192/192 replicas, 16 healthy proxies, canary answered, all roles attested).
+       OWED: the original symptom was observed at 256n; re-run at that scale before
+       closing. Tracked in doc/KNOWN_ISSUES.md D1 as RESOLVED-IN-CODE / NEEDS-SCALE-RERUN."}
   - {id: KI-D2, source: known_issues, severity: medium, primary_work_package: WP13,
      invariant: "MPI distribution path revalidated at scale; receipts prove per-rank activation",
      status: IN_PROGRESS, owner: claude, acceptance_tests: [AC-DIST-01]}

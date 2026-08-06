@@ -208,13 +208,29 @@ Refs: `[[project_n64_slo_two_causes]]`.
 
 ## D. Harness robustness / known workarounds
 
-### D1. Readiness gate false-positive at scale — `OPEN`
+### D1. Readiness gate false-positive at scale — `RESOLVED-IN-CODE / NEEDS-SCALE-RERUN`
 At 256n the driver printed `CLUSTER FULLY READY` despite a crashed ServeController
 and `Failed to collect proxy statuses` — the health check only probed one
 `/health` endpoint (0.025s), not all N. So the client ran against an unhealthy
-cluster. **Action:** harden readiness to verify all proxies/replicas (or fail
-loudly) before launching the client. Contributing factor to A1.
-Refs: `[[project_envoy_256n_deploy_failure]]`.
+cluster. Contributing factor to A1.
+
+**Resolved in code (2026-08-06).** `CLUSTER FULLY READY` is no longer a state:
+`control.serve_readiness.enforce_readiness()` gates it on a predicate — exact
+node membership, a healthy proxy on **every** node, `target_num_replicas`
+running per application, application RUNNING, and a real completion through the
+external route (a `/health` probe explicitly does not count as a canary) — plus
+a compatibility receipt from every required role. Failure is fail-closed with
+each blocker named, and the verdict is written to `readiness.json`, which the
+eval harness treats as authoritative over the stdout marker.
+
+Readiness is also **revocable**: replica sets are absolute and refreshed every
+poll, so a replica lost after the fact drops the count below target instead of
+leaving a latched marker.
+
+Validated at 2 and 16 nodes (16n: 192/192 replicas, 16 healthy proxies, canary
+answered, all roles attested). **Still needs a re-run at 256n** before this is
+closed outright — the original symptom was scale-dependent.
+Refs: `[[project_envoy_256n_deploy_failure]]`, `doc/hardening/STATUS.md`.
 
 ### D2. Former SSH fan-out overlay distribution race — `RESOLVED-IN-CODE / NEEDS-RERUN`
 The SSH fan-out description is stale. Package source and optional overlay files

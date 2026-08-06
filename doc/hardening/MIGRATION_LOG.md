@@ -875,3 +875,52 @@ system safer, it makes it unavailable — and the operator is handed a message
 that accuses the wrong subsystem. Both the sentinel resolution and the
 staticmethod shape are now covered by unit tests
 (`tests/test_serve_readiness.py`).
+
+### 16-node validation through the gate (2026-08-06)
+
+Deploy through the new readiness authority at 16 nodes, 192 replicas:
+
+```
+[Compat] replicas: 192/192 published a receipt
+[Readiness] gate: 16 nodes, apps={'default': 192},
+            roles=['ray_head', 'ray_worker', 'replica', 'engine']
+[Readiness] READY — membership: 16 nodes | components: 16 healthy |
+            model default: 192/192 replicas | routes: 1 healthy |
+            canaries: 1/1 routes answered | receipts: all required roles attested
+deploy_ready=PASS ready_s=240 (source=snapshot)
+```
+
+Two things worth noting. The `supervisor` role is correctly **absent** from the
+required set: this path launches `launch_cluster.sh` directly, so no supervisor
+stamped the environment and none is demanded. And readiness came from the
+snapshot, not the marker — 240s versus the 260s marker-based baseline, so the
+gate is not a bring-up tax.
+
+The throughput probe in that same job reported `err=1.0`, which was a **harness**
+fault, not a serving one: it selected run-log artifacts with `ls | head -1`
+(alphabetical), picked a *stale* run directory left under the same output root,
+and aimed 6.5M requests at a dead allocation's IPs. The gate's own canary
+answered normally in the same run. Fixed by selecting newest-first and, in the
+scaling harness, by taking the directory the readiness snapshot came from.
+
+### Identity normalization: one value, one normalization
+
+Making the job id robust (deriving it outside the nodefile branch) immediately
+exposed the complementary defect: a raw `PBS_JOBID` carries a
+`.aurora-pbs-...` suffix, the head scopes it (`split('.')[0][:40]`), and
+`CompatibilityActivator` read the environment value **raw**. Every replica then
+built its receipt under a different deployment id and the store rejected all of
+them as `wrong deployment` — again surfacing as the gate blaming the replica
+and engine roles for a fault that was neither.
+
+Normalization now happens in exactly one place
+(`compat.collector.deployment_scope`), the activator uses it, and
+`build_actor_runtime_env` **overrides** the propagated id rather than
+`setdefault`-ing it (the un-normalized value is already in the environment, so
+setdefault silently kept the wrong one). Regression test covers both a raw
+`PBS_JOBID` and a raw `EXASERVE_DEPLOYMENT_ID`.
+
+The pattern across this pass is worth stating plainly: **every identity that
+two processes must agree on needs a single normalization function, and the
+propagation must override rather than defer.** Three separate failures this
+pass were the same shape.

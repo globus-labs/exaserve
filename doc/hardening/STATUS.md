@@ -21,14 +21,16 @@ wrong):
 
 | Status | All records (82) | Audit findings (35) |
 |---|---|---|
-| FIXED | 29 | 13 |
-| IN_PROGRESS | 29 | 22 |
+| FIXED | 28 | 13 |
+| IN_PROGRESS | 30 | 22 |
 | OPEN | 22 | 0 |
 | OUT_OF_PRODUCTION_SCOPE | 2 | 0 |
 
 (Counts are YAML-parsed from `FINDINGS.yaml`, not regex-counted. Pass 3 moved
-PR-008 and KI-D1 to FIXED on the strength of the on-hardware evidence below;
-nothing else changed status.)
+**PR-008 to FIXED** on the on-hardware evidence below. **KI-D1 stays
+IN_PROGRESS**: the mechanism is closed and validated at 2 and 16 nodes, but the
+original false-ready symptom was observed at **256n** and has not been re-run
+there — the ledger and `KNOWN_ISSUES.md` agree on that wording deliberately.)
 
 A record is `FIXED` only when its invariant holds **on the path a production
 deployment actually takes**. Anything owned by the un-cut-over architecture is
