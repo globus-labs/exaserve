@@ -968,3 +968,71 @@ newest-first, but before a run writes its own snapshot the newest one still
 belongs to the previous run — which reported ready in 10 seconds and aimed 7.8M
 requests at an allocation that no longer existed. The harness now stamps
 `RUN_START` and selects with `find -newermt`, because ordering is not freshness.
+
+## 2026-08-06 — Pass 4: ownership becomes structural
+
+Pass 3 put the readiness authority on the production path. This pass does the
+same for **process ownership**, which was the last thing the shell still owned.
+
+### The S01 topology, now real
+
+```
+RuntimeSupervisor (allocation head, one per run)
+  └── RankLauncher          — one mpiexec/srun, the head's ONLY child
+        └── NodeSupervisor  — one per rank, owns that node's children
+              └── rank 0 also owns the deployment child
+```
+
+The invariant is worth stating as a property rather than a rule: because the
+head process holds exactly one PID — its launcher — there is no path by which
+it *could* signal or reap a remote one. `NodeSupervisor` enforces the same
+thing from the other side by refusing to adopt a component that already has a
+process, since that PID was created by somebody else.
+
+`RankLauncher` keeps the two failure signals independent (WP4.4). Launcher exit
+aggregation is used directly, because it is causal and bounded. A rank that
+reports a fatal observation fails the run even when the launch aggregates to
+zero — `rank_result_check` is where a zero exit is refused as insufficient.
+
+### `launch_cluster.sh` is now a site adapter
+
+Environment and preflight stay in the shell, where they belong; the run itself
+is handed to `exaserve.supervisor_main`. The shell no longer decides the
+launch, owns the launch, decides terminal state, or produces the exit code.
+`EXASERVE_PYTHON_RANK_LAUNCH=0` restores the old `mpiexec` line for a
+run-to-run comparison and is removed at the WP13 cutover.
+
+### DeploymentManager
+
+The deployment lifecycle is now an addressable object with the five operations
+WP4.1 requires, typed exceptions, a state machine that refuses illegal
+transitions, first-cause preservation, and a **revocable** READY (losing the
+predicate returns to VALIDATING rather than latching or going terminal). It
+delegates to the existing deployment internals — a contract around proven
+code, not a rewrite of it.
+
+One honest limitation surfaced while wiring it: `server.py` still exposes its
+CLI as a `__main__` block rather than a callable `main()`, so the manager
+drives the lifecycle *inside* that block. The restructuring into a callable
+entry point is the remaining half of WP4.1 and is not done here; the test pins
+the manager calls to the executed path so they cannot quietly drift out of it.
+
+### Engine self-attestation (EN-01 closed)
+
+The spawned vLLM `EngineCore` now writes its own receipt from inside the engine
+process via the generated sitecustomize shim; the owning replica forwards it,
+and owner attestation remains only as a fallback with the evidence class
+recorded. Patch *delivery* is unchanged — only PP asks the shim to import the
+patch module, exactly as before — so what the receipt adds is an honest account
+of what each engine process actually received:
+
+- PP engines prove each required patch with in-process sentinels;
+- non-PP engines, which deliberately never receive the vLLM/PP patches, record
+  every required patch as `not_applicable` — never as applied, and never as a
+  failure that would block readiness on a correct deployment;
+- a PP engine given the patches where they did not take effect is reported as
+  failed and rejected by the store.
+
+Verified on 2 nodes: `engine_self_attested=PASS`, and a child interpreter with
+only the shim on `PYTHONPATH` and no `exaserve` importable still starts cleanly,
+so the shim cannot break an engine.

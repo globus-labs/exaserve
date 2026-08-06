@@ -21,13 +21,14 @@ wrong):
 
 | Status | All records (82) | Audit findings (35) |
 |---|---|---|
-| FIXED | 28 | 13 |
-| IN_PROGRESS | 30 | 22 |
+| FIXED | 29 | 14 |
+| IN_PROGRESS | 29 | 21 |
 | OPEN | 22 | 0 |
 | OUT_OF_PRODUCTION_SCOPE | 2 | 0 |
 
 (Counts are YAML-parsed from `FINDINGS.yaml`, not regex-counted. Pass 3 moved
-**PR-008 to FIXED** on the on-hardware evidence below. **KI-D1 stays
+**PR-008 to FIXED** on the on-hardware evidence below, and pass 4 moved
+**PR-009 to FIXED** (per-rank ownership). **KI-D1 stays
 IN_PROGRESS**: the mechanism is closed and validated at 2 and 16 nodes, but the
 original false-ready symptom was observed at **256n** and has not been re-run
 there — the ledger and `KNOWN_ISSUES.md` agree on that wording deliberately.)
@@ -126,19 +127,44 @@ this pass, a check that could not observe a correct state reported a healthy
 cluster as broken and named the wrong cause. Fail-closed is right; blind is
 not.
 
+## Pass 4 (2026-08-06): ownership becomes structural
+
+- **The S01 topology is real.** `RuntimeSupervisor` owns exactly one
+  `RankLauncher` (one mpiexec/srun); each rank runs a `NodeSupervisor` owning
+  that node's children. Because the head holds exactly one PID, there is no
+  path by which it *could* signal a remote one — the invariant is structural,
+  not a rule. `NodeSupervisor` enforces the same from the other side: it
+  refuses to adopt a component that already has a process.
+- **`launch_cluster.sh` is a site adapter.** Environment and preflight stay in
+  the shell; the run is handed to `exaserve.supervisor_main`, which decides the
+  launch, owns it, decides terminal state, and produces the exit code.
+- **`DeploymentManager`** gives the lifecycle the five WP4.1 operations with
+  typed exceptions, a state machine that refuses illegal transitions, and a
+  revocable READY.
+- **Engine self-attestation (EN-01) closed** — the engine writes its own
+  receipt from inside the engine process.
+
+Verified on 2 Aurora nodes through the full new stack: `[supervisor] owning 1
+rank launcher over 2 node(s)`, `[Deployment] state=READY`, and
+gate_ready / marker_never_precedes_gate / receipts / canary / tree_reaped /
+engine_self_attested **all PASS**; supervisor exits 143 with the tree reaped
+(17 named processes → 0). Suite: **219 passed / 0 failed**.
+
 ### What still remains (honest scope)
 
-- **IMP-B01 / WP13 topology.** `RankLauncher` / `NodeSupervisor` /
-  `DeploymentManager` do not exist; `launch_cluster.sh` still fans out per-rank
-  `exaserve.driver` processes. The supervisor now *owns* that launch and
-  reports its first cause, but the in-allocation topology is unchanged. Bash
-  is still a coequal control plane (IMP-H03).
-- **Engine self-attestation.** The engine core is attested by its owning
-  replica, not by itself (see `COMPATIBILITY_MATRIX.md`).
-- **Scale evidence through the new path.** AC-SCALE-01 requires qualifying
-  runs; those recorded so far predate the gate.
-- Legacy switches (`EXASERVE_READINESS_GATE=0`,
-  `EXASERVE_USE_SUPERVISOR=0`, `EXASERVE_ALLOW_DEGRADED_READINESS=1`) are still
+- **`server.py` is still a `__main__` block.** `DeploymentManager` drives the
+  lifecycle, but the deployment code is not yet a callable entry point, so it
+  cannot be driven in-process by anything else. That restructuring is the
+  remaining half of WP4.1.
+- **Control-channel rank observations are not yet consumed by the head.**
+  `NodeSupervisor` emits typed observations and `RankLauncher` has the hook
+  (`rank_result_check`), but the head still learns of rank failure through
+  launcher exit aggregation alone. Wiring the §3.2 listener in replaces one
+  callable without touching the ownership structure.
+- **Scale evidence.** The gate is validated at 2 and 16 nodes; KI-D1's original
+  256n symptom has not been re-run at that scale.
+- Legacy switches (`EXASERVE_READINESS_GATE=0`, `EXASERVE_USE_SUPERVISOR=0`,
+  `EXASERVE_PYTHON_RANK_LAUNCH=0`, `EXASERVE_ALLOW_DEGRADED_READINESS=1`) are
   present by design and are removed at the WP13 cutover.
 
 ### On-hardware verdict (2 nodes, Aurora, 2026-08-06)

@@ -86,12 +86,18 @@ report it applied; a `supervisor` receipt that claims applied patches is
 rejected. The readiness snapshot records `externally_attested_roles`, so a
 reader can always see which roles rest on the weaker evidence.
 
-**Known limitation.** The vLLM `EngineCore` subprocess is currently attested by
-its owning replica. Patches reach it through the EN-01 generated
-`sitecustomize` shim, but the engine does not yet self-report, so `EN-01` and
-the `SC-*` set are not proved *inside* the engine process. Closing this means
-having the shim publish a receipt from the engine process itself; until then
-the engine's row above is the honest description of what is known.
+**EN-01 closed (2026-08-06).** The vLLM `EngineCore` now self-reports: the
+generated `sitecustomize` shim writes a receipt from inside the engine process
+and the owning replica forwards it, so `engine` is a `self` attestation
+whenever the shim runs. Owner attestation remains only as a fallback, and the
+readiness snapshot records which evidence class was used.
+
+The receipt describes what that process actually received. PP engines prove
+each required patch with in-process sentinels. Non-PP engines deliberately
+never receive the vLLM/PP patches — they are not needed there — so every
+required patch is recorded as `not_applicable`, never as applied and never as a
+failure. A PP engine that was given the patches where they did not take effect
+is reported as failed and rejected.
 
 A patch is only required where its gate requests it: `PatchSpec.env_gate`
 scopes the required set to what `EXASERVE_VLLM_PATCH_PP_LAYER_FILTER` (and

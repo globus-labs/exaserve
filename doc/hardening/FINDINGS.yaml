@@ -58,8 +58,14 @@ findings:
        per-role receipts, deadline-bounded, each blocker named. 2-node Aurora run 2026-08-06: gate_ready/marker_never_precedes_gate/receipts/canary/tree_reaped all PASS"}
   - {id: PR-009, source: audit, severity: high,
      invariant: "Every essential child is supervised for the deployment lifetime",
-     primary_work_package: WP4, affected_regions: "driver.py proxy/ray wait paths",
-     acceptance_tests: [AC-SUP-01], status: IN_PROGRESS, owner: claude}
+     primary_work_package: WP4, affected_regions: "control/{supervisor,node_supervisor,rank_launcher}.py; supervisor_main.py",
+     acceptance_tests: [AC-SUP-01], status: FIXED, owner: claude,
+     evidence: "S01 topology on the production path: RuntimeSupervisor owns exactly one
+       RankLauncher (one mpiexec/srun); each rank runs a NodeSupervisor owning that node's
+       children; NodeSupervisor refuses to adopt a PID it did not create. Unexpected exit is
+       fatal even at status 0; signals installed before any child; process groups reaped.
+       2-node Aurora run 2026-08-06: supervisor owns the launcher, both ranks start,
+       tree_reaped PASS (17 named processes to 0), supervisor exit 143 on SIGTERM."}
   - {id: PR-010, source: audit, severity: blocker,
      invariant: "Exposure model is explicit; admin surfaces are not open by default",
      primary_work_package: WP7, affected_regions: "server.py 0.0.0.0; haproxy stats admin; litellm master_key; sglang trust_remote_code",
