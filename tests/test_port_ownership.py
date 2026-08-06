@@ -77,16 +77,27 @@ def test_release_is_idempotent_and_only_removes_our_own_lock(tmp_path):
     assert foreign.exists(), "released a lease this process does not own"
 
 
-def test_exhaustion_raises_instead_of_returning_none(tmp_path):
-    base = _free_base()
-    held = [reserve_port(base + i, max_retries=1, lease_dir=str(tmp_path))
-            for i in range(3)]
-    try:
-        with pytest.raises(PortUnavailable, match="no free port"):
-            reserve_port(base, max_retries=3, lease_dir=str(tmp_path))
-    finally:
-        for lease in held:
-            lease.release()
+def test_exhaustion_raises_instead_of_returning_none(tmp_path, monkeypatch):
+    """Deterministic: whether real OS ports happen to be free is not the point.
+
+    The old shape leased three consecutive real ports, which made the result
+    depend on what else on the machine held a port at that instant — a flaky
+    release gate is worse than none.
+    """
+    from exaserve.state import ports as ports_mod
+
+    monkeypatch.setattr(ports_mod, "_bindable", lambda port, host: False)
+    with pytest.raises(PortUnavailable, match="no free port"):
+        reserve_port(31000, max_retries=3, lease_dir=str(tmp_path))
+
+
+def test_exhaustion_message_says_how_many_are_leased(tmp_path, monkeypatch):
+    from exaserve.state import ports as ports_mod
+
+    monkeypatch.setattr(ports_mod, "_bindable", lambda port, host: False)
+    with pytest.raises(PortUnavailable) as excinfo:
+        reserve_port(31000, max_retries=2, lease_dir=str(tmp_path))
+    assert "31000" in str(excinfo.value) and "31002" in str(excinfo.value)
 
 
 def test_a_dead_owners_lease_is_swept(tmp_path):
