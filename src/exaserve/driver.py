@@ -242,6 +242,46 @@ def get_ray_internal_startup_limit(cluster: RayClusterConfig) -> int:
     return max(1, min(cluster.node_cpus, configured_limit))
 
 
+def ray_head_argv(cluster: RayClusterConfig, num_gpus: int) -> list[str]:
+    """Argv only — so a NodeSupervisor can CREATE the child it owns (WP4.3)."""
+    startup_limit = get_ray_internal_startup_limit(cluster)
+    return [
+        sys.executable,
+        os.path.join(SRC_DIR, "ray_start.py"),
+        "--head",
+        f"--node-ip-address={cluster.head_ip}",
+        f"--num-cpus={cluster.node_cpus}",
+        f"--num-gpus={num_gpus}",
+        f"--port={cluster.port}",
+        "--disable-usage-stats",
+        "--include-dashboard=false",
+        "--block",
+        f"--max-startup-concurrency={startup_limit}",
+        f"--prestart-python-workers={startup_limit}",
+    ]
+
+
+def ray_worker_argv(cluster: RayClusterConfig, num_gpus: int,
+                    worker_ip: str | None = None) -> list[str]:
+    startup_limit = get_ray_internal_startup_limit(cluster)
+    worker_ip = worker_ip or get_hsn_ip()
+    return [
+        sys.executable,
+        os.path.join(SRC_DIR, "ray_start.py"),
+        f"--address={cluster.head_ip}:{cluster.port}",
+        f"--node-ip-address={worker_ip}",
+        f"--num-cpus={cluster.node_cpus}",
+        f"--num-gpus={num_gpus}",
+        "--block",
+        f"--max-startup-concurrency={startup_limit}",
+        f"--prestart-python-workers={startup_limit}",
+    ]
+
+
+def server_argv(config_path: str) -> list[str]:
+    return [sys.executable, "-m", "exaserve.server", "--config", config_path]
+
+
 def start_ray_head(cluster: RayClusterConfig, num_gpus: int, vendor: str):
     startup_limit = get_ray_internal_startup_limit(cluster)
     print(

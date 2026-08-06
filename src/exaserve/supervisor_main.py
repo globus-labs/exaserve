@@ -48,7 +48,14 @@ def build(config_path: str, *, argv_extra: Sequence[str] = (),
     """Build the supervisor and its single launcher component."""
     nodes = _node_count(os.environ.get("EXASERVE_NODEFILE"))
     scheduler = os.environ.get("EXASERVE_SCHEDULER", "pbs")
-    rank_argv = [sys.executable, "-m", "exaserve.driver",
+    # IMP-B01: the rank entry point is the NodeSupervisor, not the legacy
+    # driver. Until this line changed, NodeSupervisor had no production
+    # consumer and the documented ownership tree was a design, not the
+    # process tree that ran.
+    rank_module = ("exaserve.driver"
+                   if os.environ.get("EXASERVE_RANK_ENTRY") == "driver"
+                   else "exaserve.rank_main")
+    rank_argv = [sys.executable, "-m", rank_module,
                  "--config", config_path, *argv_extra]
 
     env = os.environ.copy()

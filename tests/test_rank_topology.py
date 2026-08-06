@@ -243,7 +243,10 @@ def test_head_supervises_exactly_one_launcher(tmp_path, monkeypatch):
     assert launcher.node_count == 2
     assert list(supervisor.components) == [component.component_id]
     assert component.argv[:3] == ["mpiexec", "-n", "2"]
-    assert "exaserve.driver" in component.argv
+    # IMP-B01: the rank entry point must be the NodeSupervisor. The previous
+    # expectation here encoded the WEAKER behaviour and let the gap pass.
+    assert "exaserve.rank_main" in component.argv
+    assert "exaserve.driver" not in component.argv
     assert "/tmp/cfg.yaml" in component.argv
 
 
@@ -313,3 +316,44 @@ def test_the_module_level_app_is_not_clobbered_by_the_entry_point():
     from exaserve import server
 
     assert isinstance(server.app, FastAPI)
+
+
+def test_the_rank_entry_point_owns_its_children(monkeypatch, tmp_path):
+    """IMP-B01 §4.1.1: NodeSupervisor must have a PRODUCTION consumer.
+
+    Before this, its only consumers were tests -- the documented ownership
+    tree described a design, not the process tree that ran.
+    """
+    from exaserve import rank_main
+
+    assert rank_main.use_node_supervisor() is True
+    monkeypatch.setenv("EXASERVE_RANK_ENTRY", "driver")
+    assert rank_main.use_node_supervisor() is False
+
+
+def test_ray_argv_is_separable_so_the_supervisor_can_create_the_child():
+    """A rank must not adopt a PID somebody else created."""
+    pytest.importorskip("ray", exc_type=ImportError)
+    from exaserve.driver import RayClusterConfig, ray_head_argv, ray_worker_argv
+
+    cluster = RayClusterConfig(head_ip="10.0.0.1", port=6379, node_cpus=64)
+    head = ray_head_argv(cluster, 12)
+    worker = ray_worker_argv(cluster, 12, worker_ip="10.0.0.2")
+    assert "--head" in head and "--block" in head
+    assert "--address=10.0.0.1:6379" in worker
+    assert all(isinstance(a, str) for a in head + worker)
+
+
+def test_a_ray_worker_exiting_zero_is_fatal_for_the_rank():
+    """The audit's hole: a long-lived Ray worker exiting 0 became a success."""
+    import time
+
+    node = NodeSupervisor(deployment_id="d", generation=1, plan_hash="h", rank=2)
+    node.adopt(ray_component([sys.executable, "-c", "raise SystemExit(0)"]))
+    node.start_all()
+    for _ in range(50):
+        if node.observe_once() is not None:
+            assert node.exit_code() != 0
+            return
+        time.sleep(0.1)
+    pytest.fail("a Ray worker exiting 0 was not fatal for the rank")
