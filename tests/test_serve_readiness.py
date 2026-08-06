@@ -369,3 +369,86 @@ def test_a_vanished_application_revokes_readiness(monkeypatch):
     monkeypatch.setitem(sys.modules, "ray", module)
     gone = sr.discover_applications()
     assert gone["app"]["running"] == 0 and gone["app"]["status"] == "MISSING"
+
+
+def _stub_cluster(monkeypatch, *, running: int, target: int = 2, canary_ok: bool):
+    """Minimal stand-in for a live Ray/Serve cluster."""
+    import sys
+    import types
+
+    ray = types.ModuleType("ray")
+    ray.nodes = lambda: [{"NodeID": "n0", "Alive": True}]
+    ray.serve = type("S", (), {"status": staticmethod(lambda: {
+        "proxies": {"n0": "HEALTHY"},
+        "applications": {"app": {"status": "RUNNING", "deployments": {
+            "d": {"replica_states": {"RUNNING": running}}}}}})})
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    monkeypatch.setitem(sys.modules, "ray.serve", ray.serve)
+    sr.reset_discovery_cache()
+    monkeypatch.setattr(sr, "_serve_details", lambda: {"applications": {"app": {
+        "route_prefix": "/", "status": "RUNNING", "deployments": {
+            "d": {"target_num_replicas": target,
+                  "replicas": [{"state": "RUNNING"}] * running}}}}})
+    monkeypatch.setattr(sr, "http_canary",
+                        lambda *a, **k: (canary_ok, "" if canary_ok else "refused"))
+
+    class _Store:
+        profile = default_profile()
+
+        def add(self, *_):
+            return True, "ok"
+
+        def satisfied(self):
+            return True, "all required roles attested"
+
+        def count(self):
+            return 1
+
+        def externally_attested_roles(self):
+            return []
+
+    monkeypatch.setattr(sr, "_build_receipt_store",
+                        lambda *a, **k: (_Store(), ["replica"]))
+
+
+def test_gate_raises_when_the_predicate_fails(monkeypatch, tmp_path):
+    """Fail-closed: an unsatisfied predicate must abort the deploy, not warn."""
+    _stub_cluster(monkeypatch, running=1, target=2, canary_ok=True)
+    monkeypatch.delenv("EXASERVE_ALLOW_DEGRADED_READINESS", raising=False)
+    with pytest.raises(RuntimeError, match="refusing to declare"):
+        sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
+                             base_url="http://x:8000", snapshot_dir=str(tmp_path),
+                             timeout_s=0.0, log=lambda *_: None)
+    # The verdict is still recorded, with the blocker named.
+    data = json.loads((tmp_path / "readiness.json").read_text())
+    assert data["ready"] is False
+    assert any("1/2 replicas" in b for b in data["blockers"])
+
+
+def test_gate_returns_ready_when_everything_holds(monkeypatch, tmp_path):
+    _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
+    snap = sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
+                                base_url="http://x:8000", snapshot_dir=str(tmp_path),
+                                timeout_s=5.0, log=lambda *_: None)
+    assert snap.ready
+
+
+def test_a_dead_canary_alone_blocks_the_gate(monkeypatch, tmp_path):
+    """Replicas can all be RUNNING while the served route answers nothing."""
+    _stub_cluster(monkeypatch, running=2, target=2, canary_ok=False)
+    monkeypatch.delenv("EXASERVE_ALLOW_DEGRADED_READINESS", raising=False)
+    with pytest.raises(RuntimeError, match="refusing to declare"):
+        sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
+                             base_url="http://x:8000", snapshot_dir=str(tmp_path),
+                             timeout_s=0.0, log=lambda *_: None)
+    data = json.loads((tmp_path / "readiness.json").read_text())
+    assert any(b.startswith("canary ") for b in data["blockers"])
+
+
+def test_degraded_escape_starts_anyway_but_records_the_blockers(monkeypatch, tmp_path):
+    _stub_cluster(monkeypatch, running=1, target=2, canary_ok=True)
+    monkeypatch.setenv("EXASERVE_ALLOW_DEGRADED_READINESS", "1")
+    snap = sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
+                                base_url="http://x:8000", snapshot_dir=str(tmp_path),
+                                timeout_s=0.0, log=lambda *_: None)
+    assert not snap.ready and snap.blockers
