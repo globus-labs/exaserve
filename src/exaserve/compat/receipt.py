@@ -61,6 +61,15 @@ class CompatibilityReceipt:
                 return False, (f"external attestation does not account for "
                                f"{sorted(unaccounted)}")
             return True, "externally attested (no in-process patch proof)"
+        # Audit #15: an UNCONDITIONAL patch (EN-01 has no env gate) cannot be
+        # "not applicable" -- if it were, a shim that ran but never imported the
+        # patch payload would place every required patch there and satisfy
+        # READY while delivering nothing.
+        unconditional = set(getattr(self, "_unconditional", ()) or ())
+        bogus = sorted(unconditional & set(self.not_applicable))
+        if bogus:
+            return False, (f"patches {bogus} are unconditional and cannot be "
+                           "reported not-applicable")
         accounted = set(self.patch_results) | set(self.not_applicable)
         missing = [p for p in required_patch_ids if p not in accounted]
         failed = [p for p, ok in self.patch_results.items() if not ok]
@@ -131,6 +140,9 @@ class ReceiptStore:
         if receipt.profile_id != self.profile.profile_id:
             return False, (f"profile mismatch: receipt={receipt.profile_id[:12]} "
                            f"expected={self.profile.profile_id[:12]}")
+        object.__setattr__(receipt, "_unconditional", tuple(
+            spec.patch_id for spec in self.profile.patches
+            if spec.required and not spec.env_gate and receipt.role in spec.roles))
         ok, reason = receipt.is_complete_for(
             self.profile.required_patch_ids(receipt.role))
         if not ok:

@@ -114,6 +114,13 @@ def write_engine_receipt(*, patches_imported: bool) -> Optional[str]:
         results: dict[str, bool] = {}
         not_applicable: list[str] = []
         for patch_id in required:
+            if patch_id == "EN-01":
+                # EN-01 IS this shim reaching the engine process. Writing this
+                # receipt from inside the engine is the proof, so it is applied
+                # -- never "not applicable", which would let a shim that
+                # delivered nothing still satisfy the role (audit #15).
+                results[patch_id] = True
+                continue
             if not patches_imported:
                 # The patch set was never delivered to this process. Claiming
                 # it applied would be false; claiming it FAILED would be wrong

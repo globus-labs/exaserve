@@ -41,17 +41,35 @@ def test_a_non_pp_engine_records_patches_as_undelivered(tmp_path, monkeypatch):
     data = json.loads(open(path).read())
     assert data["role"] == "engine"
     assert data["attestation"] == "self"
-    assert data["patch_results"] == {}
     assert data["patches_delivered"] is False
 
     profile = default_profile()
-    assert set(data["not_applicable"]) == set(profile.required_patch_ids("engine"))
+    required = set(profile.required_patch_ids("engine"))
+    # EN-01 is the shim reaching this process; writing the receipt proves it,
+    # so it must be APPLIED. Only the gated vLLM/PP patches are not-applicable.
+    assert data["patch_results"] == {"EN-01": True}
+    assert set(data["not_applicable"]) == required - {"EN-01"}
 
     # And the store accepts it: everything required is accounted for.
     from exaserve.compat.collector import receipt_from_dict
 
     ok, why = ReceiptStore(profile, "d1", 7).add(receipt_from_dict(data))
     assert ok, why
+
+
+def test_an_unconditional_patch_cannot_be_reported_not_applicable():
+    """Audit #15: a shim that ran but delivered nothing put every required
+    patch in not_applicable and the store accepted it."""
+    from dataclasses import replace
+
+    from exaserve.compat.receipt import build_receipt
+
+    profile = default_profile()
+    forged = build_receipt(
+        profile=profile, role="engine", deployment_id="d1", generation=7,
+        patch_results={}, not_applicable=profile.required_patch_ids("engine"))
+    ok, why = ReceiptStore(profile, "d1", 7).add(forged)
+    assert not ok and "unconditional" in why
 
 
 def test_a_pp_engine_that_is_half_patched_is_reported_as_failed(tmp_path, monkeypatch):
@@ -64,7 +82,8 @@ def test_a_pp_engine_that_is_half_patched_is_reported_as_failed(tmp_path, monkey
                         lambda pid: False)
     path = engine_shim.write_engine_receipt(patches_imported=True)
     data = json.loads(open(path).read())
-    assert data["patch_results"] and all(v is False for v in data["patch_results"].values())
+    gated = {k: v for k, v in data["patch_results"].items() if k != "EN-01"}
+    assert gated and all(v is False for v in gated.values())
 
     from exaserve.compat.collector import receipt_from_dict
 

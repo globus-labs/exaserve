@@ -1094,10 +1094,14 @@ class EngineWorker:
                 outcome["compat_engine_patches_delivered"] = bool(
                     self_receipts[0].get("patches_delivered"))
             else:
-                outcome["compat_engine_evidence"] = "owner"
-                outcome["compat_engine_published"] = publish_receipt(
-                    activator.attest_external("engine", executable=_sys.executable,
-                                              version_probe=engine_probe))
+                # Audit #16: substituting an owner assertion here turned FAILED
+                # engine injection into READY. No self-receipt means no engine
+                # evidence; readiness blocks on the engine role by name.
+                outcome["compat_engine_evidence"] = "missing"
+                outcome["compat_engine_published"] = False
+                print(f"[EngineWorker pid={os.getpid()}] engine wrote no "
+                      "self-receipt; NOT substituting an owner assertion "
+                      "(readiness will block on the engine role)", flush=True)
         except ActivationError as exc:
             print(f"[EngineWorker pid={os.getpid()}] compatibility activation "
                   f"FAILED (no receipt published; readiness will block): {exc}",
