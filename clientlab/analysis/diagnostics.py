@@ -75,7 +75,10 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
     target_error_rate = float(target_metrics.get("aggregate", {}).get("error_fraction", 0.0))
 
     # Expected RPS based on Little's Law: C / T when service_time > 0.
-    service_time_s = float(run_config["faults"].get("service_time", {}).get("value_ms", 0.0)) / 1000.0
+    # PR-030: "faults" is optional in a valid run config; apply the schema
+    # default instead of KeyErroring the whole analysis.
+    faults = run_config.get("faults") or {}
+    service_time_s = float(faults.get("service_time", {}).get("value_ms", 0.0)) / 1000.0
     if service_time_s > 0 and configured_active > 0:
         expected_rps = configured_active / service_time_s
     else:

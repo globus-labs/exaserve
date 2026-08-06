@@ -26,13 +26,30 @@ def trace_store_root(root: str | None = None) -> str:
     return ensure_dir(base_root)
 
 
+def _content_digest(path: str) -> str:
+    """SHA-256 of an input file's CONTENT (PR-017: paths alone allow stale
+    cache reuse after in-place edits). Empty path -> empty digest."""
+    if not path:
+        return ""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _trace_identity(spec: ExperimentSpec) -> dict[str, Any]:
     return {
         "version": TRACE_GENERATOR_VERSION,
         "trace": {
             "kind": spec.trace.kind,
             "input_prompt_path": spec.trace.input_prompt_path,
+            "input_prompt_digest": _content_digest(spec.trace.input_prompt_path),
             "input_trace_path": spec.trace.input_trace_path,
+            "input_trace_digest": _content_digest(spec.trace.input_trace_path),
+            "tokenizer_builder": getattr(spec.trace, "tokenizer_builder", ""),
         },
         "workload": {
             "duration": spec.workload.duration,
@@ -43,6 +60,9 @@ def _trace_identity(spec: ExperimentSpec) -> dict[str, Any]:
             "sampling_strategy": spec.workload.sampling_strategy,
             "seed": spec.workload.seed,
             "modes": spec.workload.modes,
+            # PR-017: arrival changes generated timestamps; fixed/poisson
+            # variants must not collide on one cached trace.
+            "arrival": getattr(spec.workload, "arrival", "fixed"),
         },
         "deployment": {
             "num_nodes": spec.deployment.num_nodes,
@@ -67,23 +87,33 @@ def materialize_trace_artifact(
     store_root: str | None = None,
     force: bool = False,
 ) -> TraceArtifact:
+    from exaserve.state.atomic import ExclusiveLease
+
     spec = variant.spec
-    trace_id = stable_hash(_trace_identity(spec), length=16)
+    identity = _trace_identity(spec)
+    trace_id = stable_hash(identity, length=16)
     artifact_dir = ensure_dir(os.path.join(trace_store_root(store_root), trace_id))
     trace_path = os.path.join(artifact_dir, "trace.jsonl")
     metadata_path = os.path.join(artifact_dir, "metadata.json")
-    if force or not os.path.exists(trace_path):
-        rows = generate_rows(spec)
-        write_trace(trace_path, spec, rows)
-        dump_json_file(
-            metadata_path,
-            {
-                "trace_id": trace_id,
-                "variant_name": variant.variant_name,
-                "trace_identity": _trace_identity(spec),
-                "row_count": len(rows),
-            },
-        )
+    # WP2.6: metadata.json is the completion marker (published atomically
+    # AFTER the trace); its absence means the artifact is incomplete even if
+    # trace.jsonl exists. Generation runs under an exclusive lease so
+    # concurrent materializers cannot double-write.
+    if force or not os.path.exists(metadata_path):
+        with ExclusiveLease(os.path.join(artifact_dir, ".generate.lease"),
+                            ttl_s=1800, owner_note=f"trace {trace_id}"):
+            if force or not os.path.exists(metadata_path):  # re-check under lease
+                rows = generate_rows(spec)
+                write_trace(trace_path, spec, rows)
+                dump_json_file(
+                    metadata_path,
+                    {
+                        "trace_id": trace_id,
+                        "variant_name": variant.variant_name,
+                        "trace_identity": identity,
+                        "row_count": len(rows),
+                    },
+                )
     return TraceArtifact(
         trace_id=trace_id,
         trace_path=trace_path,

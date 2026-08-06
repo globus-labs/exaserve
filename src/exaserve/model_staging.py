@@ -8,6 +8,7 @@ instead of downloading from HuggingFace directly.
 
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Dict, List
@@ -26,30 +27,79 @@ def print_red(message: str):
     print(f"{RED}{message}{RESET}", flush=True)
 
 
+COMPLETION_MARKER = ".exaserve_complete.json"
+
+
+def _validate_model_dir(model_path: Path) -> tuple[bool, str]:
+    """PR-005: structural completeness check.
+
+    Requires config.json and at least one weight file, and — when a
+    safetensors/pytorch shard index is present — every shard the index
+    references. This catches the "interrupted after shard k of N" case that
+    the old any-one-weight-file check classified as complete.
+    """
+    if not (model_path / "config.json").is_file():
+        return False, "missing config.json"
+
+    names = {p.name for p in model_path.iterdir() if p.is_file()}
+    weights = [n for n in names if n.endswith((".safetensors", ".bin", ".pt"))]
+    if not weights:
+        return False, "no weight files"
+
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_path = model_path / index_name
+        if index_path.is_file():
+            try:
+                weight_map = json.loads(index_path.read_text()).get("weight_map", {})
+            except (json.JSONDecodeError, OSError) as exc:
+                return False, f"unreadable {index_name}: {exc}"
+            shards = set(weight_map.values())
+            missing = sorted(s for s in shards if s not in names)
+            if missing:
+                return False, f"{index_name} references {len(missing)} missing shard(s): {missing[:3]}"
+    return True, "ok"
+
+
 def check_model_exists(model_path: Path) -> bool:
     """
-    Check if a model already exists in the specified path.
-    
-    Args:
-        model_path: Path to the model directory
-        
-    Returns:
-        bool: True if model exists and appears complete, False otherwise
+    Check if a model already exists and appears complete.
+
+    Prefers an explicit completion marker (written last after a validated
+    download). For pre-existing directories staged before markers existed,
+    falls back to structural validation and upgrades the marker in place so
+    subsequent checks are cheap and unambiguous.
     """
     if not model_path.exists():
         return False
-    
-    # Check for common model files to verify completeness
-    required_files = ["config.json"]
-    has_weights = False
-    
-    for file in model_path.iterdir():
-        if file.name in required_files:
-            required_files.remove(file.name)
-        if file.suffix in [".bin", ".safetensors", ".pt"]:
-            has_weights = True
-    
-    return len(required_files) == 0 and has_weights
+
+    marker = model_path / COMPLETION_MARKER
+    if marker.is_file():
+        return True
+
+    complete, _reason = _validate_model_dir(model_path)
+    if complete:
+        # Upgrade a legacy-complete directory to a marker-bearing one.
+        try:
+            _write_completion_marker(model_path)
+        except OSError:
+            pass  # read-only store: still complete, just not upgradeable
+    return complete
+
+
+def _write_completion_marker(model_path: Path) -> None:
+    from exaserve.state.atomic import atomic_write_json
+
+    inventory = {
+        p.name: p.stat().st_size
+        for p in sorted(model_path.iterdir())
+        if p.is_file() and p.name != COMPLETION_MARKER
+    }
+    atomic_write_json(model_path / COMPLETION_MARKER, {
+        "version": 1,
+        "file_count": len(inventory),
+        "total_bytes": sum(inventory.values()),
+        "files": inventory,
+    })
 
 
 def get_model_dir_state(model_path: Path) -> str:
@@ -77,9 +127,12 @@ def _resolve_hf_cache_snapshot(cache_dir: Path) -> Path | None:
             return snapshot_dir
 
     if snapshots_dir.is_dir():
-        candidates = sorted(p for p in snapshots_dir.iterdir() if p.is_dir())
+        # PR-005: pick the NEWEST snapshot, not the lexicographically first
+        # (commit-SHA-named dirs sort arbitrarily). refs/main above is still
+        # preferred; this is the ambiguous fallback.
+        candidates = [p for p in snapshots_dir.iterdir() if p.is_dir()]
         if candidates:
-            return candidates[0]
+            return max(candidates, key=lambda p: p.stat().st_mtime)
     return None
 
 
@@ -155,32 +208,67 @@ def download_model(model_id: str, local_path: Path, tokenizer_only: bool = False
     """
     print(f"[ModelStaging] Downloading {model_id} to {local_path}...", flush=True)
     start_time = time.time()
-    
+
+    from exaserve.state.atomic import ExclusiveLease, LeaseHeldError
+
     try:
         from huggingface_hub import snapshot_download
 
-        # Create parent directory if it doesn't exist
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Download model using huggingface_hub
-        if tokenizer_only:
-            # Only download tokenizer files
-            allow_patterns = ["*.json", "*.txt", "*.model", "tokenizer*"]
-        else:
-            # Download all model files
-            allow_patterns = None
-        
-        downloaded_path = snapshot_download(
-            repo_id=model_id,
-            local_dir=str(local_path),
-            local_dir_use_symlinks=False,
-            allow_patterns=allow_patterns,
+        allow_patterns = (
+            ["*.json", "*.txt", "*.model", "tokenizer*"] if tokenizer_only else None
         )
-        
+
+        # PR-005: transactional staging. One lease per model prevents
+        # concurrent stagers from racing into the same tree; the download
+        # lands in a sibling staging dir, is validated, marked complete, and
+        # only then atomically published to the final path.
+        lease_path = local_path.parent / f".{local_path.name}.download.lease"
+        try:
+            lease = ExclusiveLease(lease_path, ttl_s=7200,
+                                   owner_note=f"download {model_id}").acquire()
+        except LeaseHeldError:
+            print(f"[ModelStaging] Another stager holds {model_id}; waiting...",
+                  flush=True)
+            # Wait for the winner; then use its result if complete.
+            deadline = time.time() + 7200
+            while time.time() < deadline:
+                time.sleep(5)
+                if check_model_exists(local_path):
+                    print(f"[ModelStaging] ✓ {model_id} completed by another stager",
+                          flush=True)
+                    return str(local_path)
+            raise RuntimeError(f"timed out waiting for concurrent download of {model_id}")
+
+        try:
+            if check_model_exists(local_path):  # re-check under lease
+                return str(local_path)
+            staging = local_path.parent / f".{local_path.name}.staging"
+            if staging.exists():
+                shutil.rmtree(staging)
+            snapshot_download(
+                repo_id=model_id,
+                local_dir=str(staging),
+                local_dir_use_symlinks=False,
+                allow_patterns=allow_patterns,
+            )
+            if not tokenizer_only:
+                complete, reason = _validate_model_dir(staging)
+                if not complete:
+                    raise RuntimeError(
+                        f"downloaded {model_id} failed validation: {reason}")
+            _write_completion_marker(staging)
+            # Atomic publish. If final exists (partial), clear it first — we
+            # hold the lease so no other writer is active.
+            if local_path.exists():
+                shutil.rmtree(local_path)
+            os.replace(staging, local_path)
+        finally:
+            lease.release()
+
         elapsed = time.time() - start_time
         print_red(f"[ModelStaging] ✓ Downloaded {model_id} in {elapsed:.2f}s")
-        
-        return downloaded_path
+        return str(local_path)
     except Exception as e:
         elapsed = time.time() - start_time
         print_red(f"[ModelStaging] ✗ Failed to download {model_id} after {elapsed:.2f}s: {e}")

@@ -48,6 +48,7 @@ from ray.serve.config import HTTPOptions, ProxyLocation
 # transformers pin conflicts with SGLang's. The EXASERVE_ENGINE env var (read in
 # deploy_model) selects VLLMWorker vs SGLangWorker; only the chosen engine is imported.
 
+from . import request_validation as _rv
 from .schemas import ModelConfig, DeploymentConfig, load_deployment_config, load_proxy_config
 from .model_paths import get_model_route_name, get_model_storage_name, get_model_storage_path
 from .model_staging import print_red, resolve_model_paths
@@ -799,6 +800,18 @@ _SERVING_STATS_ACTOR = "ServingStatsCollector"
 _SERVING_STATS_NS = "serve"
 
 
+def _deployment_scope() -> str:
+    """PR-029: a stable per-deployment id so telemetry actors in a REUSED Ray
+    cluster cannot collide or inherit a prior deployment's state. Prefers an
+    explicit id, then the scaling-trace token, then the scheduler job id."""
+    for var in ("EXASERVE_DEPLOYMENT_ID", "EXASERVE_SCALING_TRACE_TOKEN",
+                "EXASERVE_JOBID", "PBS_JOBID"):
+        val = os.environ.get(var)
+        if val:
+            return str(val).split(".")[0][:40]
+    return "default"
+
+
 class _ServingStatsCollectorImpl:
     """Head-node in-memory sink; keeps the latest payload per replica key."""
 
@@ -815,11 +828,17 @@ class _ServingStatsCollectorImpl:
         return len(self._data)
 
 
+def _serving_collector_name() -> str:
+    # PR-029: deployment-scoped name — a new deployment gets a fresh actor,
+    # never a prior deployment's stale per-replica data.
+    return f"{_SERVING_STATS_ACTOR}:{_deployment_scope()}"
+
+
 def get_or_create_serving_collector():
     import ray
     cls = ray.remote(_ServingStatsCollectorImpl)
     return cls.options(
-        name=_SERVING_STATS_ACTOR, namespace=_SERVING_STATS_NS,
+        name=_serving_collector_name(), namespace=_SERVING_STATS_NS,
         lifetime="detached", num_cpus=0, get_if_exists=True,
     ).remote()
 
@@ -892,6 +911,7 @@ class EngineWorker:
         enforce_eager: bool = True,
         max_num_seqs: int = None,
         collect_stats: bool = False,
+        enable_log_requests: bool = True,
         engine_name: str = "vllm",
     ):
         from .engines import EngineSpec, NullEngine, get_engine
@@ -921,6 +941,7 @@ class EngineWorker:
             max_num_seqs=max_num_seqs,
             device_ids=gpu_ids,
             collect_stats=collect_stats,
+            enable_log_requests=enable_log_requests,
         )
 
         if null_compute:
@@ -1001,12 +1022,20 @@ class EngineWorker:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(self, request: Request):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "malformed JSON body"}, status_code=400)
+        try:
+            _rv.validate_model_field(body, self._served_model_names())
+            _rv.validate_messages(body.get("messages"))
+            sampling = self._parse_sampling(body)
+        except _rv.RequestValidationError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         messages = body.get("messages", [])
         stream = body.get("stream", False)
         add_generation_prompt = bool(body.get("add_generation_prompt", True))
         continue_final_message = bool(body.get("continue_final_message", False))
-        sampling = self._parse_sampling(body)
 
         prompt = self.backend.build_chat_prompt(
             messages,
@@ -1018,6 +1047,10 @@ class EngineWorker:
 
         request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         sampling["_request_id"] = request_id
+        # PR-032: preserve a caller-supplied correlation id (linked to, not
+        # conflated with, our completion id) so a request can be traced
+        # gateway -> Serve -> engine.
+        sampling["_correlation_id"] = request.headers.get("x-request-id") or request_id
         if stream:
             return StreamingResponse(
                 self._chat_stream(request_id, prompt, sampling),
@@ -1027,20 +1060,33 @@ class EngineWorker:
 
     @app.post("/v1/completions")
     async def completions(self, request: Request):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "malformed JSON body"}, status_code=400)
+        try:
+            _rv.validate_model_field(body, self._served_model_names())
+            sampling = self._parse_sampling(body)
+        except _rv.RequestValidationError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         prompt = body.get("prompt", "")
+        if not isinstance(prompt, (str, list)):
+            return JSONResponse({"error": "prompt must be a string or list"},
+                                status_code=400)
         stream = body.get("stream", False)
-        sampling = self._parse_sampling(body)
         request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
         sampling["_request_id"] = request_id
+        sampling["_correlation_id"] = request.headers.get("x-request-id") or request_id  # PR-032
         if stream:
             return StreamingResponse(
                 self._completion_stream(request_id, prompt, sampling),
                 media_type="text/event-stream",
             )
         res = await self.backend.generate(prompt, sampling)
+        _corr = sampling.get("_correlation_id", request_id)  # PR-032
         if res.error:
-            return JSONResponse({"error": res.error}, status_code=500)
+            return JSONResponse({"error": res.error}, status_code=500,
+                                headers={"X-Request-ID": _corr})
         return JSONResponse(
             {
                 "id": request_id,
@@ -1055,28 +1101,30 @@ class EngineWorker:
                     "completion_tokens": res.completion_tokens,
                     "total_tokens": res.prompt_tokens + res.completion_tokens,
                 },
-            }
+            },
+            headers={"X-Request-ID": _corr},  # PR-032: echo the correlation id
         )
 
     # ---- Internal helpers ----------------------------------------------------
 
+    def _served_model_names(self) -> set:
+        """Identities a client may name in the `model` field for THIS
+        replica: the HF id, plus its route name (PR-011)."""
+        names = {self.model_id}
+        try:
+            from .model_paths import get_model_storage_name
+
+            storage = get_model_storage_name(self.model_id)
+            names.add(storage)
+            names.add(storage.replace(".", "-"))  # route name
+        except Exception:
+            pass
+        return names
+
     @staticmethod
     def _parse_sampling(body: dict) -> dict:
-        """OpenAI request body -> neutral sampling dict (each backend re-maps)."""
-        sampling: dict = {}
-        for key in ("temperature", "top_p"):
-            if key in body:
-                sampling[key] = float(body[key])
-        for key in ("max_tokens", "min_tokens"):
-            if key in body:
-                sampling[key] = int(body[key])
-        if "stop" in body:
-            sampling["stop"] = body["stop"]
-        if body.get("ignore_eos"):
-            sampling["ignore_eos"] = True
-        sampling.setdefault("temperature", 0.7)
-        sampling.setdefault("max_tokens", 1024)
-        return sampling
+        """OpenAI request body -> validated neutral sampling dict (PR-011)."""
+        return _rv.parse_sampling(body)
 
     async def _chat_non_stream(self, request_id: str, prompt: str, sampling: dict):
         res = await self.backend.generate(prompt, sampling)
@@ -1446,6 +1494,7 @@ def deploy_model(
         enforce_eager=model_config.enforce_eager,
         max_num_seqs=model_config.max_num_seqs,
         collect_stats=getattr(config, "collect_stats", False),
+        enable_log_requests=model_config.enable_log_requests,
         engine_name=engine,
     )
 
@@ -1531,13 +1580,22 @@ def deploy_from_replica_plan(
             "Replica planner assigned zero replicas to every model; nothing to deploy."
         )
 
-    for skipped_plan in replica_plan.skipped_model_plans:
-        if skipped_plan.skipped_reason:
-            print(
-                f"[ExaServe] Skipping {skipped_plan.model_config.model_id}: "
-                f"{skipped_plan.skipped_reason}",
-                flush=True,
-            )
+    # PR-023: a config naming N models normally REQUIRES all N. Default to
+    # failing the deployment when any declared model cannot be placed; an
+    # operator opts into best-effort with EXASERVE_ALLOW_PARTIAL_MODELS=1.
+    from .replica_planner import enforce_required_models_policy
+
+    allow_partial = os.environ.get("EXASERVE_ALLOW_PARTIAL_MODELS") == "1"
+    skipped_reasons = enforce_required_models_policy(
+        replica_plan, allow_partial=allow_partial
+    )
+    if skipped_reasons and allow_partial:
+        print(
+            f"[ExaServe] WARNING: serving a SUBSET — {len(skipped_reasons)} model(s) "
+            f"could not be placed (EXASERVE_ALLOW_PARTIAL_MODELS=1): "
+            + "; ".join(skipped_reasons),
+            flush=True,
+        )
 
     use_root_route = len(config.model_configs) == 1
     if not use_root_route:
@@ -1589,7 +1647,18 @@ def deploy_from_replica_plan(
             # 405B replica -> ~N*10min, blowing the walltime (n64 reached only
             # replica 5 in 1h). _run_many with ALL N RunTargets submits them
             # together and waits for the whole batch to come up in parallel.
-            from ray.serve.api import _run_many, RunTarget
+            # PR-026: this uses private Serve internals. Guard with an explicit
+            # capability check so an unsupported Ray version fails with a clear
+            # message instead of a bare ImportError mid-deploy.
+            try:
+                from ray.serve.api import _run_many, RunTarget
+            except ImportError as exc:
+                raise RuntimeError(
+                    "shard-aware multi-replica PP requires ray.serve.api._run_many "
+                    f"/ RunTarget, absent in this Ray ({exc}). Pin the supported "
+                    "Ray version (see doc/hardening/COMPATIBILITY_MATRIX.md) or "
+                    "avoid multi-replica shard-aware PP."
+                ) from exc
             targets = []
             for r in range(n_rep):
                 dep, model_id = deploy_model(
@@ -1855,10 +1924,25 @@ if __name__ == "__main__":
 
     tracer.set_metadata(actual_gpus=total_gpus, alive_nodes=alive_nodes)
     if total_gpus < expected_gpus:
+        # PR-008: fail CLOSED. Declaring a degraded cluster "ready" is how the
+        # 256-node false-ready incident happened (KNOWN_ISSUES D1). An operator
+        # may explicitly opt into degraded startup with
+        # EXASERVE_ALLOW_DEGRADED_GPUS=1, which is recorded in the trace.
+        allow_degraded = os.environ.get("EXASERVE_ALLOW_DEGRADED_GPUS") == "1"
+        tracer.set_metadata(degraded_gpus=True, degraded_allowed=allow_degraded)
+        message = (
+            f"Only {total_gpus}/{expected_gpus} GPUs registered after the "
+            f"{600}s deadline ({total_gpus/max(expected_gpus,1)*100:.0f}%)."
+        )
+        if not allow_degraded:
+            raise RuntimeError(
+                f"[ExaServe] {message} Refusing to declare the cluster ready "
+                "with missing resources (set EXASERVE_ALLOW_DEGRADED_GPUS=1 to "
+                "start in an explicitly degraded mode)."
+            )
         print(
-            f"[ExaServe] WARNING: Only {total_gpus}/{expected_gpus} GPUs registered "
-            f"after 10min deadline ({total_gpus/max(expected_gpus,1)*100:.0f}%). "
-            f"Proceeding with reduced capacity.",
+            f"[ExaServe] WARNING: {message} Proceeding in EXPLICITLY DEGRADED "
+            "mode (EXASERVE_ALLOW_DEGRADED_GPUS=1).",
             flush=True,
         )
     else:
@@ -1991,9 +2075,18 @@ if __name__ == "__main__":
 
         # Decompose serve.run() into its two blocking phases for timing.
         # serve.run() internally calls: deploy_applications(wait=True) + wait_for_proxies_serving()
-        from ray.serve._private.api import serve_start as _serve_start
-        from ray.serve.api import build_app
-        from ray.serve._private.constants import SERVE_DEFAULT_APP_NAME
+        # PR-026: capability-guard the private-API import path.
+        try:
+            from ray.serve._private.api import serve_start as _serve_start
+            from ray.serve.api import build_app
+            from ray.serve._private.constants import SERVE_DEFAULT_APP_NAME
+        except ImportError as exc:
+            raise RuntimeError(
+                "the instrumented deploy path uses private Serve APIs "
+                f"(serve_start/build_app/constants) absent in this Ray ({exc}); "
+                "pin the supported Ray version — see "
+                "doc/hardening/COMPATIBILITY_MATRIX.md."
+            ) from exc
 
         # _serve_start accepts either a ProxyLocation enum or the underlying
         # string ("EveryNode" / "HeadOnly" / ...). ProxyLocation is a str-enum
@@ -2097,6 +2190,10 @@ if __name__ == "__main__":
         remaining = list(serving_refs)
         proxy_complete_times = []
         wait_start = time.monotonic()
+        # PR-008: bound the overall wait. The old loop had only a per-wait 5s
+        # timeout and could hang forever on a stuck proxy. A proxy that never
+        # reports serving is a fail-closed readiness error.
+        proxy_deadline_s = float(os.environ.get("EXASERVE_PROXY_READY_DEADLINE_S", "900"))
         while remaining:
             done, remaining = _ray.wait(remaining, num_returns=1, timeout=5.0)
             elapsed = time.monotonic() - wait_start
@@ -2104,6 +2201,12 @@ if __name__ == "__main__":
                 proxy_complete_times.append(elapsed)
                 if len(proxy_complete_times) % 10 == 0 or not remaining:
                     print(f"[ExaServe] Step 4c proxies ready: {len(proxy_complete_times)}/{len(serving_refs)} at +{elapsed:.1f}s", flush=True)
+            elif elapsed > proxy_deadline_s:
+                raise RuntimeError(
+                    f"[ExaServe] {len(remaining)}/{len(serving_refs)} proxies did "
+                    f"not report serving within {proxy_deadline_s:.0f}s; failing "
+                    "closed rather than declaring readiness with unhealthy proxies."
+                )
         t_wait = time.monotonic() - t0
         tracer.record_phase("serve.run.wait_proxies", t_wait)
 
@@ -2140,6 +2243,11 @@ if __name__ == "__main__":
         # .status field instead. Handle both, and SURFACE any non-healthy proxy
         # (previously this swallowed an AttributeError and reported nothing, so a
         # degraded proxy at deploy time was invisible).
+        # PR-008: proxy health is now a READINESS PREDICATE, not a warning. An
+        # unhealthy proxy, or a failure to even collect proxy status, fails
+        # closed unless degraded mode is explicitly requested.
+        _proxy_health_ok = False
+        _proxy_health_detail = ""
         try:
             from collections import Counter
             status = serve.status()
@@ -2154,13 +2262,26 @@ if __name__ == "__main__":
             n_healthy = sum(v for k, v in counts.items() if "HEALTHY" in k.upper() and "UN" not in k.upper())
             print(f"[ExaServe] Proxy statuses: {n_total} proxies, "
                   f"{n_healthy} healthy — {dict(counts)}", flush=True)
-            if n_healthy < n_total:
-                print(f"[ExaServe] ⚠ {n_total - n_healthy}/{n_total} proxies NOT healthy "
-                      f"at deploy time: {dict(counts)}", flush=True)
+            _proxy_health_ok = n_total > 0 and n_healthy == n_total
+            _proxy_health_detail = f"{n_healthy}/{n_total} healthy: {dict(counts)}"
         except Exception as e:
             import traceback
+            _proxy_health_detail = f"could not collect proxy status: {e}"
             print(f"[ExaServe] Failed to collect proxy statuses: {e}", flush=True)
             traceback.print_exc()
+
+        if not _proxy_health_ok:
+            allow_degraded = os.environ.get("EXASERVE_ALLOW_DEGRADED_PROXIES") == "1"
+            tracer.set_metadata(degraded_proxies=True, degraded_proxies_allowed=allow_degraded)
+            if not allow_degraded:
+                raise RuntimeError(
+                    f"[ExaServe] proxy readiness not satisfied ({_proxy_health_detail}); "
+                    "refusing to declare CLUSTER FULLY READY. Set "
+                    "EXASERVE_ALLOW_DEGRADED_PROXIES=1 to start in degraded mode."
+                )
+            print(f"[ExaServe] WARNING: proceeding with degraded proxies "
+                  f"({_proxy_health_detail}); EXASERVE_ALLOW_DEGRADED_PROXIES=1.",
+                  flush=True)
 
         # When instrumentation is on, gather /tmp/exaserve_inst from every node
         # to Lustre once. No-op for clean Ray installs.
@@ -2199,8 +2320,39 @@ if __name__ == "__main__":
     )
     print(f"[ExaServe] Scaling trace: {trace_path}", flush=True)
 
+    # PR-028: the driver (and PBS) deliver SIGTERM; without a handler the
+    # process dies mid-request with no Serve shutdown. Convert both signals
+    # into one orderly drain path with a bounded forced-cleanup deadline.
+    import signal as _signal
+    import threading
+
+    _shutdown_requested = threading.Event()
+
+    def _request_shutdown(signum, frame):  # noqa: ARG001
+        _shutdown_requested.set()
+
+    _signal.signal(_signal.SIGTERM, _request_shutdown)
+    _signal.signal(_signal.SIGINT, _request_shutdown)
+
     try:
-        while True:
-            time.sleep(10)
+        while not _shutdown_requested.wait(timeout=10):
+            pass
     except KeyboardInterrupt:
-        print("[ExaServe] Shutting down...")
+        pass
+    print("[ExaServe] Shutdown requested; draining Ray Serve...", flush=True)
+    _deadline = time.monotonic() + 60.0
+
+    def _forced_exit():
+        remaining = _deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        print("[ExaServe] Forced-cleanup deadline reached; exiting.", flush=True)
+        os._exit(143)
+
+    _killer = threading.Thread(target=_forced_exit, daemon=True)
+    _killer.start()
+    try:
+        serve.shutdown()
+        print("[ExaServe] Ray Serve shut down cleanly.", flush=True)
+    except Exception as exc:
+        print(f"[ExaServe] Serve shutdown error (continuing): {exc}", flush=True)

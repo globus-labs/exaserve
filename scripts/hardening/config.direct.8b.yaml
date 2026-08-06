@@ -1,0 +1,26 @@
+# Weak-scaling smoke: direct mode, tp=1 8B, auto-planner fills 12 replicas/node.
+# num_nodes is overwritten per-run by run_scaling_smoke.sh.
+ray_cluster_config:
+  head_ip: ""
+  port: 6379
+  node_cpus: 64
+
+model_deployment_config:
+  num_nodes: 2
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /tmp/hf_home
+  deployment_name: exaserve_serve
+  replica_max_ongoing_requests: 32
+  num_gpus_per_node: 12
+  model_configs:
+    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 4096
+      size: 8
+      gpu_memory_utilization: 0.90
+      enforce_eager: true
+      max_num_seqs: 64
+
+proxy_config:
+  type: none

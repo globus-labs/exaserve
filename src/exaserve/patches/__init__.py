@@ -1,8 +1,8 @@
 """Aurora-specific patches for Ray Serve and vLLM.
 
-Pinned upstream:
-    ray==2.49.1 (commit c057f1e), Aurora frameworks 2025.2.0
-    vllm: as bundled in Aurora frameworks 2025.2.0
+Pinned upstream (verified against the live install 2026-08-05, WP3):
+    ray==2.53.0 (commit 0de2118), Aurora frameworks 2025.3.1
+    vllm==0.15.0 as bundled in Aurora frameworks 2025.3.1
 
 Two patch sets, two delivery mechanisms:
 
@@ -15,7 +15,8 @@ A) ray.serve._private — overlay (PYTHONPATH shadowing)
 
 B) vLLM and ray accelerator — runtime monkey-patches
    Located: exaserve/_sitecustomize.py
-       (16 ``_patch_*`` / ``_install_*`` functions)
+       (12 live ``_patch_*`` / ``_install_*`` functions; three dead patches
+       removed 2026-08-05, see doc/hardening/COMPATIBILITY_INVENTORY.md)
    Activation: explicit via ``exaserve.patches.apply_all()``.
        Each function is gated by an EXASERVE_VLLM_*/EXASERVE_* env var.
        Default-on: EXASERVE_VLLM_PATCH_PP_LAYER_FILTER=1 — required for vLLM
@@ -30,11 +31,12 @@ The file is now ``exaserve/_sitecustomize.py`` (leading underscore)
 so CPython no longer auto-imports it — activation is explicit through
 ``apply_all()`` instead.
 
-The current overlay tree is single-tier (functional + instrumentation mixed,
-all-or-nothing under EXASERVE_RAY_SERVE_INSTRUMENTATION). Splitting the tree
-into FUNCTIONAL (default-on) and INSTRUMENTATION (opt-in) is a follow-up
-commit (commit 3 of the production_packaging plan). The classification
-of each hunk lives in ``plan/production_packaging.md``.
+The current overlay tree is single-tier and opt-in under
+EXASERVE_RAY_SERVE_INSTRUMENTATION. Diffing against upstream ray 2.53.0
+(2026-08-05) showed it carries ONLY configuration constants and
+instrumentation — no functional fixes; the per-hunk classification lives in
+``doc/hardening/COMPATIBILITY_INVENTORY.md`` and the target architecture in
+``doc/hardening/decisions/ADR-003-compatibility-delivery.md``.
 """
 
 from __future__ import annotations
@@ -49,8 +51,8 @@ __all__ = [
     "OVERLAY_ENV_VAR_LEGACY",
 ]
 
-RAY_PINNED_VERSION = "2.49.1"
-RAY_PINNED_COMMIT = "c057f1ea836f3e93f110e895029caa32136fc156"
+RAY_PINNED_VERSION = "2.53.0"
+RAY_PINNED_COMMIT = "0de211850589aea71f842873bc32574c702ab492"
 
 # Env-var rename for the overlay activation gate. EXASERVE_RAY_SERVE_INSTRUMENTATION
 # is the new (semantically clearer) name. EXASERVE_INSTRUMENTATION is the legacy

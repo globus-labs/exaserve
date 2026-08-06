@@ -7,6 +7,7 @@ trace_store.py.
 from __future__ import annotations
 
 import csv
+import importlib
 import json
 import math
 import os
@@ -44,8 +45,25 @@ def write_trace(
     spec: ExperimentSpec,
     rows: list[dict[str, Any]],
 ) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    # WP2.6 (PR-017): stream to a same-dir temp file, then publish atomically.
+    import tempfile
+
+    dirpath = os.path.dirname(os.path.abspath(path))
+    os.makedirs(dirpath, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".trace.", suffix=".tmp", dir=dirpath)
+    try:
+        _write_trace_stream(os.fdopen(fd, "w", encoding="utf-8"), spec, rows)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _write_trace_stream(handle, spec: ExperimentSpec, rows: list[dict[str, Any]]) -> None:
+    with handle:
         metadata = {
             "__type__": "metadata",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -120,6 +138,17 @@ def _find_local_model_path(model_id: str, search_roots: list[Path]) -> str | Non
 
 
 def build_tokenizer_map(spec: ExperimentSpec) -> dict[str, Any]:
+    builder = getattr(spec.trace, "tokenizer_builder", "")
+    if builder:
+        module_name, _, func_name = builder.partition(":")
+        if not module_name or not func_name:
+            raise ValueError(
+                "trace.tokenizer_builder must be 'module:function', got "
+                f"{builder!r}"
+            )
+        module = importlib.import_module(module_name)
+        return getattr(module, func_name)(spec)
+
     from transformers import AutoTokenizer
 
     search_roots = _model_search_roots(spec.deployment.model_storage_path)

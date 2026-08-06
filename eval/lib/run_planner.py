@@ -124,6 +124,25 @@ def _next_run_group_id(spec_name: str, *, experiments_root: str | None = None) -
     return f"run{latest + 1}"
 
 
+def _claim_run_group_dir(spec_dir: str, spec_name: str,
+                         *, experiments_root: str | None = None) -> tuple[str, str]:
+    """Atomically allocate the next runN directory (WP2.2 / PR-018).
+
+    ``os.mkdir`` is the exclusive-create primitive: two concurrent
+    materializers computing the same candidate ID collide on EEXIST and the
+    loser advances to the next index instead of silently sharing the
+    directory.
+    """
+    while True:
+        run_group_id = _next_run_group_id(spec_name, experiments_root=experiments_root)
+        group_root_dir = os.path.join(spec_dir, run_group_id)
+        try:
+            os.mkdir(group_root_dir)
+        except FileExistsError:
+            continue
+        return run_group_id, group_root_dir
+
+
 def _progress(msg: str) -> None:
     sys.stderr.write(msg + "\n")
     sys.stderr.flush()
@@ -268,8 +287,9 @@ def _create_run_group(
     dirty_files: list[str],
 ) -> tuple[str, str, str]:
     spec_dir = ensure_dir(spec_runs_dir(spec.name, experiments_root=experiments_root))
-    run_group_id = _next_run_group_id(spec.name, experiments_root=experiments_root)
-    group_root_dir = ensure_dir(os.path.join(spec_dir, run_group_id))
+    run_group_id, group_root_dir = _claim_run_group_dir(
+        spec_dir, spec.name, experiments_root=experiments_root
+    )
     meta_dir = ensure_dir(os.path.join(group_root_dir, "meta"))
     group_spec_path = os.path.join(meta_dir, "spec.yaml")
     shutil.copyfile(spec_path, group_spec_path)
@@ -298,6 +318,7 @@ def materialize_run_bundles(
     max_workers: int | None = None,
     repo_root: str | None = None,
     force_trace: bool = False,
+    allow_dirty: bool | None = None,
 ) -> list[RunPlan]:
     spec = load_experiment_spec(spec_path)
     variants = expand_matrix(spec)
@@ -307,6 +328,20 @@ def materialize_run_bundles(
     commit_sha, dirty_files = _detect_repo_state(repo_root_live)
     if dirty_files:
         _warn_dirty_repo(repo_root_live, dirty_files)
+        # PR-034: the snapshot uses committed HEAD and SILENTLY excludes
+        # uncommitted edits. Require an explicit acknowledgement so a user
+        # cannot believe they evaluated the code in their editor. The env var
+        # is the acknowledgement channel for the CLI (see eval/cli.py).
+        if allow_dirty is None:
+            allow_dirty = os.environ.get("EXASERVE_ALLOW_DIRTY_SNAPSHOT") == "1"
+        if not allow_dirty:
+            raise RuntimeError(
+                f"repo has {len(dirty_files)} uncommitted file(s); the snapshot "
+                "uses committed HEAD and would EXCLUDE them. Commit your changes, "
+                "or acknowledge stale-code execution with "
+                "EXASERVE_ALLOW_DIRTY_SNAPSHOT=1 (the recorded run_group.json "
+                "keeps git_dirty/dirty_files for provenance)."
+            )
     snapshot_root = _ensure_repo_snapshot(repo_root_live, commit_sha)
     created_at = utc_timestamp()
     run_group_id, group_root_dir, group_spec_path = _create_run_group(

@@ -283,6 +283,16 @@ def load_results(
                 try:
                     with open(fpath, 'r') as f:
                         data = json.load(f)
+                    # PR-019: refuse to plot an incomplete distributed result
+                    # under strict mode; otherwise warn. Legacy results without
+                    # gather metadata are treated as complete.
+                    from eval.lib.utils import result_is_complete
+                    _ok, _reason = result_is_complete(data)
+                    if not _ok:
+                        _msg = f"[weakscaling] {fpath}: {_reason}"
+                        if os.environ.get("EXASERVE_PLOT_STRICT_COMPLETE") == "1":
+                            raise ValueError(_msg + " (EXASERVE_PLOT_STRICT_COMPLETE=1)")
+                        print("WARNING: " + _msg + " — plotting anyway", file=sys.stderr)
                     if template_fields is None:
                         template_fields = _extract_plot_template_fields(data)
                     overall = data.get("overall", {})

@@ -99,6 +99,7 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
             base_dir=base_dir,
         )
         or "",
+        tokenizer_builder=str(trace_raw.get("tokenizer_builder", "")),
     )
     workload = WorkloadSpec(
         duration=float(workload_raw["duration"]),
@@ -221,6 +222,21 @@ def validate_experiment_spec(spec: ExperimentSpec) -> None:
         raise ValueError("deployment.num_nodes must be >= 1")
     if spec.scheduler.nodes < 1:
         raise ValueError("scheduler.nodes must be >= 1")
+    # PR-020: enum + bound checks that were previously missing (a bad value
+    # here surfaced only much later, or silently).
+    if spec.scheduler.type not in {"pbs", "slurm", "psij"}:
+        raise ValueError(
+            f"scheduler.type must be pbs/slurm/psij, got {spec.scheduler.type!r}")
+    engine = getattr(spec.deployment, "engine", "vllm")
+    if engine not in {"vllm", "sglang"}:
+        raise ValueError(f"deployment.engine must be vllm/sglang, got {engine!r}")
+    arrival = getattr(spec.workload, "arrival", "fixed")
+    if arrival not in {"fixed", "poisson"}:
+        raise ValueError(f"workload.arrival must be fixed/poisson, got {arrival!r}")
+    if getattr(spec.client, "go_concurrency", 1) < 1:
+        raise ValueError("client.go_concurrency must be >= 1")
+    if getattr(spec.client, "num_go_procs", 1) < 1:
+        raise ValueError("client.num_go_procs must be >= 1")
     if spec.client.dest not in {"proxy", "direct"}:
         raise ValueError("client.dest must be 'proxy' or 'direct'")
     if spec.client.early_stop < 0.0 or spec.client.early_stop > 1.0:

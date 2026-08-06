@@ -145,9 +145,11 @@ class PSIJEvalScheduler(EvalScheduler):
             return SlurmScheduler()
         return None
 
-    def count_queued(self, user: str) -> Dict[str, int]:
+    def count_queued(self, user: str) -> Optional[Dict[str, int]]:
+        # PR-014: without a native helper the queue is unobservable — that is
+        # None (fail closed), not "zero jobs".
         native = self._native()
-        return native.count_queued(user) if native else {}
+        return native.count_queued(user) if native else None
 
     def slot_limits(self) -> Dict[str, Optional[int]]:
         native = self._native()

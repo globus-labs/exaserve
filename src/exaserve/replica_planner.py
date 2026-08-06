@@ -291,3 +291,33 @@ def format_replica_plan(plan: DeploymentReplicaPlan) -> str:
     )
     lines.append(f"  Residual resources: {residual}")
     return "\n".join(lines)
+
+
+class RequiredModelsError(RuntimeError):
+    """One or more declared models could not be placed and partials are not
+    permitted (PR-023)."""
+
+
+def enforce_required_models_policy(
+    plan: "DeploymentReplicaPlan",
+    *,
+    allow_partial: bool,
+) -> list[str]:
+    """PR-023: a config naming N models normally requires all N.
+
+    Returns the list of skip reasons (possibly empty). Raises
+    RequiredModelsError when models were skipped and ``allow_partial`` is
+    False, so a partial deployment cannot silently masquerade as success.
+    """
+    skipped = [p for p in plan.skipped_model_plans if p.skipped_reason]
+    reasons = [
+        f"{p.model_config.model_id}: {p.skipped_reason}" for p in skipped
+    ]
+    if skipped and not allow_partial:
+        raise RequiredModelsError(
+            f"{len(skipped)} declared model(s) could not be placed: "
+            + "; ".join(reasons)
+            + ". Refusing to deploy a partial model set (set "
+            "EXASERVE_ALLOW_PARTIAL_MODELS=1 to serve the placeable subset)."
+        )
+    return reasons

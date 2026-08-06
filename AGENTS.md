@@ -4,7 +4,13 @@
 
 This repository is developed and tested on ALCF Aurora HPC Cluster.
 
-All experiment execution must follow the cluster workflow described below. Do not run long, resource-intensive, or GPU workloads directly on the login node. For this project, experiments are typically run in an **interactive job** so the agent can actively monitor logs, inspect failures, and iterate while the job is live.
+For the production-hardening migration, this file is authoritative for safety,
+permissions, allocation/session handling, and where commands may run. The sole
+architecture and implementation specification is
+`doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md`; audit, feasibility, Known Issues,
+and TODO documents are evidence/context and cannot override that plan.
+
+All experiment execution must follow the cluster workflow described below. Do not run long, resource-intensive, MPI, or GPU workloads directly on the login node. For this project, experiments run in a monitored **compute session**, preferably a `subjob` lease from the user's keepalive allocation, so the agent can inspect failures and iterate while the session is live.
 
 ---
 
@@ -28,28 +34,22 @@ Do **not** use the login node for:
 If asked to run an experiment, assume cluster resources are required unless the command is clearly trivial.
 (Generating experiment configs can be done at login nodes.)
 
-### 2) Interactive allocation is the default
-When experiments need to be run, first obtain an interactive PBS allocation using the project-approved method. Only after the interactive job starts should environment setup and experiment execution occur.
+For brief login-node Python or Go checks, first run `module load frameworks && module load go`; system Python is too old for this repository.
 
-Use the following wrapper scripts located in `~/script/`:
+### 2) A leased compute session is the default
+When experiments need to run, first reuse or obtain a project-approved compute session. Only after the session is validated should environment setup and execution occur.
 
-| Command | What it does |
-|---------|-------------|
-| `srundbg` | 1 node, 1 hour, `debug` queue |
-| `srundsc $N` | N nodes (default 8), 1 hour, `debug-scaling` queue |
+Preferred order:
 
-Both use `qsub -I` (interactive), project `AuroraGPT`, filesystems `home:flare`.
+1. Reuse a valid existing compute session.
+2. Use `subjob N` (or `subjob N -- <command>`) to lease exactly the needed nodes from the user's long-lived keepalive allocation. The agent does not start or manage keepalive.
+3. If no keepalive/debug source is available to `subjob`, use `~/script/srundbg` for one node or `~/script/srundsc N` for an interactive PBS fallback. Do not improvise scheduler parameters.
 
-Default behavior:
-1. Start or confirm an interactive PBS job using the wrapper scripts above.
-2. Wait until the job is active and a compute-node shell is available.
-3. Set up the environment inside that interactive session.
-4. Run the experiment there.
-5. Monitor outputs, resource usage, and failures while the job is active.
+`subjob` preserves the real PBS/PALS environment, replaces `$PBS_NODEFILE` with the leased subset, marks the session with `$AURORA_SUBJOB=1`, and releases the lease on exit/TTL. Do not bypass it with a plain SSH shell, which loses required PBS/PALS state.
 
-Do not skip the allocation step.
+Do not skip the compute-session step.
 
-### 3) Environment setup must happen inside the interactive job
+### 3) Environment setup must happen inside the compute session
 After entering the allocated compute environment, source the appropriate environment script before running code:
 
 | Command | When to use |
@@ -62,7 +62,7 @@ These scripts handle module loading, proxy configuration, and virtualenv activat
 After sourcing, confirm:
 - the correct virtual environment is active (if applicable)
 - required executables are on `PATH`
-- relevant runtime settings (CUDA visibility, etc.) are correct
+- relevant runtime settings are correct; on Aurora use `ZE_AFFINITY_MASK` and never introduce `ONEAPI_DEVICE_SELECTOR`
 
 Do not assume the environment from a previous session is still valid.
 
@@ -78,7 +78,7 @@ Before starting a run, check:
 If something is missing, stop and report the specific issue.
 
 ### 5) Prefer active monitoring
-Because interactive jobs are used specifically for live supervision, monitor the run after launch:
+Because compute sessions are used specifically for live supervision, monitor the run after launch:
 - watch stdout/stderr
 - inspect generated logs
 - check for early crashes, hangs, OOMs, missing files, or environment issues
@@ -95,11 +95,11 @@ When running multi-node experiments (e.g., `bench_internode.sh`):
 - Do not SSH to nodes that are not in the current allocation.
 
 ### 7) Walltime awareness
-Interactive PBS jobs have a fixed walltime (typically 1 hour with the default wrapper scripts). Be aware of remaining walltime:
+Compute sessions have a fixed lease TTL or PBS walltime. Be aware of both the lease and underlying job deadline:
 - Before starting a long experiment, estimate whether it will complete within the remaining walltime.
 - If walltime is running low, warn the user and suggest saving state or requesting a new allocation.
 - If a job is killed due to walltime expiration, report it clearly — do not treat it as an unknown crash.
-- Check remaining walltime with `qstat -f $PBS_JOBID | grep Walltime` if uncertain.
+- For a lease, inspect `subjob status`; inspect the underlying PBS walltime with `qstat -f $PBS_JOBID | grep Walltime` if uncertain.
 
 ### 8) Be conservative with destructive actions
 Do not delete checkpoints, logs, outputs, caches, or generated data unless explicitly asked.
@@ -114,19 +114,19 @@ When possible, use unique output directories or timestamped run directories.
 
 When the user asks to "run", "launch", "train", "evaluate", or otherwise execute nontrivial experiment code, interpret that request using this workflow:
 
-1. Confirm whether an interactive PBS allocation is already active.
-   Treat the current shell as a valid interactive PBS compute-node session only if all of the following are true:
+1. Confirm whether a valid compute session is already active.
+   Treat the current shell as valid only if all of the following are true:
    - `$PBS_JOBID` is set
    - `$PBS_NODEFILE` exists and is readable
    - `hostname` matches one of the hosts listed in `$PBS_NODEFILE`
-   - the shell is already attached to the compute-node session entered via `qsub -I`
-2. If not active, start one using `srundbg` (1 node) or `srundsc $N` (N nodes).
-3. Once inside the interactive job, source the correct environment script (`source ~/script/env_aurora` or `source ~/script/env_litellm`).
+   - the shell is either marked `$AURORA_SUBJOB=1` or verified as the active compute-node shell entered from interactive PBS
+2. If not active, prefer `subjob N`; use `srundbg` or `srundsc N` only when no lease source is available.
+3. Once inside the compute session, source the correct environment script (`source ~/script/env_aurora` or `source ~/script/env_litellm`).
 4. Perform lightweight preflight checks.
 5. Run the requested command.
 6. Monitor the run and summarize status, failures, and next actions.
 
-If the user gives a command that would bypass the interactive allocation step, do **not** execute it directly on the login node. Instead, adapt it to the required workflow.
+If the user gives a command that would bypass the compute-session step, do **not** execute it directly on the login node. Instead, adapt it to the required workflow.
 
 ---
 
@@ -134,7 +134,7 @@ If the user gives a command that would bypass the interactive allocation step, d
 
 Before running any nontrivial experiment command, determine whether execution is happening:
 - on the login node
-- inside an active interactive PBS allocation
+- inside an active `subjob` lease or interactive PBS allocation
 - in the correct project directory
 - with the correct environment active
 
@@ -142,7 +142,7 @@ For session validation, do not rely on a single signal such as hostname alone or
 - `$PBS_JOBID` is set
 - `$PBS_NODEFILE` exists and is readable
 - `hostname` appears in `$PBS_NODEFILE`
-- the shell is the active compute-node shell entered from `qsub -I`
+- the shell is marked `$AURORA_SUBJOB=1` or is the verified interactive PBS compute shell
 
 If any of these are uncertain, do not guess. Check first.
 
@@ -155,7 +155,7 @@ Do not assume that because a prior prompt mentioned allocation or setup, the cur
 Use this mental model for all experiment work:
 
 - **login node**: prepare, inspect, allocate
-- **interactive PBS job**: set up environment, execute, monitor, debug
+- **leased/interactive compute session**: set up environment, execute, monitor, debug
 
 Any deviation from this should be treated as exceptional and called out explicitly.
 
@@ -165,7 +165,7 @@ Any deviation from this should be treated as exceptional and called out explicit
 
 Unless the user explicitly says otherwise, interpret "run this" as:
 
-1. use an interactive PBS allocation if not already inside one (`srundbg` for 1 node, `srundsc $N` for N nodes)
+1. use a validated compute session if not already inside one (`subjob N` preferred; `srundbg`/`srundsc N` fallback)
 2. initialize the project runtime environment (`source ~/script/env_aurora` for Ray, `source ~/script/env_litellm` for LiteLLM)
 3. run the experiment on the allocated compute node
 4. monitor the results for failures or suspicious behavior
@@ -217,7 +217,7 @@ If resource requirements are unclear, prefer asking for clarification or using t
 ## Logging and Reporting
 
 When running experiments, report:
-- whether an interactive PBS allocation was active or newly started
+- whether a validated compute session was reused or newly obtained, and whether it is a `subjob` lease or interactive PBS fallback
 - whether environment setup was completed
 - the exact command being run
 - where logs and outputs are going
@@ -231,8 +231,8 @@ Be concise but precise.
 ## Safe Defaults
 
 Unless project documentation says otherwise, default to:
-- interactive PBS allocation before execution
-- environment setup in each fresh interactive session
+- a validated compute session before execution, preferring `subjob N`
+- environment setup in each fresh compute session
 - lightweight validation before expensive runs
 - active monitoring after launch
 - non-destructive behavior toward outputs and checkpoints
@@ -243,7 +243,7 @@ Unless project documentation says otherwise, default to:
 
 Do not:
 - run heavy jobs on the login node
-- skip interactive allocation for experiment execution
+- skip the validated compute-session step for experiment execution
 - skip environment setup in a fresh session
 - assume prior shell state is still valid
 - overwrite outputs carelessly
@@ -258,6 +258,7 @@ This project uses helper scripts in `~/script/`:
 
 | Script | Purpose |
 |--------|---------|
+| `~/script/subjob N` | Preferred N-node lease from the user-managed keepalive/debug allocation |
 | `~/script/srundbg` | Interactive 1-node debug allocation |
 | `~/script/srundsc $N` | Interactive N-node debug-scaling allocation |
 | `~/script/env_aurora` | Environment setup for Ray-only work |
@@ -275,7 +276,7 @@ When repository-specific instructions conflict with generic behavior, prefer the
 
 If there is any doubt whether a command needs cluster resources, assume it does.
 
-If there is any doubt whether the current session is already a valid interactive PBS job, verify before running.
+If there is any doubt whether the current session is a valid `subjob` lease or interactive PBS compute shell, verify before running.
 
 If there is any doubt whether the environment has been prepared in the current session, prepare it again or explicitly check it.
 

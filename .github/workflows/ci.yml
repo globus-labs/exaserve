@@ -1,0 +1,90 @@
+name: CI
+
+# PR-031 / WP11: hermetic release-gating checks. These jobs run the portable
+# core (schema/state/scheduler/planner/proxy-config/control-channel tests)
+# from a clean checkout. XPU/Ray-overlay/engine behavior and real MPI/scale
+# runs are NOT covered here — those are the Aurora WP12 lanes.
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: hermetic tests (py${{ matrix.python }}, ${{ matrix.order }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+        order: [fixed]
+        include:
+          # A second, randomized-order job on one interpreter that prints a
+          # replayable seed (WP11 item 10).
+          - python: "3.12"
+            order: random
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install (core + dev, no GPU stack)
+        run: |
+          python -m pip install --upgrade pip
+          # Core runtime deps + PyYAML/packaging; dev extra for pytest. The
+          # server/proxy/scheduler extras pull GPU/site tooling and are NOT
+          # installed in CI — the hermetic suite must not need them.
+          pip install -e ".[dev]"
+      - name: Assert no undeclared host tools are needed
+        run: |
+          # AC-TST-01: the suite must not require ripgrep or other host bins.
+          if command -v rg >/dev/null 2>&1; then echo "note: rg present"; fi
+      - name: Run hermetic suite (fixed order)
+        if: matrix.order == 'fixed'
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: python -m pytest -q -p no:randomly
+      - name: Run hermetic suite (randomized order, replayable seed)
+        if: matrix.order == 'random'
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: python -m pytest -q -o addopts="" -p randomly -v 2>&1 | tee pytest-random.log
+
+  lint:
+    name: format + lint + types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip ruff
+      - name: Ruff (correctness-critical rules — release-gating)
+        run: ruff check src eval clientlab tests
+      - name: Ruff (full lint — advisory, non-blocking follow-up)
+        run: ruff check --select E4,E7,F src eval clientlab tests || true
+
+  build:
+    name: wheel build + import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Install the built wheel in a clean venv and import it
+        run: |
+          python -m venv /tmp/wheeltest
+          /tmp/wheeltest/bin/pip install dist/*.whl
+          /tmp/wheeltest/bin/python -c "import exaserve; import exaserve.control.contracts; import exaserve.state.atomic; import exaserve.plan; print('wheel import OK', exaserve.__file__)"

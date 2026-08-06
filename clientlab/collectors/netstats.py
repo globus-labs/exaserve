@@ -37,4 +37,11 @@ class NetstatsProcess:
 
 
 def stop_remote_netstats(node: str) -> None:
-    os.system(f"ssh {node} \"pkill -f 'netstats.py'\" >/dev/null 2>&1")
+    # PR-030: argument-vector SSH like every other remote call here; no
+    # shell-string interpolation of the node value.
+    subprocess.run(
+        ["ssh", node, "pkill", "-f", "netstats.py"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )

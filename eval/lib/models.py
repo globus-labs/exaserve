@@ -92,6 +92,11 @@ class TraceSpec:
     kind: str
     input_prompt_path: str = ""
     input_trace_path: str = ""
+    # Optional "module:function" dotted path returning {model_id: tokenizer}.
+    # Empty selects the default Hugging Face loader. Crosses the trace
+    # materialization process boundary via the pickled spec (hermetic tests
+    # inject eval.testing:empty_tokenizer_map here).
+    tokenizer_builder: str = ""
 
 
 @dataclass

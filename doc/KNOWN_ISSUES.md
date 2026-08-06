@@ -1,5 +1,10 @@
 # Known Issues & Failure Log
 
+> **Document role:** Empirical incident/evidence input. Status labels here do
+> not close production findings and workaround prose is not an implementation
+> instruction. The canonical plan and, after WP0, `doc/hardening/FINDINGS.yaml`
+> govern ownership, acceptance evidence, and final disposition.
+
 A running list of issues, failure modes, and gotchas we've actually hit while
 running the ExaServe eval — kept so we can revisit them instead of
 re-discovering them. This is the **empirical** companion to:
@@ -10,11 +15,15 @@ re-discovering them. This is the **empirical** companion to:
 - Agent memory under `~/.claude/projects/-home-wenyiw-exaserve/memory/`
   — one fact per file; slugs referenced below as `[[memory_slug]]`.
 
-When something here is fixed, move it to **§E Resolved** with the fix, don't delete it.
+When something here is fixed, move it to **§E Resolved** with the fix rather
+than deleting it. Entries whose A/B/C/D identifiers are referenced by audit
+ledgers may remain in place when clearly marked resolved or superseded.
 
 **Status legend:** `OPEN` needs work · `WORKAROUND` mitigated, living with it ·
-`NEEDS-RERUN` transient infra, just resubmit · `WATCH` intermittent, monitor ·
-`PRESENTATION-PENDING` data is fine, how-to-show is undecided · `RESOLVED`.
+`NEEDS-RERUN` transient infra, just resubmit · `RESOLVED-IN-CODE / NEEDS-RERUN`
+implementation exists but its scale evidence must be refreshed · `WATCH`
+intermittent, monitor · `PRESENTATION-PENDING` data is fine, how-to-show is
+undecided · `RESOLVED`.
 
 ---
 
@@ -40,7 +49,10 @@ registry/lease, deliberately not bullet-proof (most runs are fine). Under a
 chaotic ≥128n deploy (reused nodes, co-located DP replicas, node loss) it can
 collide → EADDRINUSE → A1. **Action:** re-run on collision; eventual fix is
 OS-assigned (port 0) or a lease/retry-on-bind scheme.
-Refs: TODO.md "Port allocation is fragile"; `exaserve_serve.py` port scan.
+Refs: TODO.md "Port allocation is fragile";
+`src/exaserve/server.py:278-291`, `src/exaserve/engines/vllm.py:112-131`,
+`src/exaserve/engines/sglang.py:74-76`,
+`src/exaserve/proxy/litellm_proxy.py:127-164`.
 
 ### A3. GCS O(N²) actor-handle contention — `WORKAROUND`
 At 256n, `wait_proxies` reaches ~1751s (27 min): each of N proxies re-resolves
@@ -64,36 +76,66 @@ threads on first request and panics `ThreadPoolBuildError WouldBlock` (Aurora
 nproc exhausted by Ray gRPC threads); the replay client then produces no output.
 **Workaround (baked into launch_cluster.sh):** `RAYON_NUM_THREADS=1` +
 `TOKENIZERS_PARALLELISM=false`.
-Refs: CLAUDE.md "Project-Specific Knobs", launch_cluster.sh.
+Refs: `src/exaserve/resources/launch_cluster.sh:426-448`,
+`src/exaserve/server.py:539-551`.
 
-### A6. Per-replica scaling-trace JSON cost on Lustre — `WORKAROUND` (default-off)
-`EXASERVE_SCALING_TRACE=1` writes per-replica trace JSONs that cost ~5s/file under
-MDS contention → +10 min setup at 128n. **Default `=0`**; only enable for short
-Ray-startup debugging.
-Refs: CLAUDE.md, `exaserve_serve.py:_collect_replica_traces`.
+### A6. Former per-replica scaling-trace JSON cost — `RESOLVED / SUPERSEDED`
+The old description is no longer current. Scaling tracing now defaults to
+enabled, and replica-init records are pushed to one named Ray actor and folded
+into the head serving process's aggregate trace instead of writing one Lustre
+file per replica. `ScalingTracer.save_replica_trace()` remains in the tree but has no
+repository caller. This resolves the former metadata-server write storm; the
+single-actor ownership, stale-state, cleanup, and backpressure questions are
+separate operational debt under PR-029/WP10. **Action:** remove or explicitly
+deprecate the dead per-replica writer and validate actor load and cleanup at the
+claimed scale.
+Refs: `src/exaserve/resources/launch_cluster.sh:401-405`,
+`src/exaserve/scaling_trace.py:312-327,346-423`,
+`src/exaserve/server.py:942-956,1772-1775,2179-2200`.
 
-### A7. Lustre import stampede at scale — `OPEN`
-~3k Ray processes × ~20 imports = ~60k concurrent Lustre opens during launch
-Stage 3 (Copper only broadcasts the overlay, not `$PROJECT_ROOT/src`). MDS
-stampede. **Action:** extend Copper broadcast to cover src.
-Refs: TODO.md "Wenyi's Note", findings/ray_launch_stages.md.
+### A7. Former application-source Lustre import stampede — `RESOLVED-IN-CODE / NEEDS-RERUN`
+The old description is no longer current. `launch_cluster.sh` now invokes
+`distribute_to_nodes.sh`, which performs one MPI broadcast of the ExaServe
+package and runs it from `/tmp/exaserve_src` on every node. It can also stage a
+shared-filesystem engine venv and Triton tree into node-local storage. This
+removes the original per-process application-source open storm by construction.
+**Action:** revalidate import traffic at 128/256 nodes and separately measure
+any residual imports from system packages outside the staged environment.
+Refs: `src/exaserve/resources/launch_cluster.sh:446-486`,
+`src/exaserve/resources/distribute_to_nodes.sh:1-15,84-157`.
 
 ---
 
 ## B. Proxy behavior & bottlenecks
 
-### B1. Single HAProxy is the throughput ceiling at ≥256n — `KNOWN`
-One HAProxy on the head node plateaus ~13.7k RPS / ~50% efficiency; direct (MPI)
-hits 26.9k / ~99% linear at 256n. **Action:** default `dest=direct` for large
-weak-scaling unless specifically testing the proxy.
-Refs: CLAUDE.md "HAProxy is the bottleneck".
+### B1. Former general HAProxy throughput ceiling — `RESOLVED / SUPERSEDED BY B2`
+The ~13.7k RPS non-streaming plateau was confounded by the benchmark harness and
+head-node client topology, not an architectural HAProxy throughput ceiling.
+With the client fleet bounded correctly, current evidence records 27.1k RPS at
+256 nodes with 0.04% errors, matching the earlier healthy result. Direct-Fat and
+HAProxy converging at ~13.8k in the older comparison implicated the single
+head-node client process rather than HAProxy itself. The remaining demonstrated
+centralized-proxy constraint is the no-coalescing **streaming** network path in
+B2. **Action:** keep client topology explicit and do not generalize B2 to
+non-streaming or to HAProxy independent of topology.
+Refs: `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md:9-29`,
+`findings/weakscaling_short_v3_progress.md:98-107`.
 
-### B2. HAProxy streaming 256n head-node network saturation — `KNOWN`
-HAProxy **streaming** at 256n collapses on head-node NETWORK saturation (measured:
-6.75M TCP retransmits, ~195k conns) — not CPU/accept-queue/TIME_WAIT. Non-stream
-hits 27k; direct streaming 19.4k. **Action:** report as a network-bound result,
-not a proxy-CPU limit.
-Refs: `[[project_haproxy_streaming_256n_network]]`.
+### B2. Centralized 256n streaming congestion; rare proxy death — `KNOWN / WATCH`
+The common bounded-client result is degraded-but-stable streaming: approximately
+100% request success but poor latency/SLO attainment. Surviving degraded runs
+measured a retransmission storm (up to ~6.75M retransmits and ~195k established
+connections) on the centralized, no-coalescing streaming path; CPU,
+accept-queue, and TIME_WAIT exhaustion were falsified. A distinct rare outcome
+is total HAProxy process death and `ECONNREFUSED` (about 1/12 production ramps in
+the current evidence). Its cause is still unresolved and must not be attributed
+to congestion or resource exhaustion without a captured death signal.
+Non-streaming reaches 27.1k RPS and direct streaming reaches 19.4k RPS in the
+cited runs. **Action:** report the common congestion regime and rare process
+death separately; retain self-recording process diagnostics until the death is
+explained.
+Refs: `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md:9-80,100-120`,
+`[[project_haproxy_streaming_256n_network]]`.
 
 ### B3. litellm "fake streaming" → degenerate P99-TBT — `PRESENTATION-PENDING`
 litellm buffers the full response and flushes all tokens in a sub-ms end-burst:
@@ -109,10 +151,21 @@ Refs: `[[project_litellm_fake_streaming_tbt]]`.
 
 ## C. Measurement & data-correctness gotchas
 
-### C1. `collect_stats=true` writes NO server_stats.json — `KNOWN` (silent no-op)
-Setting `collect_stats=true` silently produces no `server_stats.json`. **Action:**
-use client-side per-request fields only; don't depend on server-side stats.
-Refs: `[[project_server_stats_noop]]`.
+### C1. Former `collect_stats=true` silent no-op — `RESOLVED / SUPERSEDED`
+The categorical no-output statement is stale. The active path now has replicas
+push bounded summaries to a named `ServingStatsCollector`; `run_executor` reads
+that actor before teardown and writes aggregate `server_stats.json`. Repository
+evidence records a successful 12/12-replica collection. Residual contract debt
+remains: collection failures are warnings and do not necessarily fail a run,
+and the unused `EngineWorker.collect_stats()` / `VLLMEngine.collect_stats()`
+path still has an incompatible data schema. **Action:** decide whether requested
+stats are required or best-effort, enforce that policy, contract-test the active
+producer/consumer, and delete or repair the dead legacy API.
+Refs: `eval/lib/run_executor.py:96-103`, `eval/lib/server_stats.py:41-109`,
+`src/exaserve/server.py:794-865,979-984`,
+`src/exaserve/engines/vllm.py:279-297`,
+`eval/specs/sc26workshop/OVERNIGHT_LOG.md:71-80,92-99`,
+`[[project_server_stats_noop]]`.
 
 ### C2. Run uses committed HEAD, not the working tree — `KNOWN` (gotcha)
 `materialize` snapshots the repo at **committed HEAD**; uncommitted changes are
@@ -125,7 +178,8 @@ Lustre sometimes leaves trailing bytes past EOF when `open("w")` writes a smalle
 file over a larger one. `_validate_replay_results` uses `JSONDecoder.raw_decode()`
 (not `json.load()`) and rewrites in place. **Do not** replace with plain
 `json.load()`.
-Refs: CLAUDE.md "Result file robustness", eval/lib/run_executor.py.
+Refs: `eval/lib/run_executor.py:286-308`,
+`findings/weakscaling_short_v3_progress.md:36-40`.
 
 ### C4. dest=direct result gather is shard-based, not MPI collective — `WORKAROUND` (don't revert)
 `replay_engine._gather_results_via_shards` has each rank write one shard to Lustre
@@ -133,7 +187,7 @@ Refs: CLAUDE.md "Result file robustness", eval/lib/run_executor.py.
 and lost ALL results at 64n on a node drop. **Do not** switch back to a collective
 or to gather.c (nesting under PALS; replay client has no Ray handle). Watch the
 "collected N/M rank shards" warning for silent partials.
-Refs: CLAUDE.md "Result file robustness", commit 570d727.
+Refs: `eval/lib/replay_engine.py:79-159`, commit 570d727.
 
 ### C5. client.num_nodes footgun (1 client/node hammering 1 proxy) — `KNOWN` (fixed in specs)
 A spec that sets `client.num_nodes = num_nodes` spawns N clients all hammering the
@@ -162,26 +216,41 @@ cluster. **Action:** harden readiness to verify all proxies/replicas (or fail
 loudly) before launching the client. Contributing factor to A1.
 Refs: `[[project_envoy_256n_deploy_failure]]`.
 
-### D2. SSH fan-out overlay distribution race — `WORKAROUND`
-Ray overlay patches are pushed via O(N) serial `ssh -f`; no return-code check (a
-failed worker silently falls back to system Ray), a `sleep 5` guards a race on
-deleting the staged script, and O(N) handshakes (~25s at 256n) don't scale past
-~512n. **Action:** add rc checks / migrate to Copper.
-Refs: findings/overlay_distribution_design.md.
+### D2. Former SSH fan-out overlay distribution race — `RESOLVED-IN-CODE / NEEDS-RERUN`
+The SSH fan-out description is stale. Package source and optional overlay files
+are now distributed through MPI broadcast, and overlay assembly is launched
+through the allocation's MPI/srun seam. This removes the O(N) SSH handshake and
+staged-script deletion race. Residual risks are the native broadcast error
+contract and verifying that every process activated the expected overlay; those
+are tracked by PR-004 and PR-026 rather than by the former SSH race.
+**Action:** revalidate the MPI distribution and activation receipts at scale.
+Refs: `src/exaserve/resources/distribute_to_nodes.sh:1-15,159-180`,
+`src/exaserve/resources/launch_cluster.sh:446-486`.
 
-### D3. Legacy EXASERVE_PROXY_PROFILE races with overlay probe — `OPEN` (low-impact)
-Legacy `EXASERVE_PROXY_PROFILE` monkey-patches and the overlay `proxy.py` probe both
-write `/tmp/exaserve_inst/proxy_init_*.json` and race/overwrite (tmpfs, no Lustre
-impact, but redundant). Still default-on. **Action:** `EXASERVE_PROXY_PROFILE=0` or
-delete the three exaserve_serve.py blocks.
-Refs: TODO.md "Wenyi's Note", launch_cluster.sh.
+### D3. Former legacy/overlay proxy-profile race — `RESOLVED-IN-CODE`
+The legacy `_install_proxy_actor_profiling_hook()` still exists but its only call
+is commented out; no active launch path sets `EXASERVE_PROXY_PROFILE`. The old
+hook also writes under `/tmp/exaserve_proxy_profile`, not the overlay's
+`/tmp/exaserve_inst/proxy_init_*.json`, so the prior current-tense race/default-on
+description is unsupported. The optional overlay is the active instrumentation
+owner. **Action:** remove the dead hook during compatibility cleanup and add an
+atomic single-owner output/activation-receipt test.
+Refs: `src/exaserve/_sitecustomize.py:1514-1629`,
+`src/exaserve/patches/ray_serve_overlay/ray/serve/_private/proxy.py:1316-1381`,
+TODO.md "Wenyi's Note".
 
-### D4. PP>1 forces single replica / uncompiled DAG — `KNOWN` (limitation + workaround)
-`pipeline_parallel_size > 1` forces `num_replicas=1` (blocks PP throughput
-scaling), and Ray compiled-DAG channels crash on XPU so PP>1 must use the
-uncompiled executor (`EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG=1`, set in
-launch_cluster.sh). **Action:** redesign placement groups for multi-replica PP.
-Refs: TODO.md "Single replica enforced for PP", server.py.
+### D4. Multi-replica PP has topology/private-API constraints — `KNOWN`
+PP defaults to one replica, but an explicit multi-replica request is retained.
+The ordinary planner then uses location-agnostic placement bundles and warns a
+stage's TP group may straddle nodes. The shard-aware mode instead stages by
+node group and deploys one node-pinned application per replica through private
+Ray Serve `_run_many`; it has measured scale evidence but remains version- and
+topology-sensitive. On XPU, PP also selects the uncompiled Ray executor through
+`EXASERVE_XPU_VLLM_DISABLE_RAY_COMPILED_DAG=1`. **Action:** make PP topology a
+typed capability, replace or strictly guard the private API, and validate
+default, explicit, and shard-aware layouts per platform.
+Refs: `src/exaserve/server.py:310-317,491-517,1287-1366,1455-1631`,
+`src/exaserve/resources/launch_cluster.sh:394-399`, `doc/exaserve.md:112-115`.
 
 ---
 

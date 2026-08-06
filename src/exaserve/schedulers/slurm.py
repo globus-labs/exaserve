@@ -58,18 +58,24 @@ class SlurmScheduler(SchedulerBackend):
             raise RuntimeError(f"could not parse job id from sbatch output: {proc.stdout!r}")
         return m.group(1)
 
-    def _squeue(self, job_id: str, fmt: str) -> str:
+    def _squeue(self, job_id: str, fmt: str) -> Optional[str]:
         proc = run_cmd(
             ["squeue", "-h", "-j", job_id, "-o", fmt],
             self.status_timeout_s,
             check=False,
         )
+        if proc.returncode != 0:
+            # PR-014: a failed squeue is "unknown", never "completed". An
+            # invalid/expired job id also lands here on most Slurm builds.
+            return None
         return proc.stdout.strip()
 
     def job_state(self, job_id: str) -> Optional[str]:
         raw = self._squeue(job_id, "%T")
+        if raw is None:
+            return None  # scheduler unobservable — caller must not conclude
         if not raw:
-            # gone from the queue -> finished (or never existed)
+            # squeue succeeded and the job is gone from the queue -> finished
             return "D"
         return _STATE_MAP.get(raw.splitlines()[0].strip(), raw.splitlines()[0].strip())
 

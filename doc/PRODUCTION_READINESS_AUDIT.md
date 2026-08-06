@@ -1,10 +1,19 @@
 # ExaServe Production-Readiness Audit
 
+> **Document role:** Corrected finding and evidence register. This audit
+> describes observed defects and risk; its remediation prose is not the worker
+> specification. Implementation architecture, order, acceptance gates, and
+> completion are governed by `doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md`.
+
 **Audit date:** 2026-08-04  
 **Audited branch:** `feature/slurm-amd-support`  
 **Audit type:** Static code and architecture review plus lightweight unit-test execution  
 **Runtime experiments:** None. No PBS allocation, GPU workload, deployment, or evaluation was launched.  
-**Worktree changes from audit:** This document only.
+**Worktree changes from audit:** Documentation only; no runtime code changes.
+**Verification revision:** Cross-checked against
+`doc/PRODUCTION_READINESS_CLAUDE_AUDIT.md` on the same commit. Valid citation
+and arithmetic corrections are incorporated below; disputed claims are
+adjudicated with evidence in that document.
 
 ## Executive summary
 
@@ -58,8 +67,11 @@ It also ignores the Ray worker return code. Most importantly, its broad
 therefore exits with status zero after many fatal startup failures.
 
 Because `launch_cluster.sh` invokes the driver under MPI/srun, the scheduler can
-record a successful job even when model deployment or serving failed. Downstream
-automation cannot reliably distinguish success from failure.
+record a successful job when the driver converts a model-deployment or serving
+failure into a zero exit. The launcher itself has `set -e` and would propagate a
+genuine nonzero launcher/driver status; the defect is that the driver returns
+zero on these failure paths. Downstream automation therefore cannot reliably
+distinguish success from failure.
 
 **Recommended change:** Give every supervised child an explicit failure
 contract; propagate its return code or raise `SystemExit(nonzero)`. Preserve the
@@ -206,7 +218,7 @@ staging or deployment.
 **Severity:** Blocker  
 **Regions:** `src/exaserve/server.py:1819-1863`,
 `src/exaserve/server.py:2090-2107`, `src/exaserve/server.py:2143-2163`,
-`src/exaserve/server.py:2193-2205`, `doc/KNOWN_ISSUES.md:157-163`
+`src/exaserve/server.py:2193-2205`, `doc/KNOWN_ISSUES.md` D1
 
 After ten minutes, the server proceeds with fewer GPUs than requested. One
 proxy-readiness path loops without an overall deadline. Nonhealthy proxy states
@@ -292,7 +304,7 @@ failure behavior.
 **Regions:** `src/exaserve/server.py:278-291`,
 `src/exaserve/engines/sglang.py:74-76`,
 `src/exaserve/proxy/litellm_proxy.py:127-164`,
-`src/exaserve/submit.py:183-224`, `doc/KNOWN_ISSUES.md:37-43`
+`src/exaserve/submit.py:183-224`, `doc/KNOWN_ISSUES.md` A2
 
 Several components probe a port by binding and closing it, then later ask the
 real process to bind the same port. This is a time-of-check/time-of-use race.
@@ -384,6 +396,7 @@ functions—or replace expressions with declarative transformations.
 
 **Severity:** High for scientific correctness  
 **Regions:** `eval/lib/trace_store.py:29-93`,
+`eval/lib/trace_generators.py:42-68`,
 `eval/lib/trace_generators.py:182-198`, `eval/lib/utils.py:85-98`
 
 Trace identity omits workload arrival mode even though arrival mode changes the
@@ -419,8 +432,7 @@ UUID-backed directories, and centralize atomic structured-file writes.
 
 **Severity:** High for evaluation correctness  
 **Regions:** `eval/lib/replay_engine.py:120-159`,
-`eval/lib/run_executor.py:330-358`,
-`eval/lib/replay_engine.py:670-679`
+`eval/lib/run_executor.py:271-358`
 
 Shard gathering logs a warning and drops missing ranks after timeout. Result
 validation reports partial request failure but returns success as long as some
@@ -438,35 +450,56 @@ use numeric result ordering; and make plots reject incomplete input by default.
 ### PR-020 — Evaluation validation does not fully establish a runnable plan
 
 **Severity:** Medium-High  
-**Regions:** `eval/lib/spec_io.py:207-286`,
-`eval/lib/backends/ray.py:90-115`, `eval/lib/run_executor.py:271-279`
+**Regions:** `eval/lib/spec_io.py:118-199,207-286`,
+`eval/lib/matrix.py:65-80`, `eval/lib/backends/ray.py:90-155`,
+`eval/lib/run_executor.py:271-279`
 
 Validation does not consistently verify scheduler/engine/mode enums, client
-process and concurrency values, saturation settings, scheduler/deployment node
-agreement, or placement capacity. Dispatch-topology execution validates only a
-limited result subset, allowing earlier arms to escape semantic validation if
-their process exited zero.
+process and concurrency values, saturation settings, agreement between
+`scheduler.nodes` and `deployment.num_nodes`, or placement capacity. The
+existing direct local/paired check compares `client.num_nodes` with
+`deployment.num_nodes`; it does not compare scheduler allocation size with the
+deployment. Omitted scheduler size defaults to deployment size, and ordinary
+matrix variants synchronize the two unless scheduler size is explicitly
+targeted or derived. Those conveniences do not reject an explicit mismatch in
+a non-matrix spec or an explicitly targeted/derived variant; allocation and
+deployment then consume the two values independently. Dispatch-topology
+execution validates only the last arm from which it finds a result, allowing
+earlier arms to escape semantic validation if their process exited zero.
 
-**Recommended change:** Add a plan-validation stage that resolves the entire
-matrix, computes resource feasibility, checks every arm, and emits a complete
-immutable launch plan before submission.
+**Recommended change:** Validate every fully resolved variant after defaults and
+matrix derivation, compute resource feasibility, require allocation/deployment
+agreement unless a typed reservation policy explicitly permits divergence,
+check every dispatch arm, and emit one immutable launch plan before submission.
 
-### PR-021 — vLLM stats collection has an internal data-contract bug
+### PR-021 — Stats collection has split contracts and best-effort failure semantics
 
-**Severity:** High when stats are enabled  
-**Regions:** `src/exaserve/server.py:779-787`,
+**Severity:** Medium-High when stats are requested
+**Regions:** `src/exaserve/server.py:779-865`,
+`src/exaserve/server.py:979-984`,
 `src/exaserve/engines/vllm.py:279-297`,
-`doc/KNOWN_ISSUES.md:112-115`
+`eval/lib/run_executor.py:96-103`, `eval/lib/server_stats.py:41-109`,
+`doc/KNOWN_ISSUES.md` C1
 
 `CollectingStatLogger.to_dict()` returns `summary`, `sample`, and
 `scheduler_snapshots`. `VLLMEngine.collect_stats()` immediately reads a
-nonexistent `finished_requests` key and raises `KeyError`. The project failure
-log separately records that `collect_stats=true` silently produces no expected
-server stats file.
+nonexistent `finished_requests` key and raises `KeyError`. That legacy
+`EngineWorker.collect_stats()` path has no repository caller, so it is latent
+debt rather than proof that the current collector always fails.
+
+The active path is push-based: replicas publish bounded summaries to a named
+actor and `run_executor` invokes `collect_server_stats()` before teardown.
+Repository evidence records a successful 12/12-replica `server_stats.json` run,
+so the old Known Issue's categorical silent-no-op claim is superseded. However,
+the executor catches collection exceptions and can still complete a run without
+the requested stats artifact, leaving required-versus-best-effort semantics
+undefined.
 
 **Recommended change:** Define and type one stats schema, test producer/consumer
-compatibility, make stats failures visible, and decide whether stats are a
-required service or explicitly best-effort telemetry.
+compatibility, and delete or repair the dead pull API. If the resolved plan
+requires stats, missing or incomplete output must make the run non-successful;
+otherwise publish an explicit telemetry-degraded status rather than silently
+treating the artifact as complete.
 
 ### PR-022 — `enable_log_requests` is parsed but not propagated
 
@@ -520,17 +553,19 @@ test/design drift that should be resolved explicitly rather than accidentally.
 configuration validator before launch, and define separate liveness, readiness,
 and end-to-end canary checks.
 
-### PR-025 — Pingora and several proxies are benchmark components, not production gateways
+### PR-025 — Pingora is a benchmark component and proxy capabilities are not normalized
 
 **Severity:** Medium  
 **Regions:** `src/exaserve/proxy/pingora_proxy.py`,
-`src/exaserve/resources/pingora_proxy/`, other proxy backends
+`scripts/pingora_lb/`, other proxy backends
 
-The Pingora implementation describes itself as a benchmark, supports a limited
-routing model, ignores or falls back for some options, and lacks the policy
-surface expected from a production API gateway. Other proxy backends similarly
-vary in authentication, retry, streaming, body-limit, health, and observability
-semantics.
+The custom Pingora implementation describes itself as a minimal benchmark load
+balancer, rejects multi-model configurations, silently falls back for an
+unknown load-balancing method, ignores its requested thread count, and uses a
+TCP-only readiness check. It lacks the policy surface expected from a
+production API gateway. The other proxy backends are not all benchmark-only,
+but they vary materially in authentication, retry, streaming, body-limit,
+health, and observability semantics without one enforced capability contract.
 
 **Recommended change:** Separate production-supported gateways from benchmark
 backends in configuration and documentation. Give each supported gateway a
@@ -543,10 +578,14 @@ capability matrix and conformance tests.
 `src/exaserve/patches/ray_serve_overlay/ray/serve/_private/`,
 `src/exaserve/server.py:1782-2053`, `pyproject.toml:16-24`
 
-The runtime uses a 1,629-line import-time monkeypatch plus approximately 12,500
-vendored lines from Ray Serve private internals. `server.py` directly imports
-several additional private Ray APIs. At the same time, package dependencies use
-open lower bounds (`ray[serve]>=2.49`) and unpinned vLLM/LiteLLM.
+The runtime uses a 1,629-line import-time monkeypatch plus approximately 10,900
+vendored lines from Ray Serve private internals (approximately 12,600 lines
+combined). `server.py` additionally imports private Serve constants,
+`_run_many`, `serve_start`, deploy utilities, generated protobufs, private
+deployment fields, private client/controller methods, and a hardcoded controller
+actor name. `ray_start.py` imports `ray._private` services. At the same time,
+package dependencies use open lower bounds (`ray[serve]>=2.49`) and unpinned
+vLLM/LiteLLM.
 
 A normal dependency upgrade can alter private classes, protobufs, constants, or
 constructor contracts without a clear compatibility failure. Import-time global
@@ -599,14 +638,20 @@ Serve/Ray/proxies in order, and always impose a final forced-cleanup deadline.
 **Regions:** serving/scaling stats actor creation in
 `src/exaserve/scaling_trace.py` and `src/exaserve/server.py`
 
-Some telemetry actors use detached lifetime and fixed names/namespaces. In a
-reused Ray cluster they can collide with or retain state from a prior deployment.
-Large replica fleets also push periodic data to a single head actor, which needs
-an explicit load and retention policy.
+Some telemetry actors use detached lifetime and fixed names/namespaces. The
+replica-init collector can collide with a survivor and is not killed on its
+error path; the serving collector uses `get_if_exists=True`, has no
+deployment-scoped reset/eviction, and can retain stale entries in a reused Ray
+cluster. The serving path already bounds push frequency and sample size and
+keeps only the latest payload per replica key, but thousands of replicas still
+fan into one cluster-wide actor without backpressure or guaranteed cleanup. The
+code calls it a head actor, but supplies no node-affinity or scheduling strategy
+that guarantees head-node placement.
 
 **Recommended change:** Namespace telemetry by immutable run/deployment ID,
-clear state at deployment start, define retention/backpressure, and clean up
-actors at shutdown.
+reject stale generations, intentionally declare placement, define bounded or
+acknowledged reporting plus drop/error metrics, clear state at deployment start,
+and clean up actors in every shutdown/error path.
 
 ### PR-030 — ClientLab currently has a confirmed configuration-path regression
 
@@ -628,56 +673,101 @@ and replace the remaining shell command with a validated argument-vector call.
 
 **Severity:** Blocker as a release-process issue  
 **Regions:** `tests/`, `eval/tests/`, `clientlab/tests/`, `pyproject.toml`,
-`doc/TODO.md:26-27`
+`eval/tests/test_eval_control_plane.py:496-511`, test `conftest.py` files,
+`doc/TODO.md:26-31`
 
-The lightweight suite collected 36 tests and finished with **25 passed, 11
-failed**. Failure categories were:
+The dated lightweight baseline at commit `005891e` collected 36 tests and
+finished with **25 passed, 11 failed** in an environment with a real `rg`
+executable on `PATH`. An independent recheck reproduced that result twice under
+frameworks Python 3.12.12 / pytest 8.3.5, including once with pytest random
+reordering disabled. A controlled environment without an executable `rg`
+finished with **24 passed, 12 failed**; the additional failure is
+`test_eval_runtime_has_no_legacy_import_hacks`, which invokes `rg` as an
+undeclared host binary. Both counts are valid environment-specific observations,
+not a canonical portable baseline. Failure categories were:
 
-- Seven eval control-plane tests attempted network access to the nonexistent
-  Hugging Face ID `test/model`; the suite is not hermetic.
+- Six eval materialization/control-plane tests attempted network access to the
+  nonexistent Hugging Face ID `test/model`; the parent-process tokenizer
+  monkeypatch does not reach forkserver workers, so the suite is not hermetic.
+- One eval plotting subprocess failed to import `exaserve` because its test
+  environment prepends the repository root rather than `src/`.
 - ClientLab failed with the `faults` `KeyError` described in PR-030.
 - The serve-submission test expects a PBS artifact while the implementation now
   defaults to PSI/J.
 - Two HAProxy tests expect old model-route health checks while production code
   uses `/-/healthz`.
+- Conditionally, the legacy-import scan raises `FileNotFoundError` when ripgrep
+  is unavailable. It should use a Python filesystem/text scan instead of a host
+  command.
+
+The eval subtree also is not independently collectible from a source-layout
+checkout unless ExaServe is installed or `src/` is added to `PYTHONPATH`;
+full-suite collection can hide this because `tests/conftest.py` mutates the
+process import path while `eval/tests/conftest.py` adds only the repository root.
+The audit environment's auto-loaded, unpinned `pytest-randomly` plugin changes test order; the
+reproducibility gap is the undeclared plugin/seed, not randomized testing itself.
 
 No `.github` CI workflow, dependency lock, pre-commit configuration, linter/type
 gate, coverage gate, or security/dependency audit configuration was found. Core
 areas such as schema rejection behavior, model-cache integrity, native staging
 failures, proxy lifecycle, scheduler idempotency, readiness, and exit semantics
-have little or no direct coverage. `doc/TODO.md` still says there are zero tests,
-which is itself evidence of documentation drift.
+have little or no direct coverage. The former `doc/TODO.md` claim that there were
+zero tests was corrected during audit adjudication, illustrating why the final
+closure pass must recheck current documentation rather than preserve stale
+current-tense claims.
 
-**Recommended change:** Make tests offline and deterministic; repair the current
-failures; add CI for supported Python/dependency versions; add formatting,
-linting, typing, security, packaging, and coverage gates; and add failure-path
-integration tests before any production label.
+**Recommended change:** Make tests offline and deterministic; replace the
+ripgrep subprocess with an in-process Python scan; define one explicit
+source-layout/package-install contract for full, targeted, and child-process
+tests; pin the canonical pytest plugin set and record randomized seeds; repair
+the remaining failures; and add CI, typing, linting, security, packaging,
+coverage, and failure-path integration gates before any production label.
 
 ### PR-032 — Observability is research-oriented rather than operational
 
 **Severity:** Medium-High  
-**Regions:** serving stats/tracing code, proxy logs, `doc/TODO.md:43-58`
+**Regions:** serving stats/tracing code, proxy logs, `doc/TODO.md:47-65`
 
-The runtime prints extensive diagnostic logs and writes research traces, but it
-does not expose one stable operational metrics contract for request rate,
-latency, errors, queueing, replica health, resource saturation, child-process
-health, staging integrity, and readiness. Request IDs are generated locally but
-are not consistently accepted/propagated across gateway, Serve, and engines.
+Ray's proxy code contains dependency-level metrics and request-context support,
+and ExaServe exposes `/health` and `/stats` handlers whose responses are local to
+the selected replica behind a load-balanced deployment route; they are not
+independently addressable per-replica operational endpoints. The driver sets
+`RAY_ENABLE_METRICS_COLLECTION=0` in the Ray-start child environment, and
+ExaServe does not expose one stable, aggregate operational contract for request
+rate, latency, errors, queueing, replica health, resource saturation,
+child-process health, staging integrity, and readiness. EngineWorker does not
+read an incoming transport correlation header and creates a new OpenAI-format
+completion/engine UUID. That application ID is semantically distinct from a
+transport trace ID, but the two are not linked across gateway, Serve, and engine
+boundaries.
 
 **Recommended change:** Define structured logs, OpenMetrics/Prometheus metrics,
-trace/correlation propagation, alertable health signals, log rotation/retention,
-and a deployment status endpoint independent of experiment tracing.
+and one transport correlation ID accepted or generated at ingress, echoed and
+linked to the distinct completion ID through proxies, Serve, engines, and logs.
+Add alertable aggregate health/status, log rotation/retention, and a deployment
+status endpoint independent of experiment tracing.
 
 ### PR-033 — Known scale limits remain architectural constraints
 
 **Severity:** High for exascale production; Medium for small deployments  
-**Regions:** `doc/KNOWN_ISSUES.md:21-79`,
-`doc/KNOWN_ISSUES.md:83-106`, supporting `findings/` documents
+**Regions:** `doc/KNOWN_ISSUES.md` sections A and B, supporting `findings/`
+documents
 
-The repository documents empirical limitations including static-port
-collisions, GCS/ServeController contention, proxy startup cliffs, Lustre import
-stampedes, and single-head-proxy throughput/network ceilings. These are not all
-ordinary bugs; several are central-architecture scaling limits.
+Current empirical limitations include static-port collisions,
+GCS/ServeController contention and proxy-startup cliffs, and centralized
+no-coalescing streaming delivery/network concentration. The repository's
+512-node evidence places the current single-head Ray/GCS architecture beyond
+its demonstrated envelope.
+
+Two older Known Issues must not be treated as current limits. Application source
+is now broadcast once and executed from `/tmp/exaserve_src`, with optional
+node-local venv staging, so the former application-source Lustre import stampede
+has a code-level remedy that now needs scale revalidation. Likewise, newer
+256-node evidence shows non-streaming HAProxy at about 27.1k RPS after correcting
+the client-topology harness bug; the unqualified “single HAProxy throughput
+ceiling” was falsified. The remaining measured constraint is the centralized
+streaming path with per-token no-delay behavior, not a general HAProxy or
+non-streaming ceiling.
 
 **Recommended change:** State a tested production envelope by node count,
 replica count, models, request mode, and proxy topology. For larger deployments,
@@ -688,7 +778,7 @@ Ray GCS/ServeController and one head-node gateway as indefinitely scalable.
 
 **Severity:** Medium usability/correctness risk  
 **Regions:** `eval/lib/run_planner.py:162-182`,
-`doc/KNOWN_ISSUES.md:117-121`
+`doc/KNOWN_ISSUES.md` C2
 
 Eval materialization snapshots committed `HEAD` and excludes dirty working-tree
 changes. It prints a warning, but users can still believe they evaluated the code
@@ -820,13 +910,24 @@ framework environment:
 python -m pytest -q
 ```
 
-Result:
+Observed results at commit `005891e` under frameworks Python 3.12.12 and pytest
+8.3.5:
 
-```text
-36 tests collected
-25 passed
-11 failed
-```
+| Test environment | Collected | Passed | Failed |
+|---|---:|---:|---:|
+| Real `rg` executable on `PATH` | 36 | 25 | 11 |
+| No `rg` executable on `PATH` | 36 | 24 | 12 |
+
+The same 25/11 result was reproduced twice during cross-verification in an
+environment containing a real ripgrep executable. Claude's 24/12 result was
+also reproduced under a controlled `PATH` without such an executable. The
+additional failure is
+`eval/tests/test_eval_control_plane.py::test_eval_runtime_has_no_legacy_import_hacks`:
+the test calls `subprocess.run(["rg", ...])` and raises `FileNotFoundError` when
+only a shell-level shim, rather than an executable, is available. Disabling
+`pytest-randomly` does not change that discriminator. Consequently neither count
+is a universal baseline; the repository has an undeclared ripgrep dependency
+and must track failures by node ID, root cause, environment receipt, and seed.
 
 No deployment, evaluation, distributed job, GPU workload, or native MPI staging
 operation was executed as part of this audit. Findings concerning large-scale

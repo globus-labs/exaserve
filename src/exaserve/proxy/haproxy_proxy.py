@@ -24,6 +24,14 @@ from textwrap import dedent
 from .base import BackendEndpoint, ProxyBackend
 
 
+def _strict_opt_bool(value: object, path: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false", "1", "0", "yes", "no"}:
+        return value.strip().lower() in {"true", "1", "yes"}
+    raise ValueError(f"{path}: expected a boolean, got {value!r}")
+
+
 class HAProxyProxy(ProxyBackend):
     """Manages an HAProxy process as the request router."""
 
@@ -166,15 +174,32 @@ class HAProxyProxy(ProxyBackend):
                 ))
 
         # --- optional stats page ---
+        # PR-010: `stats admin if TRUE` on a wildcard bind let ANY reachable
+        # host enable/disable backends unauthenticated. Default to a
+        # read-only page bound to loopback; admin and external binds are
+        # explicit opt-ins and admin then REQUIRES auth.
         if stats_port > 0:
-            lines.append(dedent(f"""\
-                listen stats
-                    bind *:{stats_port}
-                    stats enable
-                    stats uri /stats
-                    stats refresh 10s
-                    stats admin if TRUE
-                """))
+            stats_bind = str(options.get("stats_bind", "127.0.0.1"))
+            stats_admin = _strict_opt_bool(options.get("stats_admin", False),
+                                           "proxy.options.stats_admin")
+            stats_auth = options.get("stats_auth")  # "user:password"
+            if stats_admin and not stats_auth:
+                raise ValueError(
+                    "proxy.options.stats_admin requires proxy.options.stats_auth "
+                    "(user:password); refusing to emit an unauthenticated "
+                    "HAProxy admin socket (PR-010)")
+            stats_lines = [
+                "listen stats",
+                f"    bind {stats_bind}:{stats_port}",
+                "    stats enable",
+                "    stats uri /stats",
+                "    stats refresh 10s",
+            ]
+            if stats_auth:
+                stats_lines.append(f"    stats auth {stats_auth}")
+            if stats_admin:
+                stats_lines.append("    stats admin if TRUE")
+            lines.append("\n".join(stats_lines) + "\n")
 
         # Resolve {PORT} placeholder (frontend used it above)
         config_text = "\n".join(lines)
@@ -203,6 +228,20 @@ class HAProxyProxy(ProxyBackend):
         text = config_path.read_text()
         text = text.replace("{PORT}", str(port))
         config_path.write_text(text)
+
+        # PR-024: validate the generated config with HAProxy's own parser
+        # BEFORE launching, so a malformed/injected config is a clear preflight
+        # error rather than a mysterious process death at readiness time.
+        check = subprocess.run(
+            ["haproxy", "-c", "-f", str(config_path)],
+            capture_output=True, text=True,
+        )
+        if check.returncode != 0:
+            raise RuntimeError(
+                f"[HAProxyProxy] generated config failed `haproxy -c` "
+                f"validation:\n{check.stderr.strip() or check.stdout.strip()}"
+            )
+        print("[HAProxyProxy] config validated (haproxy -c)", flush=True)
 
         cmd = ["haproxy", "-f", str(config_path)]
         print(f"[HAProxyProxy] Starting: {' '.join(cmd)}", flush=True)

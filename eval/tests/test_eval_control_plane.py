@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +56,7 @@ matrix:
 trace:
   kind: weak_scaling
   input_prompt_path: {prompt_path}
+  tokenizer_builder: "eval.testing:whitespace_tokenizer_map"
 workload:
   duration: 1.0
   input_len: 8
@@ -181,7 +183,6 @@ def temp_spec(tmp_path, monkeypatch):
     spec_path = tmp_path / "spec.yaml"
     _write_prompt_dataset(prompt_path)
     _write_spec(spec_path, prompt_path)
-    monkeypatch.setattr("eval.lib.trace_generators.build_tokenizer_map", lambda _spec: {})
     return spec_path
 
 
@@ -216,6 +217,7 @@ matrix:
 trace:
   kind: weak_scaling
   input_prompt_path: {prompt_path}
+  tokenizer_builder: "eval.testing:whitespace_tokenizer_map"
 workload:
   duration: 1.0
   input_len: 8
@@ -245,7 +247,6 @@ scheduler:
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("eval.lib.trace_generators.build_tokenizer_map", lambda _spec: {})
     spec = load_experiment_spec(str(spec_path))
     variants = expand_matrix(spec)
     assert len(variants) == 3
@@ -334,6 +335,17 @@ def test_dirty_repo_warning_and_snapshot_excludes_uncommitted_content(
     (repo_root / "tracked.txt").write_text("dirty tracked\n", encoding="utf-8")
     (repo_root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
 
+    # PR-034: a dirty tree now REQUIRES explicit acknowledgement, else it
+    # raises instead of silently snapshotting stale HEAD.
+    with pytest.raises(RuntimeError, match="uncommitted"):
+        materialize_run_bundles(
+            str(temp_spec), backend_name="mock",
+            experiments_root=str(tmp_path / "runs"),
+            trace_root=str(tmp_path / "traces"),
+            repo_root=str(repo_root), max_workers=1,
+        )
+
+    monkeypatch.setenv("EXASERVE_ALLOW_DIRTY_SNAPSHOT", "1")
     plans = materialize_run_bundles(
         str(temp_spec),
         backend_name="mock",
@@ -391,7 +403,12 @@ def test_cli_validate_and_submit_all_latest_dry_run(temp_spec, tmp_path, monkeyp
     materialize_run_bundles(str(temp_spec), **run_kwargs)
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
+    # Same child-process source-layout contract as the root conftest.
+    source_root = Path(__file__).resolve().parents[2]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(source_root), str(source_root / "src")]
+        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
 
     validate = subprocess.run(
         [sys.executable, "-m", "eval.cli", "spec", "validate", str(temp_spec)],
@@ -443,7 +460,13 @@ def test_plot_scripts_resolve_latest_run_group(tmp_path, monkeypatch):
     _write_plot_result(result_path)
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.getcwd() + os.pathsep + env.get("PYTHONPATH", "")
+    # Child processes must receive the same source-layout contract as the
+    # root conftest: repo root (eval package) plus src/ (exaserve package).
+    repo_root = Path(__file__).resolve().parents[2]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo_root), str(repo_root / "src")]
+        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
     env["EXASERVE_EXPERIMENTS_ROOT"] = str(experiments_root)
     weak_plot = tmp_path / "weak.png"
     litellm_plot = tmp_path / "litellm.png"
@@ -494,18 +517,73 @@ def test_plot_scripts_resolve_latest_run_group(tmp_path, monkeypatch):
 
 
 def test_eval_runtime_has_no_legacy_import_hacks():
-    result = subprocess.run(
-        [
-            "rg",
-            "-n",
-            "from exp_configs import \\*|sys\\.path\\.insert\\(",
-            "eval/cli.py",
-            "eval/replay_client.py",
-            "eval/lib",
-        ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    assert result.returncode == 1, result.stdout
+    # AC-TST-01: in-process scan, cwd-independent, no undeclared host binary
+    # (previously shelled out to ripgrep, which is absent on some hosts).
+    pattern = re.compile(r"from exp_configs import \*|sys\.path\.insert\(")
+    repo_root = Path(__file__).resolve().parents[2]
+    targets = [
+        repo_root / "eval" / "cli.py",
+        repo_root / "eval" / "replay_client.py",
+    ]
+    targets.extend(sorted((repo_root / "eval" / "lib").rglob("*.py")))
+    offenders = []
+    for path in targets:
+        if not path.is_file():
+            continue
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if pattern.search(line):
+                offenders.append(f"{path.relative_to(repo_root)}:{lineno}: {line.strip()}")
+    assert not offenders, "\n".join(offenders)
+
+
+def test_matrix_derived_rejects_unsafe_expressions():
+    # PR-016: spec expressions are configuration, not code. The classic
+    # sandbox escapes and any attribute traversal outside math.* must raise.
+    from eval.lib.matrix import _eval_derived
+
+    assert _eval_derived("min(nodes * 4, 100)", {"nodes": 8}) == 32
+    assert _eval_derived("math.ceil(nodes / 3)", {"nodes": 8}) == 3
+    assert _eval_derived("4 if nodes > 4 else 1", {"nodes": 8}) == 4
+
+    for evil in (
+        "().__class__.__mro__[1].__subclasses__()",
+        "__import__('os').system('true')",
+        "min.__globals__",
+        "math.__loader__",
+        "[x for x in (1,)]",
+        "(lambda: 1)()",
+        "nodes.__class__",
+        "open('/etc/passwd')",
+    ):
+        with pytest.raises(ValueError):
+            _eval_derived(evil, {"nodes": 8})
+
+
+def test_spec_validation_rejects_bad_enums_and_bounds(tmp_path, monkeypatch):
+    # PR-020: enum + bound checks in validate_experiment_spec.
+    from eval.lib.spec_io import validate_experiment_spec, load_experiment_spec
+    prompt = tmp_path / "p.json"
+    _write_prompt_dataset(prompt)
+    spec_path = tmp_path / "s.yaml"
+    _write_spec(spec_path, prompt)
+    spec = load_experiment_spec(str(spec_path))
+    validate_experiment_spec(spec)  # baseline valid
+
+    import dataclasses
+    bad_sched = dataclasses.replace(spec, scheduler=dataclasses.replace(spec.scheduler, type="cobalt"))
+    with pytest.raises(ValueError, match="scheduler.type"):
+        validate_experiment_spec(bad_sched)
+
+    bad_engine = dataclasses.replace(spec, deployment=dataclasses.replace(spec.deployment, engine="tensorrt"))
+    with pytest.raises(ValueError, match="engine"):
+        validate_experiment_spec(bad_engine)
+
+    bad_arrival = dataclasses.replace(spec, workload=dataclasses.replace(spec.workload, arrival="uniform"))
+    with pytest.raises(ValueError, match="arrival"):
+        validate_experiment_spec(bad_arrival)
+
+    bad_conc = dataclasses.replace(spec, client=dataclasses.replace(spec.client, go_concurrency=0))
+    with pytest.raises(ValueError, match="go_concurrency"):
+        validate_experiment_spec(bad_conc)

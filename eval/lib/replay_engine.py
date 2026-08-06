@@ -156,7 +156,25 @@ def _gather_results_via_shards(
             f"missing ranks {missing} — their requests are dropped from this run.",
             flush=True,
         )
+    # PR-019: completeness is result data, not just a log line. Consumers
+    # (and the strict switch below) read this instead of grepping warnings.
+    _LAST_GATHER_META.clear()
+    _LAST_GATHER_META.update({
+        "expected_ranks": mpi_size,
+        "collected_ranks": len(collected),
+        "missing_ranks": missing,
+        "complete": not missing,
+    })
+    if missing and os.environ.get("EXASERVE_EVAL_STRICT_COMPLETE") == "1":
+        raise RuntimeError(
+            f"run {run_index}: incomplete gather {len(collected)}/{mpi_size} "
+            f"(missing {missing}) and EXASERVE_EVAL_STRICT_COMPLETE=1")
     return [collected[r] for r in sorted(collected)]
+
+
+# Written by _gather_results_via_shards on the root rank; merged into the
+# result meta by _save_results. Single-threaded per-process access.
+_LAST_GATHER_META: dict = {}
 
 
 class TraceRequest(object):
@@ -1313,6 +1331,7 @@ def _save_results(
                 meta,
                 token_counts_from_usage_api=usage_count,
                 token_counts_from_trace_spec=trace_count,
+                gather=dict(_LAST_GATHER_META) or None,
             ),
             "per_run": per_run,
             "summary": {model_name: len(rows) for model_name, rows in model_groups.items()},
@@ -1334,6 +1353,9 @@ def _save_results(
             },
             "requests": raw_results,
         }
-    with open(final_save_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
+    # PR-035: atomic publish — a crash/walltime-kill or concurrent reader
+    # sees either no file or the complete result, never a truncated one.
+    from exaserve.state.atomic import atomic_write_text
+
+    atomic_write_text(final_save_path, json.dumps(payload, indent=2))
     print(f">>> [REPLAY] Saved results to {final_save_path}", flush=True)

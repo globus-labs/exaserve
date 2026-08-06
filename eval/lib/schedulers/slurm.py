@@ -46,6 +46,18 @@ class SlurmScheduler(EvalScheduler):
         job_exports: Optional[Dict[str, str]] = None,
         gpus_per_node: Optional[int] = None,
     ) -> str:
+        # PR-015: validate every field that lands in an #SBATCH directive.
+        from .base import validate_directive_field as _v
+
+        job_name = _v(job_name, "job_name")
+        project = _v(project, "project")
+        walltime = _v(walltime, "walltime")
+        stdout_dir = _v(stdout_dir, "stdout_dir")
+        stderr_dir = _v(stderr_dir, "stderr_dir")
+        if queue:
+            queue = _v(queue, "queue")
+        if mail_user:
+            mail_user = _v(mail_user, "mail_user")
         part = f"#SBATCH --partition={queue}\n" if queue else ""
         gpn = f"#SBATCH --gpus-per-node={gpus_per_node}\n" if gpus_per_node else ""
         mail = (
@@ -81,11 +93,14 @@ class SlurmScheduler(EvalScheduler):
         m = _SUBMIT_RE.search(r.stdout)
         return True, (m.group(1) if m else r.stdout.strip())
 
-    def count_queued(self, user: str) -> Dict[str, int]:
+    def count_queued(self, user: str) -> Optional[Dict[str, int]]:
+        # PR-014: fail closed — an unobservable scheduler is None, never {}.
         try:
             r = self._run(["squeue", "-h", "-u", user, "-o", "%P %t"])
         except Exception:
-            return {}
+            return None
+        if r.returncode != 0:
+            return None
         counts: Dict[str, int] = {}
         for line in r.stdout.splitlines():
             parts = line.split()

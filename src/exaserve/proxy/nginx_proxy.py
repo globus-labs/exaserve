@@ -166,6 +166,17 @@ class NGINXProxy(ProxyBackend):
         # paths inside the config (we use absolute paths so this is just
         # cosmetic, but it prevents fall-back to the build-time prefix).
         prefix = str(config_path.parent) + "/"
+        # PR-024: validate the generated config with `nginx -t` before launch.
+        check = subprocess.run(
+            ["nginx", "-t", "-p", prefix, "-c", str(config_path)],
+            capture_output=True, text=True,
+        )
+        if check.returncode != 0:
+            raise RuntimeError(
+                f"[NGINXProxy] generated config failed `nginx -t` validation:\n"
+                f"{check.stderr.strip() or check.stdout.strip()}"
+            )
+        print("[NGINXProxy] config validated (nginx -t)", flush=True)
         cmd = ["nginx", "-p", prefix, "-c", str(config_path)]
         print(f"[NGINXProxy] Starting: {' '.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd)

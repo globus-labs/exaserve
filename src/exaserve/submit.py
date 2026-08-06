@@ -180,6 +180,16 @@ def serve_submit_main() -> int:
 # ---------------------------------------------------------------------------
 
 
+def _read_published_port(port_file: Optional[str]) -> Optional[int]:
+    if not port_file:
+        return None
+    try:
+        with open(port_file, "r", encoding="utf-8") as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def serve_url(
     job_id: str,
     config_path: Optional[str | os.PathLike] = None,
@@ -199,6 +209,16 @@ def serve_url(
         poll_interval_s, timeout_s: poll loop control.
         port: explicit override (skips reading the config).
     """
+    published_port_file = None
+    if config_path is not None:
+        published_port_file = os.path.join(
+            os.path.dirname(os.path.abspath(str(config_path))), "proxy_out", "proxy_port"
+        )
+    if port is None and config_path is not None:
+        # PR-012: prefer the port the proxy ACTUALLY bound (published by the
+        # driver) over the configured one — LiteLLM and friends fall back to
+        # a different port when the configured one is taken.
+        port = _read_published_port(published_port_file)
     if port is None and config_path is not None:
         proxy_cfg = load_proxy_config(str(config_path))
         port = proxy_cfg.port
@@ -212,6 +232,11 @@ def serve_url(
         if state == "R":
             head = scheduler.head_node(job_id)
             if head:
+                # Re-read the published port once running: the file appears
+                # only after the proxy actually bound (PR-012).
+                actual = _read_published_port(published_port_file)
+                if actual is not None:
+                    port = actual
                 return f"http://{head}:{port}"
         if not wait:
             if state in (None, "Q", "H"):

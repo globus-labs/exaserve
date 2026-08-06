@@ -4,9 +4,17 @@ from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 try:
-    from .model_paths import iter_unique_model_ids
+    from .model_paths import (
+        get_model_route_name,
+        get_model_storage_name,
+        iter_unique_model_ids,
+    )
 except ImportError:  # pragma: no cover - script-mode fallback
-    from .model_paths import iter_unique_model_ids
+    from .model_paths import (
+        get_model_route_name,
+        get_model_storage_name,
+        iter_unique_model_ids,
+    )
 
 
 def require_yaml():
@@ -86,18 +94,35 @@ class ProxyConfig:
     options: Dict[str, Any] = field(default_factory=dict)
 
 
+def _strict_bool(value: Any, field: str) -> bool:
+    """PR-006: a quoted "false" must not become True. YAML booleans pass
+    through unchanged; strings are parsed; anything else is rejected."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off"):
+            return False
+    raise ValueError(f"{field} must be a boolean, got {value!r}")
+
+
 def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
     """Build ModelConfig from a dict (e.g. YAML-loaded)."""
     raw_replicas = d.get("num_replicas")
     if raw_replicas is None:
         num_replicas = None
-    elif isinstance(raw_replicas, dict):
-        num_replicas = None  # YAML sometimes nests unexpectedly
     else:
+        # PR-006: an invalid num_replicas must fail loudly, not silently
+        # degrade to auto-planning (which changes an explicit request).
         try:
             num_replicas = int(raw_replicas)
         except (TypeError, ValueError):
-            num_replicas = None
+            raise ValueError(
+                f"num_replicas for {d.get('model_id', '?')} must be an integer "
+                f"or omitted, got {raw_replicas!r}"
+            ) from None
     return ModelConfig(
         model_id=d["model_id"],
         tensor_parallel_size=int(d.get("tensor_parallel_size", 1)),
@@ -105,8 +130,9 @@ def _model_config_from_dict(d: Dict[str, Any]) -> ModelConfig:
         max_model_len=int(d.get("max_model_len", 4096)),
         size=int(d.get("size", 8)),
         gpu_memory_utilization=float(d.get("gpu_memory_utilization", 0.90)),
-        enforce_eager=bool(d.get("enforce_eager", True)),
-        enable_log_requests=bool(d.get("enable_log_requests", True)),
+        enforce_eager=_strict_bool(d.get("enforce_eager", True), "enforce_eager"),
+        enable_log_requests=_strict_bool(
+            d.get("enable_log_requests", True), "enable_log_requests"),
         max_num_seqs=int(d["max_num_seqs"]) if d.get("max_num_seqs") is not None else None,
         num_replicas=num_replicas,
         num_cpus_per_replica=int(d.get("num_cpus_per_replica", 4)),
@@ -152,6 +178,22 @@ def validate_deployment_config(config: DeploymentConfig) -> DeploymentConfig:
     unique_model_ids = list(iter_unique_model_ids(config.model_configs))
     if len(unique_model_ids) != len(config.model_configs):
         raise ValueError("model_ids must be unique within model_configs")
+
+    # PR-007: distinct model IDs must also have distinct DERIVED identifiers
+    # (storage dir, HTTP route). `a/b--c` and `a--b/c` both map to storage
+    # `a--b--c`; `a.b/c` and `a-b/c` both map to route `a-b--c`. A collision
+    # would overwrite a cache or route requests to the wrong model.
+    for attr, fn in (("storage", get_model_storage_name),
+                     ("route", get_model_route_name)):
+        seen: Dict[str, str] = {}
+        for model_cfg in config.model_configs:
+            derived = fn(model_cfg.model_id)
+            if derived in seen:
+                raise ValueError(
+                    f"model {attr} identity collision: {seen[derived]!r} and "
+                    f"{model_cfg.model_id!r} both map to {derived!r}"
+                )
+            seen[derived] = model_cfg.model_id
 
     for model_cfg in config.model_configs:
         tp = model_cfg.tensor_parallel_size

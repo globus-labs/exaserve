@@ -302,8 +302,9 @@ class ScalingTracer:
         )
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = self.to_dict()
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        # PR-035: atomic publish (crash/concurrent-reader safe).
+        from exaserve.state.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(data, indent=2, default=str))
         _print_trace(f"Trace written to {path} ({len(data['phases'])} phases, "
                      f"{len(data['api_calls'])} API calls, "
                      f"{len(data['replicas'])} replicas)")
@@ -322,8 +323,8 @@ class ScalingTracer:
                 "pid": os.getpid(),
                 "replicas": list(self._replicas),
             }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        from exaserve.state.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(data, indent=2, default=str))
         return path
 
 
@@ -347,8 +348,20 @@ def _print_trace(msg: str, extra: Any = None) -> None:
 # Replica stats collection via Ray named actor (replaces Lustre file I/O)
 # --------------------------------------------------------------------------
 
-_STATS_COLLECTOR_NAME = "ReplicaStatsCollector"
 _STATS_COLLECTOR_NAMESPACE = "serve"
+
+
+def _stats_collector_name() -> str:
+    # PR-029: deployment-scoped so a reused Ray cluster never mixes two
+    # deployments' replica-init traces under one detached actor.
+    for var in ("EXASERVE_DEPLOYMENT_ID", "EXASERVE_SCALING_TRACE_TOKEN",
+                "EXASERVE_JOBID", "PBS_JOBID"):
+        val = os.environ.get(var)
+        if val:
+            return f"ReplicaStatsCollector:{str(val).split('.')[0][:40]}"
+    return "ReplicaStatsCollector:default"
+
+
 
 
 class _ReplicaStatsCollectorImpl:
@@ -375,7 +388,7 @@ def create_stats_collector():
     import ray
     actor_cls = ray.remote(_ReplicaStatsCollectorImpl)
     return actor_cls.options(
-        name=_STATS_COLLECTOR_NAME,
+        name=_stats_collector_name(),
         namespace=_STATS_COLLECTOR_NAMESPACE,
         lifetime="detached",
         num_cpus=0,
@@ -388,7 +401,7 @@ def _get_stats_collector():
         return None
     try:
         import ray
-        return ray.get_actor(_STATS_COLLECTOR_NAME, namespace=_STATS_COLLECTOR_NAMESPACE)
+        return ray.get_actor(_stats_collector_name(), namespace=_STATS_COLLECTOR_NAMESPACE)
     except Exception:
         return None
 

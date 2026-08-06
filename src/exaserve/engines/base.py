@@ -40,6 +40,7 @@ class EngineSpec:
     max_num_seqs: Optional[int] = None
     device_ids: List[int] = field(default_factory=list)   # Ray tile ids this replica owns
     collect_stats: bool = False
+    enable_log_requests: bool = True      # PR-022: operator setting reaches the backend
     extra_engine_kwargs: Dict[str, Any] = field(default_factory=dict)
 
 

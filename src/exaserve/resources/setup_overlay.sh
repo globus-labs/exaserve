@@ -12,9 +12,10 @@
 #
 # Result:
 #   /tmp/exaserve_overlay/ray/...
-#       Symlink farm pointing at the system Ray install, with five patched
-#       files in ray/serve/_private/ replaced by copies from the bcast'd
-#       /tmp/overlay_patches/serve/_private/.
+#       Symlink farm pointing at the system Ray install, with the patched
+#       files in ray/serve/_private/ (currently 6: common, constants,
+#       controller, deployment_state, proxy, router) replaced by copies from
+#       the bcast'd /tmp/overlay_patches/serve/_private/.
 
 set -euo pipefail
 
@@ -38,6 +39,18 @@ if [ -z "$SYSRAY" ] || [ ! -d "$SYSRAY/serve/_private" ]; then
     echo "[setup_overlay $(hostname -s)] ERROR: cannot resolve system ray dir." \
          "Set EXASERVE_SYSRAY or use a PYTHON_EXEC that imports ray. Got: '$SYSRAY'"
     exit 1
+fi
+
+# WP3 (ADR-003): the overlay copies whole files over this exact Ray version;
+# assembling it against any other version silently produces a mixed-version
+# ray.serve._private. Fail closed on drift unless explicitly overridden.
+RAY_ACTUAL=$("$PYTHON_EXEC" -c 'import ray; print(ray.__version__)' 2>/dev/null || echo "?")
+RAY_PINNED=$("$PYTHON_EXEC" -c 'from exaserve.patches import RAY_PINNED_VERSION as v; print(v)' 2>/dev/null || echo "?")
+if [ "$RAY_ACTUAL" != "$RAY_PINNED" ] && [ "${EXASERVE_OVERLAY_ALLOW_VERSION_MISMATCH:-0}" != "1" ]; then
+    echo "[setup_overlay $(hostname -s)] ERROR: ray $RAY_ACTUAL != pinned $RAY_PINNED;" \
+         "refusing to assemble a mixed-version overlay" \
+         "(set EXASERVE_OVERLAY_ALLOW_VERSION_MISMATCH=1 to override for a spike)"
+    exit 2
 fi
 
 LOCAL_OVERLAY="/tmp/exaserve_overlay"

@@ -345,17 +345,25 @@ def _validate_replay_results(run_plan) -> dict[str, int | str]:
     }
 
 
+def _result_index(name: str) -> int:
+    suffix = name[len("result"):-len(".json")]
+    return int(suffix) if suffix.isdigit() else -1
+
+
 def _latest_result_path(results_dir: str) -> str | None:
+    # PR-019: numeric ordering — lexicographic sort made result9.json beat
+    # result10.json and validated a stale file as the newest result.
     try:
         candidates = [
             name for name in os.listdir(results_dir)
             if name.startswith("result") and name.endswith(".json")
+            and _result_index(name) >= 0
         ]
     except FileNotFoundError:
         return None
     if not candidates:
         return None
-    return os.path.join(results_dir, sorted(candidates)[-1])
+    return os.path.join(results_dir, max(candidates, key=_result_index))
 
 
 def _resolve_run_yaml(target: str) -> str:
@@ -374,6 +382,7 @@ def _resolve_run_yaml(target: str) -> str:
 
 # Per-queue slot limits now live on the scheduler backend (scheduler.slot_limits()).
 _DEFAULT_QUEUE_SLOTS = 2  # conservative fallback for unknown queues/partitions
+_MAX_SUBMIT_ATTEMPTS = 20  # PR-013: bound retries; then record a permanent failure
 _POLL_INTERVAL_S = 300    # 5 min between polls — minimizes qstat load on login node
 
 
@@ -405,17 +414,29 @@ def submit_all(
         print(str(exc))
         return 1
 
-    # --- Lock file check ---
+    # --- Cross-host exclusive lease (PR-013) ---
+    # Atomic O_CREAT|O_EXCL acquisition (no check-then-write window); a live
+    # lease from ANOTHER host is respected (the old code treated any foreign
+    # host as stale and cleaned it, which duplicates jobs on a shared FS).
+    from exaserve.state.atomic import ExclusiveLease, LeaseHeldError
+
     lock_path = os.path.join(group_dir, ".submit_all.lock")
-    stale = _check_and_acquire_lock(lock_path, spec_name)
-    if stale is None:
-        # Lock held by a live process — abort
+    try:
+        lease = ExclusiveLease(lock_path, ttl_s=86400,
+                               owner_note=f"submit-all {spec_name}").acquire()
+    except LeaseHeldError as exc:
+        print(
+            f"WARNING: submit-all for {spec_name!r} is already running "
+            f"({exc.owner.get('host')}:{exc.owner.get('pid')}, "
+            f"note={exc.owner.get('note')}). Refusing to start a second instance.",
+            flush=True,
+        )
         return 1
 
     try:
         return _submit_all_locked(group_dir, spec_name, dry_run, poll_interval)
     finally:
-        _release_lock(lock_path)
+        lease.release()
 
 
 def _check_and_acquire_lock(lock_path: str, spec_name: str) -> bool | None:
@@ -527,10 +548,22 @@ def _submit_all_locked(
     remaining = list(pending)
     submitted: list[str] = []
     failed: dict[str, str] = {}
+    attempts: dict[str, int] = {}  # PR-013: per-run submission attempt counter
     user = getpass.getuser()
 
     while remaining:
         queue_counts = scheduler.count_queued(user)
+        if queue_counts is None:
+            # PR-014: scheduler unobservable — fail closed. Do not submit on
+            # a blind count (that is how duplicate floods happen); wait and
+            # re-observe.
+            print(
+                "  [submit-all] WARNING: scheduler queue counts unavailable "
+                "(qstat/squeue failed); holding submissions for 30s.",
+                flush=True,
+            )
+            time.sleep(30)
+            continue
         next_round: list = []
 
         for run_plan in remaining:
@@ -544,6 +577,16 @@ def _submit_all_locked(
 
             ok, msg = scheduler.submit(run_plan.bundle.job_path)
             if ok:
+                # PR-013: record the scheduler job identity durably BEFORE
+                # counting the submission, so a crash after qsub does not lose
+                # the job id and a re-invocation sees this run as submitted.
+                try:
+                    from .run_planner import write_run_state
+
+                    write_run_state(run_plan, "submitted", scheduler_job_id=msg)
+                except Exception as exc:  # persistence failure is not fatal here
+                    print(f"  WARNING: failed to persist submitted state for "
+                          f"{run_plan.run_id}: {exc}", flush=True)
                 submitted.append(run_plan.run_id)
                 queue_counts[queue] = current + 1
                 print(
@@ -552,13 +595,26 @@ def _submit_all_locked(
                     flush=True,
                 )
             else:
-                # qsub rejected — likely queue full despite our count, retry
-                next_round.append(run_plan)
-                print(
-                    f"  [{len(submitted)}/{total}] Deferred  "
-                    f"{run_plan.run_group_id}/{run_plan.run_id}: {msg}",
-                    flush=True,
-                )
+                # qsub rejected. Retry a bounded number of times (queue-full is
+                # transient); after the cap, record a permanent failure instead
+                # of retrying forever (PR-013).
+                attempts[run_plan.run_id] = attempts.get(run_plan.run_id, 0) + 1
+                if attempts[run_plan.run_id] >= _MAX_SUBMIT_ATTEMPTS:
+                    failed[run_plan.run_id] = msg
+                    print(
+                        f"  [{len(submitted)}/{total}] FAILED    "
+                        f"{run_plan.run_group_id}/{run_plan.run_id} after "
+                        f"{attempts[run_plan.run_id]} attempts: {msg}",
+                        flush=True,
+                    )
+                else:
+                    next_round.append(run_plan)
+                    print(
+                        f"  [{len(submitted)}/{total}] Deferred  "
+                        f"{run_plan.run_group_id}/{run_plan.run_id} "
+                        f"(attempt {attempts[run_plan.run_id]}): {msg}",
+                        flush=True,
+                    )
 
         remaining = next_round
         if remaining:
@@ -597,8 +653,15 @@ def _discover_pending_runs(group_dir: str):
     return pending
 
 
+# PR-013: a run in any of these states already has (or had) a scheduler job;
+# re-running submit-all must NOT create a second job for it. "succeeded"
+# additionally requires results on disk (below).
+_IN_FLIGHT_STATES = {"submitted", "running", "replaying"}
+
+
 def _is_completed(run_dir: str) -> bool:
-    """A run is completed if its status is 'succeeded' and results exist."""
+    """True if this run must be SKIPPED by submit-all discovery: it already
+    succeeded (with results) or is in flight with a recorded scheduler job."""
     state_path = os.path.join(run_dir, "state", "status.json")
     if not os.path.isfile(state_path):
         return False
@@ -607,7 +670,11 @@ def _is_completed(run_dir: str) -> bool:
             state = json.load(fh)
     except (json.JSONDecodeError, OSError):
         return False
-    if state.get("status") != "succeeded":
+    status = state.get("status")
+    if status in _IN_FLIGHT_STATES:
+        # Idempotency: don't resubmit a run we already handed to the scheduler.
+        return True
+    if status != "succeeded":
         return False
     results_dir = os.path.join(run_dir, "results")
     try:

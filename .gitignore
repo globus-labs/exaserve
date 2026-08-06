@@ -12,7 +12,10 @@ eval/go_client/go_dispatch
 .claude/
 *.log
 run_logs/
-plan/
+/plan/
+# hardening run artifacts (raw logs/binaries/staged copies); results are
+# recorded in doc/hardening/ instead (plan §8).
+artifacts/
 tools/bcast
 tools/*.o
 tmp/

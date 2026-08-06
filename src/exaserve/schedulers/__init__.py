@@ -2,11 +2,14 @@
 Pluggable batch schedulers (package submission side).
 
     from exaserve.schedulers import get_scheduler
-    sched = get_scheduler()            # EXASERVE_SCHEDULER, default "pbs"
+    sched = get_scheduler()            # EXASERVE_SCHEDULER, default "psij"
     sched.submit(job_path)
 
-Selected by ``EXASERVE_SCHEDULER`` (default ``pbs``). To add a scheduler,
-implement ``SchedulerBackend`` (base.py) and register it below.
+Selected by ``EXASERVE_SCHEDULER`` (default ``psij`` — the ExaWorks PSI/J
+backend, portable across PBS/Slurm/LSF/Flux). Native ``pbs``/``slurm``
+backends remain available. Install PSI/J with the ``scheduler`` extra
+(``pip install exaserve[scheduler]``). To add a scheduler, implement
+``SchedulerBackend`` (base.py) and register it below.
 
 Design doc: doc/design/scheduler_abstraction.md
 """

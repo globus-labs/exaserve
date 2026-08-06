@@ -39,6 +39,20 @@ class PBSScheduler(EvalScheduler):
         job_exports: Optional[Dict[str, str]] = None,
         gpus_per_node: Optional[int] = None,  # PBS ignores; select= is per-node
     ) -> str:
+        # PR-015: validate every field that lands in a #PBS directive.
+        from .base import validate_directive_field as _v
+
+        job_name = _v(job_name, "job_name")
+        queue = _v(queue, "queue")
+        walltime = _v(walltime, "walltime")
+        project = _v(project, "project")
+        filesystems = _v(filesystems, "filesystems")
+        keep_output = _v(keep_output, "keep_output")
+        stdout_dir = _v(stdout_dir, "stdout_dir")
+        stderr_dir = _v(stderr_dir, "stderr_dir")
+        if mail_user:
+            mail_user = _v(mail_user, "mail_user")
+            mail_events = _v(mail_events, "mail_events")
         mail_lines = ""
         if mail_user:
             mail_lines = f"#PBS -m {mail_events}\n#PBS -M {mail_user}\n"
@@ -67,11 +81,14 @@ class PBSScheduler(EvalScheduler):
             return False, f"qsub failed: {exc}"
         return r.returncode == 0, (r.stdout.strip() or r.stderr.strip())
 
-    def count_queued(self, user: str) -> Dict[str, int]:
+    def count_queued(self, user: str) -> Optional[Dict[str, int]]:
+        # PR-014: fail closed — an unobservable scheduler is None, never {}.
         try:
             r = self._run(["qstat", "-u", user])
         except Exception:
-            return {}
+            return None
+        if r.returncode != 0:
+            return None
         counts: Dict[str, int] = {}
         for line in r.stdout.splitlines():
             if user not in line:

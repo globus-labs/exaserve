@@ -11,7 +11,9 @@ if SRC_DIR not in sys.path:
 
 from exaserve.replica_planner import (
     NodeInventory,
+    RequiredModelsError,
     compute_replica_plan,
+    enforce_required_models_policy,
     tp_replica_capacity_for_nodes,
 )
 from exaserve.schemas import ModelConfig
@@ -157,6 +159,61 @@ class ReplicaPlannerTests(unittest.TestCase):
         self.assertEqual(pp_plan.assigned_replicas, 1)
         self.assertEqual(tp_plan.assigned_replicas, 6)
 
+
+class RequiredModelsPolicyTests(unittest.TestCase):
+    def _plan_with_skip(self):
+        # tp-auto cannot be placed alongside the explicit PP model on 4 nodes.
+        return compute_replica_plan(
+            [
+                make_model("pp-explicit", tp=8, pp=2, num_replicas=2),
+                make_model("tp-auto", tp=8),
+            ],
+            make_nodes(4),
+        )
+
+    def test_skipped_model_fails_by_default(self):  # PR-023
+        plan = self._plan_with_skip()
+        with self.assertRaises(RequiredModelsError) as ctx:
+            enforce_required_models_policy(plan, allow_partial=False)
+        self.assertIn("tp-auto", str(ctx.exception))
+
+    def test_allow_partial_returns_reasons_without_raising(self):
+        plan = self._plan_with_skip()
+        reasons = enforce_required_models_policy(plan, allow_partial=True)
+        self.assertTrue(any("tp-auto" in r for r in reasons))
+
+    def test_all_placed_is_noop(self):
+        plan = compute_replica_plan([make_model("solo", tp=8)], make_nodes(4))
+        self.assertEqual(enforce_required_models_policy(plan, allow_partial=False), [])
+
+
+class LegacySchemaHardeningTests(unittest.TestCase):
+    """PR-006/PR-007 on the legacy schemas.py path that runs today."""
+
+    def test_string_false_parses_false(self):
+        from exaserve.schemas import _model_config_from_dict
+        m = _model_config_from_dict({"model_id": "a/b", "enforce_eager": "false"})
+        self.assertFalse(m.enforce_eager)
+
+    def test_invalid_num_replicas_raises(self):
+        from exaserve.schemas import _model_config_from_dict
+        with self.assertRaises(ValueError):
+            _model_config_from_dict({"model_id": "a/b", "num_replicas": "many"})
+
+    def test_derived_identity_collision_rejected(self):
+        from exaserve.schemas import (
+            DeploymentConfig, _model_config_from_dict, validate_deployment_config,
+        )
+        cfg = DeploymentConfig(
+            num_nodes=1, num_gpus_per_node=8, local_stage_path="/tmp/x",
+            model_configs=[
+                _model_config_from_dict({"model_id": "a/b--c", "max_model_len": 64}),
+                _model_config_from_dict({"model_id": "a--b/c", "max_model_len": 64}),
+            ],
+        )
+        with self.assertRaises(ValueError) as ctx:
+            validate_deployment_config(cfg)
+        self.assertIn("collision", str(ctx.exception))
 
 if __name__ == "__main__":
     unittest.main()

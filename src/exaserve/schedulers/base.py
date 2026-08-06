@@ -42,6 +42,25 @@ class JobSpec:
     filesystems: Optional[str] = None  # PBS only
     keep_flag: Optional[str] = None    # PBS only
 
+    def __post_init__(self) -> None:
+        # PR-015: fields that land in #PBS/#SBATCH directive lines must not
+        # carry newlines or shell metacharacters (env_setup is intentionally
+        # raw operator shell and is exempt; it is treated as privileged code).
+        import re as _re
+
+        safe = _re.compile(r"^[A-Za-z0-9 ._:/@=+-]*$")
+        for name in ("walltime", "account", "job_name", "queue",
+                     "filesystems", "keep_flag", "vendor"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            text = str(value)
+            if "\n" in text or "\r" in text or not safe.match(text):
+                raise ValueError(
+                    f"JobSpec.{name} has disallowed characters (newline or shell "
+                    f"metacharacter): {text!r}"
+                )
+
 
 def run_cmd(cmd: List[str], timeout_s: int, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(

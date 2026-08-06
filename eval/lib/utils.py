@@ -83,19 +83,23 @@ def load_yaml_file(path: str | Path) -> dict[str, Any]:
 
 
 def dump_yaml_file(path: str | Path, data: Any) -> None:
+    # WP2.1 (PR-035): atomic temp+rename publish; a crash or concurrent
+    # reader sees either the previous file or the complete new one.
+    from exaserve.state.atomic import atomic_write_yaml
+
     parent = os.path.dirname(os.path.abspath(os.fspath(path)))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        yaml.safe_dump(dataclass_to_dict(data), handle, sort_keys=False)
+    atomic_write_yaml(path, dataclass_to_dict(data))
 
 
 def dump_json_file(path: str | Path, data: Any) -> None:
+    from exaserve.state.atomic import atomic_write_json
+
     parent = os.path.dirname(os.path.abspath(os.fspath(path)))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(dataclass_to_dict(data), handle, indent=2, sort_keys=True)
+    atomic_write_json(path, dataclass_to_dict(data))
 
 
 def resolve_path(raw_path: str | None, *, base_dir: str | None = None) -> str | None:
@@ -140,3 +144,19 @@ def dotted_set(data: Any, dotted_path: str, value: Any) -> None:
 def format_template(template: str, values: dict[str, Any]) -> str:
     normalized = {key: values[key] for key in values}
     return template.format(**normalized)
+
+
+def result_is_complete(result_data: dict) -> tuple[bool, str]:
+    """PR-019: a result is complete iff its distributed gather collected every
+    expected rank shard. Results predating the meta.gather field are treated
+    as complete (unknown), so historical plots still load. Returns
+    (complete, reason)."""
+    gather = (result_data.get("meta") or {}).get("gather")
+    if not gather:
+        return True, "no gather metadata (legacy result)"
+    if gather.get("complete", True):
+        return True, "complete"
+    return False, (
+        f"incomplete gather: collected {gather.get('collected_ranks')}/"
+        f"{gather.get('expected_ranks')} ranks, missing {gather.get('missing_ranks')}"
+    )

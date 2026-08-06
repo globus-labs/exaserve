@@ -1,3 +1,12 @@
+# ExaServe Backlog and Research TODOs
+
+> **Document role:** Non-normative backlog. The canonical implementation order
+> and production definition of done are in
+> `doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md`. WP0 must classify every
+> entry in `doc/hardening/FINDINGS.yaml` as production work, accepted/unsupported
+> scope, external blocker, or genuinely out-of-production-scope work with an
+> owner and revisit condition. This file cannot waive a production gate.
+
 ## Optimizations
 
 ### [03/04/2026] Client side unnecessary environment setup cleanup
@@ -17,31 +26,54 @@
 
 ### Critical
 
-- **Single replica enforced for pipeline parallelism** (schemas.py:200-206)
-  - When `pipeline_parallel_size > 1`, `num_replicas` is forced to 1. Blocks throughput scaling for large PP models. Fix requires redesigning placement group scheduling for multiple PP replica groups.
+- **Multi-replica pipeline parallelism is topology- and private-API-sensitive**
+  - PP defaults to one replica, but an explicit `num_replicas` is retained. The
+    ordinary planner uses location-agnostic bundles for multi-replica PP and
+    warns that a TP stage can straddle nodes. With
+    `EXASERVE_PP_SHARD_AWARE=1`, ExaServe instead creates separate node-pinned
+    applications and submits them through private Ray Serve `_run_many`.
+  - Promote the topology choice into typed configuration, remove or tightly
+    version-gate the private API, validate placement/staging receipts, and retain
+    one-replica, explicit multi-replica, and shard-aware PP smoke/scale tests.
+    Regions: `src/exaserve/server.py:310-317,491-517,1287-1366,1455-1631`.
 
 - **Ray GCS scalability ceiling**
   - GCS is single-threaded, caps ~1000 nodes. ServeController also single-threaded. For exascale, consider alternative orchestration (Kubernetes + custom scheduler) or sharded Ray topology.
 
-- **No unit or integration tests**
-  - Zero formal test coverage. `schemas`, `model_staging`, `model_paths`, and proxy config generation are all testable in isolation. Add CI pipeline.
+- **Tests and quality gates are not release-ready**
+  - At commit `005891e`, 36 tests collect, but the result is environment-sensitive:
+    25 passed / 11 failed with a real `rg` executable and 24 passed / 12 failed
+    without one. The delta is an undeclared ripgrep dependency.
+  - Replace that subprocess with an in-process Python scan; make each test subtree
+    runnable without unrelated `conftest.py` side effects; eliminate live Hugging
+    Face access from unit tests; and fix failures by pytest node ID/root cause.
+  - Pin test dependencies and plugins, define plugin-autoload and random-seed
+    policy, and add CI, typing, linting, packaging, security, and failure-path
+    coverage.
 
 ### Moderate
 
-- **Null-compute token counting is inaccurate** (exaserve_serve.py:~607)
+- **Null-compute token counting is inaccurate** (`src/exaserve/engines/base.py:161-183`)
   - Uses `len(prompt.split())` instead of actual tokenization. Off by 1.5-2x, skews null-compute benchmark results. Use `tiktoken` or the model's tokenizer.
 
-- **Port allocation is fragile** (exaserve_serve.py:64-77)
+- **Port allocation is fragile** (`src/exaserve/server.py:278-291`, engine/proxy bind paths)
   - Best-effort scan over a port range with no registry. Can collide under multi-tenant nodes. Use OS-assigned ports (port 0) or a proper lease/registry.
 
 - **Sequential model staging** (model_bcast.py)
   - Models are downloaded and broadcast one at a time. Parallelize across models for multi-model deployments to reduce startup time.
 
-- **Silent chat template fallback** (exaserve_serve.py:~462-474)
-  - Falls back to plain-text concatenation silently when tokenizer lacks a chat template. Should log a warning — produces garbage for chat-tuned models.
+- **SGLang chat-template fallback is overly broad and silent**
+  - `src/exaserve/engines/sglang.py:143-155` catches every exception and silently
+    falls back to a plain prompt. Catch only the expected missing-template case,
+    emit a structured warning, and propagate unrelated tokenizer/configuration
+    errors. The vLLM path already narrows and logs this fallback.
 
-- **No request tracing or correlation IDs**
-  - Request IDs are worker-local. Add OpenTelemetry or `X-Request-ID` header propagation for end-to-end tracing through proxy → Ray Serve → vLLM.
+- **No end-to-end tracing and correlation contract**
+  - Ray supplies request-context support and EngineWorker creates OpenAI
+    completion IDs, but ExaServe does not accept/preserve one transport
+    correlation ID and link it to the distinct completion ID across proxy → Ray
+    Serve → engine → logs. Define that contract and add OpenTelemetry-compatible
+    propagation.
 
 ### Architectural Gaps
 
@@ -54,30 +86,41 @@
 - **Hardcoded Aurora-specific constants scattered throughout**
   - `num_gpus_per_node=12`, master port base `23000`, Lustre paths, retry counts. Centralize into a config/constants module for portability to other HPC systems.
 
-- **sitecustomize.py is a 35KB monkeypatch**
-  - Patches vLLM internals at import time. Brittle across vLLM version bumps. Add version compatibility checks, or contribute patches upstream.
+- **Compatibility patching is broad and version-sensitive**
+  - A 1,629-line import-time monkeypatch, a 10,945-line Ray Serve private
+    overlay, worker setup hooks, and a spawned-process shim depend on private
+    Ray/vLLM behavior. Pin and verify compatibility profiles, minimize patches,
+    and prefer upstream fixes or immutable patched environments.
 
 ### Priority Table
 
 | Priority | Improvement | Effort | Impact |
 |----------|------------|--------|--------|
-| P0 | Unit tests for schemas, model_staging, model_paths | Low | Catches regressions |
+| P0 | Hermetic failure-path tests for schemas, staging, proxy, and state | Medium | Catches regressions |
 | P0 | Fix null-compute tokenization | Low | Accurate benchmarks |
-| P1 | Multi-replica PP (redesign placement groups) | High | Unlocks large model scaling |
+| P1 | Harden multi-replica PP topology and remove private `_run_many` dependency | High | Makes existing scaling support maintainable |
 | P1 | Parallelize multi-model staging | Medium | Faster startup |
 | P1 | Add /metrics Prometheus endpoint | Medium | Production observability |
 | P2 | Robust port allocation | Low | Eliminates collisions |
 | P2 | Request correlation IDs | Medium | Debuggability |
 | P2 | Centralize hardcoded constants | Low | Portability |
 | P3 | Request caching at proxy layer | Medium | Compute savings |
-| P3 | Version-check sitecustomize patches | Low | Prevents silent breakage |
+| P3 | Verified compatibility profiles; minimize/remove runtime patches | High | Prevents silent cross-process drift |
 
 ### Wenyi's Note
 [] Make a main branch with clean-up code so people can deploy it with one click. - can work on stable branch.
 [] Performance instrumentation on ray side.
-[] Now need to broadcast all used files. (Our exaserve_serve code, ray overlay(or conda env), model data).
-[] Legacy `EXASERVE_PROXY_PROFILE` monkey-patches at exaserve_serve.py:264-297, :1547-1605, :1929-1930 — superseded by overlay [proxy.py](~/.local/aurora/frameworks/2025.3.1/lib/python3.12/site-packages/ray/serve/_private/proxy.py) probe. Still default-on via launch_cluster.sh:372; both write `/tmp/exaserve_inst/proxy_init_*.json` → overlay and legacy race/overwrite. Writes are tmpfs (no Lustre impact) but redundant. Decide: disable via `EXASERVE_PROXY_PROFILE=0` or delete the three blocks.
-[] Extend Copper broadcast to cover `$PROJECT_ROOT/src` — right now Copper only broadcasts the overlay (launch_cluster.sh:473-477). Every Ray process still does Lustre imports of our exaserve Python modules, causing MDS stampede at scale. At 256n with ~3k Python processes × ~20 imports = ~60k concurrent Lustre opens during Stage 3.
+[x] Broadcast application source, optional Ray overlay, and model data; optional
+node-local venv/Triton staging is also implemented. Large-scale revalidation is
+still owed.
+[x] Legacy `EXASERVE_PROXY_PROFILE` import-hook installation is disabled in
+`src/exaserve/_sitecustomize.py`; the optional overlay owns proxy profiling.
+Remove the dead hook in the compatibility cleanup and retain one documented,
+atomic output owner plus an activation receipt test.
+[x] Application-source import stampede addressed in code:
+`distribute_to_nodes.sh` performs one MPI broadcast and execution uses
+`/tmp/exaserve_src`; optional shared-filesystem venv/Triton content can also be
+staged node-local. Re-measure residual third-party imports at 128/256 nodes.
 
 ### Paper related TODOs
 [] The client could be written with C++, Boost.io, verify if that is a better choice, need clear justification
@@ -86,8 +129,13 @@
 ### Generic-HPC refactor — deferred (2026-07-13, v0.3.0)
 Rename + pluggable-engine refactor landed and smoke-validated; the following are owed follow-ups (design docs under doc/design/):
 [] Fix stale HAProxy unit tests — `tests/test_haproxy_proxy.py` asserts the old per-model `/<route>/health` but the code emits `/-/healthz` (commit 3d130c8). 2 failures, PRE-EXISTING (red on main too), not from the refactor.
-[] Implement (3) scheduler abstraction — `SchedulerBackend` ABC + `get_scheduler()` registry (PBS wrapper first, then Slurm) + runtime seam `EXASERVE_NODEFILE` / `EXASERVE_MPILAUNCH` / `EXASERVE_JOBID` so `launch_cluster.sh` stops hard-coding `$PBS_NODEFILE`/`mpiexec`. Spec: doc/design/scheduler_abstraction.md. Slurm e2e only validatable off-Aurora.
-[] Implement (4) vendor/site abstraction — `VendorBackend` (XPU/CUDA/ROCm device isolation) + `SiteConfig`; hoist `ZE_AFFINITY_MASK`/`ONEAPI_DEVICE_SELECTOR` out of the engines into the vendor layer. Spec: doc/design/vendor_site_abstraction.md. NVIDIA/AMD e2e only validatable off-Aurora.
+[x] Implement (3) scheduler abstraction — package PBS/Slurm/PSI-J backends and
+runtime `EXASERVE_NODEFILE` / `EXASERVE_MPILAUNCH` / `EXASERVE_JOBID` seam are
+present. Eval still has a second scheduler stack to consolidate; Slurm e2e
+remains an off-Aurora validation gate.
+[x] Implement the vendor portion of (4) — XPU/CUDA/ROCm backends exist and
+device isolation moved behind them. A first-class `SiteConfig` and offsite
+NVIDIA/AMD e2e validation remain open.
 [] SGLang engine path is NOT smoke-validated (no sglang smoke spec exists; refactor only exercised vLLM). Add a 1-node sglang smoke or validate `SGLangEngine` end-to-end before trusting the sglang path post-refactor.
 [] Document `EXASERVE_ENGINE` + pluggable engine/proxy selection in README (currently only in doc/exaserve.md + the reference-card docx).
 [] doc/figures/*.png are gitignored (`*.png`) so the reference-card docx is not regenerable from a clean clone (the docx embeds them, so it renders fine). Either track the two figures + tmp/ref_card/ template, or document the regen prerequisites. Sources are in ~/aurora_rayserver.

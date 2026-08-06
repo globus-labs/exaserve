@@ -143,8 +143,12 @@ class VLLMEngine(EngineBackend):
         from vllm.engine.async_llm_engine import AsyncLLMEngine
         t0 = time.monotonic()
         engine_args = AsyncEngineArgs(**engine_kwargs)
-        if not hasattr(engine_args, "enable_log_requests"):
-            engine_args.enable_log_requests = True
+        # PR-022: honor the operator's enable_log_requests setting. The
+        # hasattr guard remains for vLLM versions that lack the field.
+        if hasattr(engine_args, "enable_log_requests"):
+            engine_args.enable_log_requests = spec.enable_log_requests
+        elif hasattr(engine_args, "disable_log_requests"):
+            engine_args.disable_log_requests = not spec.enable_log_requests
         engine_args_s = time.monotonic() - t0
 
         print(f"[VLLMEngine pid={pid}] Creating vLLM engine for {spec.model_id}...", flush=True)
@@ -277,23 +281,18 @@ class VLLMEngine(EngineBackend):
     # ---- stats ---------------------------------------------------------------
 
     def collect_stats(self) -> Dict[str, Any]:
+        # PR-021: consume the SAME schema the producer ships
+        # (summary/sample/scheduler_snapshots). The old code read a
+        # nonexistent `finished_requests` key -> KeyError on every call, and
+        # even its field names (e2e_latency/queued_time/prefill_time)
+        # disagreed with what sample() emits. to_dict() already computes the
+        # bounded per-replica summary; we just annotate and return it.
         pid = os.getpid()
         if self.stats_collector is None:
             return {"pid": pid, "model": self.model_id, "error": "stats collection not enabled"}
         data = self.stats_collector.to_dict()
         data["pid"] = pid
         data["model"] = self.model_id
-        reqs = data["finished_requests"]
-        snaps = data["scheduler_snapshots"]
-        data["summary"] = {
-            "total_requests": len(reqs),
-            "mean_batch_size": sum(s["running"] for s in snaps) / max(len(snaps), 1),
-            "max_batch_size": max((s["running"] for s in snaps), default=0),
-            "mean_e2e_latency": sum(r["e2e_latency"] for r in reqs) / max(len(reqs), 1),
-            "mean_queued_time": sum(r["queued_time"] for r in reqs) / max(len(reqs), 1),
-            "mean_prefill_time": sum(r["prefill_time"] for r in reqs) / max(len(reqs), 1),
-            "kv_cache_peak": max((s["kv_cache_usage"] for s in snaps), default=0),
-        }
         return data
 
     def live_stats(self) -> Dict[str, Any]:

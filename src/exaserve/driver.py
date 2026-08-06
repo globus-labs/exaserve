@@ -143,16 +143,43 @@ def get_rank():
     return 0  # Default to 0 if not found (e.g. local testing)
 
 
-def get_ray_env():
+def resolve_vendor() -> str:
+    """Vendor is a site fact carried by EXASERVE_VENDOR (default xpu),
+    matching launch_cluster.sh's gating. PR-002: the driver must honor it
+    instead of hardcoding XPU behavior."""
+    return os.environ.get("EXASERVE_VENDOR", "xpu").strip().lower() or "xpu"
+
+
+def resolve_num_gpus(config_path: str) -> int:
+    """PR-002: accelerator count comes from validated deployment config, not
+    a hardcoded 12. Falls back to EXASERVE_NUM_GPUS_PER_NODE then 12."""
+    try:
+        from .schemas import load_deployment_config
+
+        return int(load_deployment_config(config_path).num_gpus_per_node)
+    except Exception:
+        return int(os.environ.get("EXASERVE_NUM_GPUS_PER_NODE", "12"))
+
+
+def get_ray_env(vendor: str | None = None):
     """
     Build the environment for ray start subprocesses.
     """
     env = os.environ.copy()
+    vendor = vendor or resolve_vendor()
 
-    # Aurora Specifics for PVC (Ponte Vecchio)
-    env["ZE_FLAT_DEVICE_HIERARCHY"] = "FLAT"  # Exposes all 12 tiles
-    env["ZE_AFFINITY_MASK"] = ""              # All tiles visible (baseline)
-    env["VLLM_TARGET_DEVICE"] = "xpu"         # Tell vLLM we are on Intel 
+    # PR-002: XPU/PVC device + vLLM-target vars are correct ONLY on Intel
+    # XPU; on CUDA/ROCm they misconfigure the engine. Gate on vendor, exactly
+    # like launch_cluster.sh does.
+    if vendor == "xpu":
+        env["ZE_FLAT_DEVICE_HIERARCHY"] = "FLAT"  # Exposes all 12 tiles
+        env["ZE_AFFINITY_MASK"] = ""              # All tiles visible (baseline)
+        env["VLLM_TARGET_DEVICE"] = "xpu"         # Tell vLLM we are on Intel
+        # Ray's Intel GPU integration rewrites ONEAPI_DEVICE_SELECTOR to a
+        # "level_zero:..." list, but Triton's SYCL probe crashes on Aurora
+        # when that value is present. Keep it unset; rely on ZE_AFFINITY_MASK.
+        env["RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR"] = "1"
+        env.pop("ONEAPI_DEVICE_SELECTOR", None)
     env["RAY_ENABLE_METRICS_COLLECTION"] = "0"
     env["EXASERVE_VLLM_PATCH_PP_LAYER_FILTER"] = env.get(
         "EXASERVE_VLLM_PATCH_PP_LAYER_FILTER",
@@ -169,13 +196,6 @@ def get_ray_env():
     # Throughput optimizations: separate thread for user code and separate
     # event loop for the router. Available in Ray 2.53+.
     env.setdefault("RAY_SERVE_THROUGHPUT_OPTIMIZED", "1")
-
-    # Ray's Intel GPU integration rewrites ONEAPI_DEVICE_SELECTOR to a
-    # "level_zero:..." list, but Triton's SYCL probe crashes on Aurora when
-    # that value is present. Keep the selector unset and rely on
-    # ZE_AFFINITY_MASK for device isolation instead.
-    env["RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR"] = "1"
-    env.pop("ONEAPI_DEVICE_SELECTOR", None)
 
     return env
 
@@ -222,12 +242,12 @@ def get_ray_internal_startup_limit(cluster: RayClusterConfig) -> int:
     return max(1, min(cluster.node_cpus, configured_limit))
 
 
-def start_ray_head(cluster: RayClusterConfig):
+def start_ray_head(cluster: RayClusterConfig, num_gpus: int, vendor: str):
     startup_limit = get_ray_internal_startup_limit(cluster)
     print(
         f"[Driver] Starting RAY HEAD on {cluster.head_ip}:{cluster.port} "
-        f"with advertised CPUs={cluster.node_cpus} "
-        f"(startup/prestart cap={startup_limit})",
+        f"with advertised CPUs={cluster.node_cpus} GPUs={num_gpus} "
+        f"vendor={vendor} (startup/prestart cap={startup_limit})",
         flush=True,
     )
     # --block is CRITICAL: It keeps the subprocess alive.
@@ -237,7 +257,7 @@ def start_ray_head(cluster: RayClusterConfig):
         "--head",
         f"--node-ip-address={cluster.head_ip}",
         f"--num-cpus={cluster.node_cpus}",
-        "--num-gpus=12",
+        f"--num-gpus={num_gpus}",  # PR-002: from validated config, not 12
         f"--port={cluster.port}",
         "--disable-usage-stats",
         "--include-dashboard=false",
@@ -245,16 +265,16 @@ def start_ray_head(cluster: RayClusterConfig):
         f"--max-startup-concurrency={startup_limit}",
         f"--prestart-python-workers={startup_limit}",
     ]
-    return subprocess.Popen(cmd, env=get_ray_env())
+    return subprocess.Popen(cmd, env=get_ray_env(vendor))
 
 
-def start_ray_worker(cluster: RayClusterConfig):
+def start_ray_worker(cluster: RayClusterConfig, num_gpus: int, vendor: str):
     worker_ip = get_hsn_ip()
     startup_limit = get_ray_internal_startup_limit(cluster)
     print(
         f"[Driver] Starting RAY WORKER connecting to {cluster.head_ip}:{cluster.port} "
-        f"from {worker_ip} with advertised CPUs={cluster.node_cpus} "
-        f"(startup/prestart cap={startup_limit})",
+        f"from {worker_ip} with advertised CPUs={cluster.node_cpus} GPUs={num_gpus} "
+        f"vendor={vendor} (startup/prestart cap={startup_limit})",
         flush=True,
     )
     cmd = [
@@ -263,12 +283,12 @@ def start_ray_worker(cluster: RayClusterConfig):
         f"--address={cluster.head_ip}:{cluster.port}",
         f"--node-ip-address={worker_ip}",
         f"--num-cpus={cluster.node_cpus}",
-        "--num-gpus=12",
+        f"--num-gpus={num_gpus}",  # PR-002: from validated config, not 12
         "--block",
         f"--max-startup-concurrency={startup_limit}",
         f"--prestart-python-workers={startup_limit}",
     ]
-    return subprocess.Popen(cmd, env=get_ray_env())
+    return subprocess.Popen(cmd, env=get_ray_env(vendor))
 
 
 def wait_for_ray_serve(
@@ -366,6 +386,26 @@ def start_proxy(proxy_config, deploy_config, config_path: str):
     """
     if proxy_config.type == "none":
         return None, None, None
+
+    # PR-025: only HAProxy is a production-supported gateway candidate
+    # (ADR-000). The rest (litellm/envoy/nginx/pingora) are benchmark
+    # components with varying auth/streaming/backpressure semantics. They stay
+    # usable for benchmarking (the eval harness compares them), but are marked
+    # loudly; a production-boundary deployment (EXASERVE_PRODUCTION_BOUNDARY=1)
+    # rejects them outright.
+    _PRODUCTION_GATEWAYS = {"haproxy"}
+    if proxy_config.type not in _PRODUCTION_GATEWAYS:
+        msg = (
+            f"proxy type {proxy_config.type!r} is a BENCHMARK component, not a "
+            "production-supported gateway (ADR-000); "
+            "auth/streaming/backpressure semantics are not production-grade."
+        )
+        if os.environ.get("EXASERVE_PRODUCTION_BOUNDARY") == "1":
+            raise RuntimeError(
+                f"[Driver] {msg} Refusing under EXASERVE_PRODUCTION_BOUNDARY=1; "
+                "use haproxy for production serving."
+            )
+        print(f"[Driver] WARNING: {msg} (benchmark use only)", flush=True)
 
     # proxy/ lives alongside driver.py in src/; Python adds src/ to sys.path
     # automatically when running src/driver.py, so no path manipulation needed.
@@ -481,6 +521,10 @@ def main():
     parser.add_argument("--config", required=True, help="Path to runtime config YAML")
     args = parser.parse_args()
     cluster = load_ray_cluster_config(args.config)
+    # PR-002: resolve vendor + accelerator count ONCE from validated config
+    # before any Ray start, and thread them through both ray-start paths.
+    vendor = resolve_vendor()
+    num_gpus = resolve_num_gpus(args.config)
     os.environ.setdefault(
         "EXASERVE_SCALING_TRACE_TOKEN",
         _compute_scaling_trace_token(args.config, cluster),
@@ -498,6 +542,17 @@ def main():
     ray_process = None
     serve_process = None
     serve_output = None
+    exit_code = 0
+
+    # PR-028: scheduler termination arrives as SIGTERM. Raise SystemExit so
+    # the finally-block cleanup below runs (drain/terminate children) and the
+    # process exits 143 instead of dying mid-state with no cleanup.
+    import signal as _signal
+
+    def _on_sigterm(signum, frame):  # noqa: ARG001
+        raise SystemExit(143)
+
+    _signal.signal(_signal.SIGTERM, _on_sigterm)
     proxy_backend = None
     proxy_process = None
 
@@ -516,7 +571,7 @@ def main():
 
             # 1. Start Ray Head (Background)
             t0 = time.monotonic()
-            ray_process = start_ray_head(cluster)
+            ray_process = start_ray_head(cluster, num_gpus, vendor)
             _driver_phase("start_ray_head.launch", time.monotonic() - t0)
 
             # 2. Launch ExaServe as a non-blocking subprocess so that the
@@ -527,7 +582,7 @@ def main():
             # break those imports because __package__ would be empty.
             serve_cmd = [sys.executable, "-m", "exaserve.server"]
             serve_cmd.extend(["--config", args.config])
-            serve_env = get_ray_env()
+            serve_env = get_ray_env(vendor)
             serve_env["RAY_ADDRESS"] = f"{cluster.head_ip}:{cluster.port}"
             print(f"[Driver] Launching ExaServe: {' '.join(serve_cmd)}", flush=True)
             t0 = time.monotonic()
@@ -612,9 +667,31 @@ def main():
             #    run_exp.sh watches for this exact line to start the client.
             print("[Driver] ALL SERVICES READY", flush=True)
 
-            # 6. Wait for ExaServe to exit (it blocks until the cluster shuts down)
-            serve_process.wait()
-            if serve_process.returncode != 0:
+            # 6. Supervise BOTH the serving process and the external proxy
+            # until one exits (PR-009). Previously the driver waited only on the
+            # serve process, so a proxy that died after readiness left the job
+            # alive and healthy-looking to the scheduler.
+            while True:
+                if serve_process.poll() is not None:
+                    break
+                if (
+                    proxy_process is not None
+                    and proxy_process.poll() is not None
+                ):
+                    # Essential gateway died: fail the deployment.
+                    exit_code = proxy_process.returncode or 1
+                    print(
+                        f"[Driver] Proxy ({proxy_config.type}) exited with code "
+                        f"{proxy_process.returncode} while serving; terminating "
+                        "deployment.",
+                        flush=True,
+                    )
+                    break
+                time.sleep(2)
+            if serve_process.poll() is not None and serve_process.returncode != 0:
+                # PR-001: a failed serving child must surface as a nonzero
+                # scheduler-visible driver exit, not a log line.
+                exit_code = serve_process.returncode
                 print(
                     f"[Driver] ExaServe exited with code {serve_process.returncode}.",
                     flush=True,
@@ -635,14 +712,27 @@ def main():
             # 1. Start Ray Worker (Blocking)
             # This process will stay alive as long as the Raylet is running.
             t0 = time.monotonic()
-            ray_process = start_ray_worker(cluster)
+            ray_process = start_ray_worker(cluster, num_gpus, vendor)
             _driver_phase("start_ray_worker.launch", time.monotonic() - t0)
             ray_process.wait()  # Block until Ray dies or is killed
+            if ray_process.returncode not in (0, None):
+                # PR-001: a raylet that died abnormally is a rank failure.
+                exit_code = ray_process.returncode
+                print(
+                    f"[Driver] Ray worker exited with code {ray_process.returncode}.",
+                    flush=True,
+                )
 
     except KeyboardInterrupt:
+        exit_code = exit_code or 130
         print("[Driver] Caught interrupt, shutting down...", flush=True)
     except Exception as e:
+        # PR-001: fatal startup/orchestration errors must not become exit 0.
+        import traceback as _traceback
+
+        exit_code = exit_code or 1
         print(f"[Driver] Critical Error: {e}", flush=True)
+        _traceback.print_exc()
     finally:
         # Stop the proxy before shutting down Ray
         if rank == 0:
@@ -664,7 +754,16 @@ def main():
         if ray_process and ray_process.poll() is None:
             print("[Driver] Terminating Ray process...", flush=True)
             ray_process.terminate()
-            ray_process.wait()
+            try:
+                # PR-009: cleanup itself must not hang unboundedly.
+                ray_process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                ray_process.kill()
+                ray_process.wait()
+
+    if exit_code:
+        print(f"[Driver] Exiting with code {exit_code}.", flush=True)
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,34 @@
+# S03 spawn-proof config: 1 node, 8B, tp=1 pp=2 -> spawned EngineCore with
+# the EN-01 shim. Copied into the run outdir before launch (launch_cluster
+# mutates its config in place — PR-003).
+ray_cluster_config:
+  head_ip: ""
+  port: 6379
+  node_cpus: 64
+
+model_deployment_config:
+  # staging asserts pp <= num_nodes (shard-aware PP: one stage per node),
+  # so the spawn proof runs at the validated 2-node pp=2 topology.
+  num_nodes: 2
+  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /tmp/hf_home
+  deployment_name: exaserve_serve
+  replica_max_ongoing_requests: 8
+  num_gpus_per_node: 12
+
+  model_configs:
+    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 2
+      max_model_len: 2048
+      size: 8
+      gpu_memory_utilization: 0.85
+      enforce_eager: true
+      max_num_seqs: 8
+      # Minimal spawn proof: exactly one PP=2 replica. Attempt 2 showed
+      # auto-planning deploys ~12 concurrent PP=2 replicas (multi-replica PP
+      # is live), which blew the 30-min ready window on a debug lease.
+      num_replicas: 1
+
+proxy_config:
+  type: none

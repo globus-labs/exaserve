@@ -22,6 +22,11 @@ server = [
 proxy = [
     "litellm",
 ]
+# PR-027: PSI/J is the DEFAULT submit backend; declare it so the advertised
+# default is self-contained. Native pbs/slurm need no extra dependency.
+scheduler = [
+    "psij-python>=0.9",
+]
 dev = [
     "build>=1",
     "pytest>=8",
@@ -48,3 +53,29 @@ namespaces = true
 "exaserve" = ["py.typed"]
 "exaserve.patches" = ["ray_serve_overlay/ray/serve/_private/*.py"]
 "exaserve.resources" = ["*.sh", "*.c", "*.Makefile"]
+
+[tool.pytest.ini_options]
+# WP0 canonical test policy (doc/hardening/BASELINE.md): deterministic order
+# by default; the WP11 randomized CI job re-enables ordering explicitly with
+# `-o addopts=""` and records the printed pytest-randomly seed.
+addopts = "-p no:randomly"
+
+[tool.ruff]
+# PR-031: lint the first-party surfaces. The vendored Ray Serve overlay and
+# the large monkeypatch module are excluded — they intentionally mirror
+# upstream and are governed by the WP3 compatibility manifest, not style.
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    "src/exaserve/patches/ray_serve_overlay",
+    "src/exaserve/_sitecustomize.py",
+]
+
+[tool.ruff.lint]
+# PR-031: the release-gating subset is correctness-critical only — syntax
+# errors (E9), undefined names / bad comparisons / f-string bugs (F63/F7/F82),
+# and redefinitions (F811). This is already clean across the whole tree and
+# catches real bugs. The broader style/unused-import cleanup (full "F", "E4",
+# "E7") is tracked as an incremental follow-up and is NOT release-gating yet.
+select = ["E9", "F63", "F7", "F82", "F811"]
+ignore = []

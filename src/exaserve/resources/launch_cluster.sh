@@ -96,9 +96,13 @@ resolve_frameworks_python() {
 }
 
 write_ray_cluster_head_ip() {
+    # PR-003: writes the resolved head IP into a RUNTIME copy of the config
+    # (never the operator's source). Atomic temp+rename so a crash cannot
+    # leave a truncated runtime descriptor.
     local config_path="$1"
     local head_ip="$2"
     "$PYTHON_EXEC" - "$config_path" "$head_ip" <<'PY'
+import os
 import sys
 from exaserve.schemas import require_yaml
 
@@ -109,8 +113,12 @@ with open(config_path, "r", encoding="utf-8") as handle:
 cluster_cfg = dict(data.get("ray_cluster_config", {}) or {})
 cluster_cfg["head_ip"] = head_ip
 data["ray_cluster_config"] = cluster_cfg
-with open(config_path, "w", encoding="utf-8") as handle:
+tmp = config_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
     yaml.safe_dump(data, handle, default_flow_style=False, sort_keys=False)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, config_path)
 PY
 }
 
@@ -158,6 +166,11 @@ HOSTNAME_SHORT="$(hostname -s)"
 UNIQUE_NODES_FILE="$RUN_LOG_DIR/pbs_nodes.txt"
 sort -u "$EXASERVE_NODEFILE" > "$UNIQUE_NODES_FILE"
 cp "$DEPLOYMENT_CONFIG_PATH" "$RUN_LOG_DIR/deployment_config.yaml"
+# PR-003: the operator's source config is IMMUTABLE. All runtime-resolved
+# fields (head_ip) and adjacent artifacts (ray_node_ips.txt, proxy_out/…) go
+# into this run-scoped runtime copy, which every downstream consumer reads.
+RUNTIME_CONFIG_PATH="$RUN_LOG_DIR/runtime_config.yaml"
+cp "$DEPLOYMENT_CONFIG_PATH" "$RUNTIME_CONFIG_PATH"
 
 # Per-node launch prefix for MPI staging, cleanup, gather, and the driver.
 # PBS/PALS uses mpiexec; Slurm (Cray sites have no mpiexec) uses srun. One task
@@ -295,7 +308,7 @@ if [ -z "$HEAD_IP" ]; then
 fi
 
 echo "[System] Head IP (HSN): $HEAD_IP"
-write_ray_cluster_head_ip "$DEPLOYMENT_CONFIG_PATH" "$HEAD_IP"
+write_ray_cluster_head_ip "$RUNTIME_CONFIG_PATH" "$HEAD_IP"
 
 # --- 3. Calculate Node Count ---
 NODE_COUNT=$(wc -l < "$UNIQUE_NODES_FILE")
@@ -379,7 +392,7 @@ if [ "${EXASERVE_NULL_COMPUTE:-0}" = "1" ]; then
 else
     echo "[System] Staging models to node-local storage via MPI bcast..."
     PYTHONPATH="$PACKAGE_PARENT${PYTHONPATH:+:$PYTHONPATH}" \
-        $PYTHON_EXEC -m exaserve.model_bcast --config "$DEPLOYMENT_CONFIG_PATH" --num-nodes "$NODE_COUNT"
+        $PYTHON_EXEC -m exaserve.model_bcast --config "$RUNTIME_CONFIG_PATH" --num-nodes "$NODE_COUNT"
     # model_bcast.py writes timing JSON to a well-known path
     BCAST_TIMING_FILE="$RUN_LOG_DIR/model_bcast_timing.json"
     if [ -f "$BCAST_TIMING_FILE" ]; then
@@ -512,7 +525,7 @@ export PYTHONUNBUFFERED=1
 # imports (exaserve.driver, .server, .model_paths, ...) come from
 # tmpfs, not Lustre. Invoke as a module so relative imports resolve.
 ${EXASERVE_MPILAUNCH} \
-    $PYTHON_EXEC -m exaserve.driver --config "$DEPLOYMENT_CONFIG_PATH"
+    $PYTHON_EXEC -m exaserve.driver --config "$RUNTIME_CONFIG_PATH"
 
 # Stop Copper if it was started
 if [ "$COPPER_ACTIVE" = "1" ]; then

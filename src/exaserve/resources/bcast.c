@@ -1,5 +1,8 @@
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <assert.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,17 +17,69 @@
         }                                       \
     } while (0)
 
-#define BUFFER_SIZE (1L << 30)
+/* PR-004: 1 GiB/rank was a large aggregate cost for a streaming copy; a
+ * bounded 64 MiB buffer is plenty for MPI_Bcast throughput. */
+#define BUFFER_SIZE (64L << 20)
 
 static double get_elapsed(struct timespec t1, struct timespec t2);
+
+/* PR-004: single-quote a path for safe use inside a /bin/sh command, so a
+ * path containing spaces or shell metacharacters cannot inject commands.
+ * Returns 0 on success, -1 if the result would not fit (truncation). */
+static int shquote(char *dst, size_t dstsize, const char *src) {
+    size_t di = 0;
+    if (dstsize == 0) return -1;
+    if (di + 1 >= dstsize) return -1;
+    dst[di++] = '\'';
+    for (const char *p = src; *p; p++) {
+        if (*p == '\'') {
+            /* close quote, escaped quote, reopen quote: '\'' */
+            if (di + 4 >= dstsize) return -1;
+            dst[di++] = '\''; dst[di++] = '\\'; dst[di++] = '\''; dst[di++] = '\'';
+        } else {
+            if (di + 1 >= dstsize) return -1;
+            dst[di++] = *p;
+        }
+    }
+    if (di + 2 > dstsize) return -1;
+    dst[di++] = '\'';
+    dst[di] = '\0';
+    return 0;
+}
+
+/* PR-004: recursive mkdir via syscalls instead of system("mkdir -p ...");
+ * no shell, no injection, and errno is inspectable. Returns 0 on success. */
+static int mkdir_p(const char *path) {
+    char tmp[4096];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, len + 1);
+    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+/* Check a pclose() return: 0 iff the child ran and exited 0. */
+static int pipe_ok(int status) {
+    return status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 
 int main(int argc, char **argv) {
     struct timespec start, end;
     const char *destdir;
-    char command[4096];
+    char command[8192];
+    char q1[4096], q2[4096];
     int rank;
     unsigned long long total_bytes = 0;
     int no_root_write = 0;
+    int local_fail = 0;   /* PR-004: per-rank failure flag, aggregated below */
 
     clock_gettime(CLOCK_MONOTONIC, &start);
 
@@ -71,7 +126,17 @@ int main(int argc, char **argv) {
             right = dup;
         }
 
-        snprintf(command, sizeof(command), "tar -C %s -chf - %s", left, right);
+        /* PR-004: quote paths and verify no truncation before running tar. */
+        if (shquote(q1, sizeof(q1), left) != 0 ||
+            shquote(q2, sizeof(q2), right) != 0) {
+            fprintf(stderr, "bcast: source path too long to quote safely\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        int n = snprintf(command, sizeof(command), "tar -C %s -chf - %s", q1, q2);
+        if (n < 0 || (size_t)n >= sizeof(command)) {
+            fprintf(stderr, "bcast: tar command truncated\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
         archive = popen(command, "r");
         CHECK_ERROR(!archive, "popen (read)");
         free(dup);
@@ -83,16 +148,33 @@ int main(int argc, char **argv) {
     FILE *dest = NULL;
 
     if (!skip_write) {
-        snprintf(command, sizeof(command), "mkdir -p %s", destdir);
-        system(command);
+        /* PR-004: mkdir via syscall (checked), not system(). */
+        if (mkdir_p(destdir) != 0) {
+            fprintf(stderr, "Rank %d: mkdir_p(%s) failed: %s\n",
+                    rank, destdir, strerror(errno));
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
 
-        snprintf(command, sizeof(command), "tar -xf - -C %s", destdir);
+        if (shquote(q1, sizeof(q1), destdir) != 0) {
+            fprintf(stderr, "Rank %d: dest path too long to quote safely\n", rank);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        int n = snprintf(command, sizeof(command), "tar -xf - -C %s", q1);
+        if (n < 0 || (size_t)n >= sizeof(command)) {
+            fprintf(stderr, "Rank %d: extract command truncated\n", rank);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
         dest = popen(command, "w");
         CHECK_ERROR(!dest, "popen (write)");
     }
 
+    /* PR-004: explicit NULL check (assert is compiled out under -DNDEBUG). */
     void *buf = malloc(BUFFER_SIZE);
-    assert(buf);
+    if (!buf) {
+        fprintf(stderr, "Rank %d: failed to allocate %ld-byte buffer\n",
+                rank, (long)BUFFER_SIZE);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     while (1) {
         int chunk_size = 0;
@@ -137,15 +219,29 @@ int main(int argc, char **argv) {
         total_bytes += chunk_size;
     }
 
+    /* PR-004: close the pipes and CHECK their exit status. A tar producer or
+     * extractor that exits nonzero (partial/corrupt archive, disk full at
+     * flush) previously went unnoticed and the broadcast reported success. */
     if (rank == 0) {
-        pclose(archive);
+        if (!pipe_ok(pclose(archive))) {
+            fprintf(stderr, "Rank 0: tar (producer) exited nonzero\n");
+            local_fail = 1;
+        }
     }
     if (dest) {
-        pclose(dest);
+        if (!pipe_ok(pclose(dest))) {
+            fprintf(stderr, "Rank %d: tar (extractor) exited nonzero\n", rank);
+            local_fail = 1;
+        }
     }
     free(buf);
     free(srcpath);
     free(destpath);
+
+    /* PR-004: aggregate failures across ALL ranks; any rank's failure makes
+     * the whole broadcast fail with a nonzero exit. */
+    int global_fail = 0;
+    MPI_Allreduce(&local_fail, &global_fail, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed = get_elapsed(start, end);
@@ -153,13 +249,18 @@ int main(int argc, char **argv) {
     MPI_Reduce(&elapsed, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
-        double gb = (double)total_bytes / (1024.0 * 1024.0 * 1024.0);
-        printf("bcast: Transferred %.2f GiB in %.2f seconds (%.2f GiB/s)\n",
-            gb, max_time, gb/max_time);
+        if (global_fail) {
+            fprintf(stderr, "bcast: FAILED — one or more ranks reported a "
+                            "tar/extract error; broadcast is not complete\n");
+        } else {
+            double gb = (double)total_bytes / (1024.0 * 1024.0 * 1024.0);
+            printf("bcast: Transferred %.2f GiB in %.2f seconds (%.2f GiB/s)\n",
+                gb, max_time, max_time > 0 ? gb/max_time : 0.0);
+        }
     }
 
     MPI_Finalize();
-    return 0;
+    return global_fail ? 1 : 0;
 }
 
 static double get_elapsed(struct timespec t1, struct timespec t2)
