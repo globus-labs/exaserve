@@ -17,6 +17,20 @@
 > `approver_id` / `approved_at` / `evidence_ref` / `scope` from the actual
 > product owner, and I may propose that block but never fill it. **The 64-node
 > first-release ceiling remains unapproved and I cannot infer it.**
+>
+> **2-node validation of the new architecture (2026-08-07).** The composition
+> root path is verified working: `gate_ready`, `marker_never_precedes_gate`,
+> `receipts` (75), `canary`, and `engine_self_attested` all PASS.
+> `tree_reaped` is **FAIL (4 processes left)** — a real measurement and a real
+> open defect, not the unmeasured sentinel that earlier runs reported.
+>
+> Getting there took four env-chain fixes, each found only by running it:
+> the root fell back to `cwd` for its run directory; the head IP was
+> communicated by mutating a config file; `EXASERVE_RUN_LOG_DIR` was not
+> propagated to ranks; and `get_ray_env()` dropped the deployment identity
+> before the server child. Until the last of those, the deployment reached
+> READY while every consumer reported not-ready, because the record was
+> written where nobody looks.
 
 
 > **2026-08-06 — CLAIM WITHDRAWN.**
