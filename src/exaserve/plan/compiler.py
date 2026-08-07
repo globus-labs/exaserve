@@ -232,8 +232,20 @@ def compile_deployment_plan(raw: Mapping[str, Any], *, site: SiteProfile,
                             compatibility_profile_hash: str = "",
                             manifest_hash: str = "") -> DeploymentPlan:
     """Compile one raw serving configuration into the canonical plan."""
+    # A real config file carries sibling sections (ray_cluster_config,
+    # proxy_config, ...). The deployment subtree is what compiles; the legacy
+    # proxy_config is translated into gateway/exposure below rather than being
+    # silently dropped.
+    outer = raw
     if "model_deployment_config" in raw:
-        raw = raw["model_deployment_config"]
+        raw = dict(raw["model_deployment_config"])
+        legacy_proxy = outer.get("proxy_config")
+        if legacy_proxy is not None and "gateway" not in raw:
+            raw["gateway"] = legacy_proxy
+        if "validation_mode" in outer and "validation_mode" not in raw:
+            raw["validation_mode"] = outer["validation_mode"]
+        if "exposure" in outer and "exposure" not in raw:
+            raw["exposure"] = outer["exposure"]
     _reject_unknown(raw, _DEPLOYMENT_KEYS, "deployment")
 
     validation_mode = _bool(raw, "validation_mode", "deployment", False)

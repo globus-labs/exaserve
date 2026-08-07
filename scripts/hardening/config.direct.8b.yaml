@@ -5,6 +5,13 @@ ray_cluster_config:
   port: 6379
   node_cpus: 64
 
+# §3.2.1: direct exposure is validation/benchmark only, never a
+# production default. Saying so explicitly is what makes it legal.
+validation_mode: true
+exposure:
+  mode: DIRECT_VALIDATION
+  serve_port: 8000
+
 model_deployment_config:
   num_nodes: 2
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
