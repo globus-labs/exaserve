@@ -32,7 +32,13 @@ from typing import Callable, Iterable, Optional
 from .contracts import SCHEMA_VERSION, ComponentObservation, ComponentState, OwnerScope
 from .readiness import ReadinessCoordinator, ReadinessPlan, ReadinessSnapshot
 
-READINESS_FILENAME = "readiness.json"
+# EVIDENCE, not a decision. `readiness.json` is the composition root's single
+# READY record; this file is what the deployment child observed about its own
+# applications. They were the same filename until the root took ownership of
+# the decision, at which point one process's evidence would have overwritten
+# the other's verdict in the same directory.
+EVIDENCE_FILENAME = "deployment_evidence.json"
+READINESS_FILENAME = EVIDENCE_FILENAME      # legacy alias, removed at WP13
 
 _SEQ: dict[str, int] = {}
 
@@ -484,3 +490,80 @@ def await_ready(coord: ReadinessCoordinator, *, node_id: str, instance_id: str,
         if now > deadline:
             return snapshot
         time.sleep(poll_s)
+
+
+def observe_deployment(*, deployment_id: str, generation: int,
+                       snapshot_dir: str = "", timeout_s: float = 1800.0,
+                       poll_s: float = 5.0, log=print) -> dict:
+    """Report what THIS process can see. Decide nothing (§3.2.1 Q3, IMP-B02).
+
+    The deployment child used to be the readiness authority: it drained
+    receipts, canaried its own internal Serve port, and printed the READY
+    marker. That decided readiness against an endpoint no client uses, from a
+    process that cannot see the gateway or the other ranks' sessions.
+
+    The composition root owns that decision now. What survives here is the one
+    thing this process is genuinely the best witness for -- whether its own
+    Serve applications reached their replica targets -- written to a file whose
+    name says it is evidence.
+    """
+    import ray
+
+    deadline = time.monotonic() + timeout_s
+    last_report = 0.0
+    payload: dict = {}
+    while True:
+        reset_discovery_cache()
+        apps = discover_applications(use_cache=False)
+        per_app = {}
+        running_all = bool(apps)
+        for name, info in apps.items():
+            target = max(int(info.get("target", 0) or 0), 0)
+            running = int(info.get("running", 0) or 0)
+            per_app[name] = {"running": running, "target": target,
+                             "route_prefix": info.get("route_prefix", "/"),
+                             "status": info.get("status", "")}
+            if target <= 0 or running < target:
+                running_all = False
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "deployment_id": deployment_id,
+            "generation": generation,
+            "applications": per_app,
+            "applications_running": running_all,
+            "node_ids": [str(n["NodeID"]) for n in ray.nodes() if n.get("Alive")],
+            "observed_at": time.time(),
+            "evidence_only": True,
+        }
+        write_evidence(payload, snapshot_dir)
+        if running_all:
+            log(f"[Deployment] evidence: {len(per_app)} application(s) at target")
+            return payload
+        now = time.monotonic()
+        if now - last_report > 30.0:
+            progress = {k: "{}/{}".format(v["running"], v["target"])
+                        for k, v in per_app.items()}
+            log(f"[Deployment] not at target yet: {progress}")
+            last_report = now
+        if now > deadline:
+            log("[Deployment] evidence deadline reached without reaching target")
+            return payload
+        time.sleep(poll_s)
+
+
+def write_evidence(payload: dict, directory: str) -> Optional[str]:
+    """Persist the evidence file. Best-effort: the root blocks if it is absent."""
+    if not directory:
+        return None
+    try:
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, EVIDENCE_FILENAME)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return path
+    except OSError:
+        return None

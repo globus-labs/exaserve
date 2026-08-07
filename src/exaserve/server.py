@@ -834,6 +834,19 @@ _SERVING_STATS_ACTOR = "ServingStatsCollector"
 _SERVING_STATS_NS = "serve"
 
 
+def _root_owns_readiness() -> bool:
+    """True when the composition root decides READY (the production path).
+
+    Set by the NodeSupervisor when it starts this child. The legacy shell
+    lifecycle leaves it unset and keeps the in-child gate, so the two paths can
+    still be compared run-to-run until WP13 deletes the old one.
+    """
+    if os.environ.get("EXASERVE_ROOT_OWNS_READINESS") == "0":
+        return False
+    return bool(os.environ.get("EXASERVE_RECEIPT_SOCKET")
+                or os.environ.get("EXASERVE_ROOT_OWNS_READINESS") == "1")
+
+
 def _deployment_scope() -> str:
     """PR-029: a stable per-deployment id so telemetry actors in a REUSED Ray
     cluster cannot collide or inherit a prior deployment's state. Prefers an
@@ -1084,10 +1097,17 @@ class EngineWorker:
                 from .compat.collector import receipt_from_dict
 
                 published = 0
-                for payload in self_receipts:
-                    receipt = receipt_from_dict(payload)
-                    if receipt is not None and publish_receipt(receipt):
-                        published += 1
+                if os.environ.get("EXASERVE_RECEIPT_SOCKET"):
+                    # The engine delivered its OWN receipt over the local hop
+                    # from inside its process. Forwarding a replica-built copy
+                    # here would re-attest somebody else's process, which is
+                    # the owner-assertion substitution the audit rejected.
+                    published = len(self_receipts)
+                else:
+                    for payload in self_receipts:
+                        receipt = receipt_from_dict(payload)
+                        if receipt is not None and publish_receipt(receipt):
+                            published += 1
                 outcome["compat_engine_evidence"] = "self"
                 outcome["compat_engine_published"] = published > 0
                 outcome["compat_engine_receipts"] = published
@@ -2077,10 +2097,14 @@ def main() -> None:
     from .scaling_trace import create_stats_collector, collect_replica_stats
     create_stats_collector()
 
-    # IMP-B04: the compatibility receipt channel. Unlike the stats collector it
-    # is ALWAYS created — readiness must not depend on an optional tracing flag.
-    from .compat.collector import create_receipt_collector
-    create_receipt_collector()
+    # IMP-B04: the compatibility receipt channel. When the composition root owns
+    # readiness, receipts leave this node over the bounded local hop to the
+    # NodeSupervisor and then the authenticated §3.2 channel — a detached Ray
+    # actor is explicitly not an authoritative readiness source, so it is not
+    # created at all on that path.
+    if not _root_owns_readiness():
+        from .compat.collector import create_receipt_collector
+        create_receipt_collector()
 
     _verify_core_env()
 
@@ -2560,7 +2584,28 @@ def main() -> None:
     # every required role. The marker is printed only after that holds, so no
     # consumer can observe READY before the cluster can serve.
     _readiness_snapshot = None
-    if os.environ.get("EXASERVE_READINESS_GATE", "1") != "0":
+    _snapshot_dir = (os.environ.get("EXASERVE_RUN_LOG_DIR")
+                     or (os.path.dirname(trace_path) if trace_path else ""))
+    if _root_owns_readiness():
+        # IMP-B02: this process is a WITNESS, not the authority. It reports
+        # whether its own applications reached target; the composition root
+        # verifies the advertised endpoint, the gateway, the exact receipt set
+        # and the per-model canary, and commits the one READY transition.
+        from .control import serve_readiness as _readiness
+
+        _evidence = _readiness.observe_deployment(
+            deployment_id=_deployment_scope(),
+            generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
+            snapshot_dir=_snapshot_dir,
+            timeout_s=float(os.environ.get("EXASERVE_READINESS_TIMEOUT_S", "1800")),
+        )
+        tracer.set_metadata(deployment_evidence=_evidence,
+                            deployment=_deploy_manager.to_dict(),
+                            capabilities=_capability_report)
+        print(f"[Deployment] evidence published; the composition root owns the "
+              f"READY decision (applications_running="
+              f"{_evidence.get('applications_running')})", flush=True)
+    elif os.environ.get("EXASERVE_READINESS_GATE", "1") != "0":
         from .control import serve_readiness as _readiness
 
         _base_url = f"http://{get_ray_node_ip() or 'localhost'}:8000"
@@ -2569,7 +2614,7 @@ def main() -> None:
             generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
             plan_hash=str(getattr(tracer, "config_hash", "") or "plan"),
             base_url=_base_url,
-            snapshot_dir=os.path.dirname(trace_path) if trace_path else "",
+            snapshot_dir=_snapshot_dir,
             timeout_s=float(os.environ.get("EXASERVE_READINESS_TIMEOUT_S", "900")),
         )
         _readiness_snapshot = _deploy_manager.validate()
@@ -2580,9 +2625,10 @@ def main() -> None:
               f"(deployment {_deploy_manager.deployment_id} "
               f"gen {_deploy_manager.generation})", flush=True)
 
-    print_red(
-        f"[ExaServe] ✓✓✓ CLUSTER FULLY READY ✓✓✓ Total time: {total_time:.2f}s"
-    )
+    if not _root_owns_readiness():
+        print_red(
+            f"[ExaServe] ✓✓✓ CLUSTER FULLY READY ✓✓✓ Total time: {total_time:.2f}s"
+        )
     print(f"[ExaServe] Scaling trace: {trace_path}", flush=True)
 
     # PR-028: the driver (and PBS) deliver SIGTERM; without a handler the

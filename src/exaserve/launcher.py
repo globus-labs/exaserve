@@ -199,12 +199,23 @@ def _drive_readiness(root, config_path: str) -> None:
                 f"gateway {root.plan.gateway.kind} could not start: {exc}") from exc
         readiness.set_gateway(alive=root.gateway_alive(), healthy=True)
 
+    # The GLOBAL slots enter from this process or not at all; the gateway slot
+    # needs a live pid, so it is issued after the gateway starts.
+    issued = root.attest_global()
+    _log(f"[Composition] GLOBAL receipts issued: {issued}")
+
     # Replica evidence comes from the deployment child's snapshot; the root
-    # verifies the ENDPOINT itself rather than trusting that report.
+    # verifies the ENDPOINT itself rather than trusting that report. The child
+    # writes a DIFFERENT filename on purpose -- readiness.json is the root's
+    # single READY record, and one file cannot be both the evidence and the
+    # decision without one silently overwriting the other.
     import json
 
+    from .control.serve_readiness import EVIDENCE_FILENAME
+
     try:
-        with open(os.path.join(root.run_dir, "readiness.json"), encoding="utf-8") as fh:
+        with open(os.path.join(root.run_dir, EVIDENCE_FILENAME),
+                  encoding="utf-8") as fh:
             evidence = json.load(fh)
     except (OSError, ValueError):
         evidence = {}

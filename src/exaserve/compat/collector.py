@@ -114,6 +114,39 @@ def create_receipt_collector():
         return None
 
 
+_SOCKET_ENV = "EXASERVE_RECEIPT_SOCKET"
+
+
+def _publish_over_local_hop(receipt: Any, role: str) -> bool:
+    """Deliver a v2 receipt to the owning NodeSupervisor.
+
+    Replica and engine instances are not exactly-planned slots — the plan
+    cannot name a replica that Serve places at runtime — so these carry an
+    instance-scoped requirement id. The head files them as evidence and the
+    ledger's set equality keeps meaning "exactly the planned slots".
+    """
+    from .local_ingress import deliver_receipt
+    from .producers import attest_self
+
+    node = getattr(receipt, "node_id", "") or ""
+    pid = getattr(receipt, "pid", 0) or 0
+    try:
+        v2 = attest_self(
+            requirement_id=f"evidence/{role}/{node}/{pid}",
+            role=role, component_id=role,
+            instance_id=f"{node}:{pid}", owner_scope="RANK",
+            owner_rank=int(os.environ.get("EXASERVE_RECEIPT_RANK", "0") or 0))
+    except Exception as exc:                       # noqa: BLE001
+        _warn_once(f"[Compat] role={role}: receipt NOT built: "
+                   f"{type(exc).__name__}: {exc}")
+        return False
+    if deliver_receipt(v2.to_dict()):
+        return True
+    _warn_once(f"[Compat] role={role}: receipt NOT delivered to the node-local "
+               f"supervisor ingress at {os.environ.get(_SOCKET_ENV)}")
+    return False
+
+
 def _get_collector():
     try:
         import ray
@@ -131,8 +164,17 @@ def publish_receipt(receipt: Any) -> bool:
     Silence here is what made the first cluster run report "no receipt from
     role X" while the real fault was the channel, so a failure is printed once
     per process with the reason.
+
+    §3.2.1 forbids a detached Ray actor as an authoritative receipt path. When
+    the NodeSupervisor's bounded local hop is present this publishes there
+    instead, and the supervisor forwards the payload unchanged over the
+    authenticated channel. The actor below is the legacy transport and is
+    reached only when no hop exists (the shell-lifecycle path, deleted at
+    WP13).
     """
     role = getattr(receipt, "role", "?")
+    if os.environ.get(_SOCKET_ENV):
+        return _publish_over_local_hop(receipt, role)
     collector = _get_collector()
     if collector is None:
         _warn_once(f"[Compat] role={role}: receipt NOT published — collector "

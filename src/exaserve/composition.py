@@ -81,6 +81,12 @@ class CompositionRoot:
         self.gateway_component: Optional[ManagedComponent] = None
         self.first_cause: Optional[str] = None
         self._staging_done: list = []
+        # Receipts must name the site profile they were produced under; without
+        # it every producer would emit an empty hash and the strict validator
+        # would reject the whole set for a reason that is really a plumbing gap.
+        os.environ["EXASERVE_SITE_PROFILE_HASH"] = plan.site_profile_hash
+        os.environ["EXASERVE_PLAN_HASH"] = plan.deployment_plan_hash
+        os.environ["EXASERVE_GENERATION"] = str(generation)
 
     # -- 3. allocation binding --------------------------------------------
     def bind_allocation(self, nodes: list, scheduler_allocation_id: str):
@@ -119,6 +125,10 @@ class CompositionRoot:
 
         self.sessions = SessionCoordinator(plan=self.plan, binding=self.binding,
                                            log=self._log)
+        # The ledger has to exist BEFORE the listener: a receipt that arrives
+        # during registration would otherwise land in a list nothing
+        # adjudicates, and the slot would read as missing for the whole run.
+        self.receipts = ExactReceiptLedger(self.plan, self.binding)
         last: Optional[Exception] = None
         for attempt in range(1, retries + 1):
             try:
@@ -127,7 +137,7 @@ class CompositionRoot:
                     generation=self.generation,
                     plan_hash=self.plan.deployment_plan_hash,
                     expected_ranks=self.plan.num_nodes,
-                    sessions=self.sessions)
+                    sessions=self.sessions, receipts=self.receipts)
                 break
             except Exception as exc:      # noqa: BLE001 - reported, then fatal
                 last = exc
@@ -140,10 +150,75 @@ class CompositionRoot:
                 f"({last}); refusing to launch ranks. A run nobody can observe "
                 "is not a run worth starting.")
 
-        self.receipts = ExactReceiptLedger(self.plan, self.binding)
         self._log(f"[Composition] control listener on port {self.head_channel.port} "
                   f"for {self.plan.num_nodes} planned rank(s)")
         return self.head_channel
+
+    # -- 4b. the GLOBAL receipts only this process may issue ----------------
+    def attest_global(self) -> int:
+        """Issue the GLOBAL slots from the in-process supervisor authority.
+
+        §3.2.1: GLOBAL receipts "are never accepted from a rank session or an
+        unauthenticated IPC source" — they enter here, in-process, or not at
+        all. `from_global_authority=True` is the flag that says this call site
+        *is* that authority; nothing reachable over the wire can set it.
+        """
+        import sys as _sys
+
+        from .compat.producers import (
+            attest_self,
+            attest_supervisor,
+            required_patch_ids,
+            resolved_not_required,
+        )
+        from .compat.receipt_v2 import ReceiptError
+
+        issued = 0
+        candidates = []
+        for requirement in self.plan.receipt_requirements:
+            if requirement.owner_scope != "GLOBAL":
+                continue
+            if requirement.role == "gateway":
+                argv = self.gateway_component.argv if self.gateway_component else None
+                pid = (self.gateway_component.process.pid
+                       if self.gateway_component and self.gateway_component.process
+                       else None)
+                if pid is None:
+                    # No attestation for a daemon that is not running: an
+                    # unbacked receipt is worse than a missing one, because the
+                    # ledger would then report the slot covered.
+                    self._log("[Composition] gateway receipt withheld: "
+                              "no running gateway process to attest")
+                    continue
+                candidates.append(attest_supervisor(
+                    requirement_id=requirement.receipt_requirement_id,
+                    role=requirement.role,
+                    component_id=requirement.component_slot,
+                    executable=(argv[0] if argv else ""), argv=argv, pid=pid))
+            else:
+                candidates.append(attest_self(
+                    requirement_id=requirement.receipt_requirement_id,
+                    role=requirement.role,
+                    component_id=requirement.component_slot,
+                    owner_scope="GLOBAL", executable=_sys.executable))
+
+        for receipt in candidates:
+            try:
+                ok, detail = self.receipts.accept(
+                    receipt,
+                    required_patch_ids=required_patch_ids(receipt.role),
+                    resolved_not_required=resolved_not_required(receipt.role),
+                    from_global_authority=True)
+            except ReceiptError as exc:
+                self._log(f"[Composition] GLOBAL receipt "
+                          f"{receipt.receipt_requirement_id} rejected: {exc}")
+                continue
+            if ok:
+                issued += 1
+            else:
+                self._log(f"[Composition] GLOBAL receipt "
+                          f"{receipt.receipt_requirement_id} rejected: {detail}")
+        return issued
 
     # -- 5. staging as owned finite components -----------------------------
     def run_staging(self, steps: list) -> None:
@@ -230,6 +305,7 @@ class CompositionRoot:
         env.setdefault("EXASERVE_RUN_LOG_ROOT", os.path.dirname(self.run_dir)
                        or self.run_dir)
         env["EXASERVE_ALLOCATION_BINDING_HASH"] = self.binding.allocation_binding_hash
+        env["EXASERVE_SITE_PROFILE_HASH"] = self.plan.site_profile_hash
         launcher = RankLauncher(node_count=self.plan.num_nodes,
                                 rank_argv=rank_argv, scheduler=scheduler, env=env)
         component = self.supervisor.register(launcher.component())
@@ -381,13 +457,15 @@ class CompositionRoot:
         """
         import json
 
+        from .control.serve_readiness import EVIDENCE_FILENAME
+
         deadline = time.monotonic() + timeout_s
-        path = os.path.join(self.run_dir, "readiness.json")
+        path = os.path.join(self.run_dir, EVIDENCE_FILENAME)
         while time.monotonic() < deadline:
             try:
                 with open(path, encoding="utf-8") as handle:
                     data = json.load(handle)
-                if data.get("ready") or data.get("satisfied"):
+                if data.get("applications_running") or data.get("satisfied"):
                     return True
             except (OSError, ValueError):
                 pass

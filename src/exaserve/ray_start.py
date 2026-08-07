@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 
 from ray._private import ray_constants, services
@@ -40,6 +41,35 @@ def _patch_raylet_launch(
         return original_start_ray_process(command, process_type, *args, **kwargs)
 
     services.start_ray_process = patched_start_ray_process
+
+
+def _attest_self() -> bool:
+    """Deliver this instance's exact receipt over the bounded local hop.
+
+    Never fatal: a Ray daemon that cannot reach its supervisor's socket must
+    still come up, and the head then blocks readiness on the named missing
+    slot -- which is a diagnosis, where a dead rank would be a mystery.
+    """
+    slot = os.environ.get("EXASERVE_RECEIPT_SLOT", "")
+    role = os.environ.get("EXASERVE_RECEIPT_ROLE", "")
+    rank = os.environ.get("EXASERVE_RECEIPT_RANK", "")
+    if not (slot and role and rank.isdigit()):
+        return False
+    try:
+        from exaserve.compat.producers import attest_self, deliver
+
+        receipt = attest_self(requirement_id=slot, role=role,
+                              component_id="ray", owner_scope="RANK",
+                              owner_rank=int(rank), argv=list(sys.argv))
+        delivered = deliver(receipt)
+    except Exception as exc:                       # noqa: BLE001
+        print(f"[ray_start] receipt not produced: {type(exc).__name__}: {exc}",
+              flush=True)
+        return False
+    if not delivered:
+        print(f"[ray_start] receipt for {slot} not delivered to the local "
+              "supervisor ingress", flush=True)
+    return delivered
 
 
 def _build_ray_cli_args(args: argparse.Namespace) -> list[str]:
@@ -91,6 +121,12 @@ def main() -> int:
         max_startup_concurrency=args.max_startup_concurrency,
         num_prestart_python_workers=args.prestart_python_workers,
     )
+    # This process IS the planned ray_head/ray_worker component instance: it
+    # imported ray and applied the in-process raylet patch above, so it can
+    # attest to itself. Attesting here rather than from the supervisor matters
+    # -- a supervisor cannot see inside a process it did not build, and §3.2.1
+    # allows SUPERVISOR attestation only for UNMODIFIED external daemons.
+    _attest_self()
     cli_args = _build_ray_cli_args(args)
     return ray_scripts.cli.main(args=cli_args, prog_name="ray", standalone_mode=False)
 

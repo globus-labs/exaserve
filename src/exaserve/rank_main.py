@@ -44,6 +44,59 @@ def _server_ready(port: int = 8000, host: str = "127.0.0.1") -> bool:
         return probe.connect_ex((host, port)) == 0
 
 
+def _attest_node_supervisor(channel, rank: int, hostname: str) -> bool:
+    """This process's own planned slot, SELF-attested and sent over the channel.
+
+    The NodeSupervisor is the one thing here that can honestly attest to
+    itself: it is the process, so pid, executable, prepared environment and
+    node identity are first-hand rather than inferred.
+    """
+    try:
+        from .compat.producers import attest_self
+
+        receipt = attest_self(
+            requirement_id=f"rank{rank}/node_supervisor",
+            role="node_supervisor", component_id="node_supervisor",
+            owner_scope="RANK", owner_rank=rank, node_id=hostname,
+            argv=list(sys.argv))
+    except Exception as exc:              # noqa: BLE001 - reported, not fatal
+        print(f"[Rank {rank}] could not build the node_supervisor receipt: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+        return False
+    if not channel.submit_receipt(receipt):
+        print(f"[Rank {rank}] node_supervisor receipt NOT delivered; the head "
+              "will block on that slot by name", flush=True)
+        return False
+    return True
+
+
+def _forward_receipts(channel, ingress, rank: int, *, poll_s: float = 1.0):
+    """Drain the local hop and forward each payload UNCHANGED (§3.2.1).
+
+    Unchanged is the whole contract: the supervisor is a transport for
+    somebody else's attestation, not a co-author of it. Anything this thread
+    rewrote would be evidence the head cannot attribute.
+    """
+    import threading
+
+    def _pump() -> None:
+        while True:
+            for payload in ingress.drain():
+                channel.submit_receipt(payload)
+            if _pump_stop.wait(poll_s):
+                # One final drain so a receipt produced during shutdown is not
+                # lost between the last poll and the stop.
+                for payload in ingress.drain():
+                    channel.submit_receipt(payload)
+                return
+
+    _pump_stop = threading.Event()
+    thread = threading.Thread(target=_pump, daemon=True,
+                              name=f"exaserve-receipt-fwd-{rank}")
+    thread.start()
+    return _pump_stop
+
+
 def run(config_path: str) -> int:
     from .control.channel_runtime import RankClient
     from .control.contracts import ComponentState
@@ -114,7 +167,35 @@ def run(config_path: str) -> int:
             print(f"[Rank {rank}] no control channel; proceeding after "
                   "registration", flush=True)
 
+    # §3.2.1: node-local producers hand their EXACT receipt to their owning
+    # NodeSupervisor over one bounded local hop; this process forwards it
+    # unchanged over the authenticated channel. It must exist before any child
+    # that might produce one.
+    from .compat.local_ingress import SOCKET_ENV, LocalReceiptIngress, socket_path_for
+
+    deployment_id = os.environ.get("EXASERVE_DEPLOYMENT_ID", "unknown")
+    generation = int(os.environ.get("EXASERVE_GENERATION", "0") or 0)
+    socket_path = socket_path_for(deployment_id, generation)
+    ingress = LocalReceiptIngress(socket_path, log=print)
+    if ingress.start():
+        os.environ[SOCKET_ENV] = socket_path
+        print(f"[Rank {rank}] receipt ingress at {socket_path}", flush=True)
+
+    forwarder_stop = _forward_receipts(channel, ingress, rank)
+    _attest_node_supervisor(channel, rank, hostname)
+
     ray_env = get_ray_env(vendor)
+    ray_env[SOCKET_ENV] = os.environ.get(SOCKET_ENV, "")
+    ray_env["EXASERVE_RECEIPT_SLOT"] = (f"rank{rank}/ray_head" if rank == 0
+                                        else f"rank{rank}/ray_worker")
+    ray_env["EXASERVE_RECEIPT_ROLE"] = "ray_head" if rank == 0 else "ray_worker"
+    ray_env["EXASERVE_RECEIPT_RANK"] = str(rank)
+    for key in ("EXASERVE_PLAN_HASH", "EXASERVE_SITE_PROFILE_HASH",
+                "EXASERVE_ALLOCATION_BINDING_HASH", "EXASERVE_DEPLOYMENT_ID",
+                "EXASERVE_GENERATION"):
+        value = os.environ.get(key)
+        if value:
+            ray_env[key] = value
     argv = (ray_head_argv(cluster, num_gpus) if rank == 0
             else ray_worker_argv(cluster, num_gpus))
     node.adopt(ray_component(argv, env=ray_env))
@@ -135,6 +216,15 @@ def run(config_path: str) -> int:
             value = os.environ.get(key)
             if value:
                 server_env[key] = value
+        server_env[SOCKET_ENV] = os.environ.get(SOCKET_ENV, "")
+        server_env["EXASERVE_SITE_PROFILE_HASH"] = os.environ.get(
+            "EXASERVE_SITE_PROFILE_HASH", "")
+        # Stated explicitly, not inferred from the socket: if the hop failed to
+        # bind, the child must STILL not run its own enforcing gate, or two
+        # processes would each be deciding readiness and the child would block
+        # on receipts that now travel a different path.
+        server_env["EXASERVE_ROOT_OWNS_READINESS"] = "1"
+        server_env["EXASERVE_RECEIPT_RANK"] = str(rank)
         node.adopt(deployment_component(server_argv(config_path), env=server_env))
 
     node.start_all()
@@ -146,6 +236,11 @@ def run(config_path: str) -> int:
             print(f"[Rank {rank}] FIRST CAUSE: {cause}", flush=True)
     finally:
         node.shutdown(drain_s=30.0)
+        try:
+            forwarder_stop.set()      # forwards once more, then exits
+            ingress.stop()
+        except Exception:
+            pass
         try:
             channel.observe(f"rank{rank}", ComponentState.STOPPED.value, role="rank")
             channel.close()

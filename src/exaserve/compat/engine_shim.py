@@ -28,6 +28,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import socket
 import time
 from typing import Iterable, Optional
 
@@ -99,6 +100,34 @@ def install(shim_dir: str, receipt_dir: str, *, import_patches: bool,
         return False
 
 
+def _deliver_engine_receipt(results: dict, not_applicable: list,
+                            patches_imported: bool) -> bool:
+    """Best-effort v2 delivery over the node-local hop. Never raises."""
+    if not os.environ.get("EXASERVE_RECEIPT_SOCKET"):
+        return False
+    try:
+        from .local_ingress import deliver_receipt
+        from .producers import attest_self
+
+        def _postcondition(patch_id: str):
+            if patch_id == "EN-01":
+                return True          # this shim ran; that IS EN-01
+            if not patches_imported:
+                return None
+            if patch_id in results:
+                return results[patch_id]
+            return None if patch_id in not_applicable else False
+
+        receipt = attest_self(
+            requirement_id=f"evidence/engine/{socket.gethostname()}/{os.getpid()}",
+            role="engine", component_id="engine", owner_scope="RANK",
+            owner_rank=int(os.environ.get("EXASERVE_RECEIPT_RANK", "0") or 0),
+            postcondition=_postcondition)
+        return deliver_receipt(receipt.to_dict())
+    except Exception:
+        return False
+
+
 def write_engine_receipt(*, patches_imported: bool) -> Optional[str]:
     """Called INSIDE the engine process by the shim. Never raises."""
     directory = os.environ.get(RECEIPT_DIR_ENV)
@@ -154,6 +183,13 @@ def write_engine_receipt(*, patches_imported: bool) -> Optional[str]:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+
+        # §3.2.1: deliver from HERE, over the bounded local hop, rather than
+        # letting the owning replica forward a rebuilt receipt. Only this
+        # process can attest to its own executable, environment and patch
+        # postconditions; a replica doing it for the engine is precisely the
+        # owner-assertion substitution the audit rejected.
+        _deliver_engine_receipt(results, not_applicable, patches_imported)
         return path
     except Exception:
         return None

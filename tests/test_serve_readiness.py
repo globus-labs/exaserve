@@ -15,6 +15,7 @@ from exaserve.compat.activator import CompatibilityActivator, _postcondition_sit
 from exaserve.compat.profile import default_profile
 from exaserve.compat.receipt import ReceiptStore, build_receipt
 from exaserve.control import serve_readiness as sr
+from exaserve.control.serve_readiness import EVIDENCE_FILENAME
 from exaserve.control.readiness import ReadinessCoordinator
 
 
@@ -425,7 +426,7 @@ def test_gate_raises_when_the_predicate_fails(monkeypatch, tmp_path):
                              base_url="http://x:8000", snapshot_dir=str(tmp_path),
                              timeout_s=0.0, log=lambda *_: None)
     # The verdict is still recorded, with the blocker named.
-    data = json.loads((tmp_path / "readiness.json").read_text())
+    data = json.loads((tmp_path / EVIDENCE_FILENAME).read_text())
     assert data["ready"] is False
     assert any("1/2 replicas" in b for b in data["blockers"])
 
@@ -446,7 +447,7 @@ def test_a_dead_canary_alone_blocks_the_gate(monkeypatch, tmp_path):
         sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
                              base_url="http://x:8000", snapshot_dir=str(tmp_path),
                              timeout_s=0.0, log=lambda *_: None)
-    data = json.loads((tmp_path / "readiness.json").read_text())
+    data = json.loads((tmp_path / EVIDENCE_FILENAME).read_text())
     assert any(b.startswith("canary ") for b in data["blockers"])
 
 

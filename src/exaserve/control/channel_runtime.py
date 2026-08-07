@@ -62,11 +62,16 @@ class HeadChannel:
 
     def __init__(self, *, deployment_id: str, generation: int, plan_hash: str,
                  expected_ranks: int, host: str = "0.0.0.0",
-                 sessions=None) -> None:
+                 sessions=None, receipts=None) -> None:
         # The SessionCoordinator is the authority over registration/START; the
         # listener feeds it. Without this wiring the coordinator was a separate
         # object nothing informed, so all_registered() could never become true.
         self.sessions_coordinator = sessions
+        # Same defect one layer over: receipts arrived and were appended to a
+        # list nothing adjudicated, so every planned slot stayed missing.
+        self.ledger = receipts
+        self.evidence_receipts: list[tuple[int, dict]] = []
+        self.receipt_rejections: list[str] = []
         self.deployment_id = deployment_id
         self.generation = generation
         self.plan_hash = plan_hash
@@ -88,8 +93,46 @@ class HeadChannel:
 
     # -- sinks -------------------------------------------------------------
     def _on_receipt(self, rank: int, payload: dict) -> None:
-        """Rank-owned receipts arrive here and nowhere else."""
+        """Rank-owned receipts arrive here and nowhere else.
+
+        The AUTHENTICATED session's rank is what authorizes the payload — the
+        rank claimed inside it is only a claim, and `accept()` rejects the two
+        disagreeing. Payloads that name no planned slot are filed as evidence
+        rather than rejected, so the ledger's set equality keeps meaning
+        "exactly the planned slots" instead of drifting with whatever a node
+        chose to report.
+        """
         self.receipt_payloads.append((rank, payload))
+        if self.ledger is None:
+            return
+        requirement_id = str(payload.get("receipt_requirement_id", ""))
+        planned = {r.receipt_requirement_id
+                   for r in self.ledger.plan.receipt_requirements}
+        if requirement_id not in planned:
+            self.evidence_receipts.append((rank, payload))
+            return
+        from ..compat.producers import required_patch_ids, resolved_not_required
+        from ..compat.receipt_v2 import ReceiptError, receipt_from_dict
+
+        try:
+            receipt = receipt_from_dict(payload)
+        except ReceiptError as exc:
+            self.receipt_rejections.append(f"rank {rank} {requirement_id}: {exc}")
+            return
+        node = None
+        coordinator = getattr(self, "sessions_coordinator", None)
+        if coordinator is not None:
+            session = coordinator.sessions.get(rank)
+            node = getattr(session, "node_id", None) if session else None
+        ok, detail = self.ledger.accept(
+            receipt,
+            required_patch_ids=required_patch_ids(receipt.role),
+            resolved_not_required=resolved_not_required(receipt.role),
+            session_rank=rank, session_node=node)
+        if not ok:
+            self.receipt_rejections.append(f"rank {rank} {requirement_id}: {detail}")
+            print(f"[Control] receipt rejected from rank {rank} "
+                  f"({requirement_id}): {detail}", flush=True)
 
     def _on_observation(self, rank: int, obs: ComponentObservation) -> None:
         self.observations.append(obs)
