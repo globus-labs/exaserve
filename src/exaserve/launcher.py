@@ -220,18 +220,16 @@ def _drive_readiness(root, config_path: str) -> None:
             evidence = json.load(fh)
     except (OSError, ValueError):
         evidence = {}
+    applications = evidence.get("applications") or {}
     for model in root.plan.models:
-        target = model.num_replicas or 0
-        running = target
-        for line in evidence.get("satisfied", []):
-            if model.model_id in str(line) and "/" in str(line):
-                try:
-                    part = str(line).split(":")[-1].strip().split()[0]
-                    running, target = (int(x) for x in part.split("/"))
-                except (ValueError, IndexError):
-                    pass
+        app = _application_for(model, applications, root.plan.models)
+        running = int((app or {}).get("running", 0) or 0)
+        target = int((app or {}).get("target", 0) or 0) or (model.num_replicas or 0)
         readiness.set_replicas(model.model_id, running, target)
-        readiness.set_route(model.route_name, True)
+        # The route is healthy when the child observed its application RUNNING;
+        # asserting it unconditionally would make the route check decorative.
+        readiness.set_route(model.route_name,
+                            str((app or {}).get("status", "")).upper() == "RUNNING")
         ok, detail = root.canary_advertised_endpoint(model)
         readiness.set_canary(model.model_id, ok)
         if not ok:
@@ -247,6 +245,28 @@ def _drive_readiness(root, config_path: str) -> None:
         raise CompositionError(
             f"readiness not satisfied via the advertised endpoint: "
             f"{list(verdict.blockers)}")
+
+
+def _application_for(model, applications: dict, models) -> Optional[dict]:
+    """Match a planned model to the Serve application the child observed.
+
+    Serve does not name applications after model ids — a single-model
+    deployment is just `default` — so matching on the model id found nothing
+    and every model resolved to a zero replica target, which reads as "the
+    deployment is empty" for a deployment that is fully up.
+    """
+    if not applications:
+        return None
+    if len(models) == 1 and len(applications) == 1:
+        return next(iter(applications.values()))
+    for name, info in applications.items():
+        prefix = str(info.get("route_prefix", "")).strip("/")
+        if model.route_name in (name, prefix):
+            return info
+    for name, info in applications.items():
+        if model.model_id in str(name):
+            return info
+    return None
 
 
 def _log_receipt_evidence(root) -> None:

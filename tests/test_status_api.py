@@ -181,3 +181,69 @@ def test_clientlab_has_no_deployment_plan_compiler_of_its_own():
         if "compile_deployment_plan" in text or "build_receipt_requirements" in text:
             offenders.append(str(path))
     assert offenders == []
+
+
+# -- readiness inputs derived from the child's evidence --------------------
+def test_a_single_model_matches_the_default_serve_application():
+    """Serve does not name applications after model ids.
+
+    A single-model deployment is just `default`, so matching on the model id
+    found nothing and every model resolved to a zero replica target -- which
+    reads as "the deployment is empty" for a deployment that is fully up.
+    """
+    from exaserve.launcher import _application_for
+
+    plan = _plan()
+    model = plan.models[0]
+    apps = {"default": {"running": 24, "target": 24, "route_prefix": "/",
+                        "status": "RUNNING"}}
+    assert _application_for(model, apps, plan.models)["running"] == 24
+
+
+def test_multi_model_matches_by_route_not_by_luck():
+    from exaserve.launcher import _application_for
+
+    plan = compile_deployment_plan(
+        {"num_nodes": 2, "num_gpus_per_node": 12, "validation_mode": True,
+         "models": [{"model_id": "org/alpha", "tensor_parallel_size": 1,
+                     "max_model_len": 128, "size": 8},
+                    {"model_id": "org/beta", "tensor_parallel_size": 1,
+                     "max_model_len": 128, "size": 8}]},
+        site=default_site_profile(), deployment_id="d1")
+    apps = {
+        plan.models[0].route_name: {"running": 2, "target": 2,
+                                    "route_prefix": f"/{plan.models[0].route_name}",
+                                    "status": "RUNNING"},
+        plan.models[1].route_name: {"running": 3, "target": 3,
+                                    "route_prefix": f"/{plan.models[1].route_name}",
+                                    "status": "RUNNING"},
+    }
+    assert _application_for(plan.models[0], apps, plan.models)["running"] == 2
+    assert _application_for(plan.models[1], apps, plan.models)["running"] == 3
+
+
+def test_no_matching_application_is_none_not_a_guess():
+    from exaserve.launcher import _application_for
+
+    plan = _plan()
+    assert _application_for(plan.models[0], {}, plan.models) is None
+
+
+def test_the_root_exports_its_own_binding_hash(tmp_path, monkeypatch):
+    """The root's own receipts are built from the environment, like everyone's.
+
+    Exporting the binding hash only into the ranks' env left the root's GLOBAL
+    receipt with an empty allocation_binding_hash, which the strict validator
+    rejected -- blocking readiness on `global/supervisor`.
+    """
+    import os
+
+    from exaserve.composition import CompositionRoot
+
+    monkeypatch.delenv("EXASERVE_ALLOCATION_BINDING_HASH", raising=False)
+    plan = _plan()
+    root = CompositionRoot(plan=plan, generation=3, run_dir=str(tmp_path),
+                           log=lambda *_: None)
+    binding = root.bind_allocation([f"n{i}" for i in range(plan.num_nodes)], "job1")
+    assert os.environ["EXASERVE_ALLOCATION_BINDING_HASH"] == \
+        binding.allocation_binding_hash

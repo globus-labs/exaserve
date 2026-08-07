@@ -115,6 +115,14 @@ class CompositionRoot:
                 f"could not persist the allocation binding: {exc}") from exc
         self._log(f"[Composition] binding {self.binding.allocation_binding_hash[:12]} "
                   f"for {len(nodes)} node(s), generation {self.generation}")
+        # The root's OWN receipts are built from the environment, like every
+        # other producer's — so the binding hash has to be in this process's
+        # environment, not only in the one it hands to ranks. Without this the
+        # root's GLOBAL receipt carries an empty allocation_binding_hash and the
+        # strict validator rejects it, blocking readiness on `global/supervisor`.
+        os.environ["EXASERVE_ALLOCATION_BINDING_HASH"] = \
+            self.binding.allocation_binding_hash
+
         # The shared status record opens here, once the generation has a real
         # identity to publish. Eval and ClientLab read THIS, not a log line.
         from .status_api import DeploymentStatusPublisher
