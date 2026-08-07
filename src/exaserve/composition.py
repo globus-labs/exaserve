@@ -573,7 +573,11 @@ class CompositionRoot:
         if self.first_cause is None:
             self.first_cause = reason
         self._log(f"[Composition] FIRST CAUSE: {reason}")
-        if self.status is not None:
+        # A requested shutdown is not a fault. `exit_code()` already keeps 143
+        # distinct from a failure; publishing FAILED on the shared record threw
+        # that distinction away again, so a consumer read an orderly teardown as
+        # a fault. The drain path publishes DRAINING -> STOPPED instead.
+        if self.status is not None and not _is_requested_shutdown(reason):
             from .state.status import DeploymentState
 
             self.status.advance(DeploymentState.FAILED, reason_code="FIRST_CAUSE",
@@ -615,6 +619,12 @@ class CompositionRoot:
                 return 143
             return supervised or 1
         return supervised
+
+
+def _is_requested_shutdown(reason: str) -> bool:
+    """Is this first cause an operator-requested stop rather than a fault?"""
+    text = str(reason).upper()
+    return "SHUTDOWN_REQUESTED" in text or "SIGTERM" in text
 
 
 def head_ip() -> str:

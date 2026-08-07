@@ -1480,3 +1480,40 @@ Separately: editing `run_supervisor_smoke.sh` while a run was executing it
 produced a bogus `syntax error near unexpected token` — bash reads a script
 incrementally, so the file changed under its read offset. `bash -n` on the same
 file passes. Not a defect in the script; a hazard of editing a running one.
+
+### Full 2-node validation: nine checks, all PASS (2026-08-07)
+
+```
+gate_ready=PASS                        shared_status_ready=PASS
+marker_never_precedes_gate=PASS        receipt_slots_exact=PASS (5/5)
+evidence_separate_from_verdict=PASS    ray_receipt_actor_retired=PASS
+engine_self_attested=PASS              canary=PASS
+tree_reaped=PASS
+supervisor_exit=143  group 1 -> 0  named 15 -> 0
+```
+
+The canary is a real completion through the compiled advertised endpoint, and
+the smoke now waits the way a consumer is supposed to — through the shared
+status API — so the §3.4 boundary is exercised on every run rather than
+asserted in a test.
+
+The run directory carries the four artifacts the architecture separates:
+
+```
+deployment_status.json     shared record, the only surface consumers read
+readiness.json             the root's verdict
+deployment_evidence.json   the child's witness statement
+allocation_binding.json    this generation's identity
+```
+
+**One defect visible only in that first artifact.** The status history read
+`PLANNED -> STAGING -> CLUSTER_STARTING -> DEPLOYING -> VALIDATING -> READY ->
+FAILED` for a run that was deliberately SIGTERMed. `exit_code()` already keeps
+143 distinct from a fault; publishing `FAILED` on the shared record threw that
+distinction straight back away, so a consumer would read an orderly teardown as
+a failure. `fail()` no longer publishes FAILED for a requested shutdown — the
+drain path publishes `DRAINING -> STOPPED`.
+
+That defect is a good example of why the shared record was worth building: it
+was invisible in the log, invisible in the exit status, and obvious the moment
+the state history existed to be read.

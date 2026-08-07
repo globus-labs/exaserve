@@ -247,3 +247,25 @@ def test_the_root_exports_its_own_binding_hash(tmp_path, monkeypatch):
     binding = root.bind_allocation([f"n{i}" for i in range(plan.num_nodes)], "job1")
     assert os.environ["EXASERVE_ALLOCATION_BINDING_HASH"] == \
         binding.allocation_binding_hash
+
+
+def test_a_requested_shutdown_is_not_published_as_a_failure(tmp_path, monkeypatch):
+    """exit_code() already keeps 143 distinct from a fault.
+
+    Publishing FAILED on the shared record threw that distinction away again,
+    so a consumer read an orderly teardown as a fault.
+    """
+    from exaserve.composition import CompositionRoot, _is_requested_shutdown
+
+    assert _is_requested_shutdown("supervisor: SHUTDOWN_REQUESTED (exit=None) signal 15")
+    assert not _is_requested_shutdown("ray: UNEXPECTED_EXIT (exit=1)")
+
+    plan = _plan()
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path),
+                           log=lambda *_: None)
+    root.bind_allocation([f"n{i}" for i in range(plan.num_nodes)], "job1")
+    root.fail("supervisor: SHUTDOWN_REQUESTED (exit=None) signal 15")
+    assert read_deployment_status(str(tmp_path)).state == "PLANNED"
+
+    root.fail("ray: UNEXPECTED_EXIT (exit=1) rank 0 component exited unexpectedly")
+    assert read_deployment_status(str(tmp_path)).state == "FAILED"
