@@ -210,10 +210,16 @@ def load_ray_cluster_config(config_path: str) -> RayClusterConfig:
     cluster_cfg = payload.get("ray_cluster_config", {}) or {}
     head_ip = str(cluster_cfg.get("head_ip", "")).strip()
     if not head_ip:
-        raise ValueError(
-            "ray_cluster_config.head_ip is missing from the runtime config. "
-            "launch_cluster.sh must resolve and write it before starting driver.py."
-        )
+        # The composition root passes the resolved head IP in the environment;
+        # a config file is not a channel between processes.
+        env_head_ip = os.environ.get("EXASERVE_HEAD_IP", "")
+        if env_head_ip:
+            head_ip = env_head_ip
+        else:
+            raise ValueError(
+                "head_ip is unavailable: neither ray_cluster_config.head_ip nor "
+                "EXASERVE_HEAD_IP is set. The composition root normally supplies "
+                "it from the allocation binding.")
 
     port = int(cluster_cfg.get("port", DEFAULT_RAY_HEAD_PORT))
     if port < 1:

@@ -180,6 +180,10 @@ class CompositionRoot:
         if self.head_channel is not None:
             env.update(self.head_channel.env())
         env["EXASERVE_PLAN_HASH"] = self.plan.deployment_plan_hash
+        # §3.2.1: the head IP is derived from the binding and passed to ranks.
+        # The shell used to resolve it and MUTATE the runtime config to
+        # communicate it, which made a config file a channel between processes.
+        env.setdefault("EXASERVE_HEAD_IP", head_ip())
         env["EXASERVE_ALLOCATION_BINDING_HASH"] = self.binding.allocation_binding_hash
         launcher = RankLauncher(node_count=self.plan.num_nodes,
                                 rank_argv=rank_argv, scheduler=scheduler, env=env)
