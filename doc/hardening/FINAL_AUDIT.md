@@ -52,20 +52,46 @@ Five hash boundaries stay distinct: `site_profile_hash`,
 ## 3. Evidence
 
 ### Hermetic
-- 470 tests pass (`tests/`, `eval/tests/`, `clientlab/tests/`); ruff clean.
+- 476 tests pass (`tests/`, `eval/tests/`, `clientlab/tests/`); ruff clean.
 - Each subtree collects independently (428 / 36 / 4).
 - CI has a `packaged` job that installs the wheel and imports from **outside**
   the source tree, so a source-layout assumption fails there rather than in a
   job; and a `ledger` job that runs the §8 validator.
 
 ### On hardware (2 nodes, Aurora, `artifacts/hardening/supervisor-smoke`)
-- Composition root owns the lifecycle end to end; three earlier clean runs plus
-  the cutover runs recorded in `MIGRATION_LOG.md`.
-- `supervisor_exit=143` for a requested shutdown, distinct from a fault; named
-  processes 15 → 0 after the drain deadline.
-- The receipt chain transports and adjudicates: receipts crossed the local hop,
-  the authenticated channel, and reached the ledger, which rejected them on a
-  genuine identity mismatch before the fix and accepted them after.
+
+```
+[Composition] READY via http://10.112.170.134:8000 —
+  ['sessions: 2 planned ranks established',
+   'receipts: 5/5 exact slots',
+   'model meta-llama/Meta-Llama-3-8B-Instruct: 24/24',
+   'canaries: 1 model(s) answered']
+```
+
+Nine checks, all PASS:
+
+| check | result |
+|---|---|
+| `gate_ready` | PASS — the root's own verdict, not the child's |
+| `shared_status_ready` | PASS — read through the §3.4 API, not a log |
+| `marker_never_precedes_gate` | PASS |
+| `receipt_slots_exact` | PASS (5/5 exact set equality) |
+| `evidence_separate_from_verdict` | PASS |
+| `ray_receipt_actor_retired` | PASS |
+| `engine_self_attested` | PASS (48 engine self-receipts) |
+| `canary` | PASS — a real completion through the compiled endpoint |
+| `tree_reaped` | PASS — `supervisor_exit=143`, group 1→0, named 15→0 |
+
+Every clause of that READY line was decorative or absent a day earlier. The
+receipt slots are exact set equality against the compiled plan, fed by real
+producers; the replica count comes from the plan, not from the survivors; the
+canary is a real completion through the compiled advertised endpoint. 72
+further evidence receipts (24 replica, 48 engine) arrived over the same path.
+
+The run directory carries the four artifacts the architecture keeps distinct:
+`deployment_status.json` (shared record), `readiness.json` (the root's
+verdict), `deployment_evidence.json` (the child's witness statement), and
+`allocation_binding.json` (this generation's identity).
 
 ### Identity
 - Core and eval derive **byte-identical** `deployment_plan_hash` for one input
@@ -92,6 +118,15 @@ Listed because each was invisible to the test suite and to reading:
    not reap them), which surfaced as `XPU out of memory`.
 7. `EXASERVE_LEGACY_SHELL_LIFECYCLE` was an infinite exec loop, not the
    run-to-run comparison its comment advertised.
+8. The root's own binding hash was exported only into the ranks' environment,
+   so the root could not attest itself and readiness blocked on
+   `global/supervisor`.
+9. Serve does not name applications after model ids — a single-model
+   deployment is just `default` — so every model resolved to a zero replica
+   target: "the deployment is empty" for a deployment that was fully up.
+10. An orderly SIGTERM published `FAILED` on the shared status record, throwing
+    away the 143-vs-fault distinction the exit code already made. Visible only
+    because the state history now exists to be read.
 
 ## 5. What is NOT proven
 
@@ -123,8 +158,15 @@ rule applied to each record is explicit and the set is reproducible. Closure
 still requires linked evidence and acceptance tests, enforced separately by
 `scripts/hardening/validate_findings.py`, which CI runs.
 
-Records held open name their reason in the evidence field rather than leaving
-it to inference. The largest group is scale, gated on the unapproved envelope.
+Current state: **14 FIXED / 66 IN_PROGRESS / 2 OUT_OF_PRODUCTION_SCOPE**,
+validator passing. Records held open name their reason in the evidence field
+rather than leaving it to inference; the largest group is scale, gated on the
+unapproved envelope.
+
+The count is deliberately not impressive. A record closes when its invariant is
+proven on the path production takes, and most of the remaining ledger belongs
+to work packages this cutover did not touch (WP6–WP12) or to scale evidence
+nobody can gather until the envelope decision exists.
 
 ## 7. Recommended next steps, in order
 
