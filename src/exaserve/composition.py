@@ -282,10 +282,31 @@ def head_ip() -> str:
 
 
 def read_nodefile(path: Optional[str] = None) -> list:
-    path = path or os.environ.get("EXASERVE_NODEFILE", "")
-    if not path or not os.path.exists(path):
+    """Discover the allocation.
+
+    The site adapter normally exports EXASERVE_NODEFILE, but a direct CLI
+    launch is legitimate, so the scheduler's own variables are consulted too
+    rather than demanding a wrapper that may not have run.
+    """
+    candidates = [path, os.environ.get("EXASERVE_NODEFILE"),
+                  os.environ.get("PBS_NODEFILE")]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            path = candidate
+            break
+    else:
+        nodelist = os.environ.get("SLURM_JOB_NODELIST")
+        if nodelist:
+            import subprocess
+
+            out = subprocess.run(["scontrol", "show", "hostnames", nodelist],
+                                 capture_output=True, text=True, check=False)
+            nodes = [n.strip() for n in out.stdout.splitlines() if n.strip()]
+            if nodes:
+                return list(dict.fromkeys(nodes))
         raise CompositionError(
-            f"no nodefile at {path!r}; the site adapter must export EXASERVE_NODEFILE")
+            "no nodefile found (checked EXASERVE_NODEFILE, PBS_NODEFILE, "
+            "SLURM_JOB_NODELIST); cannot bind an allocation")
     with open(path, encoding="utf-8") as handle:
         nodes = [line.strip() for line in handle if line.strip()]
     unique: list = []
