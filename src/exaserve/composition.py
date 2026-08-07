@@ -309,9 +309,15 @@ class CompositionRoot:
                 pass
 
     def exit_code(self) -> int:
+        """Typed exit. A requested shutdown is 143, not a generic failure."""
+        supervised = self.supervisor.exit_code()
         if self.first_cause is not None:
-            return 1
-        return self.supervisor.exit_code()
+            # A SIGTERM-driven shutdown is not a fault; the supervisor already
+            # classifies it, and flattening it to 1 loses that distinction.
+            if supervised == 143 or "SHUTDOWN_REQUESTED" in str(self.first_cause):
+                return 143
+            return supervised or 1
+        return supervised
 
 
 def head_ip() -> str:

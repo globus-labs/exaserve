@@ -79,16 +79,27 @@ if [ "$gate_ok" = "1" ]; then
   # IMP-B03 reaping. The managed child runs in its OWN session (setsid), so
   # the supervisor's pgid is the WRONG thing to count — measure the launched
   # tree's group plus any surviving exaserve/ray processes on this node.
-  CHILD=$(pgrep -P $SUPER_PID -f launch_cluster.sh | head -1)
+  # The composition root has no launch_cluster.sh child any more; its own
+  # child is the rank launcher. Measuring a missing child's group meant
+  # `pgrep -g 0`, which reported a meaningless count as "leftover".
+  CHILD=$(pgrep -P $SUPER_PID 2>/dev/null | head -1)
   CHILD_PGID=$(ps -o pgid= -p "${CHILD:-0}" 2>/dev/null | tr -d ' ')
-  before_group=$(pgrep -g "${CHILD_PGID:-0}" 2>/dev/null | wc -l)
+  if [ -n "$CHILD_PGID" ]; then
+    before_group=$(pgrep -g "$CHILD_PGID" 2>/dev/null | wc -l)
+  else
+    before_group=0
+  fi
   before_named=$(pgrep -c -f 'exaserve\.(driver|server)|raylet|ServeReplica' 2>/dev/null)
   echo "--- SIGTERM supervisor (child=$CHILD child_pgid=$CHILD_PGID group=$before_group named=$before_named) ---"
   kill -TERM $SUPER_PID
   for i in $(seq 1 36); do kill -0 $SUPER_PID 2>/dev/null || break; sleep 5; done
   wait $SUPER_PID 2>/dev/null; SUPER_RC=$?
   sleep 5
-  after_group=$(pgrep -g "${CHILD_PGID:-0}" 2>/dev/null | wc -l)
+  if [ -n "$CHILD_PGID" ]; then
+    after_group=$(pgrep -g "$CHILD_PGID" 2>/dev/null | wc -l)
+  else
+    after_group=0
+  fi
   after_named=$(pgrep -c -f 'exaserve\.(driver|server)|raylet|ServeReplica' 2>/dev/null)
   leftover=$(( after_group + after_named ))
   echo "supervisor_exit=$SUPER_RC group_before=$before_group group_after=$after_group named_before=$before_named named_after=$after_named"

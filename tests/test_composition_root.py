@@ -234,3 +234,18 @@ def test_null_compute_skips_model_staging(tmp_path, monkeypatch):
     root = _root(tmp_path)
     names = [s.name for s in root.default_staging_steps("/tmp/c.yaml")]
     assert "model_bcast" not in names and "distribute_source" in names
+
+
+def test_a_requested_shutdown_exits_143_not_1(tmp_path):
+    """A SIGTERM-driven shutdown is not a generic fault; flattening it to 1
+    loses the distinction the supervisor already makes."""
+    root = _root(tmp_path)
+    root.supervisor.request_shutdown("signal 15")
+    root.fail(str(root.supervisor.first_cause))
+    assert root.exit_code() == 143
+
+
+def test_a_real_failure_still_exits_nonzero_and_not_143(tmp_path):
+    root = _root(tmp_path)
+    root.fail("staging step 'distribute' exited 3")
+    assert root.exit_code() not in (0, 143)
