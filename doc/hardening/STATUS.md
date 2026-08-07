@@ -1,5 +1,39 @@
 # ExaServe Production-Hardening — Status
 
+> **2026-08-07 (later) — THE CUTOVER IS ON THE PRODUCTION PATH AND REACHED
+> READY BY THE NEW ARCHITECTURE.**
+>
+> ```
+> [Composition] READY via http://10.112.170.100:8000 —
+>   ['sessions: 2 planned ranks established',
+>    'receipts: 5/5 exact slots',
+>    'model meta-llama/Meta-Llama-3-8B-Instruct: 24/24',
+>    'canaries: 1 model(s) answered']
+> ```
+>
+> Every clause there was decorative or absent a day earlier. The receipt slots
+> are *exact set equality* against the compiled plan, fed by real producers over
+> a bounded node-local hop and the authenticated channel; the replica count
+> comes from the plan, not from the survivors; the canary is a real completion
+> through the compiled advertised endpoint. 72 further evidence receipts (24
+> replica, 48 engine self-receipts) arrived over the same path.
+>
+> **Ledger: 14 FIXED / 66 IN_PROGRESS / 2 OUT_OF_PRODUCTION_SCOPE**, validator
+> passing. Seven scale records are held EXPLICITLY on the unapproved production
+> envelope and say so in their evidence field. The 64-node ceiling still has no
+> approval and I still cannot infer one.
+>
+> What this does **not** show is in `doc/hardening/FINAL_AUDIT.md` §5, at the
+> same length: everything is 2 nodes, `PROXIED_INTERNAL` is implemented but not
+> yet demonstrated on hardware, and non-HAProxy gateways raise a named refusal.
+>
+> Five defects were found by *running* the path, none visible to the suite:
+> node identity (FQDN vs short hostname rejected every receipt from every
+> correctly-placed rank), a prior generation's Ray session name, orphaned
+> EngineCore processes still holding device memory, the root's own binding hash
+> missing from its own environment, and Serve applications not being named after
+> model ids.
+
 > **2026-08-07 — LEDGER RE-ADJUDICATED AGAINST THE COMPLETION-CLAIM AUDIT.**
 > `doc/PRODUCTION_HARDENING_COMPLETION_CLAIM_AUDIT_2026-08-06.md` rejected the
 > "67 FIXED" accounting. Applying its §8 rule mechanically — a record is FIXED

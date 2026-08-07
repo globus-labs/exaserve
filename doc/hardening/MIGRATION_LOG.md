@@ -1433,3 +1433,50 @@ had. Deleted, with the rank driver fallback, the in-child readiness gate and its
 `EXASERVE_ALLOW_DEGRADED_READINESS` escape hatch, the `CLUSTER FULLY READY`
 marker, the Ray receipt actor **including its fallback**, and the
 `READINESS_FILENAME` alias that let two processes write one file.
+
+### READY by the new architecture (2026-08-07)
+
+```
+[Composition] GLOBAL receipts issued: 1
+[Composition] evidence receipts: 72 {'engine': 48, 'replica': 24}
+[Composition] READY via http://10.112.170.100:8000 —
+  ['sessions: 2 planned ranks established',
+   'receipts: 5/5 exact slots',
+   'model meta-llama/Meta-Llama-3-8B-Instruct: 24/24',
+   'canaries: 1 model(s) answered']
+```
+
+The run before it produced the same 72 evidence receipts and then blocked, with
+both remaining defects named exactly:
+
+```
+[Composition] GLOBAL receipt global/supervisor rejected:
+  allocation_binding_hash must be a lowercase sha256 hex digest, got ''
+[Composition] FIRST CAUSE: readiness not satisfied via the advertised endpoint:
+  ["receipts missing: ['global/supervisor']",
+   'model meta-llama/Meta-Llama-3-8B-Instruct: no replica target resolved']
+```
+
+The first: the root's own receipts are built from the environment like every
+other producer's, but the binding hash was exported only into the env handed to
+ranks — so the root could not attest itself. The second: Serve does not name
+applications after model ids (a single-model deployment is just `default`), so
+matching the child's evidence on the model id found nothing and every model
+resolved to a zero replica target — "the deployment is empty" for a deployment
+that was fully up.
+
+Both are fixed in `2ebd1de`, and the blocker text is worth keeping: a readiness
+predicate that names the two things wrong, by name, is the whole point of
+replacing a stdout marker.
+
+### Two hazards worth recording (2026-08-07)
+
+The preflight's first live run reported `cleared 3 stale Ray state path(s) and
+1 orphaned engine process group(s)` — confirming the leak rather than assuming
+it. `ray stop` reaps raylets and Ray workers but not the engine children a
+replica spawned, and those hold device memory.
+
+Separately: editing `run_supervisor_smoke.sh` while a run was executing it
+produced a bogus `syntax error near unexpected token` — bash reads a script
+incrementally, so the file changed under its read offset. `bash -n` on the same
+file passes. Not a defect in the script; a hazard of editing a running one.
