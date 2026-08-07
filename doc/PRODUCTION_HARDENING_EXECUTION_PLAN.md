@@ -2,7 +2,7 @@
 
 **Draft date:** 2026-08-04
 
-**Last reconciled:** 2026-08-05 after Claude round-2 and feasibility-plan
+**Last reconciled:** 2026-08-07 after completion-claim audit and cutover-question
 adjudication
 
 **Companion audit:** `doc/PRODUCTION_READINESS_AUDIT.md`
@@ -312,23 +312,516 @@ control signal.
 
 The startup sequence is fixed:
 
-1. Compile and persist the immutable plan; activate the compatibility profile
-   before importing Ray or an engine.
-2. Bind the control listener and persist `CLUSTER_STARTING` without the secret.
-3. Launch ranks and require an authenticated registration, node/rank identity,
+1. Resolve exactly one immutable plan: load/verify the precompiled artifact
+   produced before scheduler submission, or invoke the one-way legacy adapter
+   once for a direct/manual launch; persist its canonical identity and activate
+   the compatibility profile before importing Ray or an engine.
+2. Resolve the scheduler allocation/nodefile into the immutable
+   generation-scoped `AllocationBinding` and persist it atomically.
+3. Bind the control listener and persist `CLUSTER_STARTING` without the secret.
+4. Launch ranks and require an authenticated registration, node/rank identity,
    and supervisor receipt from every planned rank.
-4. Start the rank-zero Ray head child with explicit endpoints, then start worker
+5. Start the rank-zero Ray head child with explicit endpoints, then start worker
    Ray children after the typed head endpoint is available. Process liveness is
    not Ray readiness.
-5. Verify exact current-generation Ray membership/resources through the
+6. Verify exact current-generation Ray membership/resources through the
    S02-selected adapter, then let the outer `DeploymentManager` connect and
    deploy Serve applications directly through its typed API.
-6. Start the selected external gateway as a globally owned component, collect
-   actor/replica/engine receipts and registrations, and evaluate the section 5
-   readiness predicate.
-7. Persist READY atomically before rendering any compatibility marker. On any
+7. Establish the compiled advertised endpoint: for production, start HAProxy as
+   a globally owned component; an explicit validation-only direct plan instead
+   publishes its typed Serve endpoint without inventing a gateway process.
+   Collect actor/replica/engine receipts and registrations, then evaluate the
+   section 5 readiness predicate.
+8. Persist READY atomically before rendering any compatibility marker. On any
    failure, preserve the first cause, stop in reverse ownership order, and exit
    nonzero.
+
+#### 3.2.1 Binding cutover resolutions (2026-08-07)
+
+This subsection resolves every question in
+`doc/hardening/QUESTIONS_FOR_CODEX_2026-08-07.md`. These are implementation
+requirements, not alternative designs from which the worker may choose. The
+worker must continue the ordered cutover without waiting for another
+architecture answer. Evidence-derived production timeout values, the current
+product-owner choice between the proposed 64-node ceiling and the previously
+discussed 128/256 scope, and any later support-envelope expansion remain gated.
+The generic contracts that consume timeout/scope values are not gated by that
+product choice and must be implemented under the conditional-P00 rule in §4.2.
+
+**Allocation-head adapter, supervisor bootstrap, and staging ownership**
+
+The allocation-head shell adapter is limited to prerequisites required to
+enter Python:
+
+- select the site-provided interpreter and load unavoidable site modules;
+- discover and validate the existing scheduler/allocation environment and
+  nodefile;
+- sanitize the inherited environment and resolve the clean immutable ExaServe
+  package artifact; and
+- perform exactly one final `exec` of the import-light Python composition root
+  (`exaserve.launcher` after cutover).
+
+It must not compile or mutate configuration, create the authoritative runtime
+plan, start ranks or persistent services, invoke source/model/runtime
+distribution, own component logs or result collection, install post-launch
+cleanup traps, publish lifecycle state, or make readiness/terminal decisions.
+Loading a Copper module or establishing Copper-related environment is site
+setup; starting and later stopping a Copper process is lifecycle ownership and
+must be represented as a typed supervisor-owned component or removed.
+
+The Python composition root boots from the clean packaged artifact available
+on the shared filesystem or immutable site environment. It does not import
+from the node-local tree that it is about to create, and no second staged
+supervisor copy is required. The normal scheduler/eval path compiles and
+persists `RunPlan` plus its exact `DeploymentPlan` before submission, and the
+in-allocation composition root loads and verifies that artifact/hash. A direct
+manual legacy launch instead invokes the one-way `exaserve.plan` adapter exactly
+once. Both paths yield one canonical `DeploymentPlan` object; neither recompiles
+or reinterprets it downstream. The composition root activates the referenced
+compatibility profile before any Ray/engine import, constructs
+`RuntimeSupervisor(plan)` in the same process, and passes only typed plan
+objects to it. `RuntimeSupervisor` never reads or reinterprets source YAML.
+The supervisor then stages content-addressed rank artifacts and launches ranks
+from the verified staged artifact. Existing MPI/native helpers may remain
+intact as finite supervised subprocesses. They must use argument vectors,
+sanitized environments, bounded deadlines, and validated per-rank
+receipts/result manifests; zero exit without the declared result is failure.
+The migration therefore moves ownership into Python without rewriting a sound
+native distribution algorithm merely to avoid a subprocess.
+
+Acceptance requires a static/fake-launcher test proving that the shell starts
+no lifecycle child, has no path after the final `exec`, and contains no
+staging/readiness/cleanup decision. Bind, staging, helper, or result-validation
+failure must produce a typed first cause, bounded reverse-order cleanup, and a
+nonzero scheduler-visible result.
+
+**Exact compatibility receipts and bounded transport batching**
+
+Receipt correctness is per exact planned logical process or actor instance at
+every scale. The compiled `DeploymentPlan` enumerates stable
+`receipt_requirement_id`s containing role, logical component/replica slot, and
+ownership or placement constraints. Stable planned rank may be part of a fixed
+requirement; allocation hostname must not be, because the semantic plan is
+compiled before allocation and must survive a restart on different nodes.
+
+After resolving the nodefile and before binding the listener, the composition
+root atomically persists an immutable generation-scoped `AllocationBinding`
+containing at least schema version, deployment ID, generation, deployment-plan
+hash, SiteProfile hash, scheduler allocation ID, exact `rank_to_node` map, and
+`allocation_binding_hash`. The binding hash is SHA-256 over its canonical
+semantic fields and is separate from the deployment-plan hash. Authenticated
+`REGISTER` binds a planned rank to the node from this artifact. If a dependency
+assigns an allowed replica dynamically, a typed current-generation
+`ComponentInstanceBinding` binds its actual rank/node/actor instance to exactly
+one previously unfilled planned slot. A restart/replacement uses a new instance
+binding; it must not create an unplanned requirement or satisfy two slots by
+count.
+
+Each accepted start/restart has one current `instance_id`. A receipt covers
+exactly one `(deployment_id, generation, deployment_plan_hash,
+allocation_binding_hash, receipt_requirement_id, component_id, instance_id)`.
+A role-level receipt, count-only assertion, or one receipt standing for several
+managed instances is invalid. Duplicate receipts do not add coverage, a
+superseded-instance receipt is stale, and READY requires exact set equality
+between the planned keys and accepted current-instance keys. Managed Python
+processes/actors self-report. A supervisor may attest only one individually
+identified unmodified external daemon that it owns; it may not replace
+managed-role self-reporting.
+
+The replacement schema is `CompatibilityReceipt` version 2 with these exact
+fields and value families (hex digests are lowercase SHA-256):
+
+```text
+schema_version: 2
+deployment_id: non-empty string
+generation: non-negative integer
+deployment_plan_hash: sha256
+site_profile_hash: sha256
+allocation_binding_hash: sha256
+compatibility_profile_hash: sha256
+manifest_hash: sha256
+receipt_requirement_id: non-empty string
+role: non-empty string
+component_id: non-empty string
+instance_id: non-empty string
+owner_scope: GLOBAL | RANK
+owner_rank: non-negative integer | null
+node_id: non-empty string
+pid: positive integer | null
+actor_id: non-empty string | null
+executable_hash: sha256
+argv_hash: sha256 | null
+prepared_environment_hash: sha256
+observed_versions: sorted map<string,string>
+observed_package_hashes: sorted map<string,sha256>
+observed_source_hashes: sorted map<string,sha256>
+patch_results: sorted map<patch_id, {
+  status: APPLIED | NOT_REQUIRED | FAILED,
+  postcondition_passed: boolean,
+  evidence_hash: sha256 | null
+}>
+capabilities: sorted unique list<string>
+attestation_type: SELF | SUPERVISOR
+attested_at: RFC3339 UTC timestamp
+receipt_hash: sha256
+```
+
+`owner_rank` is null exactly for `GLOBAL`; it is required for `RANK`. At least
+one of PID or actor ID is present. For `RANK`, `node_id` and `owner_rank` must
+agree with the authenticated `NodeSupervisor` session and rank-to-node entry in
+the `AllocationBinding`; a rank session must not submit a `GLOBAL` receipt. For
+`GLOBAL`, `owner_rank` is null, `node_id` is the allocation-head node from the
+binding, and only the local in-process `RuntimeSupervisor`/composition-root
+authority may inject the receipt into the same validator/global writer. This is
+the valid path for the outer supervisor's `SELF` receipt and for its
+`SUPERVISOR` attestation of an individually identified global daemon such as
+HAProxy. `receipt_hash` is SHA-256 over the canonical JSON object with
+`receipt_hash` omitted and must equal the hash named by the corresponding
+observation. `APPLIED` requires a true semantic postcondition. `NOT_REQUIRED`
+is legal only when the fully resolved manifest excludes that patch from this
+role (including a compile-time-resolved gate being off); it cannot excuse
+missing proof for a targeted patch. `FAILED`, a false postcondition, a missing
+required patch key, or an unknown patch/status fails the receipt. `SUPERVISOR`
+is legal only for an individually identified unmodified external daemon owned
+by that supervisor; if the manifest requires an in-process patch for that role,
+supervisor attestation cannot satisfy it. The receipt contains no secret.
+Version-1 role-only payloads fail closed rather than being permissively
+upgraded.
+
+All remote/rank-owned authoritative receipt payloads travel over the
+authenticated section 3.2 channel. Local `GLOBAL` producers enter through the
+in-process outer-supervisor authority described above and the same strict
+receipt validator; they are never accepted from a rank session or an
+unauthenticated IPC source. A detached Ray actor, stdout, shared file, or
+node-local file is not an authoritative readiness source. A bounded local IPC
+hop is allowed only to deliver the exact rank-owned receipt to its owning
+`NodeSupervisor`, which forwards it unchanged. The global writer alone
+materializes the accepted evidence.
+
+Per-rank batching is a transport optimization, not evidence aggregation:
+
+```text
+OBSERVATION payload:
+  payload_version: 1, observation, compatibility_receipt?
+
+SNAPSHOT payload:
+  payload_version: 1, snapshot_id, chunk_index, chunk_count,
+  complete_set_hash, observations[], compatibility_receipts[]
+```
+
+Missing or non-`1` payload versions fail closed; they are not upgraded in
+place.
+
+A rank sends one bounded complete snapshot when it fits the strict frame
+limit. Otherwise it sends deterministic chunks sharing one `snapshot_id`,
+fixed `chunk_count`, and a hash of the canonical complete set. Chunk indices
+are contiguous and zero-based. Before chunking/hashing, collapse byte-identical
+duplicate items and reject conflicting duplicate keys. A complete snapshot has
+exactly one latest observation for each `(component_id, instance_id)` and
+exactly one receipt for each
+`(receipt_requirement_id, component_id, instance_id)`; two different bodies for
+either key are fatal, even if sequences or receipt hashes differ. The
+complete-set hash is SHA-256 over canonical JSON whose now-unique observations
+are sorted by `(component_id, instance_id)` and whose now-unique receipts are
+sorted by `(receipt_requirement_id, component_id, instance_id)`.
+
+Each authenticated session may assemble at most one snapshot at a time. The
+resolved SiteProfile supplies positive `max_snapshot_chunks`,
+`max_snapshot_bytes`, and `max_snapshot_items` as well as the per-frame limit
+and assembly deadline; every limit is enforced before allocation/copy. An
+identical duplicate chunk is idempotent; a conflicting duplicate, gap,
+out-of-range index, changed chunk count/hash, mixed generation, or exceeded
+bound rejects and audits the session. An expired incomplete assembly is
+discarded and the rank remains absent/recovering under the applicable
+registration or reconnect deadline.
+
+The receiver validates every item against the authenticated rank/node session.
+Only after the entire hash-verified snapshot is present does it atomically
+**replace** all prior current-generation observations, receipts, and instance
+bindings owned by that rank; an item absent from the accepted complete snapshot
+is removed/tombstoned and cannot continue satisfying READY. Global or another
+rank's state is never modified. The head then sends a normal protocol-family
+`COMMAND` with operation `SNAPSHOT_ACCEPTED`, a stable `command_id`, and payload
+`{payload_version: 1, snapshot_id, complete_set_hash}`. Retries reuse the same
+command ID and payload. The rank validates and durably records that exact
+acknowledgment, then returns the normal idempotent `COMMAND_RESULT` with the same
+`command_id`, operation, snapshot ID/hash, and `status: SUCCEEDED`; a duplicate
+command returns the same result. A mismatched ID/hash/version or failed result
+does not cross the barrier. The rank sends no incrementals before processing
+the command, and the head rejects incrementals and does not complete the
+barrier until the matching successful result arrives. Disconnect before the
+result requires a new complete reconnect snapshot. A rank is not
+`all_registered` and cannot receive START until its initial snapshot,
+supervisor receipt, and acknowledgment round trip are accepted. Every
+reconnect repeats this barrier before its state can re-enter readiness.
+Incremental observations may then attach the exact receipt named by their
+receipt hash.
+
+Synthetic high-cardinality tests must exercise aggregate bounds, one-in-flight
+enforcement, canonical hashing, chunk deduplication/conflict, atomic replacement
+and tombstoning, exact-set reconciliation, ACK/START barriers, and linear
+coordinator work without requiring a large hardware allocation.
+
+**Gateway ownership, readiness ordering, and direct exposure**
+
+The selected production gateway is a `GLOBAL` component owned only by the
+allocation-head `RuntimeSupervisor`. Rank zero and every `NodeSupervisor` must
+reject ownership of or attestation for that gateway. After the deployment has
+published typed current-generation route/target evidence sufficient to
+configure ingress, the outer supervisor starts and supervises the gateway and
+then evaluates the final readiness predicate.
+
+Internal Serve readiness is component evidence only. Do not introduce or
+publish a deployment-level `SERVE_READY` result that a client could confuse
+with READY. The existing `DEPLOYING -> VALIDATING -> READY` sequence is
+authoritative: route/replica evidence permits entry into `VALIDATING`; gateway
+health, route discovery, exact receipts, and per-model inference canaries
+through the canonical advertised endpoint are checked there; only one final
+READY transition is persisted.
+
+For this first-release envelope, HAProxy is the sole production gateway and
+trusted allocation/internal-network exposure is the sole production exposure.
+`GatewayPlan` and `ExposurePlan` are distinct schemas. `GatewayPlan.kind` names
+an actual managed gateway implementation and has no `none` or `direct` value.
+`ExposurePlan.mode` is one of `PROXIED_INTERNAL`, `DIRECT_VALIDATION`, or a
+future separately gated mode and carries the canonical advertised endpoint and
+security policy. Production requires `GatewayPlan(kind=HAPROXY)` with
+`PROXIED_INTERNAL`. `DIRECT_VALIDATION` requires `gateway: null` and
+`ScaleEnvelope.validation_mode = true`; every other null/mode combination is a
+compile error.
+
+The legacy value `proxy_config.type: none` is not a production gateway. During
+migration the legacy adapter may map it only to explicit
+`DIRECT_VALIDATION`; it must never be the production default or silently make
+the gateway predicate vacuous. An eval/client `dest=direct` selects a benchmark
+client path and cannot redefine deployment exposure. A validation-mode direct
+plan must name the allocation-reachable Serve endpoint as its canonical
+advertised endpoint and still prove route health, per-model canaries, bind and
+security policy, request limits, and revocation. Claiming direct exposure in a
+future production envelope requires an explicit S00/ADR-000 expansion and its
+own WP7/WP12 evidence.
+
+An absent/unhealthy selected gateway or a canary that bypasses the declared
+endpoint blocks READY. After READY, unexpected gateway-process exit revokes
+readiness and transitions immediately to terminal `FAILED`, followed by bounded
+cleanup and a nonzero scheduler-visible result. If the gateway process remains
+alive but its health, route, or canary validation fails, the state moves
+`READY -> VALIDATING` for one bounded recovery interval. Successful
+revalidation may atomically persist READY again for the same generation;
+deadline expiry transitions to `FAILED`, followed by bounded cleanup and a
+nonzero result. `DEGRADED` is not an implicit fallback in this pass. Tests must
+prove these transitions, that rank-owned `GLOBAL` gateway observations are
+rejected, and that no marker, internal Serve health response, or eval routing
+flag advances deployment READY.
+
+**Listener bind, initial registration, reconnect, and deadlines**
+
+The authenticated control listener is mandatory. Its implementation may retry
+a transient bind/collision within a bounded pre-launch operation, but ultimate
+bind failure terminates the generation before any rank is launched. Launcher
+exit aggregation is redundant failure evidence, never a degraded substitute
+for the channel.
+
+A bounded initial-registration deadline starts when `RankLauncher` starts.
+Every planned rank must authenticate with the expected rank, node, deployment,
+generation, and plan identity and publish its supervisor receipt. A
+`NodeSupervisor` may exist to register, but it must not start Ray or another
+long-lived local child until the outer supervisor has accepted every planned
+rank and issued the typed start command. Transient transport failures may retry
+with bounded backoff inside that deadline. Invalid unauthenticated or
+pre-registration traffic closes and audits only that untrusted session; the
+expected rank remains missing and the registration deadline governs global
+failure, preventing a trivial bad-MAC denial of service. After a planned rank
+has authenticated, an identity, schema, sequence, or other deterministic
+contract violation by that session is rank-fatal and therefore
+generation-fatal. If one required rank is absent at the deadline, the
+generation is terminal, the launcher is terminated, and the scheduler-visible
+result is nonzero; a late initial registration cannot revive it. A rank is not
+counted as registered and cannot receive START until its complete initial
+snapshot and required supervisor receipt are accepted.
+
+After successful registration, EOF/reset establishes `loss_time` immediately;
+silent loss establishes it at
+`last_accepted_heartbeat_arrival + lease_timeout_s`. At `loss_time`, remove the
+rank's readiness contribution immediately. Recovery is allowed only until
+`loss_time + reconnect_grace_s` for the same planned
+rank/node/plan/generation and a valid current or explicitly accepted
+replacement instance. The session remains recovering until a complete
+current-generation snapshot is accepted; no incremental traffic contributes
+to readiness first. Grace expiry is terminal and a later reconnect is rejected.
+On loss of the outer-supervisor lease, each node applies the same loss/grace
+anchors; after grace expires it begins draining/terminating local children and
+must finish within `watchdog_cleanup_deadline_s`. Implementations must not add
+the lease timeout and reconnect grace twice or kill children before the
+declared recovery interval ends.
+
+`GOODBYE` is normal only after the sending `NodeSupervisor` has received an
+acknowledged `DRAIN`/`STOP` command. Completion of a finite child component does
+not authorize its long-lived rank control session to disappear. A future plan
+may declare the control-session sender itself finite only through a new typed
+session-lifecycle contract and corresponding state-machine tests; this pass has
+no such exception. A normal GOODBYE closes that session without creating a new
+failure, while readiness remains revoked during intentional shutdown. An
+unsolicited `GOODBYE` from a required rank is an explicit rank loss and is
+terminal; it is not a clean-success shortcut.
+
+The immutable resolved plan contains positive
+`registration_deadline_s`, `reconnect_grace_s`, `heartbeat_interval_s`,
+`lease_timeout_s`, `snapshot_assembly_deadline_s`,
+`watchdog_cleanup_deadline_s`, `max_frame_bytes`, `max_snapshot_chunks`,
+`max_snapshot_bytes`, and `max_snapshot_items` values selected through its
+`SiteProfile` and `ScaleEnvelope`; runtime environment variables cannot
+silently override them.
+`lease_timeout_s` must cover at least three planned heartbeat intervals.
+Production Aurora values are evidence-derived from S01/WP12 at the claimed
+tiers and must not be guessed from 256-node folklore. This does not block code:
+unit/component tests inject short deterministic values, while a production
+profile remains unqualified until measured values are recorded.
+
+Acceptance tests cover: no rank launch after bind failure; isolation of
+unauthenticated bad-MAC traffic; generation-fatal violation by an authenticated
+rank; delayed registration inside the deadline; terminal failure for one
+missing rank; no `all_registered`/START or Ray child before every initial
+snapshot and supervisor receipt; immediate readiness revocation on disconnect;
+the exact loss/grace/cleanup clock anchors; rejection of incrementals before a
+reconnect snapshot; recovery inside grace; terminal failure after grace;
+expected shutdown `GOODBYE` versus unsolicited active-rank `GOODBYE`; and
+bounded node-local watchdog cleanup.
+
+**Canonical compiled-plan family and identity**
+
+`src/exaserve/plan/` is the sole public contract namespace. Its current
+implementation is a migration scaffold and may be refactored or replaced
+internally, but the worker must extend that namespace rather than elevate
+`eval/lib/models.py::RunPlan` or create a fourth parallel contract.
+
+The canonical composition is:
+
+- `SiteProfile` is a separate immutable, versioned, content-addressed artifact
+  containing site capabilities and defaults: scheduler/backend and launcher
+  capabilities, filesystem semantics, accelerator/vendor inventory, network
+  boundary, environment/profile facts, and measured default control limits. It
+  contains neither a particular queue/allocation request nor secret values. It
+  has a stable human-readable ID and a canonical content hash.
+- `SchedulerPlan` is the immutable per-run allocation request: selected backend,
+  account/queue references, requested nodes/resources, walltime, reservation or
+  logical-subset topology, and scheduler policy. It is validated against the
+  SiteProfile but is not itself a site capability database.
+- `DeploymentPlan` is the immutable serving/resource contract. It contains the
+  SiteProfile ID/hash, compatibility-profile and manifest hashes, `ModelPlan`s,
+  optional `GatewayPlan`, required `ExposurePlan`, serving resource demand,
+  logical topology/receipt requirements, and resolved control/readiness limits.
+  It does not contain
+  queue/account/walltime or allocation hostnames.
+- shared `RunPlan` is an immutable eval/ClientLab wrapper containing the exact
+  canonical `DeploymentPlan`, one `SchedulerPlan`, and semantic workload,
+  trace/client, and artifact-policy subplans. Core serving consumes
+  `DeploymentPlan` directly; a serving-only invocation does not manufacture an
+  empty-workload mega-`RunPlan`. Eval and ClientLab must embed the same compiled
+  `DeploymentPlan` object/hash and may not reconstruct or reinterpret it.
+- `AllocationBinding` and current `ComponentInstanceBinding`s are
+  generation-scoped runtime-state artifacts, not semantic plans. They bind the
+  stable rank/replica slots to allocation hostnames and live process/actor
+  instances as described above.
+
+Hash boundaries are exact:
+
+- `site_profile_hash` covers canonical SiteProfile semantic content;
+- `deployment_plan_hash` covers canonical DeploymentPlan content including
+  `site_profile_hash`, excluding only its own hash;
+- `run_semantic_hash` covers the embedded `deployment_plan_hash`,
+  `SchedulerPlan`, workload, trace/client content references, and artifact
+  policy; and
+- `allocation_binding_hash` and a separate `run_provenance_hash` cover
+  generation/allocation binding and execution evidence such as resolved input
+  paths, exact command, environment, timestamps, and output locations. Those
+  values never perturb the semantic plan hashes.
+
+Runtime identity persists deployment ID, generation, deployment-plan hash,
+SiteProfile hash, allocation-binding hash, and optional run-semantic/provenance
+hashes. Restarting identical intent increments generation and produces a new
+allocation binding without changing semantic plan hashes. No consumer derives
+a competing plan or generation identity.
+
+All schemas are versioned and deeply immutable. Canonical maps have stable
+ordering, secrets are references, unknown fields and invalid coercions fail
+before allocation, and every runtime-significant accepted legacy/eval field is
+either represented or rejected with its full path. Legacy loaders remain only
+as one-way adapters that invoke this compiler once; WP13 removes direct YAML
+interpretation and mutable parallel plan dataclasses. Tests must prove that one
+input produces byte-identical deployment-plan hashes in CLI/core/eval/ClientLab,
+that a runtime-significant serving change alters `deployment_plan_hash`, a
+semantic workload/scheduler change alters `run_semantic_hash`, SiteProfile drift
+alters its hash and the bound deployment hash, and path/timestamp/allocation
+changes alter only the binding/provenance hashes.
+
+**Ledger fields, approval, and status adjudication**
+
+Every `FINDINGS.yaml` record uses this exact shape and every key is present:
+
+```yaml
+id: <unique non-empty string>
+source: <non-empty string>
+severity: <blocker | high | medium-high | medium | low | info>
+invariant: <non-empty string>
+primary_work_package: <WP0..WP13>
+affected_regions: [<repository path or symbol>, ...]
+acceptance_tests: [<test/acceptance ID>, ...]
+status: <OPEN | IN_PROGRESS | FIXED | REPLACED | ACCEPTED_LIMIT |
+         UNSUPPORTED | EXTERNAL_BLOCKER | OUT_OF_PRODUCTION_SCOPE>
+decision: <non-empty adjudication and missing proof, if any>
+evidence: [<stable repository/artifact/test/ADR reference>, ...]
+fallback: <selected fallback, or "none — <truthful reason>">
+residual_risk: <bounded risk, or "none — <truthful reason>">
+support_impact: <non-empty production/support effect>
+owner: <work owner; not approval>
+approval: null
+revisit_condition: <non-empty trigger/condition>
+```
+
+For `ACCEPTED_LIMIT`, replace `approval: null` with exactly:
+
+```yaml
+approval:
+  approver_id: <actual user/product-owner identity>
+  approved_at: <RFC3339 UTC timestamp>
+  evidence_ref: <stable repository path, issue/PR URL, or durable message ID>
+  scope: <exact accepted limit and production envelope>
+```
+
+`affected_regions`, `acceptance_tests`, and `evidence` are YAML lists, never
+semicolon/comma-encoded scalar prose. `affected_regions` is non-empty.
+`acceptance_tests`/`evidence` may be empty only for `OPEN` or `IN_PROGRESS` when
+`decision` explicitly names the missing test/proof, or for a valid exceptional
+disposition whose reason and durable decision evidence are recorded. Empty
+strings and unexplained `N/A` are invalid.
+
+`owner` is the work owner, not approval. A worker may propose the block but may
+not fill `approver_id` or claim approval without the linked affirmative
+decision. A name/date without evidence is insufficient. Changing the decision,
+support impact, scope, or production envelope invalidates the approval. An
+approval also cannot weaken a mandatory invariant in this plan; that requires
+an explicit plan amendment.
+
+Schema repair and status adjudication are separate. Populate missing fields
+truthfully, then re-evaluate the disposition against the complete invariant and
+acceptance evidence. `FIXED`/`REPLACED` may remain only with stable linked proof;
+otherwise use `OPEN` when no work/proof is underway or `IN_PROGRESS` when it is.
+An unapproved `ACCEPTED_LIMIT` is invalid and must be reopened until a named
+user/product owner approves it or another valid disposition is demonstrated.
+Exceptional statuses require meaningful support impact and revisit condition.
+Do not mechanically reopen a substantively proven fix solely because metadata
+was missing, and do
+not preserve a closure count with invented, empty, or unexplained `N/A`
+content.
+
+Add a repository validator used by the hermetic suite/CI to enforce this schema,
+conditional status rules, unique IDs, linked acceptance IDs, and evidence-path
+existence where local. Normalize and re-adjudicate all records before using
+ledger counts as a work queue or completion claim. In particular, `TD-CONSTS`
+cannot remain `ACCEPTED_LIMIT` on the rationale that SiteProfile is cosmetic;
+SiteProfile is mandatory here and the finding must be reopened until its
+invariant is implemented or this canonical plan is explicitly amended.
 
 ### 3.3 Normative code ownership
 
@@ -345,9 +838,10 @@ second orchestration layer:
 | `src/exaserve/control/readiness.py` | Pure indexed readiness projection/predicate over plan plus observations; no process launch or log reads |
 | `src/exaserve/deployment.py` | Callable `DeploymentManager` for Serve prepare/deploy/observe/drain/stop; typed exceptions; lazy Ray/engine import only after activation; no CLI or scheduler submission |
 | `src/exaserve/compat/{profile,activator,receipt}.py` | Compatibility selection, pre-import environment construction, manifest/capability verification, and receipt schemas |
-| `src/exaserve/driver.py` | Thin adapter from compiled plan to the outer supervisor and final exit code; no marker parsing or duplicate child registry |
+| `src/exaserve/launcher.py` | Import-light composition root: load/verify the precompiled plan artifact or compile once through the direct/manual legacy adapter, activate compatibility, construct `RuntimeSupervisor(plan)` in-process, and return its final exit code; never launch the shell as a child after cutover |
+| `src/exaserve/driver.py` | Temporary one-way legacy invocation/config adapter into the shared compiler/launcher; no plan reinterpretation, marker parsing, lifecycle ownership, or duplicate child registry; remove or reduce to a compatibility alias at WP13 |
 | `src/exaserve/server.py` | Serving/application/replica definitions consumed by `DeploymentManager`; no cluster launch, global persistence, or gateway ownership |
-| `src/exaserve/resources/launch_cluster.sh` | Temporary allocation-head environment/preflight adapter that ends with one `exec` of the outer Python supervisor; the supervisor launches the rank entry point through MPI/srun; remove the shell at WP13 if it adds no required site boundary |
+| `src/exaserve/resources/launch_cluster.sh` | Temporary allocation-head environment/preflight adapter that ends with one `exec` of `exaserve.launcher`; the resulting Python process constructs the outer supervisor, which launches the rank entry point through MPI/srun; remove the shell at WP13 if it adds no required site boundary |
 
 Core, eval, and ClientLab consume the same plan/status APIs and may not import
 transport internals. Shell and Python compatibility-marker consumers are
@@ -359,6 +853,7 @@ The process-boundary decisions are likewise explicit:
 | Boundary | Required production form | Lifecycle/readiness evidence |
 |---|---|---|
 | ExaServe CLI -> supervisor | In-process typed plan call | Return/typed exception and durable terminal status |
+| Scheduler submission -> in-allocation launcher | Permission-scoped canonical serialized RunPlan/DeploymentPlan reference plus expected hashes; load/verify, never rebuild source YAML in the job | Persisted plan/provenance identity and hash mismatch failure before rank launch |
 | Supervisor -> Ray head/worker daemons | One node-owned supervised subprocess per daemon; a public CLI is acceptable when no stable equivalent library lifecycle exists; argument vector, never shell text | PID/exit plus S02-selected Ray membership/resource observation; stdout is diagnostic only |
 | Supervisor -> Serve deployment | Direct, lazy-imported `DeploymentManager` API by default | Typed deployment/replica/route observations; exactly one local IPC child is the proven fault-isolation fallback |
 | Supervisor -> external gateway | Globally owned supervised subprocess | PID/exit, official health or real canary, route/capability check |
@@ -474,27 +969,88 @@ order. First draft S00's provisional envelope; then perform S03's full inventory
 and build only the import-light minimal activator harness needed for experiments;
 then prove S01's rank channel/topology; then run S02 and the full cross-role S03
 proofs; finally reconcile all four ADRs and repeat any affected proof. None of
-the four contracts freezes until their plan/profile hashes, role set, transport,
-readiness inputs, and support envelope agree.
+the four technical verdicts passes until their plan/profile hashes, role set,
+transport, and readiness inputs agree. Scope-dependent release values then
+follow the conditional approval rule below; only generic mechanics may freeze
+under its narrow pending-scope status.
+
+Product-scope approval is a separable authority gate, with these exact packet
+semantics:
+
+1. S01-S03 and the technical parts of S00 must still meet every proof above;
+   missing product approval does not excuse, downgrade, or falsely close a
+   technical spike. The historical 2026-08-05 spikes are partial evidence under
+   the strengthened contract, so P00 is currently reopened until the ADRs name
+   and close their remaining proof slices.
+2. After all technical P00 gates pass, but while the 64-versus-128/256 decision
+   is still unapproved, P00 records exactly
+   `TECHNICAL_PASS_SCOPE_PENDING` rather than `PASS`. This status satisfies the
+   P01 dependency only for P01-P05 work that is independent of the chosen
+   ceiling: generic schemas/interfaces, explicit scope fields and validators,
+   plan-producing-path convergence, lifecycle/readiness mechanics, and
+   lower-scale correctness tests.
+   Record it in ADR-000 and the migration log as a **program-gate marker**; it
+   is not a `FINDINGS.yaml` status and must never be written into a finding's
+   `status` field.
+3. Under `TECHNICAL_PASS_SCOPE_PENDING`, tests may use an explicitly labelled
+   candidate-64 fixture, but the worker must not publish/default a production
+   `qualification_target`, freeze a value-bearing release SiteProfile, close or
+   reclassify 128/256 scale findings, publish a support claim, or begin P06
+   qualification/cutover. Those actions require the approval block in §3.2.1
+   and a full P00 `PASS`.
+4. If the owner selects a larger ceiling, reopen S00 and every affected P01-P05
+   artifact or assumption before it freezes; generic contract work that remains
+   valid need not be discarded. Thus pending approval alone does not block
+   architecture implementation, but it remains an explicit release gate.
 
 #### S00 — Initial production envelope and scale topology
 
 Resolve the first release's scheduler/site, vendor, engine, gateway, exposure,
 request mode, node count, and replica count as independent support dimensions.
-Unless the user explicitly expands it, the provisional candidate is Aurora
-PBS/Intel XPU with vLLM, a trusted allocation/internal-network boundary, and
-HAProxy as the production gateway candidate. SGLang, public Internet exposure,
-Slurm, CUDA, and ROCm remain gated claims. Streaming and every scale tier remain
-outside the claimed support matrix pending their own capability/scale gates;
+For this pass the target combination is Aurora PBS/Intel XPU with vLLM,
+non-streaming requests, a trusted allocation/internal-network boundary, and
+HAProxy as the sole production gateway. These are target dimensions, not a
+support claim until their required gates pass. SGLang, public Internet
+exposure, direct/no-gateway production exposure, streaming, Slurm, CUDA, and
+ROCm remain gated or rejected as recorded in ADR-000 and the support matrix;
 `UNSUPPORTED` is assigned only after a failed proof or documented blocker.
 
-Decide whether 256-or-more-node service is a release requirement. A bounded
-readiness coordinator does not remove Ray Serve's measured internal `R*N^2`
-actor-handle traffic. If the required envelope exceeds the proven single-Ray-
-cluster topology, test and select among a maintained upstream/patch-series fix,
-sharded Ray clusters/control planes, another topology, or an explicit lower
-supported ceiling. A Ray fork or sharded-control-plane program is new scope and
-must be re-estimated before WP1; it is not hidden inside WP5.
+The technically selected candidate for this pass is a
+`qualification_target = 64` fixture: qualify the final architecture through 4,
+16, and 64 nodes, while 128/256 and larger tiers remain outside the current
+technical proposal. The generic production-mode validator rejects a node count
+above the target in the explicitly supplied, approved envelope; before approval
+there is no released default/value-bearing production SiteProfile, and only an
+explicitly labelled candidate-64 fixture may exercise that rule. Because prior
+project material discussed 256-node production behavior, freezing the reduced
+release envelope and reclassifying its larger-tier findings requires an
+explicit durable user/product-owner approval under §1 and §3.2.1. No worker may
+infer or author that approval. Until it is recorded, 64 is the
+implementation/qualification candidate and the support-scope decision remains
+a release/ledger gate, not a reason to postpone lower-scale correctness work or
+to run 256 before it.
+A bounded readiness coordinator does not remove Ray Serve's measured internal `R*N^2`
+actor-handle traffic. Expanding the envelope beyond 64 requires an explicit
+user/product-owner scope decision, a reopened S00, and a new estimate selecting
+among a maintained upstream/patch-series fix, sharded Ray clusters/control
+planes, another proven topology, or a lower ceiling. A Ray fork or sharded-
+control-plane program is new scope and is not hidden inside WP5. Historical
+128/256 evidence remains useful context but is not current qualification and
+cannot decide the pending release-scope approval.
+
+After the 64-node scope receives durable approval, ledger adjudication follows
+that boundary instead of preserving “256-node evidence owed” as a current-
+release blocker. Before approval, do not close or reclassify a scale record
+solely by assuming the narrower scope. If a record concerns behavior that
+is also claimed at 64 or below, prove its invariant on the final architecture at
+the required lower tiers. If it concerns only an unclaimed 128/256 or streaming
+combination, first make the compiler/support matrix reject that combination,
+then use `OUT_OF_PRODUCTION_SCOPE` for a genuinely optional never-advertised
+tier or `UNSUPPORTED` for a rejected capability with a demonstrated defect.
+Record support impact and the explicit S00-expansion revisit condition. Do not
+mark the underlying mechanism `FIXED` merely because the larger tier is
+excluded, and—after the scope is approved—do not leave it `IN_PROGRESS` solely
+awaiting hardware outside that approved envelope.
 
 Deliverable: `doc/hardening/decisions/ADR-000-production-envelope.md`.
 
@@ -575,15 +1131,18 @@ decisions because WP1 must encode them in the immutable plan schema.
 
 | Packet | Work | May start when | Required checkpoint |
 |---|---|---|---|
-| P00 | WP0 baseline, ledger, hermetic test-environment repair, S00-S03, and required one-/two-node early compute proofs | Immediately | Reproducible environment receipt, every current failure identified, four ADR verdicts backed by the required proofs |
-| P01 | WP1 contracts plus WP2 atomic state/artifacts | P00 gates pass | Canonical immutable plans and crash-safe state tests |
-| P02 | WP3 compatibility profiles and process receipts | P01 contract stable; S03 early proof already passed in P00 | Every process role proves one profile or fails closed; the early spawned-engine/two-node proof is retained as a regression |
-| P03 | WP4 supervisor plus WP5 readiness state machine | P02 activation proven; S01/S02 early proofs already passed in P00 | No log-controlled success; fake and leased two-node lifecycle/failure/readiness regressions pass |
+| P00 | WP0 baseline, ledger, hermetic test-environment repair, S00-S03, and required one-/two-node early compute proofs | Immediately | Reproducible environment receipt, every current failure identified, and four ADR verdicts backed by the required proofs. If only product-scope approval is absent after all technical gates pass, record `TECHNICAL_PASS_SCOPE_PENDING`; full `PASS` additionally requires that approval. |
+| P01 | WP1 contracts plus WP2 atomic state/artifacts, including every core/eval/ClientLab plan-producing path | P00 technical gates pass: either full `PASS` or the narrowly defined `TECHNICAL_PASS_SCOPE_PENDING` status | Canonical immutable plans, byte-identical DeploymentPlan hashes across producers, and crash-safe state tests; no parallel plan interpretation remains. With scope pending, only generic mechanics/candidate fixtures freeze, subject to §4.2. |
+| P02 | WP3 compatibility profile plus v2 receipt schemas/producers, local outer-supervisor ingress for GLOBAL receipts, and bounded node-local ingress for rank receipts | P01 contract and allocation-binding identity stable; the strengthened S03 early proof passed in the current P00 technical gate | Profile/materialization and exact SELF/SUPERVISOR receipt producers pass hermetic/spawn tests; this packet does **not** claim production receipt/readiness closure before P03 wiring |
+| P03 | WP4 supervisor/control-session state machine plus WP5 readiness, integrating remote WP3 receipts over the authenticated channel and GLOBAL receipts through the local outer-supervisor validator | P02 schema/producers stable; the strengthened S01/S02 early proofs passed in the current P00 technical gate | Listener/REGISTER/initial-SNAPSHOT/acknowledgment/START/reconnect is mandatory; every exact required instance proves one profile through its allowed ingress; no Ray collector/log/file authority remains; fake and leased two-node lifecycle/failure/readiness regressions pass |
 | P04 | WP6 staging, WP7 gateways/security, WP8 schedulers | P03 component contract stable | Transaction, capability, port, submission, and recovery tests pass |
-| P05 | WP9 eval/ClientLab, WP10 operations, WP11 release gates | P04 status/plan APIs stable | Consumers share contracts; packaged hermetic suite and CI are green |
-| P06 | WP12 platform proof and WP13 cutover | All lower gates pass | Supported matrix evidence, legacy deletion, closed ledger, final audit |
+| P05 | WP9 eval/ClientLab runtime status/supervision/scheduler/operations migration, WP10 operations, and WP11 release gates | P04 status/plan APIs stable | Runtime consumers use the P01 plan identities, temporary compile adapters are removed, and the packaged hermetic suite/CI are green |
+| P06 | WP12 platform proof and WP13 cutover | All lower technical gates pass, product-scope approval is durable, and P00 has full `PASS` rather than `TECHNICAL_PASS_SCOPE_PENDING` | Supported matrix evidence, legacy deletion, closed ledger, final audit |
 
-Packets are dependency groups, not permission to make a giant diff. Only slices
+Packets are dependency groups, not permission to make a giant diff. P02 and P03
+are one vertical co-design boundary: P02 may freeze producers/schema, but no
+finding whose invariant requires authenticated delivery or READY may close until
+the P03 production path consumes them. Only slices
 inside the same packet may overlap after their shared interfaces are frozen;
 later packets do not “parallelize cleanly after WP0.” Use the logical checkpoints
 in section 10 and keep the tree testable after each slice.
@@ -597,8 +1156,8 @@ not replace them with prose:
 |---|---|---|
 | AC-TST-01 | The legacy-import policy test passes with and without an executable `rg`; its implementation uses no undeclared host binary. `eval/tests`, its individual control-plane module, and child subprocess tests collect from the documented installed/source contract. Plugin set and fixed/random seed are recorded. | WP0/WP11 |
 | AC-SUP-01 | A fake launcher and a leased two-node run prove explicit per-rank ownership. Worker Ray-child death, worker-supervisor death, rank nonzero, head-child death, cancellation, and partial start each preserve the first cause, produce one terminal state and nonzero scheduler-visible status, and finish bounded idempotent cleanup. No head process signals or reaps an unowned remote PID. | WP0/WP4/WP12 |
-| AC-CTL-01 | The authenticated rank channel rejects wrong deployment/plan hash/generation, rank/node mismatch, bad MAC, oversized/unknown messages, stale sequence, and duplicate non-idempotent commands. Disconnect removes readiness; reconnect requires a full snapshot; supervisor loss triggers bounded node-local cleanup. MPI exit and the typed event independently produce a nonzero global failure, and stdout text cannot change state. | WP0/WP4/WP12 |
-| AC-COMP-01 | A profile manifest inventories every patch and affected role. One-node spawn and two-node tests prove matching profile/version/hash/capability receipts from every required managed role and supervisor attestation for allowed external daemons; missing, stale, or mismatched receipts prevent READY. No test edits an installed package in place. | WP0/WP3/WP12 |
+| AC-CTL-01 | Invalid unauthenticated traffic is session-local while a deterministic violation by an authenticated planned rank is rank/generation-fatal. The channel rejects wrong deployment/plan/binding hash/generation, rank/node mismatch, bad MAC, oversized/unknown messages, stale sequence, and duplicate non-idempotent commands. REGISTER does not count until a bounded replacement SNAPSHOT plus supervisor receipt and its matching idempotent SNAPSHOT_ACCEPTED command/result round trip are atomically accepted; START waits for all ranks. Disconnect uses the specified loss/grace clocks, removes readiness, and reconnect requires a bounded full replacement snapshot; expected shutdown GOODBYE is distinct from unsolicited loss; supervisor loss triggers bounded node-local cleanup. MPI exit and the typed event independently produce a nonzero global failure, and stdout text cannot change state. | WP0/WP4/WP12 |
+| AC-COMP-01 | A profile manifest inventories every patch and affected role. One-node spawn and two-node tests prove v2 receipts with exact requirement/instance and plan/profile/manifest/allocation-binding identity from every required managed role, plus supervisor attestation only for individually identified allowed external daemons. Remote/rank-owned receipts travel only over the authenticated channel; GLOBAL receipts enter only through the local in-process outer-supervisor authority and the same strict validator/global writer. Duplicate-plus-missing exact sets, missing self-report, stale/mismatched receipt, or a targeted patch marked NOT_REQUIRED prevent READY. No test edits an installed package in place. | WP0/WP3/WP4/WP12 |
 | AC-RDY-01 | For each READY conjunct, a test withholds or stales only that observation and proves the deployment remains non-ready with a named blocker. A gateway/process health response alone, a one-replica canary, a log marker, or prior-generation status can never satisfy the predicate. Post-READY loss performs the declared state transition. | WP0/WP5/WP7/WP12 |
 | AC-RDY-02 | Synthetic high-cardinality runs prove O(K) retained state and full reconciliation for K planned identities, O(1) indexed update per ordinary observation, at-least-once deduplication, stale-instance/generation rejection, bounded heartbeat traffic, exact blocker reporting, atomic READY persistence before marker rendering, and READY revocation after required lease expiry. No producer performs fleet-wide polling. | WP5/WP12 |
 | AC-PLAN-01 | Omitted scheduler size inherits deployment size; an explicit no-matrix mismatch and explicit targeted/derived matrix mismatch are rejected; an untargeted deployment matrix synchronizes; zero remains invalid; rendered allocation and advertised deployment agree; every dispatch arm is validated. | WP1/WP9 |
@@ -609,7 +1168,7 @@ not replace them with prose:
 | AC-PP-01 | PP defaults to one replica, retains a feasible explicit count, and proves disjoint node-pinned shard-aware bundles. The non-shard multi-replica path is explicitly gated/warned, and the private multi-app call is removed or capability/version guarded. | WP1/WP3/WP12 |
 | AC-PROXY-01 | Proxy evidence classifies `healthy`, `degraded`, and `process_dead` separately. A death captures exit code/signal/log before causal assignment. Bounded-client no-delay on/off runs record retransmits, connections, CPU, process state, and unique run IDs. | WP4/WP7/WP12 |
 | AC-INST-01 | Static call search proves the legacy proxy profiling hook is absent or unreachable; instrumentation has exactly one documented output owner and emits an atomic activation receipt. | WP3/WP10 |
-| AC-SCALE-01 | ADR-000 distinguishes the user-approved qualification target from the evidence-derived supported maximum for each site/vendor/engine/gateway/request-mode/node/replica envelope. ExaServe readiness-event processing is linear in planned components/events in a synthetic high-cardinality test, with event/message/canary counts reported against plan size. Logical 16/64/128/256 gates remain distinct; any larger-allocation subset proves isolation and records both sizes. Scale above the accepted single-control-plane envelope is rejected unless its separate topology gate passed. | WP0/WP5/WP12 |
+| AC-SCALE-01 | ADR-000 distinguishes the explicitly product-owner-approved qualification target from the evidence-derived supported maximum for each site/vendor/engine/gateway/request-mode/node/replica envelope. ExaServe readiness-event processing is linear in planned components/events in a synthetic high-cardinality test, with event/message/canary counts reported against plan size. Required logical tiers remain distinct; the proposed ladder ends at 64 and cannot freeze until its scope approval is durably linked, while 128/256 identities remain reserved. Any larger-allocation subset proves isolation and records both sizes. Scale above the approved/proven single-control-plane envelope is rejected unless its separate topology gate passed. | WP0/WP5/WP12 |
 
 The test-policy, fake-supervisor, scheduler, telemetry, stats, observability,
 synthetic scale, and mocked distribution checks are login-node-safe when kept
@@ -672,7 +1231,8 @@ driver, server, evaluation, and ClientLab.
 Actions:
 
 1. Define versioned schemas for `DeploymentPlan`, `ModelPlan`, `GatewayPlan`,
-   `SchedulerPlan`, `RunPlan`, `SiteProfile`, and `ScaleEnvelope`. The envelope
+   `ExposurePlan`, `SchedulerPlan`, `RunPlan`, `SiteProfile`, and
+   `ScaleEnvelope`. The envelope
    independently names scheduler/site, vendor/accelerator, engine/profile,
    gateway/exposure, request/streaming mode, node range, replica/model limits,
    and the validation tier required for each combination; it is not a single
@@ -680,19 +1240,25 @@ Actions:
    `qualification_target` from the evidence-derived `supported_max`; only a
    validation-mode plan may exceed the latter, and a passing lower tier never
    implies support for a higher tier.
-2. Separate user intent from derived values. The compiler produces a new,
+2. Define the generation-scoped `AllocationBinding`,
+   `ComponentInstanceBinding`, and `RunProvenance` contracts separately from
+   semantic plans. Enforce the responsibility and hash boundaries in §3.2.1:
+   SiteProfile capabilities/defaults; SchedulerPlan allocation request;
+   DeploymentPlan serving demand; optional eval/ClientLab RunPlan wrapper;
+   allocation/provenance identity never folded into semantic hashes.
+3. Separate user intent from derived values. The compiler produces a new,
    immutable plan; it never rewrites the source YAML.
-3. Make coercion strict: booleans, numbers, enums, ports, paths, node counts,
+4. Make coercion strict: booleans, numbers, enums, ports, paths, node counts,
    model identities, and environment variables fail with path-specific errors.
-4. Give models an explicit stable identity distinct from display name and model
+5. Give models an explicit stable identity distinct from display name and model
    repository path. Detect collisions before submission.
-5. Represent secrets by references, not serialized values, and redact them from
+6. Represent secrets by references, not serialized values, and redact them from
    plans, logs, commands, and status artifacts.
-6. Add a legacy-config adapter so existing inputs can be compiled once into the
+7. Add a legacy-config adapter so existing inputs can be compiled once into the
    new contract during migration.
-7. Make core, eval, and ClientLab import the shared schemas instead of creating
+8. Make core, eval, and ClientLab import the shared schemas instead of creating
    parallel interpretations.
-8. Validate `scheduler.nodes` against `deployment.num_nodes` after defaults and
+9. Validate `scheduler.nodes` against `deployment.num_nodes` after defaults and
    matrix derivation. Permit divergence only through a named, typed reservation
    topology whose resource and rate semantics are explicit.
 
@@ -716,11 +1282,15 @@ Actions:
    submission and concurrent writers.
 3. Define a versioned `DeploymentStatus` and `RunStatus` with explicit lifecycle,
    timestamps, reason codes, component observations, and provenance.
-4. Record the source snapshot policy explicitly: working tree, committed HEAD,
+4. Atomically persist immutable `AllocationBinding` before listener/rank launch,
+   append/current `ComponentInstanceBinding` transitions through the one state
+   writer, and persist `RunProvenance` separately from semantic plans. Reject a
+   binding whose plan/site/generation/allocation identity disagrees.
+5. Record the source snapshot policy explicitly: working tree, committed HEAD,
    or packaged artifact. Never silently substitute committed HEAD.
-5. Make result completeness manifest-based: expected shards/files/checksums must
+6. Make result completeness manifest-based: expected shards/files/checksums must
    be satisfied before a run is marked successful.
-6. Use content identity for traces and generated inputs; write them atomically
+7. Use content identity for traces and generated inputs; write them atomically
    and make reuse safe under concurrent runs.
 
 Fallback: on filesystems whose rename or locking semantics prove inadequate,
@@ -774,13 +1344,14 @@ Actions:
     the base and patch artifacts, constructs the role environment, and then
     imports/execs the role. Add a clean-interpreter test proving `ray`,
     `ray.serve`, `vllm`, and `sglang` are not imported before verification.
-13. Define `CompatibilityReceipt` with schema version, deployment/generation,
-    plan/profile/manifest hashes, role and logical/instance identity, owner/node,
-    PID or actor identity, executable hash, observed package/source hashes,
-    per-patch activation/postcondition results, capabilities, attestation type,
-    and timestamp. It contains no secret. Receipts travel through the structured
-    observation channel and the global writer materializes them; processes do
-    not race to write independent shared-filesystem receipt files.
+13. Implement the exact version-2 `CompatibilityReceipt` schema and validation
+    rules in §3.2.1. It contains no secret. Remote/rank-owned receipts travel
+    through the structured observation channel; GLOBAL receipts enter only
+    through the local in-process outer-supervisor authority. Both use the same
+    strict validator/global writer, and processes do not race to write
+    independent shared-filesystem receipt files. WP3 proves producers plus
+    their allowed local ingress; P03/WP4 is the required production integration
+    gate before receipt/readiness findings close.
 
 Fallback ladder:
 
@@ -800,8 +1371,10 @@ activated before import, and covered by role receipts plus semantic probes. A
 runtime monkey patch is never a parallel default tier; it is a per-patch last
 resort with an exact version/symbol guard and fail-closed self-test.
 
-Exit gate: one activation path reaches all process types; unknown versions and
-partial activation cannot reach READY.
+Exit gate: one activation path and v2 receipt producer reaches every process
+type in hermetic/spawn proofs; unknown versions and partial activation are
+rejected. Production authenticated delivery and READY closure remain gated on
+the P03 integration specified in §4.3.
 
 ### WP4 — Replace subprocess sprawl with a runtime supervisor
 
@@ -871,10 +1444,17 @@ Actions:
 1. Implement an explicit deployment state machine:
    `PLANNED -> STAGING -> CLUSTER_STARTING -> DEPLOYING -> VALIDATING -> READY ->
    DRAINING -> STOPPED`. `FAILED` and `CANCELLED` are distinct terminal outcomes
-   reachable from every active state. Add `DEGRADED` only if it is an explicit
-   product mode with allowed operations and recovery rules. Specify post-READY
-   transitions for replica/gateway loss back to `VALIDATING`, `DEGRADED`,
-   `DRAINING`, or `FAILED`.
+   reachable from every active state. `DEGRADED` is not a state in this pass.
+   After READY, unexpected gateway-process exit revokes readiness and moves
+   immediately to `FAILED`; cleanup is bounded and the scheduler-visible result
+   is nonzero. A live gateway whose health, route, or canary validation fails
+   moves `READY -> VALIDATING`, revokes the persisted READY record, and gets one
+   bounded recovery interval. Successful revalidation may atomically persist
+   READY again for the same generation; deadline expiry moves to `FAILED` with
+   bounded cleanup and a nonzero result. Apply the same bounded
+   `READY -> VALIDATING -> {READY, FAILED}` policy to recoverable replica/route
+   validation loss; a process loss or another contract-declared nonrecoverable
+   fault moves directly to `FAILED`.
 2. Create a named `ReadinessCoordinator` that tracks the plan generation and
    the versioned `ComponentObservation` contract in section 3.1. Reject stale
    generations, duplicate/out-of-order sequences, and unknown schemas.
@@ -886,8 +1466,10 @@ Actions:
    observations: exact required membership/resources; every required long-lived
    component healthy; expected model and replica counts; current-generation
    engine registrations; required routes/proxies; matching compatibility
-   receipts; selected gateway healthy; and every required per-model external
-   canary successful. Every required observation must belong to the current plan
+   receipts; the selected gateway healthy when the plan declares one; the
+   explicitly declared direct endpoint healthy for a validation-only direct
+   plan; and every required per-model advertised-endpoint canary successful.
+   Every required observation must belong to the current plan
    hash/generation/instance and remain inside its typed SiteProfile freshness or
    lease bound. Persist both satisfied and blocking predicates.
 5. Require exact planned-versus-observed node membership and required resources,
@@ -897,7 +1479,9 @@ Actions:
 7. Require Ray Serve route/proxy health on every required node, not just actor
    creation or mailbox ordering.
 8. Require the selected external gateway to pass its own health check and route
-   discovery.
+   discovery. An explicit validation-only direct plan has no gateway process,
+   but must pass equivalent route/endpoint checks and cannot satisfy a
+   production support claim.
 9. Send a per-model canary through the externally advertised endpoint and verify
    the response contract. Do not let a canary for one replica certify all
    replicas; use replica registrations plus externally routed canaries.
@@ -910,8 +1494,10 @@ Actions:
 11. Persist the READY transition before rendering `CLUSTER FULLY READY` as a
    human-readable compatibility line. Add a repository-wide test proving no
    Python or shell control path parses readiness markers.
-12. Fail closed on deadline. A degraded mode must be explicitly requested and
-    list the unavailable capabilities/models.
+12. Fail closed on deadline. Do not implement a `DEGRADED` deployment state in
+    this pass. Explicit validation-only exposure or an unsupported production
+    combination remains a compile-time envelope decision, never a runtime
+    fallback that weakens READY.
 
 Fallbacks are component-specific:
 
@@ -978,10 +1564,15 @@ Actions:
    no-coalescing streaming/network concentration, and per-node proxy topology
    are architectural decisions, not tuning footnotes. Preserve the corrected
    non-streaming HAProxy result as a regression test rather than treating the
-   former harness-confounded plateau as a current ceiling. Classify the common
-   degraded-but-stable 256-node streaming regime separately from rare unexplained
-   HAProxy process death; capture exit/signal evidence before assigning the death
-   a network root cause.
+   former harness-confounded plateau as a current ceiling. The historical
+   degraded-but-stable 256-node streaming regime and rare unexplained HAProxy
+   process death are evidence against the specific `streaming × 256-node`
+   combination; they are not evidence against 256-node non-streaming service.
+   Streaming remains outside the technical proposal independently of the
+   pending maximum-node decision. If the owner selects 128/256 non-streaming
+   scope, reopen S00 and qualify that dimension separately. If either dimension
+   later expands, capture exit/signal evidence before assigning the historical
+   death a network root cause.
 
 Fallback: if a gateway lacks a dependable readiness API, use a real inference
 canary plus process observation. If it lacks required streaming/backpressure or
@@ -1195,9 +1786,12 @@ Validation order:
    verification and replica failure.
 8. 16-node and then 64-node topology tests validating controller/proxy load,
    staging fanout, network behavior, and readiness deadlines.
-9. 128-node and then 256-node tests only after every lower gate passes. Capture GCS
-   behavior, proxy topology, controller ticks, network throughput, and failure
-   recovery rather than treating READY alone as success.
+9. If the proposed 64-node scope is explicitly approved, stop this pass's final
+   scale qualification there. If the owner instead requires 128/256, reopen S00
+   and re-estimate the control-plane topology before scheduling those tests;
+   every lower gate must pass first. Such an expanded gate captures GCS behavior,
+   proxy topology, controller ticks, network throughput, and failure recovery
+   rather than treating READY alone as success.
 10. Separate offsite validation by support dimension: scheduler (for example
     Slurm), accelerator (CUDA or ROCm), engine, site profile, and scale. WP0 first
     performs a bounded account/access/environment probe for documented candidates
@@ -1212,7 +1806,9 @@ resources are unavailable, record the external blocker and suppress the affected
 scale/platform production claim; lack of a run is never implicit validation.
 Scenario batteries may share an expensive allocation, but each scenario requires
 a fresh generation, declared reset boundary, unique artifact directory, and an
-independent verdict. Bundling never removes the 16/64/128/256 logical gates.
+independent verdict. Bundling never removes any logical gate required by the
+approved `ScaleEnvelope`; under the proposed scope those final scale gates are
+16 and 64.
 
 Exit gate: the published support matrix contains only combinations that passed
 their required tier; scale limits have a measured envelope or an explicit
@@ -1260,7 +1856,7 @@ shipped behavior; the closure ledger has no `OPEN`, `PARTIAL`, or
 | Persistence | Crash at each write/lock boundary; concurrent writers; filesystem-specific tests | Partial state, duplicate submit, trace/result races |
 | One-node compute | Full lifecycle and real engine smoke | Environment, vendor, patch activation, model and canary readiness |
 | Multi-node compute | Membership, staging, replicas, proxies, node/process loss | False readiness, partial staging, port/topology, recovery |
-| Scale | 128/256-node measured topology and failure behavior | GCS/controller scaling, proxy cliff, network saturation |
+| Scale | Required approved `ScaleEnvelope` tiers (proposed: measured 16/64-node final-architecture behavior; 128/256 only if the owner selects/expands that scope) | GCS/controller scaling, proxy cliff, network saturation |
 | Offsite | Native Slurm and CUDA/ROCm runs | Portability claims that Aurora cannot prove |
 
 Every test result is linked to the finding ledger and compatibility profile. A
@@ -1321,8 +1917,11 @@ Each `FINDINGS.yaml` record requires:
 ```text
 id, source, severity, invariant, primary_work_package, affected_regions,
 acceptance_tests, status, decision, evidence, fallback, residual_risk,
-support_impact, owner, approval?, revisit_condition
+support_impact, owner, approval, revisit_condition
 ```
+
+Types and conditional rules are exactly those in §3.2.1; `approval` is present
+as null unless a valid `ACCEPTED_LIMIT` mapping is required.
 
 `status` uses only `OPEN`, `IN_PROGRESS`, `FIXED`, `REPLACED`,
 `ACCEPTED_LIMIT`, `UNSUPPORTED`, `EXTERNAL_BLOCKER`, or

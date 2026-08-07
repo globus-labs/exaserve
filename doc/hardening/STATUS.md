@@ -1,5 +1,24 @@
 # ExaServe Production-Hardening — Status
 
+> **2026-08-07 — LEDGER RE-ADJUDICATED AGAINST THE COMPLETION-CLAIM AUDIT.**
+> `doc/PRODUCTION_HARDENING_COMPLETION_CLAIM_AUDIT_2026-08-06.md` rejected the
+> "67 FIXED" accounting. Applying its §8 rule mechanically — a record is FIXED
+> only with linked evidence *and* acceptance tests proving the invariant on the
+> production path, and an ACCEPTED_LIMIT without a product-owner approval block
+> is not closure — leaves:
+>
+> **2 FIXED / 78 IN_PROGRESS / 2 OUT_OF_PRODUCTION_SCOPE.**
+>
+> That number is the honest one. `scripts/hardening/validate_findings.py` is the
+> gate that produced it and now passes; it refuses to invent placeholder
+> metadata to preserve a count.
+>
+> The five former ACCEPTED_LIMIT records are reopened: approval requires
+> `approver_id` / `approved_at` / `evidence_ref` / `scope` from the actual
+> product owner, and I may propose that block but never fill it. **The 64-node
+> first-release ceiling remains unapproved and I cannot infer it.**
+
+
 > **2026-08-06 — CLAIM WITHDRAWN.**
 > `doc/PRODUCTION_HARDENING_COMPLETION_CLAIM_AUDIT_2026-08-06.md` audited the
 > "67 FIXED / only 256-node work remains" claim and rejected it: **0 of 18

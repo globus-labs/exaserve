@@ -1144,3 +1144,79 @@ All eight IN_PROGRESS records are the **same** blocker: 256-node evidence.
 Each has its mechanism closed and validated at 2 and 16 nodes, and each names
 what it still owes at scale. The five ACCEPTED_LIMIT records are backlog items
 recorded as decisions rather than left to look like unfinished work.
+
+---
+
+## 2026-08-07 — Cutover-question adjudication (documentation-only)
+
+Claude Code's five rewrite-sensitive questions were audited against the
+canonical execution plan and current production paths. The architecture forks
+are now resolved in plan §3.2.1 and indexed in
+`QUESTIONS_FOR_CODEX_2026-08-07.md`:
+
+- the site shell ends in one exec of the import-light Python composition root;
+  the typed-plan RuntimeSupervisor owns lifecycle and finite native helpers;
+- semantic plans are separate from generation-scoped allocation/component
+  bindings;
+- CompatibilityReceipt v2 is exact per planned instance; rank-owned receipts
+  travel through bounded authenticated replacement snapshots, while GLOBAL
+  receipts enter only through the local in-process outer-supervisor authority
+  and the same validator/global writer—never the Ray collector/files;
+- the outer supervisor owns HAProxy and one advertised-endpoint READY predicate;
+- listener/registration/START/reconnect/GOODBYE/watchdog semantics and clock
+  anchors are fail-closed and explicit;
+- SiteProfile, SchedulerPlan, DeploymentPlan, optional RunPlan, semantic hashes,
+  and provenance/binding hashes have separate responsibilities; and
+- the §8 ledger and ACCEPTED_LIMIT approval schemas are exact and require a
+  repository/CI validator before ledger counts are trusted.
+
+The final worker-contract pass also fixes payload version 1, duplicate-item
+rejection, and the idempotent `SNAPSHOT_ACCEPTED` command/result round trip;
+defines post-READY gateway recovery/failure transitions and rank GOODBYE
+semantics; preserves the corrected audit's `medium-high` severity; and requires
+all core/eval/ClientLab plan-producing paths to converge in P01 rather than
+deferring a second compiler to P05.
+
+### SUPERSEDED / P00 REOPENED
+
+The 2026-08-05 entry titled “P00 GATE CLOSED” is historical and is explicitly
+superseded under the strengthened canonical gates. Its artifacts remain useful,
+but they prove narrower slices:
+
+- **S00:** Aurora/XPU/vLLM/HAProxy/non-streaming and 64 nodes are a technical
+  candidate, not a frozen release envelope; the named product-owner scope
+  approval is absent.
+- **S01:** the two-node harness proves PALS environment/TCP feasibility,
+  prototype typed-cause delivery, and eventual placeholder reaping. It uses no
+  real Ray child, treats legacy GOODBYE as success, and kills immediately on
+  disconnect, so it does not prove the target START/reconnect/grace/watchdog
+  timing or real lifecycle failure matrix.
+- **S02:** the direct Serve probes prove public-status blindness and a route
+  gap. They do not exercise the outer-supervisor-owned HAProxy canonical
+  endpoint, the full stale/missing/broken negative matrix, post-READY gateway
+  transitions, or the synthetic linearity bound.
+- **S03:** the inventory and EngineCore shim prove current-process reach. They
+  do not complete the per-patch public → immutable wheel/environment →
+  generated exact-hash overlay → guarded-runtime ladder, the full two-node v2
+  receipt set, or missing/mismatch fail-closed behavior over the final ingress
+  paths.
+
+P00 is therefore `REOPENED`, not passed. After those technical gaps close, if
+scope approval alone remains absent, record
+`TECHNICAL_PASS_SCOPE_PENDING`: P01-P05 may proceed only for generic,
+ceiling-independent mechanics, while production target defaults, scale-ledger
+closure, support claims, and P06 remain blocked. Full P00 `PASS` requires the
+durable product decision.
+
+ADR-001/002/003 now label these evidence limits and the compatibility matrix
+keeps pending scope separate from current support. No code, tests, scheduler
+commands, or compute runs were part of this documentation slice.
+
+One product decision remains intentionally unfilled: 64 nodes is the selected
+technical first-release candidate, but excluding previously discussed 128/256
+scope requires a named product-owner approval with timestamp, durable evidence,
+and exact scope. A worker cannot author it. Lower-scale architecture work may
+continue; release-envelope freeze and scale-ledger reclassification may not.
+The Pass 5 counts immediately above are therefore historical claims, not a
+current completion statement; P00 must normalize and re-adjudicate the ledger
+before publishing replacement counts.
