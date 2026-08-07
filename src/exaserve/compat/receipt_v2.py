@@ -332,12 +332,18 @@ class ExactReceiptLedger:
                 return self._reject(receipt,
                                     f"slot is planned for rank {slot.planned_rank}, "
                                     f"session is rank {session_rank}")
+            # Compare canonical node identity: the binding holds the
+            # scheduler's (fully qualified) name and a process reports its
+            # short hostname, so a literal comparison rejects every receipt
+            # from every correctly-placed rank.
+            from ..plan.contracts import same_node
+
             bound_node = self.binding.node_for(session_rank)
-            if bound_node is not None and receipt.node_id != bound_node:
+            if bound_node is not None and not same_node(bound_node, receipt.node_id):
                 return self._reject(receipt,
                                     f"node_id {receipt.node_id!r} != bound "
                                     f"{bound_node!r} for rank {session_rank}")
-            if session_node is not None and receipt.node_id != session_node:
+            if session_node is not None and not same_node(session_node, receipt.node_id):
                 return self._reject(receipt, "node_id does not match the session")
 
         existing = self._by_slot.get(receipt.slot_key())

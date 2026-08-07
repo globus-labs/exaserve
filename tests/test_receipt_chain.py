@@ -446,3 +446,66 @@ def test_launcher_issues_the_global_receipts_before_committing_ready():
 
     source = inspect.getsource(launcher._drive_readiness)
     assert source.index("attest_global()") < source.index("commit_ready(")
+
+
+# -- node identity --------------------------------------------------------
+def test_a_short_hostname_matches_its_bound_fqdn(monkeypatch, tmp_path):
+    """The first real run rejected EVERY receipt on this exact mismatch.
+
+    The scheduler's node file is fully qualified; a process reports
+    socket.gethostname(), which is not. A literal comparison rejected every
+    correctly-placed rank, so readiness could never be satisfied.
+    """
+    plan = _plan()
+    binding = build_allocation_binding(
+        plan=plan, generation=7, scheduler_allocation_id="job1",
+        nodes=["x4303c4s1b0n0.hsn.cm.aurora.alcf.anl.gov",
+               "x4310c4s0b0n0.hsn.cm.aurora.alcf.anl.gov"])
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "d1")
+    monkeypatch.setenv("EXASERVE_GENERATION", "7")
+    monkeypatch.setenv("EXASERVE_PLAN_HASH", plan.deployment_plan_hash)
+    monkeypatch.setenv("EXASERVE_SITE_PROFILE_HASH", plan.site_profile_hash)
+    monkeypatch.setenv("EXASERVE_ALLOCATION_BINDING_HASH",
+                       binding.allocation_binding_hash)
+    receipt = producers.attest_self(
+        requirement_id="rank1/ray_worker", role="ray_worker", component_id="ray",
+        owner_scope="RANK", owner_rank=1, node_id="x4310c4s0b0n0")
+    ledger = ExactReceiptLedger(plan, binding)
+    ok, detail = ledger.accept(receipt, required_patch_ids=(), session_rank=1,
+                               session_node="x4310c4s0b0n0")
+    assert ok, detail
+
+
+def test_a_different_host_is_still_rejected():
+    """Canonicalizing must not blur two real hosts together."""
+    from exaserve.plan.contracts import same_node
+
+    assert same_node("n7.example.gov", "N7")
+    assert not same_node("n7.example.gov", "n8.example.gov")
+    assert not same_node("", "n7")
+
+
+def test_the_binding_keeps_the_name_the_scheduler_wrote():
+    """Comparison is canonical; the RECORD is faithful."""
+    plan = _plan()
+    binding = build_allocation_binding(
+        plan=plan, generation=1, scheduler_allocation_id="j",
+        nodes=["a.long.domain", "b.long.domain"])
+    assert binding.node_for(0) == "a.long.domain"
+    assert binding.is_bound_node(0, "a")
+    assert not binding.is_bound_node(0, "b")
+
+
+def test_the_supervisor_receipt_is_produced_before_the_start_gate():
+    """§3.2.1: REGISTER does not count until the supervisor receipt is accepted.
+
+    Producing it after START would mean the head released the gate on evidence
+    it did not yet have.
+    """
+    import inspect
+
+    from exaserve import rank_main
+
+    source = inspect.getsource(rank_main.run)
+    assert source.index("_attest_node_supervisor") < source.index("poll_start")
+    assert source.index("ingress.start()") < source.index("poll_start")

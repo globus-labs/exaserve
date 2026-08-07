@@ -51,19 +51,40 @@ fi
 grep -m1 "compatibility profile" "$OUT/launch.log" | tee "$OUT/compat_receipt.txt"
 grep -m1 "supervising:" "$OUT/launch.log" | tee -a "$OUT/compat_receipt.txt"
 grep -m1 "\[Readiness\] gate:" "$OUT/launch.log" | tee -a "$OUT/compat_receipt.txt"
+# The ROOT's record now carries the exact receipt-slot reconciliation, so the
+# check is "every PLANNED slot is covered", not "at least N receipts arrived".
 receipts=$(python -c "
-import json,sys
-try: print(json.load(open('$SNAP')).get('receipts',0))
-except Exception: print(0)" 2>/dev/null)
-echo "receipts_collected=$receipts"
-# EN-01: the engine must attest ITSELF, so it must not appear in the
-# externally-attested list.
-engine_self=$(python -c "
 import json
 try:
     d = json.load(open('$SNAP'))
-    print('yes' if 'engine' not in (d.get('externally_attested_roles') or []) else 'no')
-except Exception: print('unknown')" 2>/dev/null)
+    line = next((s for s in d.get('satisfied',[]) if s.startswith('receipts:')), '')
+    print(line.split(':',1)[1].strip().split()[0] if line else '0/0')
+except Exception: print('0/0')" 2>/dev/null)
+echo "receipt_slots=$receipts"
+receipts_ok=$(python -c "
+a,_,b='$receipts'.partition('/')
+print(1 if a and b and a==b and int(a)>0 else 0)" 2>/dev/null)
+
+# The child publishes EVIDENCE under a different name; readiness.json is the
+# root's verdict. Both must exist, and they must not be the same file.
+EV=$(ls -t "$OUT"/run_logs/*/deployment_evidence.json 2>/dev/null | head -1)
+evidence_ok=0
+if [ -n "$EV" ]; then
+  cp "$EV" "$OUT/deployment_evidence.json"
+  evidence_ok=$(python -c "
+import json;d=json.load(open('$EV'));print(1 if d.get('applications_running') and d.get('evidence_only') else 0)" 2>/dev/null)
+fi
+echo "evidence_published=$evidence_ok"
+
+# IMP-B04: no detached Ray receipt actor may exist on the production path.
+actor_absent=$(grep -qc "receipt collector ready" "$OUT/launch.log" 2>/dev/null && echo 0 || echo 1)
+echo "ray_receipt_actor_absent=$actor_absent"
+
+# EN-01: the engine attests ITSELF over the authenticated path. A replica
+# forwarding a rebuilt copy would be an owner assertion, so what is checked is
+# that an ENGINE-role evidence receipt reached the head.
+engine_self=$(grep -m1 "evidence receipts:" "$OUT/launch.log" 2>/dev/null | grep -q "'engine'" && echo yes || echo no)
+grep -m1 "evidence receipts:" "$OUT/launch.log" | tee -a "$OUT/compat_receipt.txt"
 echo "engine_self_attested=$engine_self"
 
 canary_ok=0; leftover=99
@@ -109,8 +130,10 @@ pkill -f exaserve.driver 2>/dev/null; ray stop --force >/dev/null 2>&1
 echo "=== SUPERVISOR SMOKE VERDICT ==="
 echo "gate_ready=$([ "$gate_ok" = 1 ] && echo PASS || echo "FAIL ($gate_ready)")"
 echo "marker_never_precedes_gate=$([ "$marker_before_gate" = 0 ] && echo PASS || echo FAIL)"
-echo "receipts=$([ "${receipts:-0}" -ge 5 ] && echo "PASS ($receipts)" || echo "FAIL ($receipts)")"
+echo "receipt_slots_exact=$([ "${receipts_ok:-0}" = 1 ] && echo "PASS ($receipts)" || echo "FAIL ($receipts)")"
+echo "evidence_separate_from_verdict=$([ "${evidence_ok:-0}" = 1 ] && echo PASS || echo FAIL)"
+echo "ray_receipt_actor_retired=$([ "${actor_absent:-0}" = 1 ] && echo PASS || echo FAIL)"
+echo "engine_self_attested=$([ "$engine_self" = yes ] && echo PASS || echo "FAIL ($engine_self)")"
 echo "canary=$([ "$canary_ok" = 1 ] && echo PASS || echo FAIL)"
 echo "tree_reaped=$([ "${leftover:-99}" -le 0 ] && echo PASS || echo "FAIL ($leftover left)")"
-echo "engine_self_attested=$([ "$engine_self" = "yes" ] && echo PASS || echo "FAIL ($engine_self)")"
 echo "SUPERVISOR_SMOKE_DONE"

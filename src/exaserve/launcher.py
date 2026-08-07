@@ -203,6 +203,7 @@ def _drive_readiness(root, config_path: str) -> None:
     # needs a live pid, so it is issued after the gateway starts.
     issued = root.attest_global()
     _log(f"[Composition] GLOBAL receipts issued: {issued}")
+    _log_receipt_evidence(root)
 
     # Replica evidence comes from the deployment child's snapshot; the root
     # verifies the ENDPOINT itself rather than trusting that report. The child
@@ -238,11 +239,36 @@ def _drive_readiness(root, config_path: str) -> None:
 
     verdict = readiness.commit_ready(root.run_dir)
     if verdict.ready:
+        # Only now does the SHARED record say READY: the durable verdict is
+        # already on disk, so no consumer can see READY ahead of its evidence.
+        root.publish_ready(endpoint)
         _log(f"[Composition] READY via {endpoint} — {list(verdict.satisfied)}")
     else:
         raise CompositionError(
             f"readiness not satisfied via the advertised endpoint: "
             f"{list(verdict.blockers)}")
+
+
+def _log_receipt_evidence(root) -> None:
+    """Report what arrived that is NOT an exactly-planned slot.
+
+    Replicas and engine cores are placed at runtime, so the plan cannot name
+    them and they are not ledger slots. They still travel the authenticated
+    path, and naming the roles here is what makes "the engine attested itself"
+    an observable fact rather than an assumption.
+    """
+    head = getattr(root, "head_channel", None)
+    if head is None:
+        return
+    roles: dict = {}
+    for _, payload in getattr(head, "evidence_receipts", []):
+        role = str(payload.get("role", "?"))
+        roles[role] = roles.get(role, 0) + 1
+    _log(f"[Composition] evidence receipts: {sum(roles.values())} "
+         f"{dict(sorted(roles.items()))}")
+    rejected = getattr(head, "receipt_rejections", [])
+    if rejected:
+        _log(f"[Composition] receipts rejected: {len(rejected)} — {rejected[:4]}")
 
 
 def use_supervisor() -> bool:

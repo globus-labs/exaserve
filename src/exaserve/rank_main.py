@@ -145,6 +145,23 @@ def run(config_path: str) -> int:
     # or any other long-lived child until the head has accepted every planned
     # rank and sent START. Starting Ray first is what made registration
     # decorative.
+    # The bounded local hop and this rank's own supervisor receipt belong to
+    # REGISTRATION, not to bring-up: §3.2.1 says REGISTER "does not count until
+    # a bounded replacement SNAPSHOT plus supervisor receipt ... are atomically
+    # accepted". Producing the receipt after START would mean the head released
+    # the gate on evidence it did not yet have.
+    from .compat.local_ingress import SOCKET_ENV, LocalReceiptIngress, socket_path_for
+
+    deployment_id = os.environ.get("EXASERVE_DEPLOYMENT_ID", "unknown")
+    generation = int(os.environ.get("EXASERVE_GENERATION", "0") or 0)
+    socket_path = socket_path_for(deployment_id, generation)
+    ingress = LocalReceiptIngress(socket_path, log=print)
+    if ingress.start():
+        os.environ[SOCKET_ENV] = socket_path
+        print(f"[Rank {rank}] receipt ingress at {socket_path}", flush=True)
+    forwarder_stop = _forward_receipts(channel, ingress, rank)
+    _attest_node_supervisor(channel, rank, hostname)
+
     if channel.connected:
         channel.observe(f"rank{rank}", ComponentState.RUNNING.value, role="rank",
                         detail="registered")
@@ -166,23 +183,6 @@ def run(config_path: str) -> int:
             # no gate to wait for.
             print(f"[Rank {rank}] no control channel; proceeding after "
                   "registration", flush=True)
-
-    # §3.2.1: node-local producers hand their EXACT receipt to their owning
-    # NodeSupervisor over one bounded local hop; this process forwards it
-    # unchanged over the authenticated channel. It must exist before any child
-    # that might produce one.
-    from .compat.local_ingress import SOCKET_ENV, LocalReceiptIngress, socket_path_for
-
-    deployment_id = os.environ.get("EXASERVE_DEPLOYMENT_ID", "unknown")
-    generation = int(os.environ.get("EXASERVE_GENERATION", "0") or 0)
-    socket_path = socket_path_for(deployment_id, generation)
-    ingress = LocalReceiptIngress(socket_path, log=print)
-    if ingress.start():
-        os.environ[SOCKET_ENV] = socket_path
-        print(f"[Rank {rank}] receipt ingress at {socket_path}", flush=True)
-
-    forwarder_stop = _forward_receipts(channel, ingress, rank)
-    _attest_node_supervisor(channel, rank, hostname)
 
     ray_env = get_ray_env(vendor)
     ray_env[SOCKET_ENV] = os.environ.get(SOCKET_ENV, "")

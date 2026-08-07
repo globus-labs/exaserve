@@ -81,6 +81,7 @@ class CompositionRoot:
         self.gateway_component: Optional[ManagedComponent] = None
         self.first_cause: Optional[str] = None
         self._staging_done: list = []
+        self.status = None                # the shared DeploymentStatus writer
         # Receipts must name the site profile they were produced under; without
         # it every producer would emit an empty hash and the strict validator
         # would reject the whole set for a reason that is really a plumbing gap.
@@ -114,6 +115,14 @@ class CompositionRoot:
                 f"could not persist the allocation binding: {exc}") from exc
         self._log(f"[Composition] binding {self.binding.allocation_binding_hash[:12]} "
                   f"for {len(nodes)} node(s), generation {self.generation}")
+        # The shared status record opens here, once the generation has a real
+        # identity to publish. Eval and ClientLab read THIS, not a log line.
+        from .status_api import DeploymentStatusPublisher
+
+        self.status = DeploymentStatusPublisher(
+            self.run_dir, plan=self.plan, binding=self.binding,
+            generation=self.generation, log=self._log)
+        self.status.initialize()
         return self.binding
 
     # -- 4. fail-closed listener ------------------------------------------
@@ -225,6 +234,10 @@ class CompositionRoot:
         """Each step must exit zero AND produce its declared result."""
         import subprocess
 
+        from .state.status import DeploymentState
+
+        if self.status is not None:
+            self.status.advance(DeploymentState.STAGING, reason_code="STAGING")
         for step in steps:
             self._log(f"[Composition] staging: {step.name}")
             started = time.monotonic()
@@ -312,6 +325,15 @@ class CompositionRoot:
         self.supervisor.install_signal_handlers()
         self.supervisor.start_all()
         self._log(f"[Composition] launched {self.plan.num_nodes} rank(s)")
+        if self.status is not None:
+            from .state.status import DeploymentState
+
+            # A run that skipped staging (null-compute) has never left PLANNED,
+            # so the walk starts from wherever it actually is.
+            states = [DeploymentState.CLUSTER_STARTING, DeploymentState.DEPLOYING]
+            if self.status.state == DeploymentState.PLANNED.value:
+                states.insert(0, DeploymentState.STAGING)
+            self.status.advance_through(*states, reason_code="RANKS_LAUNCHED")
         return component
 
     def await_all_registered(self, *, poll_s: float = 1.0) -> None:
@@ -442,6 +464,12 @@ class CompositionRoot:
         self.readiness.enter_validating()
         endpoint = self.advertised_endpoint(ip or head_ip())
         self.readiness.set_advertised_endpoint(endpoint)
+        if self.status is not None:
+            from .state.status import DeploymentState
+
+            self.status.advance(DeploymentState.VALIDATING,
+                                reason_code="ENDPOINT_ESTABLISHED",
+                                advertised_endpoint=endpoint)
         if self.plan.gateway is not None:
             self.readiness.set_gateway(alive=self.gateway_alive(), healthy=None)
         self._log(f"[Composition] advertised endpoint {endpoint} "
@@ -517,14 +545,44 @@ class CompositionRoot:
             self.readiness.revoke("gateway process exited", gateway_dead=True)
             self.fail("gateway process exited after READY")
 
+    def publish_ready(self, endpoint: str) -> None:
+        """Publish READY on the SHARED record, after the verdict is committed.
+
+        Ordering is the point: the record is written only once
+        `PlanReadiness.commit_ready` has persisted the verdict, so a consumer
+        can never see READY on the shared surface before the evidence that
+        justified it exists on disk.
+        """
+        if self.status is None:
+            return
+        from .state.status import DeploymentState
+
+        self.status.advance(DeploymentState.READY, reason_code="READY",
+                            advertised_endpoint=endpoint)
+
     # -- 9. termination ----------------------------------------------------
     def fail(self, reason: str) -> None:
         if self.first_cause is None:
             self.first_cause = reason
         self._log(f"[Composition] FIRST CAUSE: {reason}")
+        if self.status is not None:
+            from .state.status import DeploymentState
+
+            self.status.advance(DeploymentState.FAILED, reason_code="FIRST_CAUSE",
+                                detail=str(reason)[:400])
 
     def shutdown(self, *, drain_s: float = 30.0) -> None:
         """Bounded reverse-order cleanup; a cleanup error never hides the cause."""
+        if self.status is not None:
+            from .state.status import DeploymentState
+
+            # Draining is a state consumers must be able to see: a client that
+            # keeps dispatching into a draining deployment reads as a serving
+            # failure when it is an orderly shutdown.
+            record = self.status.advance(DeploymentState.DRAINING,
+                                         reason_code="SHUTDOWN_REQUESTED")
+            if record is not None:
+                self._draining = True
         try:
             self.supervisor.shutdown(drain_s=drain_s)
         except Exception as exc:          # noqa: BLE001
@@ -534,6 +592,10 @@ class CompositionRoot:
                 self.head_channel.stop()
             except Exception:             # noqa: BLE001
                 pass
+        if self.status is not None and getattr(self, "_draining", False):
+            from .state.status import DeploymentState
+
+            self.status.advance(DeploymentState.STOPPED, reason_code="DRAINED")
 
     def exit_code(self) -> int:
         """Typed exit. A requested shutdown is 143, not a generic failure."""

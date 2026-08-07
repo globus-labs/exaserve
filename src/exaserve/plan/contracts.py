@@ -388,6 +388,19 @@ class AllocationBinding:
                 return node
         return None
 
+    def is_bound_node(self, rank: int, node_id: str) -> bool:
+        """Does ``node_id`` name the node this rank is bound to?
+
+        The binding holds whatever the scheduler wrote in its node file — on
+        this site, fully qualified — while a process reports
+        ``socket.gethostname()``, which is the short name. A literal string
+        comparison therefore rejected every receipt from every correctly-placed
+        rank. Compare canonical forms instead: the short name is unique within
+        an allocation, so this loses no discrimination between real hosts.
+        """
+        bound = self.node_for(rank)
+        return bound is not None and same_node(bound, node_id)
+
     def ranks(self) -> tuple[int, ...]:
         return tuple(sorted(rank for rank, _ in self.rank_to_node))
 
@@ -409,6 +422,21 @@ class ComponentInstanceBinding:
 
     def key(self) -> str:
         return self.receipt_requirement_id
+
+
+def canonical_node_id(node_id: str) -> str:
+    """The comparable form of a node name: lowercase, domain stripped.
+
+    Nothing is *stored* in this form — receipts and bindings keep exactly what
+    their producer observed, so the record stays faithful. This is only how two
+    names are compared.
+    """
+    return str(node_id).strip().lower().split(".", 1)[0]
+
+
+def same_node(left: str, right: str) -> bool:
+    canonical = canonical_node_id(left)
+    return bool(canonical) and canonical == canonical_node_id(right)
 
 
 def build_allocation_binding(*, plan: DeploymentPlan, generation: int,
