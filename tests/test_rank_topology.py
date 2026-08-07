@@ -373,3 +373,17 @@ def test_a_rank_drains_when_shutdown_is_requested():
     assert time.monotonic() - start < 20, "supervise() ignored the shutdown request"
     node.shutdown(drain_s=10)
     assert node.exit_code() == 143
+
+
+def test_the_rank_carries_run_identity_into_the_deployment_child():
+    """get_ray_env is Ray-focused, so identity must be passed explicitly.
+
+    Without it the readiness snapshot lands in a /tmp fallback and every
+    consumer reports not-ready for a deployment that IS ready.
+    """
+    from importlib import resources
+
+    source = (resources.files("exaserve") / "rank_main.py").read_text()
+    for key in ("EXASERVE_RUN_LOG_DIR", "EXASERVE_DEPLOYMENT_ID",
+                "EXASERVE_PLAN_HASH", "EXASERVE_CONTROL_PORT"):
+        assert key in source, f"{key} is not carried into the deployment child"

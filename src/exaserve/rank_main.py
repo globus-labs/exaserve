@@ -126,6 +126,19 @@ def run(config_path: str) -> int:
     if rank == 0:
         server_env = dict(ray_env)
         server_env["RAY_ADDRESS"] = f"{cluster.head_ip}:{cluster.port}"
+        # get_ray_env builds a Ray-focused environment, so the deployment
+        # identity and run directory have to be carried explicitly. Without
+        # this the readiness snapshot lands in a /tmp fallback and every
+        # consumer reports not-ready for a deployment that IS ready.
+        for key in ("EXASERVE_RUN_LOG_DIR", "EXASERVE_RUN_LOG_ROOT",
+                    "EXASERVE_DEPLOYMENT_ID", "EXASERVE_GENERATION",
+                    "EXASERVE_PLAN_HASH", "EXASERVE_ALLOCATION_BINDING_HASH",
+                    "EXASERVE_COMPAT_PROFILE_ID", "EXASERVE_HEAD_IP",
+                    "EXASERVE_CONTROL_HOST", "EXASERVE_CONTROL_PORT",
+                    "EXASERVE_CONTROL_SECRET"):
+            value = os.environ.get(key)
+            if value:
+                server_env[key] = value
         node.adopt(deployment_component(server_argv(config_path), env=server_env))
 
     node.start_all()
