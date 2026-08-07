@@ -1288,3 +1288,33 @@ Re-adjudicated with `scripts/hardening/validate_findings.py`, which encodes the
 records claiming FIXED had no linked evidence and 5 ACCEPTED_LIMITs had no
 approval block; all reopened rather than back-filled. The 64-node ceiling
 remains unapproved.
+
+### P05 + packaged CI (2026-08-07, same pass)
+
+**Eval derives the shared identity.** `eval/lib/plan_adapter.py` makes the eval
+path compile the *same* `DeploymentPlan` core does. The decisive test passes:
+one serving input yields byte-identical `deployment_plan_hash` from both sides;
+a serving change moves it; a workload change moves only `run_semantic_hash`.
+Eval's `proxy.type: none` now compiles to a declared `DIRECT_VALIDATION`
+exposure instead of a nameless absent gateway, and a test pins that the adapter
+cannot smuggle unmodelled keys past the compiler's unknown-key rejection.
+
+**Copper and result collection became owned components.** The shell started a
+Copper process and installed an EXIT trap that ran collection — the trap in
+particular meant collection outlived the thing supposed to own it and could not
+report a typed failure. Loading the Copper *module* stays in the adapter (site
+setup); starting the process is lifecycle and now belongs to the root, which
+reaps it in reverse order. Collection failure is reported and not fatal:
+losing diagnostics must not turn a good run into a failed one.
+
+**CI tests the artifact, not the checkout.** The suite ran against an editable
+checkout, so a module that was never packaged still passed. A new job builds
+the wheel, installs it into a clean venv, imports the new plan/compat/control/
+composition modules from outside the source tree, and asserts the packaged
+resources shipped. The ledger validator is its own gate, so a record claiming
+closure without evidence fails CI rather than surfacing in a later audit. The
+lint job no longer claims "types" in its name, because it runs no type checker.
+
+**Re-validated on 2 nodes after all of the above:** gate_ready,
+marker_never_precedes_gate, receipts (75), canary, tree_reaped,
+engine_self_attested — all PASS; `supervisor_exit=143`, named 15 → 0.
