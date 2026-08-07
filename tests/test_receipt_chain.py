@@ -518,3 +518,19 @@ def test_the_ray_preflight_can_be_disabled(monkeypatch):
 
     monkeypatch.setenv("EXASERVE_SKIP_RAY_PREFLIGHT", "1")
     assert rank_main._clear_stale_ray_state(0) is False
+
+
+def test_the_preflight_also_reaps_orphaned_engine_processes():
+    """`ray stop` does not reap the engine processes a replica spawns.
+
+    Those hold device memory, so a node reused after a killed generation comes
+    back with its GPUs occupied and the next run dies with an out-of-memory
+    error that reads as a capacity problem and is really inherited state.
+    """
+    import inspect
+
+    from exaserve import rank_main
+
+    source = inspect.getsource(rank_main._clear_stale_ray_state)
+    assert "EngineCore" in source
+    assert "ServeReplica" in source

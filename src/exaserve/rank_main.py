@@ -77,6 +77,22 @@ def _clear_stale_ray_state(rank: int, *, timeout_s: float = 60.0) -> bool:
     except (subprocess.TimeoutExpired, OSError) as exc:
         print(f"[Rank {rank}] ray preflight stop did not complete: {exc}",
               flush=True)
+    # `ray stop` reaps raylets and Ray workers, but NOT the engine processes a
+    # replica spawns -- and those hold device memory. A node reused after a
+    # killed generation therefore comes back with its GPUs occupied, and this
+    # generation dies with `torch.OutOfMemoryError: XPU out of memory`, which
+    # reads as a capacity problem and is really inherited state.
+    orphans = 0
+    for pattern in ("EngineCore", "ServeReplica", "exaserve.server",
+                    "VLLM::EngineCore"):
+        try:
+            found = subprocess.run(["pkill", "-9", "-f", pattern], timeout=15,
+                                   check=False, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+            orphans += 1 if found.returncode == 0 else 0
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
     removed = 0
     for path in glob.glob("/tmp/ray/session_*") + ["/tmp/ray/ray_current_cluster"]:
         try:
@@ -87,8 +103,9 @@ def _clear_stale_ray_state(rank: int, *, timeout_s: float = 60.0) -> bool:
             removed += 1
         except OSError:
             pass
-    if removed:
-        print(f"[Rank {rank}] cleared {removed} stale Ray state path(s)", flush=True)
+    if removed or orphans:
+        print(f"[Rank {rank}] cleared {removed} stale Ray state path(s) and "
+              f"{orphans} orphaned engine process group(s)", flush=True)
     return True
 
 
