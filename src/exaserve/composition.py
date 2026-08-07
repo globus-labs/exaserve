@@ -372,6 +372,64 @@ class CompositionRoot:
                   f"({self.plan.exposure.mode})")
         return endpoint
 
+    def await_deployment_serving(self, *, timeout_s: float = 3600.0,
+                                 poll_s: float = 5.0) -> bool:
+        """Wait for the deployment child to report its applications running.
+
+        The deployment-side snapshot is EVIDENCE, not the decision: the root
+        still verifies the advertised endpoint and commits READY itself.
+        """
+        import json
+
+        deadline = time.monotonic() + timeout_s
+        path = os.path.join(self.run_dir, "readiness.json")
+        while time.monotonic() < deadline:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+                if data.get("ready") or data.get("satisfied"):
+                    return True
+            except (OSError, ValueError):
+                pass
+            if self.sessions is not None and \
+                    self.sessions.generation_state == "TERMINAL":
+                return False
+            time.sleep(poll_s)
+        return False
+
+    def gateway_argv(self, config_dir: str) -> Optional[list]:
+        """Render the gateway config and return its argv, or None."""
+        if self.plan.gateway is None:
+            return None
+        if self.plan.gateway.kind != "haproxy":
+            raise CompositionError(
+                f"gateway {self.plan.gateway.kind} has no supervised launcher yet")
+        return ["haproxy", "-f", os.path.join(config_dir, "haproxy.cfg"), "-db"]
+
+    def canary_advertised_endpoint(self, model, *, timeout_s: float = 60.0
+                                   ) -> tuple:
+        """One real completion through the COMPILED advertised endpoint."""
+        import json
+        import urllib.error
+        import urllib.request
+
+        route = "" if len(self.plan.models) == 1 else f"/{model.route_name}"
+        url = f"{self.readiness.advertised_endpoint}{route}/v1/completions"
+        body = json.dumps({"prompt": "The capital of France is",
+                           "max_tokens": 4}).encode()
+        request = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=timeout_s) as response:
+                payload = json.loads(response.read().decode())
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        choices = payload.get("choices") or []
+        if not choices or "text" not in choices[0]:
+            return False, f"no completion: {str(payload)[:120]}"
+        return True, str(choices[0]["text"])[:60]
+
     def observe_gateway(self) -> None:
         """Post-READY: a dead gateway is terminal, an unhealthy one revokes."""
         if self.plan.gateway is None or self.readiness is None:

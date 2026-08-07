@@ -92,3 +92,30 @@ def test_an_explicit_run_directory_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("EXASERVE_RUN_LOG_DIR", str(tmp_path / "explicit"))
     monkeypatch.setenv("EXASERVE_RUN_LOG_ROOT", str(tmp_path))
     assert launcher._resolve_run_dir(1, "c.yaml") == str(tmp_path / "explicit")
+
+
+def test_the_run_path_drives_the_gateway_and_readiness():
+    """The audit's failure mode: a component that exists and is not used.
+
+    start_gateway / build_readiness / establish_advertised_endpoint existed,
+    were tested, and nothing on the reachable path called them -- so a
+    PROXIED_INTERNAL plan reached READY without a gateway ever starting.
+    """
+    import inspect
+
+    source = inspect.getsource(launcher)
+    assert "_drive_readiness(root, config_path)" in source, (
+        "run() does not drive readiness")
+    driver_src = inspect.getsource(launcher._drive_readiness)
+    for call in ("build_readiness", "establish_advertised_endpoint",
+                 "start_gateway", "canary_advertised_endpoint", "commit_ready"):
+        assert call in driver_src, f"the run path does not call {call}"
+
+
+def test_readiness_failure_is_a_typed_composition_error():
+    """An unsatisfied predicate must abort, not serve unrecorded."""
+    import inspect
+
+    src = inspect.getsource(launcher._drive_readiness)
+    assert "raise CompositionError" in src
+    assert "not satisfied via the advertised endpoint" in src

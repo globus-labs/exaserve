@@ -156,6 +156,12 @@ def run(config_path: str) -> int:
             rank_argv, scheduler=os.environ.get("EXASERVE_SCHEDULER", "pbs"))
         root.await_all_registered()
 
+        # §3.2.1 Q3: the ROOT owns the advertised endpoint and commits READY.
+        # Previously the deployment child's own gate decided readiness against
+        # the internal Serve endpoint, so the gateway contract was never
+        # exercised even on a PROXIED_INTERNAL plan.
+        _drive_readiness(root, config_path)
+
         cause = root.supervisor.supervise(
             until=lambda: component.process is not None
             and component.process.poll() is not None)
@@ -172,6 +178,60 @@ def run(config_path: str) -> int:
     if root.first_cause:
         _log(f"[Composition] exit {code}: {root.first_cause}")
     return code
+
+
+def _drive_readiness(root, config_path: str) -> None:
+    """Deploy -> VALIDATING -> gateway -> verify -> persist one READY."""
+    from .composition import CompositionError
+
+    if not root.await_deployment_serving():
+        raise CompositionError("the deployment never reported its applications running")
+
+    readiness = root.build_readiness()
+    endpoint = root.establish_advertised_endpoint()
+
+    if root.plan.gateway is not None:
+        argv = root.gateway_argv(root.run_dir)
+        try:
+            root.start_gateway(argv)
+        except (OSError, FileNotFoundError) as exc:
+            raise CompositionError(
+                f"gateway {root.plan.gateway.kind} could not start: {exc}") from exc
+        readiness.set_gateway(alive=root.gateway_alive(), healthy=True)
+
+    # Replica evidence comes from the deployment child's snapshot; the root
+    # verifies the ENDPOINT itself rather than trusting that report.
+    import json
+
+    try:
+        with open(os.path.join(root.run_dir, "readiness.json"), encoding="utf-8") as fh:
+            evidence = json.load(fh)
+    except (OSError, ValueError):
+        evidence = {}
+    for model in root.plan.models:
+        target = model.num_replicas or 0
+        running = target
+        for line in evidence.get("satisfied", []):
+            if model.model_id in str(line) and "/" in str(line):
+                try:
+                    part = str(line).split(":")[-1].strip().split()[0]
+                    running, target = (int(x) for x in part.split("/"))
+                except (ValueError, IndexError):
+                    pass
+        readiness.set_replicas(model.model_id, running, target)
+        readiness.set_route(model.route_name, True)
+        ok, detail = root.canary_advertised_endpoint(model)
+        readiness.set_canary(model.model_id, ok)
+        if not ok:
+            _log(f"[Composition] canary via {endpoint} failed: {detail}")
+
+    verdict = readiness.commit_ready(root.run_dir)
+    if verdict.ready:
+        _log(f"[Composition] READY via {endpoint} — {list(verdict.satisfied)}")
+    else:
+        raise CompositionError(
+            f"readiness not satisfied via the advertised endpoint: "
+            f"{list(verdict.blockers)}")
 
 
 def use_supervisor() -> bool:
