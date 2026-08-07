@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 
 class CapabilityUnavailable(RuntimeError):

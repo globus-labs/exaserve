@@ -33,7 +33,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 SCHEMA_VERSION = 2
 

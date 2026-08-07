@@ -285,11 +285,10 @@ def test_the_site_adapter_execs_the_supervisor():
     from importlib import resources
 
     script = (resources.files("exaserve") / "resources" / "launch_cluster.sh").read_text()
-    assert "exaserve.supervisor_main" in script
-    assert "EXASERVE_PYTHON_RANK_LAUNCH" in script
-    # The legacy line survives only inside the switch's else branch.
-    legacy = script.count("-m exaserve.driver")
-    assert legacy == 1, f"expected one legacy fallback invocation, found {legacy}"
+    assert "-m exaserve.launcher" in script, (
+        "the adapter must exec the composition root")
+    assert "-m exaserve.driver" not in script, (
+        "the shell must not launch ranks itself any more")
 
 
 def test_the_deployment_entry_point_is_callable():

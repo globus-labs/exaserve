@@ -1,72 +1,77 @@
-"""IMP-B01 wiring: the CLI launch path is supervised, not `exec bash`."""
+"""IMP-H03: the CLI entry is the composition root, not a Bash supervisor."""
 
 from __future__ import annotations
 
 import os
-import sys
-import textwrap
 
 import pytest
 
 from exaserve import launcher
 
 
-def test_switch_defaults_to_supervisor(monkeypatch):
-    monkeypatch.delenv("EXASERVE_USE_SUPERVISOR", raising=False)
+def test_the_entry_point_is_the_composition_root_not_bash():
+    """It used to supervise `bash launch_cluster.sh`, so the shell owned the
+    lifecycle and the 'Python supervisor' supervised a shell."""
+    import inspect
+
+    source = inspect.getsource(launcher)
+    assert "CompositionRoot" in source
+    assert "def run(" in source
+    # Bash appears only in the explicitly-legacy branch.
+    assert source.count("execvp") <= 1
+    assert launcher.LEGACY_ENTRY_ENV in source
+
+
+def test_the_legacy_shell_lifecycle_is_off_by_default(monkeypatch):
+    monkeypatch.delenv(launcher.LEGACY_ENTRY_ENV, raising=False)
     assert launcher.use_supervisor() is True
-    monkeypatch.setenv("EXASERVE_USE_SUPERVISOR", "0")
+    monkeypatch.setenv(launcher.LEGACY_ENTRY_ENV, "1")
     assert launcher.use_supervisor() is False
 
 
-def test_cli_launch_cluster_no_longer_execs_bash():
-    """The old implementation called os.execvp and never returned."""
+def test_cli_launch_cluster_delegates_to_the_composition_root():
     import inspect
 
     from exaserve import cli
 
-    src = inspect.getsource(cli.launch_cluster)
-    assert "execvp" not in src, "CLI still replaces itself with bash"
-    assert "launcher" in src
+    source = inspect.getsource(cli.launch_cluster)
+    assert "execvp" not in source
+    assert "launcher" in source
 
 
-def test_supervised_launch_propagates_child_failure(tmp_path, monkeypatch):
-    """A failing launcher script must yield a nonzero supervised exit code."""
-    fake = tmp_path / "launch_cluster.sh"
-    fake.write_text("#!/bin/bash\necho staging...\nexit 9\n")
-    monkeypatch.setattr(launcher, "_resources",
-                        lambda: ("/pkg", "/", str(fake)))
-    assert launcher.launch([]) == 9
+def test_a_plan_that_cannot_compile_is_a_typed_nonzero_exit(tmp_path):
+    """Plan compilation failure must not become a running deployment."""
+    config = tmp_path / "bad.yaml"
+    config.write_text("model_deployment_config:\n  num_node: 4\n")
+    assert launcher.run(str(config)) == 2
 
 
-def test_supervised_launch_returns_zero_on_success(tmp_path, monkeypatch):
-    fake = tmp_path / "launch_cluster.sh"
-    fake.write_text("#!/bin/bash\necho ok\nexit 0\n")
-    monkeypatch.setattr(launcher, "_resources",
-                        lambda: ("/pkg", "/", str(fake)))
-    assert launcher.launch([]) == 0
+def test_a_persisted_plan_artifact_is_hash_verified(tmp_path):
+    from exaserve.plan.compiler import compile_deployment_plan
+    from exaserve.plan.contracts import PlanError, SiteProfile
 
+    site = SiteProfile(
+        schema_version=2, site_id="s", max_nodes=8, gpus_per_node=12,
+        cpus_per_node=64, scheduler_types=("pbs",), gateway_kinds=("haproxy",),
+        vendors=("xpu",), engines=("vllm",), model_storage_path="/m",
+        local_stage_path="/t").finalize()
+    plan = compile_deployment_plan(
+        {"num_nodes": 1,
+         "models": [{"model_id": "a/b", "tensor_parallel_size": 1,
+                     "max_model_len": 4096, "size": 8}],
+         "gateway": {"kind": "haproxy", "port": 4001}},
+        site=site, deployment_id="d")
 
-def test_supervised_launch_reaps_descendants(tmp_path, monkeypatch):
-    """IMP-B03: a grandchild spawned by the launcher must not survive."""
-    marker = tmp_path / "grandchild.pid"
-    fake = tmp_path / "launch_cluster.sh"
-    fake.write_text(textwrap.dedent(f"""\
-        #!/bin/bash
-        {sys.executable} -c "import time; time.sleep(120)" &
-        echo $! > {marker}
-        sleep 0.5
-        exit 0
-        """))
-    monkeypatch.setattr(launcher, "_resources",
-                        lambda: ("/pkg", "/", str(fake)))
-    assert launcher.launch([]) == 0
-    pid = int(marker.read_text().strip())
-    # After the supervised launch returns, the grandchild must be gone.
-    import time
-    for _ in range(30):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return  # reaped
-        time.sleep(0.2)
-    pytest.fail(f"grandchild {pid} survived supervised cleanup")
+    import json
+    from dataclasses import asdict
+
+    payload = asdict(plan)
+    artifact = tmp_path / "run.plan.json"
+    artifact.write_text(json.dumps(payload, default=str))
+    loaded = launcher.load_or_compile_plan(str(artifact), deployment_id="d")
+    assert loaded.deployment_plan_hash == plan.deployment_plan_hash
+
+    payload["deployment_plan_hash"] = "0" * 64
+    artifact.write_text(json.dumps(payload, default=str))
+    with pytest.raises(PlanError, match="hash mismatch"):
+        launcher.load_or_compile_plan(str(artifact), deployment_id="d")

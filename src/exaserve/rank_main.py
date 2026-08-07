@@ -87,6 +87,26 @@ def run(config_path: str) -> int:
     # Handlers before any child exists.
     node.install_signal_handlers()
 
+    # §3.2.1 Q4 phase 2: a rank may run enough of NodeSupervisor to REGISTER
+    # and publish its snapshot + supervisor receipt, but it must NOT start Ray
+    # or any other long-lived child until the head has accepted every planned
+    # rank and sent START. Starting Ray first is what made registration
+    # decorative.
+    if channel.connected:
+        started = time.monotonic()
+        deadline = float(os.environ.get("EXASERVE_START_GATE_TIMEOUT_S", "600"))
+        channel.observe(f"rank{rank}", ComponentState.RUNNING.value, role="rank",
+                        detail="registered; awaiting START")
+        while not channel.start_received():
+            if time.monotonic() - started > deadline:
+                print(f"[Rank {rank}] START never arrived within {deadline:.0f}s; "
+                      "refusing to start children", flush=True)
+                channel.close()
+                return 1
+            time.sleep(1.0)
+        print(f"[Rank {rank}] START received after "
+              f"{time.monotonic() - started:.1f}s", flush=True)
+
     ray_env = get_ray_env(vendor)
     argv = (ray_head_argv(cluster, num_gpus) if rank == 0
             else ray_worker_argv(cluster, num_gpus))

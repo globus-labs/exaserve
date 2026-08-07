@@ -116,6 +116,14 @@ class HeadChannel:
         except Exception:
             return False
 
+    def broadcast_start(self) -> int:
+        """Release the START gate. Ranks hold every child until this lands."""
+        self._started = True
+        return len(getattr(self._listener, "sessions", {}) or {})
+
+    def start_broadcast(self) -> bool:
+        return getattr(self, "_started", False)
+
     def stop(self) -> None:
         try:
             self._loop.call(self._listener.stop(), timeout=10)
@@ -152,6 +160,7 @@ class RankClient:
         self._channel: Optional[NodeChannel] = None
         self._seq = 0
         self.connected = False
+        self._start_received = False
 
     def connect(self, timeout: float = 30.0) -> bool:
         """Best-effort: a channel failure must not prevent the rank running.
@@ -209,6 +218,19 @@ class RankClient:
         except Exception:
             self.connected = False
             return False
+
+    def start_received(self) -> bool:
+        """True once the head has released the START gate.
+
+        Without a live channel there is nothing to wait for, so an unconnected
+        rank is not held hostage by a gate that can never open.
+        """
+        if not self.connected:
+            return True
+        return self._start_received
+
+    def note_start(self) -> None:
+        self._start_received = True
 
     def close(self) -> None:
         if self._channel is not None and self._loop is not None:

@@ -168,12 +168,11 @@ RUN_LOG_DIR="${EXASERVE_RUN_LOG_DIR:-$RUN_LOG_ROOT/${RUN_STAMP}_${CONFIG_STEM}}"
 RUN_LOG_FILE="${EXASERVE_RUN_LOG_FILE:-$RUN_LOG_DIR/launch.log}"
 mkdir -p "$RUN_LOG_DIR"
 
-if [ "${EXASERVE_PROJECT_LOGGING_INITIALIZED:-0}" != "1" ]; then
-    export EXASERVE_PROJECT_LOGGING_INITIALIZED=1
-    export EXASERVE_RUN_LOG_DIR="$RUN_LOG_DIR"
-    export EXASERVE_RUN_LOG_FILE="$RUN_LOG_FILE"
-    exec > >(tee -a "$RUN_LOG_FILE") 2>&1
-fi
+# §3.2.1: component logs are owned by the composition root, not the adapter.
+# The adapter only tells Python where the run directory is; it does not
+# re-route the run's output into a file whose lifetime it would then own.
+export EXASERVE_RUN_LOG_DIR="$RUN_LOG_DIR"
+export EXASERVE_RUN_LOG_FILE="$RUN_LOG_FILE"
 
 HOSTNAME_SHORT="$(hostname -s)"
 UNIQUE_NODES_FILE="$RUN_LOG_DIR/pbs_nodes.txt"
@@ -534,24 +533,16 @@ fi
 # Force unbuffered Python output so tee gets lines immediately
 export PYTHONUNBUFFERED=1
 
-# WP13: this shell is a SITE ADAPTER. Everything above is environment and
-# preflight that genuinely belongs to the site; the run itself is owned by the
-# Python supervisor, which owns exactly one rank launcher (mpiexec/srun), which
-# owns the per-rank node supervisors. The head therefore never holds a remote
-# PID. Ranks run from the per-node /tmp/exaserve_src copy so node-local imports
-# come from tmpfs, not Lustre.
+# §3.2.1: this shell is a SITE ADAPTER and ends here, in exactly one exec.
 #
-# EXASERVE_PYTHON_RANK_LAUNCH=0 restores the shell's own mpiexec line for a
-# run-to-run comparison; registered in doc/hardening/MIGRATION_LOG.md and
-# removed at the WP13 cutover.
-if [ "${EXASERVE_PYTHON_RANK_LAUNCH:-1}" != "0" ]; then
-    $PYTHON_EXEC -m exaserve.supervisor_main --config "$RUNTIME_CONFIG_PATH"
-else
-    ${EXASERVE_MPILAUNCH} \
-        $PYTHON_EXEC -m exaserve.driver --config "$RUNTIME_CONFIG_PATH"
-fi
-
-# Stop Copper if it was started
-if [ "$COPPER_ACTIVE" = "1" ]; then
-    stop_copper_aurora.sh -d "$COPPER_LOG_DIR" -v /tmp/${USER}/copper_mount 2>&1 || true
-fi
+# Everything after this line used to be lifecycle: Copper stop, log routing,
+# result collection, cleanup traps. All of that is now owned by the Python
+# composition root as typed components, because a shell that runs code after
+# handing off is still the thing that owns the run.
+#
+# The adapter's whole remit: pick the interpreter, validate the allocation,
+# sanitize the environment, resolve the package, and exec.
+#
+# EXASERVE_LEGACY_SHELL_LIFECYCLE=1 restores the old in-shell lifecycle for a
+# run-to-run comparison; deleted at the WP13 cutover.
+exec $PYTHON_EXEC -m exaserve.launcher "$RUNTIME_CONFIG_PATH"

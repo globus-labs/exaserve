@@ -6,7 +6,6 @@ import json
 
 import pytest
 
-from exaserve.compat.receipt_v2 import ExactReceiptLedger
 from exaserve.control.plan_readiness import DeploymentPhase, PlanReadiness
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import SiteProfile, build_allocation_binding
