@@ -73,6 +73,7 @@ class HeadChannel:
         self.expected_ranks = expected_ranks
         self.secret = new_deployment_secret()
         self.observations: list[ComponentObservation] = []
+        self.receipt_payloads: list = []
         self.failures: list[str] = []
         self.disconnected: list[int] = []
         self._loop = _LoopThread()
@@ -80,11 +81,16 @@ class HeadChannel:
             deployment_id=deployment_id, plan_hash=plan_hash, generation=generation,
             expected_ranks=expected_ranks, secret=self.secret,
             on_observation=self._on_observation,
-            on_session_change=self._on_session_change, host=host)
+            on_session_change=self._on_session_change, host=host,
+            on_receipt=self._on_receipt)
         self._loop.call(self._listener.start())
         self.port = self._listener.port
 
     # -- sinks -------------------------------------------------------------
+    def _on_receipt(self, rank: int, payload: dict) -> None:
+        """Rank-owned receipts arrive here and nowhere else."""
+        self.receipt_payloads.append((rank, payload))
+
     def _on_observation(self, rank: int, obs: ComponentObservation) -> None:
         self.observations.append(obs)
         if obs.state in (ComponentState.FAILED.value,):
@@ -253,6 +259,22 @@ class RankClient:
     def start_gate_available(self) -> bool:
         """True when the head can deliver START over the wire."""
         return self.connected
+
+    def submit_receipt(self, receipt) -> bool:
+        """Send one exact v2 receipt over the AUTHENTICATED channel (§3.2.1).
+
+        A detached Ray actor, stdout, or a node-local file is not an
+        authoritative readiness source. This is the only path a rank-owned
+        receipt may take to the head.
+        """
+        if not self.connected or self._channel is None or self._loop is None:
+            return False
+        payload = receipt.to_dict() if hasattr(receipt, "to_dict") else dict(receipt)
+        try:
+            self._loop.call(self._channel.send_receipt(payload), timeout=15)
+            return True
+        except Exception:                 # noqa: BLE001
+            return False
 
     def poll_start(self, timeout: float = 1.0) -> bool:
         """Check for the head's START and acknowledge it."""

@@ -56,6 +56,7 @@ class EnvelopeKind(str, Enum):
     COMMAND = "COMMAND"
     COMMAND_RESULT = "COMMAND_RESULT"
     SNAPSHOT = "SNAPSHOT"
+    RECEIPT = "RECEIPT"          # one exact v2 compatibility receipt
     HEARTBEAT = "HEARTBEAT"
     GOODBYE = "GOODBYE"
 

@@ -197,3 +197,47 @@ def test_an_unconnected_rank_is_not_held_by_a_gate_it_cannot_see(monkeypatch):
     client = RankClient(rank=0)
     assert client.start_gate_available() is False
     assert client.start_received() is True
+
+
+def test_a_rank_receipt_travels_over_the_authenticated_channel(head, monkeypatch):
+    """A detached Ray actor is not an authoritative readiness source."""
+    import time
+
+    _rank_env(head, monkeypatch)
+    client = RankClient(rank=0)
+    assert client.connect(timeout=10)
+    try:
+        receipt = {"schema_version": 2, "owner_scope": "RANK", "owner_rank": 0,
+                   "receipt_requirement_id": "rank0/ray_head", "role": "ray_head"}
+        assert client.submit_receipt(receipt)
+        for _ in range(50):
+            if head.receipt_payloads:
+                break
+            time.sleep(0.1)
+        assert head.receipt_payloads, "no receipt reached the head"
+        rank, payload = head.receipt_payloads[-1]
+        assert rank == 0 and payload["receipt_requirement_id"] == "rank0/ray_head"
+    finally:
+        client.close()
+
+
+def test_a_rank_cannot_submit_a_global_receipt_over_the_channel(head, monkeypatch):
+    """GLOBAL receipts enter only from the in-process supervisor authority."""
+    import time
+
+    _rank_env(head, monkeypatch)
+    client = RankClient(rank=1)
+    assert client.connect(timeout=10)
+    try:
+        client.submit_receipt({"schema_version": 2, "owner_scope": "GLOBAL",
+                               "owner_rank": None,
+                               "receipt_requirement_id": "global/supervisor",
+                               "role": "supervisor"})
+        time.sleep(0.5)
+        assert not any(p.get("owner_scope") == "GLOBAL"
+                       for _, p in head.receipt_payloads), (
+            "a rank session smuggled a GLOBAL receipt")
+        assert any("global_receipt_from_rank" in a.reason
+                   for a in head._listener.audit), "the attempt was not audited"
+    finally:
+        client.close()

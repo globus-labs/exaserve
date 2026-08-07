@@ -132,7 +132,9 @@ class ControlListener:
         on_observation: Callable[[int, ComponentObservation], Awaitable[None] | None],
         on_session_change: Callable[[int, bool], Awaitable[None] | None] | None = None,
         host: str = "0.0.0.0",
+        on_receipt: Callable[[int, dict], Awaitable[None] | None] | None = None,
     ) -> None:
+        self._on_receipt = on_receipt
         self.deployment_id = deployment_id
         self.plan_hash = plan_hash
         self.generation = generation
@@ -317,6 +319,19 @@ class ControlListener:
                     # IMP-B06: record receiver-side arrival so a watchdog can
                     # expire a silent rank's lease.
                     session.last_seen_at = time.monotonic()
+                elif env.kind == EnvelopeKind.RECEIPT.value:
+                    # A rank session may submit only RANK-scoped receipts for
+                    # its own authenticated rank; the validator enforces the
+                    # rest (§3.2.1).
+                    payload = dict(env.payload or {})
+                    if payload.get("owner_scope") == "GLOBAL":
+                        self._audit("global_receipt_from_rank",
+                                    "rank session attempted a GLOBAL receipt",
+                                    rank=env.sender_rank, node_id=env.sender_node)
+                    elif self._on_receipt is not None:
+                        result = self._on_receipt(session.rank, payload)
+                        if asyncio.iscoroutine(result):
+                            await result
                 elif env.kind == EnvelopeKind.COMMAND_RESULT.value:
                     command_id = str(env.payload.get("command_id", ""))
                     if command_id:
@@ -454,6 +469,11 @@ class NodeChannel:
         if env.kind != EnvelopeKind.COMMAND.value:
             return None
         return env.payload
+
+    async def send_receipt(self, payload: dict) -> None:
+        assert self._writer is not None
+        await write_frame(self._writer, self._secret,
+                          self._env(EnvelopeKind.RECEIPT.value, payload))
 
     async def send_command_result(self, command_id: str, ok: bool,
                                   detail: str = "") -> None:
