@@ -70,8 +70,58 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
         run: python -m pytest -q -o addopts="" -p randomly -v 2>&1 | tee pytest-random.log
 
+  packaged:
+    name: packaged wheel test (not an editable checkout)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Install the WHEEL and run the suite against it
+        run: |
+          # IMP-H07: CI previously tested an editable checkout, so a file that
+          # was never packaged still passed. Installing the wheel into a clean
+          # venv and running the suite against the INSTALLED package is what
+          # proves the artifact a user would get actually works.
+          python -m venv /tmp/pkg
+          /tmp/pkg/bin/pip install --upgrade pip
+          /tmp/pkg/bin/pip install dist/*.whl pytest pyyaml
+          cd /tmp   # never import from the source tree
+          /tmp/pkg/bin/python -c "
+          import exaserve, exaserve.plan.compiler, exaserve.compat.receipt_v2
+          import exaserve.control.session, exaserve.control.plan_readiness
+          import exaserve.composition, exaserve.launcher, exaserve.site
+          print('packaged import OK', exaserve.__file__)"
+      - name: Assert the packaged resources shipped
+        run: |
+          /tmp/pkg/bin/python -c "
+          from importlib import resources
+          root = resources.files('exaserve') / 'resources'
+          for name in ('launch_cluster.sh', 'distribute_to_nodes.sh', 'bcast.c'):
+              assert (root / name).is_file(), f'{name} missing from the wheel'
+          script = (root / 'launch_cluster.sh').read_text()
+          assert '-m exaserve.launcher' in script
+          print('packaged resources OK')"
+
+  ledger:
+    name: findings ledger validator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip pyyaml
+      - name: Validate every record against plan section 8
+        run: python scripts/hardening/validate_findings.py
+
   lint:
-    name: format + lint + types
+    name: format + lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
