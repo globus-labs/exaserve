@@ -26,14 +26,24 @@ from exaserve.cli import launch_cluster; launch_cluster()
 SUPER_PID=$!
 echo "supervisor_pid=$SUPER_PID"
 
+# Wait the way a CONSUMER is supposed to: through the shared status API, not
+# by grepping a log. That also dogfoods the §3.4 boundary on every smoke run.
 ready=0
-for i in $(seq 1 150); do
-  [ -s "$(ls -t "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)" ] && { ready=1; break; }
-  grep -qE "\[Driver\] FATAL|Refusing to declare|refusing to declare|FIRST CAUSE" "$OUT/launch.log" && break
+for i in $(seq 1 240); do
+  RUNDIR=$(ls -td "$OUT"/run_logs/*/ 2>/dev/null | head -1)
+  if [ -n "$RUNDIR" ]; then
+    state=$(PYTHONPATH=$PWD/src python -c "
+from exaserve.status_api import read_deployment_status
+s = read_deployment_status('$RUNDIR')
+print(s.state if s else 'NONE')" 2>/dev/null)
+    [ "$state" = "READY" ] && { ready=1; break; }
+    case "$state" in FAILED|STOPPED|CANCELLED) break;; esac
+  fi
   kill -0 $SUPER_PID 2>/dev/null || break
   sleep 10
 done
-echo "ready_signal=$ready after $((i*10))s"
+echo "ready_signal=$ready after $((i*10))s (shared status state=${state:-NONE})"
+status_ok=$([ "$state" = "READY" ] && echo 1 || echo 0)
 
 SNAP=$(ls -t "$OUT"/run_logs/*/readiness.json 2>/dev/null | head -1)
 gate_ok=0; gate_ready=""
@@ -129,6 +139,7 @@ fi
 pkill -f exaserve.driver 2>/dev/null; ray stop --force >/dev/null 2>&1
 echo "=== SUPERVISOR SMOKE VERDICT ==="
 echo "gate_ready=$([ "$gate_ok" = 1 ] && echo PASS || echo "FAIL ($gate_ready)")"
+echo "shared_status_ready=$([ "${status_ok:-0}" = 1 ] && echo PASS || echo "FAIL (${state:-NONE})")"
 echo "marker_never_precedes_gate=$([ "$marker_before_gate" = 0 ] && echo PASS || echo FAIL)"
 echo "receipt_slots_exact=$([ "${receipts_ok:-0}" = 1 ] && echo "PASS ($receipts)" || echo "FAIL ($receipts)")"
 echo "evidence_separate_from_verdict=$([ "${evidence_ok:-0}" = 1 ] && echo PASS || echo FAIL)"
