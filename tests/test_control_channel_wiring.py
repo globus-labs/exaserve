@@ -241,3 +241,91 @@ def test_a_rank_cannot_submit_a_global_receipt_over_the_channel(head, monkeypatc
                    for a in head._listener.audit), "the attempt was not audited"
     finally:
         client.close()
+
+
+def test_a_chunked_snapshot_is_applied_only_when_complete(head, monkeypatch):
+    """A partial or mixed snapshot must never become the rank's projection."""
+    import time
+
+    import socket
+
+    from exaserve.control.contracts import SCHEMA_VERSION, ComponentObservation, OwnerScope
+
+    _rank_env(head, monkeypatch)
+    client = RankClient(rank=0)
+    assert client.connect(timeout=10)
+    try:
+        # node_id must match the authenticated session: the listener refuses a
+        # rank asserting another node, which is the identity binding working.
+        node_id = socket.gethostname()
+        observations = [
+            ComponentObservation(
+                schema_version=SCHEMA_VERSION, deployment_id="d1", plan_hash="h",
+                generation=7, component_id=f"c{i}", instance_id="i",
+                sequence=i + 1, owner_scope=OwnerScope.RANK.value, role="ray",
+                node_id=node_id, state="RUNNING", observed_at=time.time(),
+                owner_rank=0)
+            for i in range(5)
+        ]
+        # Force multiple chunks so assembly is genuinely exercised.
+        client._loop.call(
+            client._channel.send_snapshot(observations, chunk_items=2), timeout=15)
+        for _ in range(60):
+            if len(head.observations) >= 5:
+                break
+            time.sleep(0.1)
+        assert len(head.observations) >= 5, (
+            f"chunked snapshot did not assemble ({len(head.observations)} items)")
+    finally:
+        client.close()
+
+
+def test_a_snapshot_with_a_wrong_hash_is_refused(head, monkeypatch):
+    import time
+
+    _rank_env(head, monkeypatch)
+    client = RankClient(rank=1)
+    assert client.connect(timeout=10)
+    try:
+        # Hand-craft a frame whose declared hash cannot match its items.
+        from exaserve.control.contracts import EnvelopeKind
+
+        client._loop.call(client._channel._writer.drain(), timeout=5)
+        from exaserve.control.transport import write_frame
+
+        env = client._channel._env(EnvelopeKind.SNAPSHOT.value, {
+            "payload_version": 1, "snapshot_id": "bogus", "chunk_index": 0,
+            "total_chunks": 1, "complete_hash": "0" * 64,
+            "items": [{"kind": "observation", "body": {"tampered": True}}]})
+        client._loop.call(
+            write_frame(client._channel._writer, client._channel._secret, env),
+            timeout=10)
+        time.sleep(0.6)
+        assert any("hash mismatch" in a.reason for a in head._listener.audit), (
+            "a snapshot whose content does not match its declared hash was accepted")
+    finally:
+        client.close()
+
+
+def test_a_snapshot_observation_claiming_another_node_is_refused(head, monkeypatch):
+    """A rank must not assert a node it is not bound to, even in a snapshot."""
+    import time
+
+    from exaserve.control.contracts import SCHEMA_VERSION, ComponentObservation, OwnerScope
+
+    _rank_env(head, monkeypatch)
+    client = RankClient(rank=0)
+    assert client.connect(timeout=10)
+    try:
+        forged = [ComponentObservation(
+            schema_version=SCHEMA_VERSION, deployment_id="d1", plan_hash="h",
+            generation=7, component_id="c0", instance_id="i", sequence=1,
+            owner_scope=OwnerScope.RANK.value, role="ray",
+            node_id="somebody-elses-node", state="RUNNING",
+            observed_at=time.time(), owner_rank=0)]
+        client._loop.call(client._channel.send_snapshot(forged), timeout=15)
+        time.sleep(0.6)
+        assert not head.observations, "a forged node_id was accepted"
+        assert any("NODE_MISMATCH" in a.reason for a in head._listener.audit)
+    finally:
+        client.close()

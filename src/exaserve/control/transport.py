@@ -43,6 +43,7 @@ from .contracts import (
 
 _LEN = struct.Struct(">I")
 # IMP-B06: bound listener memory (dedup keys retained per session).
+_MAX_SNAPSHOT_CHUNKS = 256
 _MAX_DEDUP_KEYS = 4096
 _MAX_AUDIT_RECORDS = 1000
 _MAC_BYTES = 32
@@ -151,6 +152,7 @@ class ControlListener:
         self._writers: dict[int, Any] = {}
         self._command_results: dict[str, dict] = {}
         self._pending_commands: dict[int, list] = {}
+        self._snapshots: dict[int, dict] = {}
         self._nodes_by_rank: dict[int, str] = {}
         self.audit: list[AuditRecord] = []
         self._registered_event: dict[int, asyncio.Event] = {}
@@ -255,12 +257,38 @@ class ControlListener:
                     break
                 session.last_seq = env.seq
 
-                if env.kind in (EnvelopeKind.OBSERVATION.value, EnvelopeKind.SNAPSHOT.value):
-                    payloads = (
-                        env.payload.get("observations", [])
-                        if env.kind == EnvelopeKind.SNAPSHOT.value
-                        else [env.payload]
-                    )
+                if env.kind == EnvelopeKind.SNAPSHOT.value:
+                    # §3.2.1 chunking: accept the COMPLETE set or nothing. A
+                    # partial or mixed snapshot must never become the rank's
+                    # projection, so chunks are buffered and verified against
+                    # the declared hash before any item is applied.
+                    accepted, reason, items = self._assemble_snapshot(
+                        session.rank, env.payload)
+                    if reason:
+                        self._audit(reason, "snapshot rejected", rank=session.rank)
+                        return
+                    if not accepted:
+                        continue          # more chunks owed
+                    payloads = [i["body"] for i in items
+                                if i.get("kind") == "observation"]
+                    for receipt_item in (i for i in items
+                                         if i.get("kind") == "receipt"):
+                        if self._on_receipt is not None:
+                            body = dict(receipt_item.get("body") or {})
+                            if body.get("owner_scope") == "GLOBAL":
+                                self._audit("global_receipt_from_rank",
+                                            "rank snapshot carried a GLOBAL receipt",
+                                            rank=session.rank)
+                                return
+                            result = self._on_receipt(session.rank, body)
+                            if asyncio.iscoroutine(result):
+                                await result
+                elif env.kind == EnvelopeKind.OBSERVATION.value:
+                    payloads = [env.payload]
+                else:
+                    payloads = None
+
+                if payloads is not None:
                     for item in payloads:
                         try:
                             obs = validate_observation(item)
@@ -354,6 +382,47 @@ class ControlListener:
             self._writers.pop(getattr(session, "rank", -1), None)
             writer.close()
 
+    def _assemble_snapshot(self, rank: int, payload: dict):
+        """Buffer one chunk. Returns (complete, reject_reason, items)."""
+        import hashlib
+        import json as _json
+
+        if int(payload.get("payload_version", 1)) != 1:
+            return False, "unknown snapshot payload_version", []
+        snapshot_id = str(payload.get("snapshot_id", ""))
+        total = int(payload.get("total_chunks", 1))
+        index = int(payload.get("chunk_index", 0))
+        complete_hash = str(payload.get("complete_hash", ""))
+        if total < 1 or index < 0 or index >= total:
+            return False, f"chunk {index} out of range 0..{total - 1}", []
+        if total > _MAX_SNAPSHOT_CHUNKS:
+            return False, f"{total} chunks exceeds the cap", []
+
+        state = self._snapshots.get(rank)
+        if state is None or state["snapshot_id"] != snapshot_id:
+            # One in-flight snapshot per rank; a new id replaces the old.
+            state = {"snapshot_id": snapshot_id, "total": total,
+                     "hash": complete_hash, "chunks": {}}
+            self._snapshots[rank] = state
+        existing = state["chunks"].get(index)
+        items = list(payload.get("items") or [])
+        if existing is not None and existing != items:
+            return False, f"conflicting duplicate for chunk {index}", []
+        state["chunks"][index] = items
+        if len(state["chunks"]) < state["total"]:
+            return False, None, []
+
+        assembled: list = []
+        for i in sorted(state["chunks"]):
+            assembled.extend(state["chunks"][i])
+        blob = _json.dumps(assembled, sort_keys=True, separators=(",", ":"),
+                           default=str)
+        actual = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        del self._snapshots[rank]
+        if complete_hash and actual != complete_hash:
+            return False, "snapshot content hash mismatch", []
+        return True, None, assembled
+
     async def _send_command(self, rank: int, command_id: str, operation: str,
                             payload: dict | None = None) -> bool:
         """Push one command to a rank. Returns False if it is unreachable."""
@@ -445,12 +514,43 @@ class NodeChannel:
         await write_frame(self._writer, self._secret,
                           self._env(EnvelopeKind.OBSERVATION.value, obs.to_dict()))
 
-    async def send_snapshot(self, observations: list[ComponentObservation]) -> None:
+    async def send_snapshot(self, observations: list[ComponentObservation],
+                            receipts: list | None = None, *,
+                            snapshot_id: str = "", chunk_items: int = 256) -> str:
+        """Send a complete replacement snapshot, chunked and hashed.
+
+        The §3.2.1 contract: payload version 1, zero-based contiguous chunks, a
+        canonical SHA-256 over the COMPLETE item set, and one in-flight
+        snapshot. The head accepts only the whole set, so a partial or mixed
+        snapshot cannot silently become the rank's projection.
+        """
         assert self._writer is not None
-        await write_frame(
-            self._writer, self._secret,
-            self._env(EnvelopeKind.SNAPSHOT.value,
-                      {"observations": [o.to_dict() for o in observations]}))
+        import hashlib
+        import json as _json
+
+        items = [{"kind": "observation", "body": o.to_dict()} for o in observations]
+        items += [{"kind": "receipt", "body": dict(r)} for r in (receipts or [])]
+        blob = _json.dumps(items, sort_keys=True, separators=(",", ":"),
+                           default=str)
+        complete_hash = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        snapshot_id = snapshot_id or f"snap-{self.rank}-{complete_hash[:12]}"
+
+        chunks = [items[i:i + chunk_items]
+                  for i in range(0, len(items), chunk_items)] or [[]]
+        for index, chunk in enumerate(chunks):
+            await write_frame(self._writer, self._secret, self._env(
+                EnvelopeKind.SNAPSHOT.value, {
+                    "payload_version": 1,
+                    "snapshot_id": snapshot_id,
+                    "chunk_index": index,
+                    "total_chunks": len(chunks),
+                    "complete_hash": complete_hash,
+                    "items": chunk,
+                    # Kept for the legacy single-frame reader during migration.
+                    "observations": [i["body"] for i in chunk
+                                     if i["kind"] == "observation"],
+                }))
+        return snapshot_id
 
     async def send_heartbeat(self) -> None:
         assert self._writer is not None
