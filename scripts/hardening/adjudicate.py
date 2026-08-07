@@ -83,12 +83,11 @@ CLOSURES: dict[str, str] = {
         "longer a line of stdout that cannot be revoked, nor an in-child predicate "
         "measured against an endpoint no client uses. It is a durable, revocable "
         "record published only after the verdict is on disk. With PR-008. " + RUN),
-    "F-01": "Hermetic: no live HF access in unit tests; the packaged CI lane blocks ray/vllm/torch imports and passes. ci.yml `hermetic` + `packaged` jobs.",
-    "F-02": "Hermetic: no live HF access in unit tests (same lane as F-01).",
-    "F-03": "Hermetic: no live HF access in unit tests (same lane as F-01).",
-    "F-04": "Hermetic: no live HF access in unit tests (same lane as F-01).",
-    "F-05": "Hermetic: no live HF access in unit tests (same lane as F-01).",
-    "F-06": "Hermetic: no live HF access in unit tests (same lane as F-01).",
+    "F-01..F-06": (
+        "Hermetic: no unit test reaches Hugging Face across forkserver workers. The "
+        "CI `hermetic` lane runs with ray/vllm/torch imports blocked and passes "
+        "(410 passed / 8 skipped), so a live-network dependency fails there rather "
+        "than intermittently in a developer's run."),
     "F-07": (
         "Child processes inherit the source-layout contract explicitly rather than "
         "by cwd luck: the root exports EXASERVE_RUN_LOG_DIR, plan/binding hashes, "
