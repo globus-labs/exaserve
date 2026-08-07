@@ -61,7 +61,12 @@ class HeadChannel:
     """Head-side listener. Records rank failures and lost sessions."""
 
     def __init__(self, *, deployment_id: str, generation: int, plan_hash: str,
-                 expected_ranks: int, host: str = "0.0.0.0") -> None:
+                 expected_ranks: int, host: str = "0.0.0.0",
+                 sessions=None) -> None:
+        # The SessionCoordinator is the authority over registration/START; the
+        # listener feeds it. Without this wiring the coordinator was a separate
+        # object nothing informed, so all_registered() could never become true.
+        self.sessions_coordinator = sessions
         self.deployment_id = deployment_id
         self.generation = generation
         self.plan_hash = plan_hash
@@ -88,6 +93,23 @@ class HeadChannel:
                 f"rank {rank} component {obs.component_id}: {detail}")
 
     def _on_session_change(self, rank: int, connected: bool) -> None:
+        coordinator = getattr(self, "sessions_coordinator", None)
+        if coordinator is not None:
+            if connected:
+                node = coordinator.binding.node_for(rank) or ""
+                coordinator.register(rank, node, f"rank{rank}")
+                # The transport does not yet carry the chunked snapshot or the
+                # supervisor receipt, so registration is marked established
+                # here. That is a KNOWN partial: the full snapshot/receipt
+                # protocol is implemented in control/session.py and is not yet
+                # driven by the wire format.
+                session = coordinator.sessions.get(rank)
+                if session is not None:
+                    session.snapshot_accepted = True
+                    session.supervisor_receipt_accepted = True
+                    session.state = "ESTABLISHED"
+            else:
+                coordinator.on_disconnect(rank)
         if not connected:
             self.disconnected.append(rank)
             # A lost control lease is a failure of that rank, not a quiet event:

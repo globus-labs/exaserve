@@ -117,6 +117,8 @@ class CompositionRoot:
         from .control.channel_runtime import HeadChannel
         from .control.session import SessionCoordinator
 
+        self.sessions = SessionCoordinator(plan=self.plan, binding=self.binding,
+                                           log=self._log)
         last: Optional[Exception] = None
         for attempt in range(1, retries + 1):
             try:
@@ -124,7 +126,8 @@ class CompositionRoot:
                     deployment_id=self.plan.deployment_id,
                     generation=self.generation,
                     plan_hash=self.plan.deployment_plan_hash,
-                    expected_ranks=self.plan.num_nodes)
+                    expected_ranks=self.plan.num_nodes,
+                    sessions=self.sessions)
                 break
             except Exception as exc:      # noqa: BLE001 - reported, then fatal
                 last = exc
@@ -137,8 +140,6 @@ class CompositionRoot:
                 f"({last}); refusing to launch ranks. A run nobody can observe "
                 "is not a run worth starting.")
 
-        self.sessions = SessionCoordinator(plan=self.plan, binding=self.binding,
-                                           log=self._log)
         self.receipts = ExactReceiptLedger(self.plan, self.binding)
         self._log(f"[Composition] control listener on port {self.head_channel.port} "
                   f"for {self.plan.num_nodes} planned rank(s)")
