@@ -1318,3 +1318,30 @@ lint job no longer claims "types" in its name, because it runs no type checker.
 **Re-validated on 2 nodes after all of the above:** gate_ready,
 marker_never_precedes_gate, receipts (75), canary, tree_reaped,
 engine_self_attested — all PASS; `supervisor_exit=143`, named 15 → 0.
+
+### Production-exposure run: READY reached, but by the OLD gate (2026-08-07)
+
+The first hardware run of a `PROXIED_INTERNAL` plan compiled and booted
+correctly — plan `6d0c9711a851`, real deployment id and generation, listener
+before ranks, START released, `[Deployment] state=READY`. The readiness
+snapshot landed in the run directory as it should.
+
+It nevertheless does **not** demonstrate the gateway contract, and the run is
+what showed why:
+
+- `server.py` still drives the legacy `control/serve_readiness` gate, not
+  `control/plan_readiness.PlanReadiness`. The READY above therefore canaried
+  the internal Serve endpoint, not the compiled advertised endpoint.
+- `launcher.run()` never calls `start_gateway`, `build_readiness`, or
+  `establish_advertised_endpoint`. The composition root has all three, they are
+  unit-tested, and nothing on the reachable path invokes them — so no gateway
+  process was started and the smoke's proxy canary returned nothing.
+
+This is precisely the failure mode the completion-claim audit named: a
+component that exists, is tested, and is not what production uses. Recording it
+as an open gap rather than reading `state=READY` as gateway evidence.
+
+**Owed:** wire `PlanReadiness` into the deployment path in place of the legacy
+gate, and have the composition root start the gateway and establish the
+advertised endpoint before validating. Until then, `PROXIED_INTERNAL` compiles
+and deploys but its exposure contract is unproven on hardware.
