@@ -1220,3 +1220,71 @@ continue; release-envelope freeze and scale-ledger reclassification may not.
 The Pass 5 counts immediately above are therefore historical claims, not a
 current completion statement; P00 must normalize and re-adjudicate the ledger
 before publishing replacement counts.
+
+## 2026-08-07 — Pass 6: the cutover packets (P01–P04)
+
+Executing the binding resolutions in plan §3.2.1 after the completion-claim
+audit rejected the previous accounting.
+
+**P01 — one compiled plan.** `plan/contracts.py` + `plan/compiler.py`:
+SiteProfile / SchedulerPlan / DeploymentPlan / RunPlan / AllocationBinding with
+distinct hash boundaries. Serving changes move `deployment_plan_hash`; workload
+moves `run_semantic_hash`; paths, timestamps and allocation nodes move only
+binding/provenance. `GatewayPlan` has no `none` member, so production cannot
+run with no front door, and direct exposure compiles only under explicit
+`validation_mode` + `DIRECT_VALIDATION`.
+
+**P02 — receipts per exact instance.** `compat/receipt_v2.py` implements the
+§3.2.1 field list. Readiness needs exact set equality against the planned
+slots, so duplicate-plus-missing at a matching total still fails.
+`APPLIED/NOT_REQUIRED/FAILED` replaces the boolean, `NOT_REQUIRED` cannot
+excuse a targeted patch, and v1 role-only payloads fail closed.
+
+**P03 — the protocol.** `control/session.py` makes registration a gate:
+REGISTER alone is insufficient, a complete snapshot plus supervisor receipt is,
+and one missing rank at the deadline is terminal. Reconnect requires a full
+replacement snapshot. Loss anchors are exact and grace is not double-counted.
+`control/plan_readiness.py` derives readiness from the plan rather than the
+survivors, verifies the advertised endpoint, and persists one revocable READY.
+
+COMMAND dispatch now exists, which matters more than it sounds: START was
+previously computed and never delivered, so the gate could not be enforced. The
+listener pushes commands per session and records COMMAND_RESULT; the rank polls
+and acknowledges. Rank receipts travel over the same authenticated channel, and
+a rank attempting a GLOBAL receipt is refused and audited.
+
+**P04 — Python owns the lifecycle.** `launcher.py` is the composition root the
+adapter execs into; `composition.py` binds the listener FAIL-CLOSED before any
+rank exists, runs staging as owned finite steps with validated result
+manifests, owns the gateway as a GLOBAL component, and establishes the
+advertised endpoint before readiness. The shell ends in exactly one process
+exec with nothing after it.
+
+### What running it actually taught
+
+Four defects were invisible until the path ran, and every one was an ownership
+handoff rather than a logic error: the root fell back to `cwd` for its run
+directory; the head IP was communicated by **mutating a config file**;
+`EXASERVE_RUN_LOG_DIR` was not propagated to ranks; and `get_ray_env()` dropped
+the deployment identity before the server child. Until the last was fixed, the
+deployment reached READY while every consumer reported not-ready — the record
+was written where nobody looks.
+
+Two further "failures" were measurement artifacts in the smoke itself, and both
+were initially misreported as product defects. `tree_reaped FAIL (99 left)` is
+an *unmeasured sentinel*; `(4 left)` was `pgrep -g 0` after the script looked
+for a `launch_cluster.sh` child that no longer exists. The lesson is the
+audit's own, turned on the harness: a check is only as good as what it can
+actually see.
+
+**2-node result:** gate_ready, marker_never_precedes_gate, receipts (75),
+canary, tree_reaped, engine_self_attested — all PASS; `supervisor_exit=143`,
+named processes 15 → 0.
+
+### Ledger
+
+Re-adjudicated with `scripts/hardening/validate_findings.py`, which encodes the
+§8 rule and now passes: **2 FIXED / 78 IN_PROGRESS / 2 out of scope**. 27
+records claiming FIXED had no linked evidence and 5 ACCEPTED_LIMITs had no
+approval block; all reopened rather than back-filled. The 64-node ceiling
+remains unapproved.

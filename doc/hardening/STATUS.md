@@ -21,8 +21,15 @@
 > **2-node validation of the new architecture (2026-08-07).** The composition
 > root path is verified working: `gate_ready`, `marker_never_precedes_gate`,
 > `receipts` (75), `canary`, and `engine_self_attested` all PASS.
-> `tree_reaped` is **FAIL (4 processes left)** — a real measurement and a real
-> open defect, not the unmeasured sentinel that earlier runs reported.
+> `tree_reaped` initially read FAIL (4 left). Diagnosing it found **one real
+> bug and one measurement artifact**: a SIGTERM shutdown exited 1 instead of
+> the 143 the supervisor already classified, and the smoke was looking for a
+> `launch_cluster.sh` child the new architecture no longer has, so it counted
+> process group 0. The same run's real figure was `named_before=15,
+> named_after=0` — the tree WAS fully reaped.
+>
+> After both fixes, **all six checks PASS** with `supervisor_exit=143`,
+> `group 1 -> 0`, `named 15 -> 0`.
 >
 > Getting there took four env-chain fixes, each found only by running it:
 > the root fell back to `cwd` for its run directory; the head IP was
