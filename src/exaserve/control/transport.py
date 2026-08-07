@@ -144,6 +144,11 @@ class ControlListener:
         self._server: asyncio.AbstractServer | None = None
         self.port: int | None = None
         self.sessions: dict[int, SessionInfo] = {}
+        # Writer per authenticated session, so the head can PUSH commands.
+        # Without this, START was computed and never delivered.
+        self._writers: dict[int, Any] = {}
+        self._command_results: dict[str, dict] = {}
+        self._pending_commands: dict[int, list] = {}
         self._nodes_by_rank: dict[int, str] = {}
         self.audit: list[AuditRecord] = []
         self._registered_event: dict[int, asyncio.Event] = {}
@@ -224,7 +229,11 @@ class ControlListener:
                                  sender_node="head", seq=0,
                                  payload={"command_id": "register", "ok": True}),
                     )
+                    self._writers[session.rank] = writer
                     await self._emit_session_change(session.rank, True)
+                    # Deliver anything queued before this rank connected.
+                    for queued in self._pending_commands.pop(session.rank, []):
+                        await self._send_command(session.rank, *queued)
                     continue
 
                 if session is None or not session.registered:
@@ -308,6 +317,14 @@ class ControlListener:
                     # IMP-B06: record receiver-side arrival so a watchdog can
                     # expire a silent rank's lease.
                     session.last_seen_at = time.monotonic()
+                elif env.kind == EnvelopeKind.COMMAND_RESULT.value:
+                    command_id = str(env.payload.get("command_id", ""))
+                    if command_id:
+                        self._command_results[command_id] = {
+                            "rank": env.sender_rank,
+                            "ok": bool(env.payload.get("ok")),
+                            "detail": env.payload.get("detail", ""),
+                        }
                 elif env.kind == EnvelopeKind.GOODBYE.value:
                     break
                 # COMMAND/COMMAND_RESULT handling is added with the command
@@ -319,7 +336,41 @@ class ControlListener:
                 # drops; readiness must not keep believing the set is complete.
                 self._all_registered.clear()
                 await self._emit_session_change(session.rank, False)
+            self._writers.pop(getattr(session, "rank", -1), None)
             writer.close()
+
+    async def _send_command(self, rank: int, command_id: str, operation: str,
+                            payload: dict | None = None) -> bool:
+        """Push one command to a rank. Returns False if it is unreachable."""
+        writer = self._writers.get(rank)
+        if writer is None:
+            self._pending_commands.setdefault(rank, []).append(
+                (command_id, operation, payload))
+            return False
+        body = {"command_id": command_id, "operation": operation}
+        body.update(payload or {})
+        try:
+            await write_frame(writer, self._secret, Envelope(
+                v=SCHEMA_VERSION, kind=EnvelopeKind.COMMAND.value,
+                deployment_id=self.deployment_id, plan_hash=self.plan_hash,
+                generation=self.generation, sender_rank=SUPERVISOR_RANK,
+                sender_node="head", seq=0, payload=body))
+            return True
+        except (ConnectionError, OSError):
+            return False
+
+    async def broadcast_command(self, command_id: str, operation: str,
+                                payload: dict | None = None) -> int:
+        """Send to every known session. Returns how many were reachable."""
+        sent = 0
+        for rank in sorted(self.sessions):
+            if await self._send_command(rank, f"{command_id}:{rank}", operation,
+                                        payload):
+                sent += 1
+        return sent
+
+    def command_result(self, command_id: str) -> dict | None:
+        return self._command_results.get(command_id)
 
     def _register(self, env: Envelope) -> tuple[SessionInfo | None, str | None]:
         rank, node = env.sender_rank, env.sender_node
@@ -390,6 +441,27 @@ class NodeChannel:
         assert self._writer is not None
         await write_frame(self._writer, self._secret,
                           self._env(EnvelopeKind.HEARTBEAT.value, {}))
+
+    async def receive_command(self, timeout: float = 1.0):
+        """One COMMAND from the head, or None on timeout."""
+        assert self._reader is not None
+        try:
+            env = await asyncio.wait_for(
+                read_frame(self._reader, self._secret), timeout)
+        except (asyncio.TimeoutError, ConnectionError,
+                asyncio.IncompleteReadError):
+            return None
+        if env.kind != EnvelopeKind.COMMAND.value:
+            return None
+        return env.payload
+
+    async def send_command_result(self, command_id: str, ok: bool,
+                                  detail: str = "") -> None:
+        assert self._writer is not None
+        await write_frame(self._writer, self._secret,
+                          self._env(EnvelopeKind.COMMAND_RESULT.value,
+                                    {"command_id": command_id, "ok": ok,
+                                     "detail": detail}))
 
     async def wait_disconnected(self) -> None:
         """Return when the supervisor connection is gone (watchdog input).

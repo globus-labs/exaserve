@@ -139,9 +139,18 @@ class HeadChannel:
             return False
 
     def broadcast_start(self) -> int:
-        """Release the START gate. Ranks hold every child until this lands."""
+        """Release the START gate by actually SENDING it (§3.2.1 Q4).
+
+        This used to set a head-side flag that no rank could observe, so the
+        gate was computed and never enforced.
+        """
         self._started = True
-        return len(getattr(self._listener, "sessions", {}) or {})
+        try:
+            return int(self._loop.call(
+                self._listener.broadcast_command("START", "START"), timeout=30))
+        except Exception as exc:          # noqa: BLE001
+            print(f"[Control] START broadcast failed: {exc}", flush=True)
+            return 0
 
     def start_broadcast(self) -> bool:
         return getattr(self, "_started", False)
@@ -242,12 +251,29 @@ class RankClient:
             return False
 
     def start_gate_available(self) -> bool:
-        """True when the head can actually deliver START over the wire.
+        """True when the head can deliver START over the wire."""
+        return self.connected
 
-        COMMAND/COMMAND_RESULT dispatch is not implemented yet, so this is
-        False and the caller must not block on a message that cannot arrive.
-        """
-        return False
+    def poll_start(self, timeout: float = 1.0) -> bool:
+        """Check for the head's START and acknowledge it."""
+        if self._start_received:
+            return True
+        if not self.connected or self._channel is None or self._loop is None:
+            return False
+        try:
+            payload = self._loop.call(
+                self._channel.receive_command(timeout), timeout=timeout + 5)
+        except Exception:                 # noqa: BLE001
+            return False
+        if not payload or payload.get("operation") != "START":
+            return False
+        self._start_received = True
+        try:
+            self._loop.call(self._channel.send_command_result(
+                str(payload.get("command_id", "START")), True), timeout=10)
+        except Exception:                 # noqa: BLE001
+            pass
+        return True
 
     def start_received(self) -> bool:
         """True once the head has released the START gate.

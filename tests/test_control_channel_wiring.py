@@ -154,3 +154,46 @@ def test_driver_publishes_rank_lifecycle():
     for marker in ('_channel.observe("ray_head"', '_channel.observe("ray_worker"',
                    '_channel.observe("deployment"', '_channel.observe("proxy"'):
         assert marker in source, f"driver does not report {marker}"
+
+
+def test_start_is_actually_delivered_and_acknowledged(head, monkeypatch):
+    """The gate used to be a head-side flag no rank could observe."""
+    import time
+
+    _rank_env(head, monkeypatch)
+    client = RankClient(rank=0)
+    assert client.connect(timeout=10)
+    try:
+        assert client.start_received() is False
+        assert head.broadcast_start() >= 1, "START reached no session"
+        for _ in range(50):
+            if client.poll_start(timeout=0.5):
+                break
+        assert client.start_received() is True, "rank never observed START"
+        # The head must see the acknowledgement.
+        for _ in range(50):
+            if head._listener.command_result("START:0"):
+                break
+            time.sleep(0.1)
+        result = head._listener.command_result("START:0")
+        assert result and result["ok"], "no COMMAND_RESULT for START"
+    finally:
+        client.close()
+
+
+def test_the_start_gate_is_available_once_connected(head, monkeypatch):
+    _rank_env(head, monkeypatch)
+    client = RankClient(rank=1)
+    try:
+        assert client.connect(timeout=10)
+        assert client.start_gate_available() is True
+    finally:
+        client.close()
+
+
+def test_an_unconnected_rank_is_not_held_by_a_gate_it_cannot_see(monkeypatch):
+    for key in (HOST_ENV, PORT_ENV, SECRET_ENV):
+        monkeypatch.delenv(key, raising=False)
+    client = RankClient(rank=0)
+    assert client.start_gate_available() is False
+    assert client.start_received() is True
