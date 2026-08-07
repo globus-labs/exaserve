@@ -1345,3 +1345,91 @@ as an open gap rather than reading `state=READY` as gateway evidence.
 gate, and have the composition root start the gateway and establish the
 advertised endpoint before validating. Until then, `PROXIED_INTERNAL` compiles
 and deploys but its exposure contract is unproven on hardware.
+
+### The receipt chain existed in pieces and was never connected (2026-08-07)
+
+Wiring `PlanReadiness` into the production path (commit `768a213`) made the
+next gap unavoidable, because readiness now actually consults the receipt
+ledger. It was empty, and it had always been empty:
+
+- nothing produced a receipt for **any** exactly-planned slot;
+- `HeadChannel` appended arriving receipts to a list nothing adjudicated;
+- what receipts did exist travelled over a **detached Ray actor**, which
+  §3.2.1 rules out by name as a readiness source.
+
+So `ExactReceiptLedger`, `CompatibilityReceiptV2` and the slot enumeration were
+all present, unit-tested, and jointly incapable of covering a single slot. The
+same shape as the gateway gap above: components that exist, are tested, and are
+not what production uses.
+
+The chain built in `f70d490`:
+
+```
+producer (SELF, in the process that can honestly attest)
+  -> bounded node-local IPC hop to its owning NodeSupervisor
+    -> forwarded UNCHANGED over the authenticated §3.2 channel
+      -> ExactReceiptLedger, authorized by the AUTHENTICATED session rank
+```
+
+`ray_start.py` — our own process, which imports ray and applies the raylet
+patch — attests `rank{N}/ray_{head,worker}`; the NodeSupervisor attests itself;
+the composition root issues the GLOBAL slots from the in-process authority that
+nothing on the wire can claim; the EngineCore shim delivers its own receipt
+from inside the engine instead of the replica re-attesting it.
+`attest_supervisor` **refuses** a role whose resolved manifest requires an
+in-process patch, so SUPERVISOR attestation cannot be used to paper over a
+patch nobody proved.
+
+### Two defects the first chain run found (2026-08-07)
+
+The chain transported and adjudicated on the first try, and the adjudication
+immediately rejected **every receipt from every correctly-placed rank**:
+
+```
+node_id 'x4310c4s0b0n0' != bound 'x4310c4s0b0n0.hsn.cm.aurora.alcf.anl.gov'
+```
+
+The scheduler's node file is fully qualified; a process reports
+`socket.gethostname()`, which is not. Comparison is now canonical while the
+record stays faithful to what each side observed (`22e0d2a`), with a test that
+two different hosts still do not match.
+
+The re-run then died in `ray start --head` with
+
+```
+AssertionError: Session name ... does not match persisted value ...
+Perhaps there was an error connecting to Redis.
+```
+
+A prior generation killed before it could stop Ray had left its session name on
+the node. That reads as a Redis fault and is really inherited state — the class
+§3.2.1 forbids — so each rank now clears prior-generation node-local Ray state
+after START and before it creates any child (`2821870`). The preflight cleared
+38–40 stale paths per node on the next run.
+
+### The shared status boundary had no writer (2026-08-07)
+
+`state/status.py` implemented the durable, lease-guarded, CAS-checked record the
+§3.4 boundary table requires — and nothing wrote to or read from it. With no
+writer, the only ways to learn deployment state were the root's private
+`readiness.json` shape or a log line, i.e. exactly the "private process monitor
+or log grep" the table forbids.
+
+`status_api.py` (`22e0d2a`) is both halves. The root publishes the real
+lifecycle; READY is published only **after** the durable verdict is on disk, so
+no consumer can see READY ahead of its evidence. `require_ready_endpoint`
+raises with the reason for a missing record, wrong generation, wrong plan hash,
+non-READY state, or READY with no endpoint. `clientlab/targets/exaserve_target.py`
+is ClientLab's only view of a real deployment, with a test that fails if
+process monitoring or log parsing reappears in it.
+
+### WP13 deletions (2026-08-07, `b36a045`)
+
+Two of the "kept for a run-to-run comparison" paths could not have performed
+one. `EXASERVE_LEGACY_SHELL_LIFECYCLE` exec'd `bash launch_cluster.sh`, which
+since P04 execs straight back into the launcher with the same environment — an
+infinite exec loop. The shell kept a comment advertising a branch it no longer
+had. Deleted, with the rank driver fallback, the in-child readiness gate and its
+`EXASERVE_ALLOW_DEGRADED_READINESS` escape hatch, the `CLUSTER FULLY READY`
+marker, the Ray receipt actor **including its fallback**, and the
+`READINESS_FILENAME` alias that let two processes write one file.
