@@ -1517,3 +1517,20 @@ drain path publishes `DRAINING -> STOPPED`.
 That defect is a good example of why the shared record was worth building: it
 was invisible in the log, invisible in the exit status, and obvious the moment
 the state history existed to be read.
+
+### Confirmed: the full lifecycle, twice, on different nodes (2026-08-07)
+
+```
+gate_ready=PASS  shared_status_ready=PASS  marker_never_precedes_gate=PASS
+receipt_slots_exact=PASS (5/5)  evidence_separate_from_verdict=PASS
+ray_receipt_actor_retired=PASS  engine_self_attested=PASS
+canary=PASS  tree_reaped=PASS
+
+deployment_status.json history:
+  PLANNED -> STAGING -> CLUSTER_STARTING -> DEPLOYING -> VALIDATING
+          -> READY -> DRAINING -> STOPPED
+```
+
+An orderly shutdown now ends in `STOPPED`, not `FAILED`. The whole lifecycle is
+legible from one durable record that a consumer can read without touching a log
+or a process table.
