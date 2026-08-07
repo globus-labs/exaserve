@@ -94,6 +94,26 @@ def plan_from_dict(payload: dict):
     ).finalize()
 
 
+def _resolve_run_dir(generation: int, config_path: str) -> str:
+    """The root owns its run directory rather than inheriting one or using cwd.
+
+    The shell used to compute `<root>/<stamp>_<config>`; when the root took
+    over it fell back to the working directory, so durable artifacts landed
+    wherever the process happened to start.
+    """
+    explicit = os.environ.get("EXASERVE_RUN_LOG_DIR")
+    if explicit:
+        return explicit
+    root = os.environ.get("EXASERVE_RUN_LOG_ROOT")
+    if not root:
+        return os.getcwd()
+    stem = os.path.splitext(os.path.basename(config_path))[0]
+    run_dir = os.path.join(root, f"gen{generation}_{stem}")
+    os.makedirs(run_dir, exist_ok=True)
+    os.environ["EXASERVE_RUN_LOG_DIR"] = run_dir
+    return run_dir
+
+
 def run(config_path: str) -> int:
     """Own one deployment generation end to end."""
     from .composition import CompositionError, CompositionRoot, read_nodefile
@@ -101,7 +121,7 @@ def run(config_path: str) -> int:
     deployment_id = (os.environ.get("EXASERVE_DEPLOYMENT_ID")
                      or os.environ.get("EXASERVE_JOBID", "local")).split(".")[0][:40]
     generation = int(os.environ.get("EXASERVE_GENERATION", "0") or int(time.time()))
-    run_dir = os.environ.get("EXASERVE_RUN_LOG_DIR", os.getcwd())
+    run_dir = _resolve_run_dir(generation, config_path)
 
     try:
         plan = load_or_compile_plan(config_path, deployment_id=deployment_id)

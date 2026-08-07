@@ -75,3 +75,20 @@ def test_a_persisted_plan_artifact_is_hash_verified(tmp_path):
     artifact.write_text(json.dumps(payload, default=str))
     with pytest.raises(PlanError, match="hash mismatch"):
         launcher.load_or_compile_plan(str(artifact), deployment_id="d")
+
+
+def test_the_root_derives_its_own_run_directory(tmp_path, monkeypatch):
+    """Durable artifacts must not land in whatever directory the process
+    happened to start in."""
+    monkeypatch.delenv("EXASERVE_RUN_LOG_DIR", raising=False)
+    monkeypatch.setenv("EXASERVE_RUN_LOG_ROOT", str(tmp_path))
+    run_dir = launcher._resolve_run_dir(42, "/some/where/config.direct.8b.yaml")
+    assert run_dir == str(tmp_path / "gen42_config.direct.8b")
+    assert os.path.isdir(run_dir)
+    assert os.environ["EXASERVE_RUN_LOG_DIR"] == run_dir
+
+
+def test_an_explicit_run_directory_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXASERVE_RUN_LOG_DIR", str(tmp_path / "explicit"))
+    monkeypatch.setenv("EXASERVE_RUN_LOG_ROOT", str(tmp_path))
+    assert launcher._resolve_run_dir(1, "c.yaml") == str(tmp_path / "explicit")
