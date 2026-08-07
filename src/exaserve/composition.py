@@ -290,6 +290,43 @@ class CompositionRoot:
         state, _ = self.gateway_component.observe()
         return state == "RUNNING"
 
+    # -- 8. readiness over the advertised endpoint -------------------------
+    def build_readiness(self):
+        """Plan-bound readiness bound to THIS generation's evidence."""
+        from .control.plan_readiness import PlanReadiness
+
+        self.readiness = PlanReadiness(
+            plan=self.plan, binding=self.binding, receipts=self.receipts,
+            sessions=self.sessions, log=self._log)
+        return self.readiness
+
+    def establish_advertised_endpoint(self, ip: Optional[str] = None) -> str:
+        """§3.2.1 Q3 step 2: enter VALIDATING and fix the advertised endpoint.
+
+        For production that means the gateway process the head owns; for an
+        explicit validation plan it is the declared Serve endpoint. Either way
+        readiness verifies THAT endpoint and canaries go through it.
+        """
+        if self.readiness is None:
+            self.build_readiness()
+        self.readiness.enter_validating()
+        endpoint = self.advertised_endpoint(ip or head_ip())
+        self.readiness.set_advertised_endpoint(endpoint)
+        if self.plan.gateway is not None:
+            self.readiness.set_gateway(alive=self.gateway_alive(), healthy=None)
+        self._log(f"[Composition] advertised endpoint {endpoint} "
+                  f"({self.plan.exposure.mode})")
+        return endpoint
+
+    def observe_gateway(self) -> None:
+        """Post-READY: a dead gateway is terminal, an unhealthy one revokes."""
+        if self.plan.gateway is None or self.readiness is None:
+            return
+        alive = self.gateway_alive()
+        if alive is False:
+            self.readiness.revoke("gateway process exited", gateway_dead=True)
+            self.fail("gateway process exited after READY")
+
     # -- 9. termination ----------------------------------------------------
     def fail(self, reason: str) -> None:
         if self.first_cause is None:

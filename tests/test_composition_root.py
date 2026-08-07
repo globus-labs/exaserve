@@ -249,3 +249,44 @@ def test_a_real_failure_still_exits_nonzero_and_not_143(tmp_path):
     root = _root(tmp_path)
     root.fail("staging step 'distribute' exited 3")
     assert root.exit_code() not in (0, 143)
+
+
+def test_the_advertised_endpoint_is_established_before_readiness(tmp_path):
+    """§3.2.1 Q3: VALIDATING establishes the endpoint that readiness verifies."""
+    root = _root(tmp_path)
+    root.bind_allocation(["n0", "n1"], "j")
+
+    class _Receipts:
+        def satisfied(self):
+            return True, {"planned": 6, "accepted": 6, "missing": [], "unexpected": []}
+
+    root.receipts = _Receipts()
+    endpoint = root.establish_advertised_endpoint("10.0.0.1")
+    assert endpoint == "http://10.0.0.1:4001"
+    assert root.readiness.phase == "VALIDATING"
+    assert root.readiness.advertised_endpoint == endpoint
+
+
+def test_a_dead_gateway_after_ready_is_terminal(tmp_path):
+    root = _root(tmp_path)
+    root.bind_allocation(["n0", "n1"], "j")
+
+    class _Receipts:
+        def satisfied(self):
+            return True, {"planned": 6, "accepted": 6, "missing": [], "unexpected": []}
+
+    root.receipts = _Receipts()
+    root.establish_advertised_endpoint("10.0.0.1")
+    # Gateway component that has already exited.
+    component = root.start_gateway(["/bin/true"])
+    assert component is not None
+    import time
+
+    for _ in range(50):
+        if root.gateway_alive() is False:
+            break
+        time.sleep(0.1)
+    root.observe_gateway()
+    assert root.readiness.phase == "FAILED"
+    assert root.first_cause and "gateway" in root.first_cause
+    root.shutdown(drain_s=5)
