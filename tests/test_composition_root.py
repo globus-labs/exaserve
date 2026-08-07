@@ -212,3 +212,25 @@ def test_the_run_directory_is_propagated_to_ranks(tmp_path, monkeypatch):
         assert component.env["EXASERVE_PLAN_HASH"] == root.plan.deployment_plan_hash
     finally:
         root.shutdown(drain_s=5)
+
+
+def test_staging_steps_are_owned_with_deadlines_and_results(tmp_path):
+    """The shell owned staging; the root owns it as finite components."""
+    root = _root(tmp_path)
+    steps = root.default_staging_steps("/tmp/cfg.yaml", python_exec="/usr/bin/python3")
+    names = [s.name for s in steps]
+    assert "model_bcast" in names and "distribute_source" in names
+    for step in steps:
+        assert step.deadline_s > 0, f"{step.name} has no deadline"
+        assert isinstance(step.argv, list) and step.argv, "argv vector required"
+        assert not any(";" in str(a) or "|" in str(a) for a in step.argv), (
+            "staging must not build shell strings")
+    bcast = next(s for s in steps if s.name == "model_bcast")
+    assert bcast.result_paths, "model staging must declare a result manifest"
+
+
+def test_null_compute_skips_model_staging(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXASERVE_NULL_COMPUTE", "1")
+    root = _root(tmp_path)
+    names = [s.name for s in root.default_staging_steps("/tmp/c.yaml")]
+    assert "model_bcast" not in names and "distribute_source" in names

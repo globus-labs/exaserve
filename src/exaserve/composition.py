@@ -173,6 +173,43 @@ class CompositionRoot:
             self._log(f"[Composition] staging: {step.name} ok "
                       f"({time.monotonic() - started:.1f}s)")
 
+    def default_staging_steps(self, config_path: str, *,
+                              python_exec: Optional[str] = None) -> list:
+        """The staging the shell used to own, as OWNED finite components.
+
+        The native/MPI algorithms are unchanged and still run as subprocesses
+        (§3.2.1 is explicit that a sound algorithm should not be rewritten in
+        Python to avoid a subprocess). What changes is ownership: argv vector,
+        deadline, and a declared result that must exist for the step to count
+        as successful.
+        """
+        import sys as _sys
+        from importlib import resources
+
+        python_exec = python_exec or _sys.executable
+        resources_dir = resources.files("exaserve") / "resources"
+        env = os.environ.copy()
+        env["EXASERVE_RUN_LOG_DIR"] = self.run_dir
+
+        steps: list = []
+        if os.environ.get("EXASERVE_NULL_COMPUTE", "0") != "1":
+            steps.append(StagingStep(
+                name="model_bcast",
+                argv=[python_exec, "-m", "exaserve.model_bcast",
+                      "--config", config_path,
+                      "--num-nodes", str(self.plan.num_nodes)],
+                result_paths=(os.path.join(self.run_dir,
+                                           "model_bcast_timing.json"),),
+                deadline_s=float(os.environ.get(
+                    "EXASERVE_STAGING_DEADLINE_S", "3600")),
+                env=env))
+        steps.append(StagingStep(
+            name="distribute_source",
+            argv=["bash", str(resources_dir / "distribute_to_nodes.sh")],
+            deadline_s=float(os.environ.get("EXASERVE_DISTRIBUTE_DEADLINE_S", "1800")),
+            env=env))
+        return steps
+
     # -- 6. ranks + START gate --------------------------------------------
     def launch_ranks(self, rank_argv: list, *, scheduler: str = "pbs"):
         from .control.rank_launcher import RankLauncher
