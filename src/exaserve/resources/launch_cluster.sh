@@ -289,7 +289,9 @@ PY
     echo "[System] Launcher exit code: $exit_code"
 }
 
-trap 'finalize_run_logs $?' EXIT
+# §3.2.1: no post-launch cleanup trap. Result collection is owned by the
+# composition root; a trap here would run after the adapter has handed
+# the run to Python, which is lifecycle ownership by another name.
 
 echo "[System] Project Root: $PROJECT_ROOT"
 echo "[System] Package Root: $PACKAGE_ROOT"
@@ -517,14 +519,13 @@ echo "[System] PYTHONPATH after distribution: $PYTHONPATH"
 # prepend the legacy ~/.local Ray overlay here, because that bypasses
 # EXASERVE_INSTRUMENTATION=0 and silently turns clean-Ray runs into patched runs.
 # Enable with EXASERVE_AURORA_USE_COPPER=1; auto-disabled for single-node runs.
-COPPER_ACTIVE=0
+# §3.2.1: loading the Copper MODULE is site setup and belongs here; STARTING
+# and later stopping a Copper process is lifecycle and belongs to the
+# composition root, which owns it as a typed component and reaps it in reverse
+# order. The adapter therefore prepares the environment and stops.
 if [ "${EXASERVE_AURORA_USE_COPPER:-0}" = "1" ] && [ "$NODE_COUNT" -ge 2 ]; then
     if module load copper 2>/dev/null; then
-        COPPER_LOG_DIR="$RUN_LOG_DIR/copper"
-        mkdir -p "$COPPER_LOG_DIR"
-        launch_copper_aurora.sh -d "$COPPER_LOG_DIR" -v /tmp/${USER}/copper_mount 2>&1 || true
-        COPPER_ACTIVE=1
-        echo "[System] Copper active; PYTHONPATH unchanged (per-run /tmp staging is source of truth)"
+        echo "[System] Copper module loaded; the supervisor owns the process"
     else
         echo "[System] Copper module not available, continuing without it"
     fi

@@ -290,6 +290,60 @@ class CompositionRoot:
         state, _ = self.gateway_component.observe()
         return state == "RUNNING"
 
+    # -- 7b. persistent site services + result collection ------------------
+    def start_copper(self, log_dir: Optional[str] = None) -> Optional[ManagedComponent]:
+        """Copper as a typed supervised component (§3.2.1).
+
+        Loading a Copper module is site setup and stays in the adapter; STARTING
+        and later stopping a Copper process is lifecycle, so it belongs here as
+        an owned component that shutdown reaps in reverse order.
+        """
+        if os.environ.get("EXASERVE_AURORA_USE_COPPER", "0") != "1":
+            return None
+        if self.plan.num_nodes < 2:
+            self._log("[Composition] copper skipped (single-node run)")
+            return None
+        log_dir = log_dir or os.path.join(self.run_dir, "copper")
+        os.makedirs(log_dir, exist_ok=True)
+        mount = f"/tmp/{os.environ.get('USER', 'exaserve')}/copper_mount"
+        component = self.supervisor.register(ManagedComponent(
+            component_id="copper",
+            argv=["launch_copper_aurora.sh", "-d", log_dir, "-v", mount],
+            long_lived=True))
+        try:
+            component.start()
+        except (OSError, FileNotFoundError) as exc:
+            self._log(f"[Composition] copper unavailable ({exc}); continuing")
+            self.supervisor.components.pop("copper", None)
+            return None
+        self._log(f"[Composition] copper started (logs {log_dir})")
+        return component
+
+    def collect_results(self, *, deadline_s: float = 300.0) -> bool:
+        """Per-node archive collection, owned and bounded.
+
+        The shell ran this from an EXIT trap, which meant collection outlived
+        the thing that was supposed to own it and could not report a typed
+        failure. Failure is reported, not fatal: losing diagnostics must not
+        turn a good run into a failed one.
+        """
+        from importlib import resources
+
+        per_node = os.path.join(self.run_dir, "per_node")
+        os.makedirs(per_node, exist_ok=True)
+        script = resources.files("exaserve") / "resources" / "gather_run_logs.sh"
+        if not os.path.exists(str(script)):
+            return False
+        step = StagingStep(name="collect_results",
+                           argv=["bash", str(script), self.run_dir, per_node],
+                           deadline_s=deadline_s)
+        try:
+            self.run_staging([step])
+            return True
+        except CompositionError as exc:
+            self._log(f"[Composition] result collection failed (not fatal): {exc}")
+            return False
+
     # -- 8. readiness over the advertised endpoint -------------------------
     def build_readiness(self):
         """Plan-bound readiness bound to THIS generation's evidence."""

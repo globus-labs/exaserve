@@ -290,3 +290,37 @@ def test_a_dead_gateway_after_ready_is_terminal(tmp_path):
     assert root.readiness.phase == "FAILED"
     assert root.first_cause and "gateway" in root.first_cause
     root.shutdown(drain_s=5)
+
+
+def test_copper_is_an_owned_component_not_a_shell_side_effect(tmp_path, monkeypatch):
+    """Loading the module is site setup; starting a process is lifecycle."""
+    monkeypatch.delenv("EXASERVE_AURORA_USE_COPPER", raising=False)
+    root = _root(tmp_path)
+    assert root.start_copper() is None, "copper must be opt-in"
+
+    monkeypatch.setenv("EXASERVE_AURORA_USE_COPPER", "1")
+    single = CompositionRoot(plan=_plan(1), generation=1, run_dir=str(tmp_path),
+                             log=lambda *_: None)
+    assert single.start_copper() is None, "single-node runs skip copper"
+
+
+def test_result_collection_failure_is_reported_not_fatal(tmp_path):
+    """Losing diagnostics must not turn a good run into a failed one."""
+    root = _root(tmp_path)
+    assert root.collect_results() is False
+    assert root.first_cause is None, "collection failure must not set a first cause"
+
+
+def test_the_adapter_starts_no_persistent_service_and_installs_no_trap():
+    """§3.2.1: module loading is site setup; starting a process is lifecycle."""
+    from importlib import resources
+
+    script = (resources.files("exaserve") / "resources" /
+              "launch_cluster.sh").read_text()
+    code = "\n".join(ln for ln in script.splitlines()
+                     if not ln.strip().startswith("#"))
+    assert "launch_copper_aurora.sh" not in code, "adapter starts a Copper process"
+    assert "stop_copper_aurora.sh" not in code, "adapter stops a Copper process"
+    assert "trap " not in code, "adapter installs a lifecycle trap"
+    # Loading the module is still allowed and expected.
+    assert "module load copper" in script
