@@ -509,3 +509,25 @@ def test_the_supervisor_receipt_is_produced_before_the_start_gate():
     source = inspect.getsource(rank_main.run)
     assert source.index("_attest_node_supervisor") < source.index("poll_start")
     assert source.index("ingress.start()") < source.index("poll_start")
+
+
+def test_stale_ray_state_is_cleared_before_any_child_starts():
+    """A generation must not inherit a prior generation's node-local state.
+
+    The ordering IS the safety argument: nothing of this generation exists on
+    the node yet when the preflight runs.
+    """
+    import inspect
+
+    from exaserve import rank_main
+
+    source = inspect.getsource(rank_main.run)
+    assert source.index("_clear_stale_ray_state") < source.index("node.adopt(")
+    assert source.index("poll_start") < source.index("_clear_stale_ray_state")
+
+
+def test_the_ray_preflight_can_be_disabled(monkeypatch):
+    from exaserve import rank_main
+
+    monkeypatch.setenv("EXASERVE_SKIP_RAY_PREFLIGHT", "1")
+    assert rank_main._clear_stale_ray_state(0) is False

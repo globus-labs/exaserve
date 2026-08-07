@@ -44,6 +44,52 @@ def _server_ready(port: int = 8000, host: str = "127.0.0.1") -> bool:
         return probe.connect_ex((host, port)) == 0
 
 
+def _clear_stale_ray_state(rank: int, *, timeout_s: float = 60.0) -> bool:
+    """Clear a PRIOR generation's node-local Ray state before starting ours.
+
+    Ray persists its session name on the node. A generation that was killed
+    before it could stop Ray leaves that behind, and the next `ray start --head`
+    dies with
+
+        AssertionError: Session name ... does not match persisted value ...
+
+    which reads as a Redis fault and is really an inherited-state fault. §3.2.1
+    is explicit that a generation must not inherit a prior generation's state,
+    and this is the node-local half of that.
+
+    Safe by ordering, not by luck: this runs after START and before this rank
+    creates ANY child, so nothing belonging to this generation exists on the
+    node yet. The node is exclusively allocated, so there is no third party's
+    cluster to stop.
+    """
+    if os.environ.get("EXASERVE_SKIP_RAY_PREFLIGHT") == "1":
+        return False
+    import glob
+    import shutil
+    import subprocess
+
+    try:
+        subprocess.run([sys.executable, "-m", "ray.scripts.scripts", "stop",
+                        "--force"], timeout=timeout_s, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f"[Rank {rank}] ray preflight stop did not complete: {exc}",
+              flush=True)
+    removed = 0
+    for path in glob.glob("/tmp/ray/session_*") + ["/tmp/ray/ray_current_cluster"]:
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            elif os.path.exists(path):
+                os.unlink(path)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        print(f"[Rank {rank}] cleared {removed} stale Ray state path(s)", flush=True)
+    return True
+
+
 def _attest_node_supervisor(channel, rank: int, hostname: str) -> bool:
     """This process's own planned slot, SELF-attested and sent over the channel.
 
@@ -183,6 +229,8 @@ def run(config_path: str) -> int:
             # no gate to wait for.
             print(f"[Rank {rank}] no control channel; proceeding after "
                   "registration", flush=True)
+
+    _clear_stale_ray_state(rank)
 
     ray_env = get_ray_env(vendor)
     ray_env[SOCKET_ENV] = os.environ.get(SOCKET_ENV, "")
