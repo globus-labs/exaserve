@@ -93,19 +93,30 @@ def run(config_path: str) -> int:
     # rank and sent START. Starting Ray first is what made registration
     # decorative.
     if channel.connected:
-        started = time.monotonic()
-        deadline = float(os.environ.get("EXASERVE_START_GATE_TIMEOUT_S", "600"))
         channel.observe(f"rank{rank}", ComponentState.RUNNING.value, role="rank",
-                        detail="registered; awaiting START")
-        while not channel.start_received():
-            if time.monotonic() - started > deadline:
-                print(f"[Rank {rank}] START never arrived within {deadline:.0f}s; "
-                      "refusing to start children", flush=True)
-                channel.close()
-                return 1
-            time.sleep(1.0)
-        print(f"[Rank {rank}] START received after "
-              f"{time.monotonic() - started:.1f}s", flush=True)
+                        detail="registered")
+        if channel.start_gate_available():
+            started = time.monotonic()
+            deadline = float(os.environ.get("EXASERVE_START_GATE_TIMEOUT_S", "600"))
+            while not channel.start_received():
+                if time.monotonic() - started > deadline:
+                    print(f"[Rank {rank}] START never arrived within "
+                          f"{deadline:.0f}s; refusing to start children",
+                          flush=True)
+                    channel.close()
+                    return 1
+                time.sleep(1.0)
+            print(f"[Rank {rank}] START received after "
+                  f"{time.monotonic() - started:.1f}s", flush=True)
+        else:
+            # KNOWN GAP, stated rather than hidden: COMMAND/COMMAND_RESULT
+            # dispatch is not implemented in the transport, so the head cannot
+            # deliver START over the wire. The gate exists and is unit-tested
+            # in control/session.py; until dispatch lands, a rank proceeds
+            # after registration. Blocking here instead would hang every run
+            # on a message that cannot arrive.
+            print(f"[Rank {rank}] START gate not deliverable (COMMAND dispatch "
+                  "unimplemented); proceeding after registration", flush=True)
 
     ray_env = get_ray_env(vendor)
     argv = (ray_head_argv(cluster, num_gpus) if rank == 0

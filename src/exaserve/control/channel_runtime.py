@@ -241,6 +241,14 @@ class RankClient:
             self.connected = False
             return False
 
+    def start_gate_available(self) -> bool:
+        """True when the head can actually deliver START over the wire.
+
+        COMMAND/COMMAND_RESULT dispatch is not implemented yet, so this is
+        False and the caller must not block on a message that cannot arrive.
+        """
+        return False
+
     def start_received(self) -> bool:
         """True once the head has released the START gate.
 
