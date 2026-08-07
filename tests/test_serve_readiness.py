@@ -408,8 +408,6 @@ def _stub_cluster(monkeypatch, *, running: int, target: int = 2, canary_ok: bool
         def externally_attested_roles(self):
             return []
 
-    monkeypatch.setattr(sr, "_build_receipt_store",
-                        lambda *a, **k: (_Store(), ["replica"]))
     # These exercise the readiness predicate, not the private-API surface;
     # without a real Ray the surface check would fail first and mask them.
     import exaserve.compat.private_api as _pa
@@ -417,44 +415,55 @@ def _stub_cluster(monkeypatch, *, running: int, target: int = 2, canary_ok: bool
     monkeypatch.setattr(_pa, "verify", lambda strict=True: {"stubbed": True})
 
 
-def test_gate_raises_when_the_predicate_fails(monkeypatch, tmp_path):
-    """Fail-closed: an unsatisfied predicate must abort the deploy, not warn."""
-    _stub_cluster(monkeypatch, running=1, target=2, canary_ok=True)
-    monkeypatch.delenv("EXASERVE_ALLOW_DEGRADED_READINESS", raising=False)
-    with pytest.raises(RuntimeError, match="refusing to declare"):
-        sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
-                             base_url="http://x:8000", snapshot_dir=str(tmp_path),
-                             timeout_s=0.0, log=lambda *_: None)
-    # The verdict is still recorded, with the blocker named.
-    data = json.loads((tmp_path / EVIDENCE_FILENAME).read_text())
-    assert data["ready"] is False
-    assert any("1/2 replicas" in b for b in data["blockers"])
+def test_the_child_publishes_evidence_and_decides_nothing(monkeypatch, tmp_path):
+    """WP13/IMP-B02: this process is a witness, not the readiness authority.
 
-
-def test_gate_returns_ready_when_everything_holds(monkeypatch, tmp_path):
+    It could see neither the gateway nor the other ranks' sessions, so the
+    in-child gate decided READY against an endpoint no client uses. The
+    replacement reports what this process genuinely observes and returns it;
+    `PlanReadiness` in the composition root decides.
+    """
     _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
-    snap = sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
-                                base_url="http://x:8000", snapshot_dir=str(tmp_path),
-                                timeout_s=5.0, log=lambda *_: None)
-    assert snap.ready
+    evidence = sr.observe_deployment(deployment_id="d1", generation=1,
+                                     snapshot_dir=str(tmp_path), timeout_s=5.0,
+                                     poll_s=0.01, log=lambda *_: None)
+    assert evidence["applications_running"] is True
+    assert evidence["evidence_only"] is True
+    assert "ready" not in evidence          # not this process's word to say
+    on_disk = json.loads((tmp_path / EVIDENCE_FILENAME).read_text())
+    assert on_disk == evidence
 
 
-def test_a_dead_canary_alone_blocks_the_gate(monkeypatch, tmp_path):
-    """Replicas can all be RUNNING while the served route answers nothing."""
-    _stub_cluster(monkeypatch, running=2, target=2, canary_ok=False)
-    monkeypatch.delenv("EXASERVE_ALLOW_DEGRADED_READINESS", raising=False)
-    with pytest.raises(RuntimeError, match="refusing to declare"):
-        sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
-                             base_url="http://x:8000", snapshot_dir=str(tmp_path),
-                             timeout_s=0.0, log=lambda *_: None)
-    data = json.loads((tmp_path / EVIDENCE_FILENAME).read_text())
-    assert any(b.startswith("canary ") for b in data["blockers"])
-
-
-def test_degraded_escape_starts_anyway_but_records_the_blockers(monkeypatch, tmp_path):
+def test_a_shortfall_is_reported_as_not_running_not_as_a_verdict(monkeypatch,
+                                                                 tmp_path):
     _stub_cluster(monkeypatch, running=1, target=2, canary_ok=True)
-    monkeypatch.setenv("EXASERVE_ALLOW_DEGRADED_READINESS", "1")
-    snap = sr.enforce_readiness(deployment_id="d1", generation=1, plan_hash="h",
-                                base_url="http://x:8000", snapshot_dir=str(tmp_path),
-                                timeout_s=0.0, log=lambda *_: None)
-    assert not snap.ready and snap.blockers
+    evidence = sr.observe_deployment(deployment_id="d1", generation=1,
+                                     snapshot_dir=str(tmp_path), timeout_s=0.02,
+                                     poll_s=0.01, log=lambda *_: None)
+    assert evidence["applications_running"] is False
+    app = next(iter(evidence["applications"].values()))
+    assert (app["running"], app["target"]) == (1, 2)
+
+
+def test_the_evidence_file_is_not_the_ready_record(monkeypatch, tmp_path):
+    """One file cannot be both the witness statement and the verdict."""
+    _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
+    sr.observe_deployment(deployment_id="d1", generation=1,
+                          snapshot_dir=str(tmp_path), timeout_s=5.0,
+                          poll_s=0.01, log=lambda *_: None)
+    assert (tmp_path / "deployment_evidence.json").exists()
+    assert not (tmp_path / "readiness.json").exists()
+
+
+def test_there_is_no_degraded_readiness_escape_hatch():
+    """The deleted gate honoured EXASERVE_ALLOW_DEGRADED_READINESS.
+
+    An env var that turns a fail-closed predicate into a warning is the thing
+    the audit objected to; nothing on the decision path reads it now.
+    """
+    import inspect
+
+    from exaserve.control import plan_readiness
+
+    for module in (sr, plan_readiness):
+        assert "ALLOW_DEGRADED_READINESS" not in inspect.getsource(module)

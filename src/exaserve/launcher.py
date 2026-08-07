@@ -272,8 +272,12 @@ def _log_receipt_evidence(root) -> None:
 
 
 def use_supervisor() -> bool:
-    """Retained for the migration switch; the shell path is legacy-only."""
-    return os.environ.get(LEGACY_ENTRY_ENV) != "1"
+    """There is exactly one lifecycle owner now (WP13).
+
+    Kept as a predicate because callers and tests ask the question; it no
+    longer has a false branch to return.
+    """
+    return True
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -282,16 +286,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise SystemExit("usage: exaserve-launch-cluster <config>")
     config_path = args[0]
 
-    # The legacy shell-lifecycle path is retained only for a run-to-run
-    # comparison and is deleted at WP13.
-    if not use_supervisor():
-        from importlib import resources
-
-        package_root = resources.files("exaserve")
-        script = str(package_root / "resources" / "launch_cluster.sh")
-        os.environ.setdefault("EXASERVE_PACKAGE_ROOT", str(package_root))
-        os.environ.setdefault("EXASERVE_PACKAGE_PARENT", str(package_root.parent))
-        os.execvp("bash", ["bash", script, *args])
+    # WP13: the legacy shell-lifecycle branch is gone. It could not have worked
+    # anyway -- it exec'd `bash launch_cluster.sh`, which since the P04 cutover
+    # execs straight back into this module with the same environment, so the
+    # flag it advertised was an infinite exec loop rather than the run-to-run
+    # comparison its comment promised.
+    if os.environ.get(LEGACY_ENTRY_ENV) == "1":
+        _log(f"[Composition] {LEGACY_ENTRY_ENV} is no longer supported; "
+             "the shell is a site adapter and Python owns the lifecycle")
     raise SystemExit(run(config_path))
 
 

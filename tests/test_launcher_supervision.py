@@ -22,11 +22,21 @@ def test_the_entry_point_is_the_composition_root_not_bash():
     assert launcher.LEGACY_ENTRY_ENV in source
 
 
-def test_the_legacy_shell_lifecycle_is_off_by_default(monkeypatch):
+def test_the_legacy_shell_lifecycle_no_longer_exists(monkeypatch):
+    """WP13: there is exactly one lifecycle owner.
+
+    The flag could not have worked anyway -- it exec'd `bash
+    launch_cluster.sh`, which since the P04 cutover execs straight back into
+    the launcher with the same environment, so it was an infinite exec loop
+    rather than the run-to-run comparison it advertised.
+    """
+    import inspect
+
     monkeypatch.delenv(launcher.LEGACY_ENTRY_ENV, raising=False)
     assert launcher.use_supervisor() is True
     monkeypatch.setenv(launcher.LEGACY_ENTRY_ENV, "1")
-    assert launcher.use_supervisor() is False
+    assert launcher.use_supervisor() is True
+    assert "execvp" not in inspect.getsource(launcher.main)
 
 
 def test_cli_launch_cluster_delegates_to_the_composition_root():

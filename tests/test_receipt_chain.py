@@ -361,8 +361,6 @@ def test_publish_prefers_the_local_hop_over_the_ray_actor(monkeypatch, tmp_path,
     ingress = LocalReceiptIngress(path)
     assert ingress.start()
     monkeypatch.setenv("EXASERVE_RECEIPT_SOCKET", path)
-    monkeypatch.setattr(collector, "_get_collector",
-                        lambda: pytest.fail("the Ray actor must not be consulted"))
     try:
         v1 = _v1_receipt("replica")
         assert collector.publish_receipt(v1)
@@ -382,38 +380,27 @@ def _v1_receipt(role):
                          deployment_id="d1", generation=7, patch_results={})
 
 
-def test_server_routes_readiness_to_the_root_when_the_hop_exists(monkeypatch):
-    import exaserve.server as server
-
-    monkeypatch.delenv("EXASERVE_ROOT_OWNS_READINESS", raising=False)
-    monkeypatch.delenv("EXASERVE_RECEIPT_SOCKET", raising=False)
-    assert server._root_owns_readiness() is False
-    monkeypatch.setenv("EXASERVE_RECEIPT_SOCKET", "/tmp/x.sock")
-    assert server._root_owns_readiness() is True
-    monkeypatch.setenv("EXASERVE_ROOT_OWNS_READINESS", "0")
-    assert server._root_owns_readiness() is False
-
-
-def test_the_child_no_longer_creates_the_receipt_actor_on_the_new_path():
-    """The creation call must be GUARDED, not merely present."""
+def test_the_child_never_decides_readiness(monkeypatch):
+    """WP13: there is no switch left. The child is always a witness."""
     import inspect
 
     import exaserve.server as server
 
-    source = inspect.getsource(server.main) if hasattr(server, "main") else ""
-    if "create_receipt_collector" not in source:
-        source = _read_server_source()
-    index = source.index("create_receipt_collector()")
-    preceding = source[:index]
-    assert "_root_owns_readiness()" in preceding.rsplit("if ", 1)[-1] or \
-        "not _root_owns_readiness()" in preceding[-400:]
+    assert not hasattr(server, "_root_owns_readiness")
+    source = inspect.getsource(server.main)
+    assert "observe_deployment(" in source
+    assert "enforce_readiness" not in source
+    assert "_deploy_manager.validate()" not in source
 
 
-def _read_server_source() -> str:
+def test_the_child_cannot_create_a_receipt_actor_at_all():
+    """Not guarded -- deleted. A guarded violation is still reachable."""
     import exaserve.server as server
 
     with open(server.__file__, encoding="utf-8") as handle:
-        return handle.read()
+        source = handle.read()
+    assert "create_receipt_collector" not in source
+    assert "drain_receipts" not in source
 
 
 def test_rank_main_forwards_receipts_unchanged():

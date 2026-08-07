@@ -543,7 +543,4 @@ export PYTHONUNBUFFERED=1
 #
 # The adapter's whole remit: pick the interpreter, validate the allocation,
 # sanitize the environment, resolve the package, and exec.
-#
-# EXASERVE_LEGACY_SHELL_LIFECYCLE=1 restores the old in-shell lifecycle for a
-# run-to-run comparison; deleted at the WP13 cutover.
 exec $PYTHON_EXEC -m exaserve.launcher "$RUNTIME_CONFIG_PATH"

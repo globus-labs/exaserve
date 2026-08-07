@@ -7,28 +7,45 @@ import pytest
 from exaserve.compat import collector
 
 
-def test_the_receipt_store_is_bounded_and_reports_truncation():
-    """A detached actor that grows with the fleet outlives its deployment."""
-    impl = collector._ReceiptCollectorImpl()
-    for i in range(collector._MAX_RECEIPTS + 25):
-        impl.report({"role": "replica", "pid": i})
-    assert impl.count() == collector._MAX_RECEIPTS
-    assert impl.dropped() == 25, "truncation must be visible, not silent"
+def test_the_ray_receipt_actor_is_gone(tmp_path):
+    """WP13 deleted it: §3.2.1 does not accept it as a readiness source.
 
+    A "fallback" to an unauthenticated transport is not a safety net; it is
+    the violation with a longer name.
+    """
+    for name in ("create_receipt_collector", "drain_receipts",
+                 "shutdown_collector", "_ReceiptCollectorImpl", "collector_name"):
+        assert not hasattr(collector, name), f"{name} survived the WP13 cutover"
 
-def test_the_collector_has_a_shutdown_path():
-    """Detached actors survive their creator; somebody has to reap them."""
-    assert hasattr(collector, "shutdown_collector")
-    # Without a live Ray cluster it reports "nothing to do" rather than raising.
-    assert collector.shutdown_collector() is False
-
-
-def test_the_deploy_path_reaps_the_collector():
     from importlib import resources
 
     source = (resources.files("exaserve") / "server.py").read_text()
-    assert "shutdown_collector" in source, "nothing reaps the receipt collector"
+    assert "create_receipt_collector" not in source
+    assert "shutdown_collector" not in source
 
+
+def test_the_bound_moved_to_the_node_local_ingress(tmp_path):
+    """The cap and its drop count follow the receipts to their real transport."""
+    from exaserve.compat.local_ingress import LocalReceiptIngress, deliver_receipt
+
+    path = str(tmp_path / "d" / "receipts.sock")
+    ingress = LocalReceiptIngress(path, max_queued=4)
+    assert ingress.start()
+    try:
+        results = [deliver_receipt({"i": i}, path=path) for i in range(9)]
+    finally:
+        ingress.stop()
+    assert sum(results) == 4
+    assert ingress.dropped == 5          # truncation is counted, never silent
+
+
+def test_publishing_without_the_hop_is_a_named_failure(monkeypatch):
+    monkeypatch.delenv("EXASERVE_RECEIPT_SOCKET", raising=False)
+
+    class _R:
+        role = "replica"
+
+    assert collector.publish_receipt(_R()) is False
 
 def test_proxy_fanout_is_off_when_the_gate_is_on():
     """KI-A4: the wait_proxies cliff was an O(N) RPC fan-out from the head."""

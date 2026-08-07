@@ -301,9 +301,14 @@ def test_the_deployment_entry_point_is_callable():
     assert callable(server.main)
     source = inspect.getsource(server.main)
     for call in ("_deploy_manager.prepare()", "_deploy_manager.deploy()",
-                 "_deploy_manager.validate()", "_deploy_manager.drain(",
-                 "_deploy_manager.stop()"):
+                 "_deploy_manager.drain(", "_deploy_manager.stop()"):
         assert call in source, f"main() does not drive {call}"
+    # WP13: the child publishes EVIDENCE and does not validate itself. It can
+    # see neither the gateway nor the other ranks' sessions, so it is the wrong
+    # process to decide readiness.
+    assert "_deploy_manager.validate()" not in source
+    assert "observe_deployment(" in source
+    assert "CLUSTER FULLY READY" not in source
 
 
 def test_the_module_level_app_is_not_clobbered_by_the_entry_point():
@@ -323,11 +328,16 @@ def test_the_rank_entry_point_owns_its_children(monkeypatch, tmp_path):
     Before this, its only consumers were tests -- the documented ownership
     tree described a design, not the process tree that ran.
     """
+    import inspect
+
     from exaserve import rank_main
 
     assert rank_main.use_node_supervisor() is True
+    # WP13 deleted the driver fallback: two per-rank entry points meant two
+    # ownership trees, and only one was the one the documentation described.
     monkeypatch.setenv("EXASERVE_RANK_ENTRY", "driver")
-    assert rank_main.use_node_supervisor() is False
+    assert rank_main.use_node_supervisor() is True
+    assert "_driver_main" not in inspect.getsource(rank_main.main)
 
 
 def test_ray_argv_is_separable_so_the_supervisor_can_create_the_child():

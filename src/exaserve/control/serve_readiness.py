@@ -1,8 +1,10 @@
 """Live readiness authority for the Serve deployment (plan WP5, audit IMP-B02).
 
-This is the *production* binding of :mod:`exaserve.control.readiness`. It turns
-the current cluster into observations, runs a real inference canary through the
-external route, and returns one authoritative snapshot.
+This turns the current cluster into observations. It was once the *authority*
+-- an in-child gate that decided READY against this node's internal Serve port,
+from a process that can see neither the gateway nor the other ranks' sessions.
+WP13 removed that: `observe_deployment` publishes EVIDENCE, and
+`control/plan_readiness.py` in the composition root decides.
 
 Why this exists: readiness used to be a line of stdout. `CLUSTER FULLY READY`
 was printed after a bring-up sequence, and every consumer (driver, eval
@@ -16,8 +18,8 @@ Expected replica counts come from each application's ``target_num_replicas``
 (the applied deployment config), never from what happens to be running — so a
 replica that dies drops the count below target and revokes readiness.
 
-The snapshot is written to ``readiness.json`` so consumers read a structured,
-generation-tagged fact instead of parsing logs.
+The evidence is written to ``deployment_evidence.json`` so consumers read a
+structured, generation-tagged fact instead of parsing logs.
 """
 
 from __future__ import annotations
@@ -38,7 +40,6 @@ from .readiness import ReadinessCoordinator, ReadinessPlan, ReadinessSnapshot
 # the decision, at which point one process's evidence would have overwritten
 # the other's verdict in the same directory.
 EVIDENCE_FILENAME = "deployment_evidence.json"
-READINESS_FILENAME = EVIDENCE_FILENAME      # legacy alias, removed at WP13
 
 _SEQ: dict[str, int] = {}
 
@@ -235,7 +236,7 @@ def write_snapshot(snapshot: ReadinessSnapshot, directory: str,
         return None
     try:
         os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, READINESS_FILENAME)
+        path = os.path.join(directory, EVIDENCE_FILENAME)
         payload = snapshot.to_dict()
         if extra:
             payload.update(extra)
@@ -275,184 +276,6 @@ def build_plan(*, deployment_id: str, generation: int, plan_hash: str,
         expected_routes=tuple(routes),
         canary_routes=tuple(canary_routes),
         required_receipt_roles=tuple(required_receipt_roles))
-
-
-def _build_receipt_store(deployment_id: str, generation: int, log) -> tuple:
-    """Head-side receipt store + the roles this topology can attest.
-
-    Returns ``(store, required_roles)``. ``supervisor`` is required only when a
-    supervisor actually stamped the environment — the legacy `exec bash` path
-    has no supervisor to attest, and demanding a receipt nobody can issue would
-    fail closed for a reason unrelated to compatibility.
-    """
-    import sys
-
-    from ..compat.activator import CompatibilityActivator
-    from ..compat.collector import collector_name as _collector_name
-    from ..compat.collector import drain_receipts, receipt_from_dict
-
-    activator = CompatibilityActivator(deployment_id=deployment_id,
-                                       generation=generation)
-    profile = activator.profile
-    stamped = os.environ.get("EXASERVE_COMPAT_PROFILE_ID", "")
-    roles = ["ray_head", "ray_worker", "replica", "engine"]
-    if stamped:
-        roles.insert(0, "supervisor")
-        if stamped != profile.profile_id:
-            log(f"[Readiness] WARNING: supervisor profile {stamped[:12]} != head "
-                f"profile {profile.profile_id[:12]}")
-    override = os.environ.get("EXASERVE_REQUIRED_RECEIPT_ROLES", "")
-    if override:
-        roles = [r.strip() for r in override.split(",") if r.strip()]
-
-    from dataclasses import replace as _replace
-
-    scoped = _replace(profile, required_roles=tuple(roles))
-    object.__setattr__(scoped, "profile_id", profile.profile_id)
-
-    from ..compat.receipt import ReceiptStore
-
-    store = ReceiptStore(scoped, deployment_id, generation)
-
-    # Ray daemons are unmodified external processes started with a prepared
-    # environment: the head attests them (plan §3.1), it does not pretend they
-    # self-report. The supervisor receipt is re-derived from its env stamp.
-    ray_version = ""
-    try:
-        import ray as _ray
-
-        ray_version = _ray.__version__
-    except Exception:
-        pass
-    for role in ("supervisor", "ray_head", "ray_worker"):
-        if role in roles:
-            ok, why = store.add(activator.attest_external(
-                role, executable=sys.executable,
-                version_probe=f"ray {ray_version}"))
-            if not ok:
-                log(f"[Readiness] receipt for {role} rejected: {why}")
-
-    drained = drain_receipts()
-    if not drained:
-        log("[Readiness] no receipts on the channel yet "
-            f"(collector={_collector_name()})")
-    for payload in drained:
-        receipt = receipt_from_dict(payload)
-        if receipt is None:
-            continue
-        ok, why = store.add(receipt)
-        if not ok:
-            log(f"[Readiness] receipt from {payload.get('role')} rejected: {why}")
-    return store, roles
-
-
-def enforce_readiness(*, deployment_id: str, generation: int, plan_hash: str,
-                      base_url: str, snapshot_dir: str = "",
-                      timeout_s: float = 600.0,
-                      log=print) -> ReadinessSnapshot:
-    """THE readiness gate. Raises unless the predicate holds (fail-closed).
-
-    Replaces "we got through bring-up, so print CLUSTER FULLY READY". The
-    marker is still printed for backward compatibility, but only *after* this
-    returns ready, so the text can no longer outrun the fact.
-    """
-    import ray
-
-    node_ids = [str(n["NodeID"]) for n in ray.nodes() if n.get("Alive")]
-    reset_discovery_cache()          # this generation's targets, not a prior one's
-    apps = discover_applications(use_cache=False)
-    if not apps:
-        raise RuntimeError("[Readiness] no Serve applications are deployed; "
-                           "refusing to declare readiness.")
-    expected_replicas = {name: max(int(i["target"]), 1) for name, i in apps.items()}
-    routes = tuple(apps)
-
-    # PR-026: verify the declared private-API surface once, by capability
-    # name, so drift is reported here rather than as an ImportError inside a
-    # later deploy. Already past staging at this point, but still before the
-    # gate declares anything ready.
-    from ..compat.private_api import PrivateApiUnavailable, verify as _verify_private
-
-    try:
-        _private = _verify_private(strict=True)
-        _missing = sorted(k for k, ok in _private.items() if not ok)
-        if _missing:
-            log(f"[Readiness] optional private capabilities unavailable: {_missing}")
-    except PrivateApiUnavailable as exc:
-        raise RuntimeError(f"[Readiness] {exc}") from exc
-
-    store, roles = _build_receipt_store(deployment_id, generation, log)
-    # Probe every route when there are few; sample deterministically when a
-    # shard-aware deployment exposes hundreds. The sample is RECORDED, so the
-    # snapshot never implies routes answered that were not probed.
-    limit = int(os.environ.get("EXASERVE_CANARY_ROUTE_LIMIT", "8") or 8)
-    canary_routes = sample_routes(sorted(apps), limit)
-    plan = build_plan(
-        deployment_id=deployment_id, generation=generation, plan_hash=plan_hash,
-        node_ids=node_ids, expected_replicas=expected_replicas, routes=routes,
-        canary_routes=canary_routes, required_receipt_roles=tuple(roles))
-    coord = ReadinessCoordinator(plan, receipts=store)
-
-    def _url_for(app: str) -> str:
-        prefix = str(apps[app].get("route_prefix") or "/").rstrip("/")
-        return f"{base_url.rstrip('/')}{prefix}/v1/completions"
-
-    canary_url = _url_for(canary_routes[0]) if canary_routes else ""
-    if len(canary_routes) < len(apps):
-        log(f"[Readiness] canary SAMPLES {len(canary_routes)}/{len(apps)} routes "
-            f"(EXASERVE_CANARY_ROUTE_LIMIT={limit}): {list(canary_routes)}")
-    log(f"[Readiness] gate: {len(node_ids)} nodes, apps={expected_replicas}, "
-        f"roles={roles}, canary={canary_url}")
-
-    def _canary_all() -> tuple[bool, str]:
-        """Probe each sampled route; every one must answer."""
-        details = []
-        all_ok = True
-        for app in canary_routes:
-            ok, detail = http_canary(_url_for(app))
-            coord.set_canary(app, ok)
-            all_ok = all_ok and ok
-            if not ok:
-                details.append(f"{app}: {detail}")
-        return all_ok, "; ".join(details) if details else "all sampled routes answered"
-
-    def _refresh_receipts() -> None:
-        """Receipts arrive as replicas finish starting, so re-drain each pass."""
-        from ..compat.collector import drain_receipts as _drain
-        from ..compat.collector import receipt_from_dict as _parse
-
-        for payload in _drain():
-            receipt = _parse(payload)
-            if receipt is not None:
-                store.add(receipt)
-
-    snapshot = await_ready(
-        coord, node_id=(node_ids[0] if node_ids else "head"),
-        instance_id=f"gen{generation}", routes=canary_routes,
-        on_poll=_refresh_receipts, canary=_canary_all,
-        timeout_s=timeout_s, log=log)
-
-    path = write_snapshot(snapshot, snapshot_dir, extra={
-        "deployment_id": deployment_id, "canary_url": canary_url,
-        "canary_routes": list(canary_routes), "routes_total": len(apps),
-        "required_roles": list(roles), "receipts": store.count(),
-        "externally_attested_roles": store.externally_attested_roles(),
-        "expected_replicas": expected_replicas,
-        "degraded_discovery": any(a.get("degraded_source") for a in apps.values()),
-        "private_api": _private,
-    })
-    if path:
-        log(f"[Readiness] snapshot -> {path}")
-    if not snapshot.ready:
-        if os.environ.get("EXASERVE_ALLOW_DEGRADED_READINESS") == "1":
-            log(f"[Readiness] WARNING: degraded start, blockers={list(snapshot.blockers)}")
-            return snapshot
-        raise RuntimeError(
-            "[Readiness] refusing to declare the cluster ready; blockers: "
-            f"{list(snapshot.blockers)}. Set EXASERVE_ALLOW_DEGRADED_READINESS=1 "
-            "to start anyway.")
-    log(f"[Readiness] READY — {list(snapshot.satisfied)}")
-    return snapshot
 
 
 def await_ready(coord: ReadinessCoordinator, *, node_id: str, instance_id: str,

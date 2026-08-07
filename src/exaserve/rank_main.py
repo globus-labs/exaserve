@@ -19,8 +19,9 @@ of any owned child is fatal for this rank **regardless of exit status** — whic
 closes the "a long-lived Ray worker exiting zero becomes a successful rank"
 hole the audit identified.
 
-`EXASERVE_RANK_ENTRY=driver` restores the legacy driver for a run-to-run
-comparison. Removed at the WP13 cutover.
+WP13 removed the `EXASERVE_RANK_ENTRY=driver` fallback: two per-rank entry
+points meant two ownership trees, and only one of them was the one the
+documentation described.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ from typing import Optional, Sequence
 
 
 def use_node_supervisor() -> bool:
-    return os.environ.get("EXASERVE_RANK_ENTRY", "node_supervisor") != "driver"
+    """WP13: NodeSupervisor is the only per-rank entry point."""
+    return True
 
 
 def _server_ready(port: int = 8000, host: str = "127.0.0.1") -> bool:
@@ -305,10 +307,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--config", required=True)
     args, _ = parser.parse_known_args(list(argv) if argv is not None
                                       else sys.argv[1:])
-    if not use_node_supervisor():
-        from .driver import main as _driver_main
-
-        return _driver_main() or 0
     return run(args.config)
 
 
