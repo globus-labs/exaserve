@@ -185,6 +185,13 @@ class CompositionRoot:
         # The shell used to resolve it and MUTATE the runtime config to
         # communicate it, which made a config file a channel between processes.
         env.setdefault("EXASERVE_HEAD_IP", head_ip())
+        # The run directory is where every durable artifact of this generation
+        # lands (readiness snapshot, traces, per-node archives). The shell used
+        # to export it; the root owns it now, so it must pass it on or the
+        # snapshot ends up in /tmp where no consumer looks for it.
+        env["EXASERVE_RUN_LOG_DIR"] = self.run_dir
+        env.setdefault("EXASERVE_RUN_LOG_ROOT", os.path.dirname(self.run_dir)
+                       or self.run_dir)
         env["EXASERVE_ALLOCATION_BINDING_HASH"] = self.binding.allocation_binding_hash
         launcher = RankLauncher(node_count=self.plan.num_nodes,
                                 rank_argv=rank_argv, scheduler=scheduler, env=env)

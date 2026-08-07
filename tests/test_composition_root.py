@@ -192,3 +192,23 @@ def test_the_nodefile_deduplicates_in_order(tmp_path, monkeypatch):
     path.write_text("nB\nnA\nnB\nnC\n")
     monkeypatch.setenv("EXASERVE_NODEFILE", str(path))
     assert read_nodefile() == ["nB", "nA", "nC"]
+
+
+def test_the_run_directory_is_propagated_to_ranks(tmp_path, monkeypatch):
+    """Durable artifacts must land where consumers look, not in /tmp.
+
+    The shell used to export EXASERVE_RUN_LOG_DIR; when the root took over the
+    lifecycle without passing it on, the readiness snapshot was written to a
+    scaling-trace fallback under /tmp and every consumer reported "not ready"
+    for a deployment that was in fact READY.
+    """
+    root = _root(tmp_path)
+    root.bind_allocation(["n0", "n1"], "j")
+    monkeypatch.setenv("EXASERVE_MPILAUNCH", "/bin/true")
+    component = root.launch_ranks(["/bin/true"])
+    try:
+        assert component.env["EXASERVE_RUN_LOG_DIR"] == str(tmp_path)
+        assert component.env["EXASERVE_HEAD_IP"]
+        assert component.env["EXASERVE_PLAN_HASH"] == root.plan.deployment_plan_hash
+    finally:
+        root.shutdown(drain_s=5)
