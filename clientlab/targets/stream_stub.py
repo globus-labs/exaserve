@@ -4,6 +4,7 @@
 Returns SSE-formatted responses with configurable TTFT delay.
 Supports both streaming and non-streaming modes based on request body.
 """
+
 import argparse
 import json
 import time
@@ -12,7 +13,7 @@ from socketserver import ThreadingMixIn
 
 
 class StreamHandler(BaseHTTPRequestHandler):
-    ttft_delay = 0.05   # seconds to first token
+    ttft_delay = 0.05  # seconds to first token
     token_delay = 0.01  # seconds between tokens
     num_tokens = 16
 
@@ -29,7 +30,9 @@ class StreamHandler(BaseHTTPRequestHandler):
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len)
         try:
-            req = json.loads(body) if body else {}
+            from exaserve.state.atomic import strict_json_loads
+
+            req = strict_json_loads(body.decode("utf-8")) if body else {}
         except json.JSONDecodeError:
             req = {}
 
@@ -108,7 +111,10 @@ def main():
         daemon_threads = True
 
     server = ThreadedHTTPServer(("0.0.0.0", args.port), StreamHandler)
-    print(f"Streaming stub server on port {args.port} (ttft={args.ttft_delay}s, token_delay={args.token_delay}s)", flush=True)
+    print(
+        f"Streaming stub server on port {args.port} (ttft={args.ttft_delay}s, token_delay={args.token_delay}s)",
+        flush=True,
+    )
     server.serve_forever()
 
 

@@ -2,8 +2,8 @@ name: nullcompute_smoke_1node
 # VALIDATION stand-in for EXP SET 3 (real spec nullcompute_scaling is 256+ nodes).
 # 1 node, null-compute (no forward pass) + instrumentation probes + startup_only.
 # Confirms the mode works before the capacity campaign:
-#   - EXASERVE_NULL_COMPUTE=1 / EXASERVE_INSTRUMENTATION=1 exported
-#   - cluster reaches CLUSTER FULLY READY without loading the model
+#   - null-compute and instrumentation are bound into DeploymentPlan.runtime
+#   - canonical generation-bound DeploymentStatus reaches READY without loading the model
 #   - scaling_trace.json + /tmp/exaserve_inst/* instrumentation files written
 #   - startup_only exits at READY (no replay)
 matrix:
@@ -58,8 +58,8 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs
-  queue: debug
+  queue: capacity
   walltime: 01:00:00

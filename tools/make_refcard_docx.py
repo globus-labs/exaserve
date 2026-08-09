@@ -8,13 +8,19 @@ swaps document.xml. The docx is fully generated — edit THIS script, not the
 Word file, or your changes will be lost on the next regeneration.
 
 Usage:  python3 tools/make_refcard_docx.py
-Needs:  tmp/ref_card/Academy_Framework_Reference_Card.docx as the template.
+Needs:  tmp/ref_card/Academy_Framework_Reference_Card.docx as the template and
+        the two source figures listed in doc/exaserve.md.
 """
+
+import os
+from pathlib import Path
 import re
+import tempfile
 import zipfile
 
-SRC = "/home/wenyiw/exaserve/tmp/ref_card/Academy_Framework_Reference_Card.docx"
-OUT = "/home/wenyiw/exaserve/doc/ExaServe_Reference_Card.docx"
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "tmp/ref_card/Academy_Framework_Reference_Card.docx"
+OUT = ROOT / "doc/ExaServe_Reference_Card.docx"
 
 RUST = "9C4A2E"
 RUST_BORDER = "C2613F"
@@ -52,8 +58,10 @@ def par(runs_xml, before=None, after=None, pbdr=None, line=None, jc=None):
     ppr = ""
     if pbdr:
         sz, space = pbdr
-        ppr += (f'<w:pBdr><w:bottom w:val="single" w:color="{RUST_BORDER}" '
-                f'w:sz="{sz}" w:space="{space}"/></w:pBdr>')
+        ppr += (
+            f'<w:pBdr><w:bottom w:val="single" w:color="{RUST_BORDER}" '
+            f'w:sz="{sz}" w:space="{space}"/></w:pBdr>'
+        )
     if before is not None or after is not None:
         b = f' w:before="{before}"' if before is not None else ""
         a = f' w:after="{after}"' if after is not None else ""
@@ -77,7 +85,9 @@ def bold_lead(text):
 def heading(num, text):
     return par(
         run(f"{num}  ·  {text}", sz=26, b=True, color=RUST),
-        before=260, after=120, pbdr=(12, 3),
+        before=260,
+        after=120,
+        pbdr=(12, 3),
     )
 
 
@@ -94,7 +104,7 @@ def one_cell_table(cell_xml, left_color, left_sz, edge_color, edge_sz, fill, mar
         '<w:insideV w:val="none" w:color="auto" w:sz="0"/>'
         "</w:tblBorders></w:tblPr>"
         f'<w:tblGrid><w:gridCol w:w="{FULL_W}"/></w:tblGrid>'
-        f'<w:tr><w:trPr><w:cantSplit/></w:trPr>'
+        f"<w:tr><w:trPr><w:cantSplit/></w:trPr>"
         f'<w:tc><w:tcPr><w:tcW w:type="dxa" w:w="{FULL_W}"/>'
         "<w:tcBorders>"
         f'<w:top w:val="single" w:color="{edge_color}" w:sz="{edge_sz}"/>'
@@ -117,36 +127,36 @@ def code_block(text):
             runs.append("<w:r><w:br/></w:r>")
         runs.append(run(ln, sz=16, font="Consolas"))
     cell = par("".join(runs), line=248)
-    return one_cell_table(cell, RUST_BORDER, 18, CODE_EDGE, 4, CODE_BG,
-                          (90, 160, 90, 140))
+    return one_cell_table(cell, RUST_BORDER, 18, CODE_EDGE, 4, CODE_BG, (90, 160, 90, 140))
 
 
 def callout(lead, text, fill):
     runs = run(lead + "  ", b=True, color=RUST) + run(text)
     cell = f"<w:p>{runs}</w:p>"
-    return one_cell_table(cell, RUST_BORDER, 20, RUST_BORDER, 4, fill,
-                          (110, 170, 110, 150))
+    return one_cell_table(cell, RUST_BORDER, 20, RUST_BORDER, 4, fill, (110, 170, 110, 150))
 
 
-IMG_DIR = "/home/wenyiw/exaserve/doc/figures"
+IMG_DIR = ROOT / "doc/figures"
 _images = []  # (zip_target, src_path, relationship_id)
 
 
 def figure(png_name, caption, width_in):
     """Embed doc/figures/<png_name> centered at width_in inches, with an
     italic gray caption underneath (paper-figure style)."""
-    import os
     import struct
-    src = os.path.join(IMG_DIR, png_name)
-    d = open(src, "rb").read()
-    w, h = struct.unpack(">II", d[16:24])   # PNG IHDR
+
+    src = IMG_DIR / png_name
+    d = src.read_bytes()
+    if len(d) < 24 or d[:8] != b"\x89PNG\r\n\x1a\n":
+        raise RuntimeError(f"reference-card figure is absent or not PNG: {src}")
+    w, h = struct.unpack(">II", d[16:24])  # PNG IHDR
     rid = f"rIdFig{len(_images) + 1}"
     _images.append((f"media/{png_name}", src, rid))
-    cx = int(width_in * 914400)             # EMU
+    cx = int(width_in * 914400)  # EMU
     cy = int(cx * h / w)
     n = 100 + len(_images)
     drawing = (
-        '<w:r><w:drawing>'
+        "<w:r><w:drawing>"
         '<wp:inline distT="0" distB="0" distL="0" distR="0" '
         'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
         f'<wp:extent cx="{cx}" cy="{cy}"/>'
@@ -157,10 +167,10 @@ def figure(png_name, caption, width_in):
         f'<pic:nvPicPr><pic:cNvPr id="{n}" name="{png_name}"/><pic:cNvPicPr/></pic:nvPicPr>'
         f'<pic:blipFill><a:blip r:embed="{rid}" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>'
-        '<a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+        "<a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
         f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
         '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
-        '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+        "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
     )
     fig_par = par(drawing, before=60, after=40, jc="center")
     cap_par = par(run(caption, sz=16, color=GRAYTXT, i=True), after=120, jc="center")
@@ -192,9 +202,11 @@ def data_table(rows, col_w, repeat_header=False):
         cells = "".join(tc(c, col_w[j], fill, header) for j, c in enumerate(row))
         # no row may split across a page boundary; the header row repeats on
         # the next page only where requested (tables expected to span pages)
-        trpr = ("<w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>"
-                if header and repeat_header
-                else "<w:trPr><w:cantSplit/></w:trPr>")
+        trpr = (
+            "<w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>"
+            if header and repeat_header
+            else "<w:trPr><w:cantSplit/></w:trPr>"
+        )
         trs.append(f"<w:tr>{trpr}{cells}</w:tr>")
     borders = "".join(
         f'<w:{side} w:val="single" w:color="{TBL_BORDER}" w:sz="4"/>'
@@ -213,52 +225,70 @@ blocks = []
 # title block
 blocks.append(par(run("EXASERVE", sz=48, b=True, color=RUST)))
 blocks.append(par(run("Framework Reference Card", sz=30, b=True), after=40))
-blocks.append(par(
-    run("Scaling LLM Inference on HPC  —  One OpenAI-Compatible Endpoint "
-        "from N Compute Nodes  •  github.com/wenyiwang-us/exaserve",
-        sz=19, color=GRAYTXT),
-    after=140, pbdr=(18, 4),
-))
-blocks.append(body_par(
-    "ExaServe is a framework for scaling LLM inference across the compute nodes of "
-    "an HPC system. From one YAML file and one command, it turns a batch-scheduler "
-    "allocation (e.g. a PBS job) into a "
-    "single OpenAI-compatible inference service: it launches a Ray cluster over the "
-    "allocation, stages model weights to node-local storage with an MPI broadcast, deploys "
-    "one inference replica per GPU tile as Ray Serve applications — a single EngineWorker "
-    "host over a pluggable engine backend (vLLM or SGLang) — and "
-    "optionally fronts them with a pluggable head-node proxy such as HAProxy. A companion "
-    "benchmarking harness "
-    "measures deployments end to end and has validated them at up to 256 nodes "
-    "(3,072 Intel XPU tiles) on ALCF Aurora.", after=100,
-))
+blocks.append(
+    par(
+        run(
+            "Scaling LLM Inference on HPC  —  One OpenAI-Compatible Endpoint "
+            "from N Compute Nodes  •  github.com/wenyiwang-us/exaserve",
+            sz=19,
+            color=GRAYTXT,
+        ),
+        after=140,
+        pbdr=(18, 4),
+    )
+)
+blocks.append(
+    body_par(
+        "ExaServe is a framework for scaling LLM inference across the compute nodes of "
+        "an HPC system. From one YAML file and one command, it turns a batch-scheduler "
+        "allocation (e.g. a PBS job) into a "
+        "single OpenAI-compatible inference service: it launches a Ray cluster over the "
+        "allocation, stages model weights to node-local storage with an MPI broadcast, deploys "
+        "vLLM inference replicas as separate Ray Serve applications, and fronts them with one "
+        "head-owned HAProxy. A companion evaluation harness measures deployments end to end. "
+        "The current evidence-backed production maximum is two Aurora nodes; larger historical "
+        "measurements below predate the hardened architecture and are research context, not a "
+        "current support or qualification claim.",
+        after=100,
+    )
+)
 
 # 1 Why
 blocks.append(heading(1, "Why ExaServe?"))
-blocks.append(body_par(
-    "Existing LLM serving stacks assume cloud environments; HPC systems bring batch-queue "
-    "scheduling, MPI-only launch paths, Lustre metadata costs, exotic accelerators, and "
-    "scale cliffs that only appear past a hundred nodes. ExaServe packages the "
-    "engineering needed to cross that gap:"
-))
+blocks.append(
+    body_par(
+        "Existing LLM serving stacks assume cloud environments; HPC systems bring batch-queue "
+        "scheduling, MPI-only launch paths, Lustre metadata costs, exotic accelerators, and "
+        "scale cliffs that only appear past a hundred nodes. ExaServe packages the "
+        "engineering needed to cross that gap:"
+    )
+)
 why = [
-    ("Turnkey N-node serving",
-     "One YAML file plus one command turns a batch-scheduler allocation into an "
-     "OpenAI-compatible service; clients see the standard API and need no HPC "
-     "knowledge."),
-    ("Validated at scale",
-     "Deployments measured to 256 nodes / 3,072 replicas behind a production HAProxy "
-     "front end: 27.1k non-streaming QPS with Llama-3-8B (one replica per tile) "
-     "— 96% weak-scaling efficiency at 256 nodes (27.1k of 28.2k offered, 0% errors). "
-     "A quantified comparison of head-node proxies (HAProxy, Envoy, LiteLLM, Ray Serve "
-     "proxy) guides the front-end choice."),
-    ("Frontier-model ready",
-     "Multi-node pipeline parallelism serves Llama-3.1-405B (TP8 × PP2, two nodes per "
-     "replica) with shard-aware weight staging, demonstrated from 2 to 128 replicas "
-     "(4 to 256 nodes) at 67% weak-scaling efficiency (streaming)."),
-    ("Measurement built in",
-     "A declarative benchmark harness generates traces and scheduler jobs, replays load "
-     "through a Go client, and scores per-request TTFT/TBT against latency SLOs."),
+    (
+        "Turnkey N-node serving",
+        "One YAML file plus one command turns a batch-scheduler allocation into an "
+        "OpenAI-compatible service; clients see the standard API and need no HPC "
+        "knowledge.",
+    ),
+    (
+        "Historical scale evidence",
+        "Earlier deployments measured to 256 nodes / 3,072 replicas behind HAProxy "
+        "front end: 27.1k non-streaming QPS with Llama-3-8B (one replica per tile) "
+        "— 96% weak-scaling efficiency at 256 nodes (27.1k of 28.2k offered, 0% errors). "
+        "A quantified comparison of head-node proxies (HAProxy, Envoy, LiteLLM, Ray Serve "
+        "proxy) guides qualification work, but those runs do not qualify the hardened path.",
+    ),
+    (
+        "Frontier-model research",
+        "Multi-node pipeline parallelism serves Llama-3.1-405B (TP8 × PP2, two nodes per "
+        "replica) with shard-aware weight staging, demonstrated from 2 to 128 replicas "
+        "(4 to 256 nodes) at 67% weak-scaling efficiency (streaming) on the historical path.",
+    ),
+    (
+        "Measurement built in",
+        "A declarative benchmark harness generates traces and scheduler jobs, replays load "
+        "through a Go client, and scores per-request TTFT/TBT against latency SLOs.",
+    ),
 ]
 for lead, text in why:
     blocks.append(bold_lead(lead))
@@ -266,306 +296,414 @@ for lead, text in why:
 
 # 2 What's in a deployment
 blocks.append(heading(2, "What’s in a deployment?"))
-blocks.append(body_par(
-    "A deployment is a small stack of cooperating pieces, all driven from one "
-    "configuration file:"
-))
-blocks.append(data_table([
-    ["Component", "Description"],
-    ["Launcher",
-     "exaserve-serve-submit (batch, from a login node) or exaserve-launch-cluster "
-     "(interactive) bring up the whole stack on a scheduler allocation"],
-    ["MPI weight staging",
-     "One-source-many-sinks MPI broadcast from the shared file system (e.g., Lustre) to "
-     "node-local storage; shard-aware per pipeline stage for very large models"],
-    ["Inference replicas",
-     "vLLM or SGLang replicas as independent Ray Serve applications — one per GPU "
-     "tile (12 per Aurora node) for single-tile models, or spanning multiple tiles and "
-     "nodes via tensor/pipeline parallelism for larger models"],
-    ["Head-node proxy",
-     "HAProxy, LiteLLM, and others — a single client-facing endpoint with load "
-     "balancing, plus auth and rate limits with LiteLLM"],
-    ["Site patches",
-     "Small Ray/vLLM fixes required at 256+ nodes, applied automatically at launch"],
-    ["Benchmark harness",
-     "eval/: declarative specs → traces + scheduler jobs → replay → SLO scoring"],
-], [2800, 7424], repeat_header=True))
+blocks.append(
+    body_par(
+        "A deployment is a small stack of cooperating pieces, all driven from one "
+        "configuration file:"
+    )
+)
+blocks.append(
+    data_table(
+        [
+            ["Component", "Description"],
+            [
+                "Launcher",
+                "exaserve-serve-submit (batch, from a login node) or exaserve-launch-cluster "
+                "(interactive) bring up the whole stack on a scheduler allocation",
+            ],
+            [
+                "MPI weight staging",
+                "One-source-many-sinks MPI broadcast from the shared file system (e.g., Lustre) to "
+                "node-local storage; shard-aware per pipeline stage for very large models",
+            ],
+            [
+                "Inference replicas",
+                "vLLM replicas as independent Ray Serve applications — one per GPU "
+                "tile (12 per Aurora node) for single-tile models, or spanning multiple tiles and "
+                "nodes via tensor/pipeline parallelism for larger models",
+            ],
+            [
+                "Head-node proxy",
+                "One head-owned HAProxy — the sole current production gateway — exposes a "
+                "single allocation-internal endpoint",
+            ],
+            [
+                "Compatibility profile",
+                "Version-pinned targeted activation plus per-process attestation before READY",
+            ],
+            [
+                "Benchmark harness",
+                "eval/: declarative specs → traces + scheduler jobs → replay → SLO scoring",
+            ],
+        ],
+        [2800, 7424],
+        repeat_header=True,
+    )
+)
 
 # 3 Installation
 blocks.append(heading(3, "Installation"))
-blocks.append(body_par(
-    "Install steps are site-specific — they depend on how the host provides Ray, the "
-    "inference engine, MPI, and the accelerator toolchain. The recipe below targets ALCF "
-    "Aurora; recipes for other sites will be added as they are supported.", after=60,
-))
+blocks.append(
+    body_par(
+        "Install steps are site-specific — they depend on how the host provides Ray, the "
+        "inference engine, MPI, and the accelerator toolchain. The recipe below targets ALCF "
+        "Aurora; recipes for other sites will be added as they are supported.",
+        after=60,
+    )
+)
 blocks.append(bold_lead("ALCF Aurora"))
-blocks.append(body_par(
-    "The package installs into the Python provided by Aurora’s frameworks module, "
-    "which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only the "
-    "exaserve package itself.", after=60,
-))
-blocks.append(code_block(
-    "module load frameworks\n"
-    "git clone https://github.com/wenyiwang-us/exaserve && cd exaserve\n"
-    "python3 -m pip install --user .\n"
-    "\n"
-    "# console scripts land in a frameworks-versioned bin dir; add it to PATH:\n"
-    "export PATH=\"$(python3 -c 'import sysconfig; "
-    "print(sysconfig.get_path(\"scripts\", \"posix_user\"))'):$PATH\"\n"
-    "which exaserve-serve-submit   # verify"
-))
-blocks.append(body_par(
-    "One-time extras, each needed only for the feature that uses it: build HAProxy with "
-    "scripts/build_haproxy.sh (proxied deployments); create a separate LiteLLM venv (its "
-    "dependencies conflict with Ray/vLLM); build the benchmark load generator with "
-    "module load go && bash eval/go_client/build.sh."
-))
+blocks.append(
+    body_par(
+        "The package installs into the Python provided by Aurora’s frameworks module, "
+        "which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only the "
+        "exaserve package itself.",
+        after=60,
+    )
+)
+blocks.append(
+    code_block(
+        "module load frameworks\n"
+        "git clone https://github.com/wenyiwang-us/exaserve && cd exaserve\n"
+        "python3 -m pip install --user .\n"
+        "\n"
+        "# console scripts land in a frameworks-versioned bin dir; add it to PATH:\n"
+        "export PATH=\"$(python3 -c 'import sysconfig; "
+        'print(sysconfig.get_path("scripts", "posix_user"))\'):$PATH"\n'
+        "which exaserve-serve-submit   # verify"
+    )
+)
+blocks.append(
+    body_par(
+        "One-time extras: build HAProxy with scripts/build_haproxy.sh for the production "
+        "gateway; build the evaluation load generator with "
+        "module load go && bash eval/go_client/build.sh."
+    )
+)
 
 # 4 Example
 blocks.append(heading(4, "Example"))
 blocks.append(bold_lead("ALCF Aurora"))
-blocks.append(body_par(
-    "One YAML file describes a deployment — the Ray cluster, the model deployment, "
-    "and the client-facing proxy. Submit it from a login node (no allocation needed), "
-    "then query the printed URL from anywhere that can reach the head node:", after=60,
-))
-blocks.append(code_block(
-    "exaserve-serve-submit my_config.yaml --project-account YOUR_PROJECT --wait\n"
-    "# 8470123.aurora-pbs-0001...          <- PBS job id\n"
-    "# http://x4310c1s0b0n0:4001           <- service URL\n"
-    "\n"
-    "curl -sS -X POST \"http://x4310c1s0b0n0:4001/v1/chat/completions\" \\\n"
-    "     -H 'Content-Type: application/json' \\\n"
-    "     -d '{\"model\":\"meta-llama/Meta-Llama-3-8B-Instruct\",\n"
-    "          \"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":8}'\n"
-    "# {\"id\":\"chatcmpl-...\",\"choices\":[{\"message\":{\"content\":\"Hi!\"...}}],...}\n"
-    "\n"
-    "qdel 8470123                           # tear down"
-))
-blocks.append(body_par(
-    "The configuration it references: Llama-3-8B on two nodes (24 replicas) behind "
-    "HAProxy. model_storage_path (your model directory on the shared file system) and "
-    "local_stage_path (node-local staging) are typically the only fields that vary per "
-    "user.", after=60,
-))
-blocks.append(code_block(
-    "# my_config.yaml\n"
-    "ray_cluster_config:\n"
-    "  head_ip: \"\"              # filled in at runtime\n"
-    "  port: 6379\n"
-    "  node_cpus: 64\n"
-    "model_deployment_config:\n"
-    "  num_nodes: 2\n"
-    "  model_storage_path: /lus/flare/projects/<PROJECT>/<user>/models\n"
-    "  local_stage_path: /tmp/hf_home\n"
-    "  num_gpus_per_node: 12\n"
-    "  model_configs:\n"
-    "    - model_id: meta-llama/Meta-Llama-3-8B-Instruct\n"
-    "      tensor_parallel_size: 1\n"
-    "      pipeline_parallel_size: 1\n"
-    "      max_model_len: 4096\n"
-    "      size: 8                # billions of params; drives replica planning\n"
-    "      gpu_memory_utilization: 0.90\n"
-    "      enforce_eager: true\n"
-    "      max_num_seqs: 64\n"
-    "proxy_config:\n"
-    "  type: haproxy              # haproxy | litellm | none\n"
-    "  port: 4001                 # client-facing port\n"
-    "  backend_port: 8000         # Ray Serve HTTP port on each node"
-))
-blocks.append(callout(
-    "Learn more:",
-    "the README covers interactive launches inside qsub -I, custom PBS integration via "
-    "--dry-run, and every configuration field (examples/config.reference.yaml is fully "
-    "annotated).",
-    LEARN_BG,
-))
+blocks.append(
+    body_par(
+        "One flat canonical YAML file describes deployment semantics. Submit it from a login "
+        "node (no allocation needed), "
+        "then query the printed URL from anywhere that can reach the head node:",
+        after=60,
+    )
+)
+blocks.append(
+    code_block(
+        "exaserve-serve-submit my_config.yaml --project-account YOUR_PROJECT --wait\n"
+        "# 8470123.aurora-pbs-0001...          <- PBS job id\n"
+        "# http://x4310c1s0b0n0:4001           <- service URL\n"
+        "\n"
+        'curl -sS -X POST "http://x4310c1s0b0n0:4001/v1/chat/completions" \\\n'
+        "     -H 'Content-Type: application/json' \\\n"
+        '     -d \'{"model":"meta-llama/Meta-Llama-3-8B-Instruct",\n'
+        '          "messages":[{"role":"user","content":"hello"}],"max_tokens":8}\'\n'
+        '# {"id":"chatcmpl-...","choices":[{"message":{"content":"Hi!"...}}],...}\n'
+        "\n"
+        "qdel 8470123                           # tear down"
+    )
+)
+blocks.append(
+    body_par(
+        "The configuration it references: Llama-3-8B on two nodes (24 replicas) behind "
+        "HAProxy. model_storage_path (your model directory on the shared file system) and "
+        "local_stage_path (node-local staging) are typically the only fields that vary per "
+        "user.",
+        after=60,
+    )
+)
+blocks.append(
+    code_block(
+        "# my_config.yaml\n"
+        "num_nodes: 2\n"
+        "ray_port: 6379\n"
+        "node_cpus: 64\n"
+        "model_storage_path: /lus/flare/projects/<PROJECT>/<user>/models\n"
+        "local_stage_path: /tmp/hf_home\n"
+        "num_gpus_per_node: 12\n"
+        "models:\n"
+        "  - model_id: meta-llama/Meta-Llama-3-8B-Instruct\n"
+        "    tensor_parallel_size: 1\n"
+        "    pipeline_parallel_size: 1\n"
+        "    max_model_len: 4096\n"
+        "    size: 8\n"
+        "gateway:\n"
+        "  kind: haproxy\n"
+        "  port: 4001\n"
+        "  backend_port: 8000\n"
+        "  options: {balance: leastconn, maxconn: 8000}"
+    )
+)
+blocks.append(
+    callout(
+        "Learn more:",
+        "the README covers interactive launches inside qsub -I, custom PBS integration via "
+        "--dry-run, and every configuration field (examples/config.reference.yaml is fully "
+        "annotated).",
+        LEARN_BG,
+    )
+)
 
 # 5 Scaling
-blocks.append(heading(5, "Scaling to hundreds of nodes"))
-blocks.append(body_par(
-    "All measurements in this section were conducted on ALCF Aurora (Intel PVC XPU, "
-    "12 tiles/node, PBS), at up to 256 nodes / 3,072 tiles.", after=80,
-))
+blocks.append(heading(5, "Historical scale evidence (not current qualification)"))
+blocks.append(
+    body_par(
+        "All measurements in this section were conducted on the pre-cutover ALCF Aurora "
+        "path. They are regression context only. The hardened architecture must be re-run at "
+        "each approved tier before any larger support claim is published.",
+        after=80,
+    )
+)
 blocks.append(bold_lead("Front-end proxy at scale"))
-blocks.append(body_par(
-    "All client traffic enters through the head-node proxy. Non-streaming completions "
-    "scale nearly linearly through a single HAProxy — 27.1k QPS with Llama-3-8B "
-    "at 256 nodes / 3,072 single-tile replicas, 0% errors. Streaming (SSE) is harder on "
-    "a centralized front end: the per-token delivery path saturates the head node’s "
-    "network at large node counts, so requests still complete but slowly — streaming "
-    "throughput plateaus around 4.7k QPS from 128 nodes, and p99 end-to-end "
-    "latency reaches 17 s at 256 nodes while non-streaming p99 stays near 2 s at every "
-    "scale. Budget streaming capacity per proxy and prefer non-streaming completions at "
-    "extreme scale.", after=60,
-))
-blocks.append(figure(
-    "fig1_proxy_scaling.png",
-    "Weak scaling, 1–256 nodes (Llama-3-8B, 64 in / 64 out, 110 QPS/node offered): "
-    "successful throughput and SLO attainment per front end, streaming (solid) vs "
-    "non-streaming (dashed). Non-streaming HAProxy reaches 27.1k QPS; streaming through "
-    "any centralized proxy plateaus or collapses. “Direct” is the benchmark-only "
-    "backend-isolation diagnostic.",
-    7.0,
-))
-blocks.append(callout(
-    "Note:",
-    "for benchmarking only, the harness’s client can bypass the proxy and dispatch "
-    "to per-node endpoints (client.dest: direct in a spec) to measure backend capacity "
-    "without a front end — backends themselves scale linearly to 256 nodes when the "
-    "proxy is bypassed. This mode exposes one endpoint per node and is not a deployment "
-    "path.",
-    NOTE_BG,
-))
+blocks.append(
+    body_par(
+        "All client traffic enters through the head-node proxy. Non-streaming completions "
+        "scale nearly linearly through a single HAProxy — 27.1k QPS with Llama-3-8B "
+        "at 256 nodes / 3,072 single-tile replicas, 0% errors. Streaming (SSE) is harder on "
+        "a centralized front end: the per-token delivery path saturates the head node’s "
+        "network at large node counts, so requests still complete but slowly — streaming "
+        "throughput plateaus around 4.7k QPS from 128 nodes, and p99 end-to-end "
+        "latency reaches 17 s at 256 nodes while non-streaming p99 stays near 2 s at every "
+        "scale. Budget streaming capacity per proxy and prefer non-streaming completions at "
+        "extreme scale.",
+        after=60,
+    )
+)
+blocks.append(
+    figure(
+        "fig1_proxy_scaling.png",
+        "Weak scaling, 1–256 nodes (Llama-3-8B, 64 in / 64 out, 110 QPS/node offered): "
+        "successful throughput and SLO attainment per front end, streaming (solid) vs "
+        "non-streaming (dashed). Non-streaming HAProxy reaches 27.1k QPS; streaming through "
+        "any centralized proxy plateaus or collapses. “Direct” is the benchmark-only "
+        "backend-isolation diagnostic.",
+        7.0,
+    )
+)
+blocks.append(
+    callout(
+        "Note:",
+        "for benchmarking only, the harness’s client can bypass the proxy and dispatch "
+        "to per-node endpoints (client.dest: direct in a spec) to measure backend capacity "
+        "without a front end — backends themselves scale linearly to 256 nodes when the "
+        "proxy is bypassed. This mode exposes one endpoint per node and is not a deployment "
+        "path.",
+        NOTE_BG,
+    )
+)
 blocks.append(bold_lead("Multi-node models"))
-blocks.append(body_par(
-    "Models larger than a node are served with pipeline parallelism across node pairs "
-    "(Llama-3.1-405B: TP8 within a node × PP2 across two nodes). Shard-aware staging "
-    "gives each pipeline stage only its own weight shard (~380 GiB, which fits node-local "
-    "tmpfs) and pins each replica to its nodes. All 405B measurements are streaming: at a "
-    "fixed per-replica offered rate, aggregate successful throughput grows from "
-    "0.7 QPS at 2 replicas to 31.0 QPS at 128 replicas (4 to 256 nodes) — 67% "
-    "weak-scaling efficiency vs the 4-node base, sublinear rather than linear. Through a "
-    "single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes "
-    "(9.3 QPS, 80%) before the same head-node streaming ceiling appears; a "
-    "non-streaming 405B configuration has not been measured.", after=60,
-))
-blocks.append(figure(
-    "fig7_pp405b.png",
-    "Llama-3.1-405B (TP8 × PP2) weak scaling, 2–128 replicas at a fixed offered rate "
-    "per replica. Point labels: successful throughput and weak-scaling efficiency vs "
-    "the 4-node base.",
-    5.2,
-))
+blocks.append(
+    body_par(
+        "Models larger than a node are served with pipeline parallelism across node pairs "
+        "(Llama-3.1-405B: TP8 within a node × PP2 across two nodes). Shard-aware staging "
+        "gives each pipeline stage only its own weight shard (~380 GiB, which fits node-local "
+        "tmpfs) and pins each replica to its nodes. All 405B measurements are streaming: at a "
+        "fixed per-replica offered rate, aggregate successful throughput grows from "
+        "0.7 QPS at 2 replicas to 31.0 QPS at 128 replicas (4 to 256 nodes) — 67% "
+        "weak-scaling efficiency vs the 4-node base, sublinear rather than linear. Through a "
+        "single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes "
+        "(9.3 QPS, 80%) before the same head-node streaming ceiling appears; a "
+        "non-streaming 405B configuration has not been measured.",
+        after=60,
+    )
+)
+blocks.append(
+    figure(
+        "fig7_pp405b.png",
+        "Llama-3.1-405B (TP8 × PP2) weak scaling, 2–128 replicas at a fixed offered rate "
+        "per replica. Point labels: successful throughput and weak-scaling efficiency vs "
+        "the 4-node base.",
+        5.2,
+    )
+)
 blocks.append(bold_lead("Robustness across workloads and models"))
-blocks.append(body_par(
-    "Holding the 8B baseline fixed and varying one axis at a time (each row’s offered "
-    "rate pinned at 90% of its single-node saturation), SLO attainment — the fraction "
-    "of requests meeting TTFT ≤ 2 s and P99 TBT ≤ 250 ms — holds at 64 nodes for "
-    "long-context and moderate-rate workloads and for the 120B model. The two rows that "
-    "degrade (the short/high-rate baseline and Poisson arrivals at the same mean) lose "
-    "their latency margin at the saturation knee once 64 nodes share the streaming path: "
-    "the failure is load-shape specific, not model- or workload-specific.", after=60,
-))
-blocks.append(data_table([
-    ["Perturbation", "attain (N=1)", "attain (N=64)", "Δ"],
-    ["(baseline) 8B, 64/64, fixed-interval", "0.91", "0.43", "−0.48"],
-    ["Workload: ShareGPT 2K/2K", "1.00", "0.90", "−0.10"],
-    ["Workload: ShareGPT 4K/4K", "1.00", "1.00", "0.00"],
-    ["Workload: Code (HumanEval)", "1.00", "1.00", "0.00"],
-    ["Workload: Chat (ShareGPT natural)", "0.99", "0.99", "0.00"],
-    ["Workload: Summarization", "1.00", "1.00", "0.00"],
-    ["Model: 120B (TP=8, rate 9)", "0.98", "0.97", "−0.01"],
-    ["Arrival: Poisson", "0.89", "0.35", "−0.54"],
-    ["Arrival: BurstGPT trace †", "0.46", "0.46", "0.00"],
-], [4424, 2000, 2000, 1800]))
-blocks.append(par(run(
-    "† BurstGPT replays a fixed total arrival rate not scaled by N, so its N=64 cell is "
-    "not a weak-scaling stress; reported for completeness.",
-    sz=16, color=GRAYTXT), after=100))
+blocks.append(
+    body_par(
+        "Holding the 8B baseline fixed and varying one axis at a time (each row’s offered "
+        "rate pinned at 90% of its single-node saturation), SLO attainment — the fraction "
+        "of requests meeting TTFT ≤ 2 s and P99 TBT ≤ 250 ms — holds at 64 nodes for "
+        "long-context and moderate-rate workloads and for the 120B model. The two rows that "
+        "degrade (the short/high-rate baseline and Poisson arrivals at the same mean) lose "
+        "their latency margin at the saturation knee once 64 nodes share the streaming path: "
+        "the failure is load-shape specific, not model- or workload-specific.",
+        after=60,
+    )
+)
+blocks.append(
+    data_table(
+        [
+            ["Perturbation", "attain (N=1)", "attain (N=64)", "Δ"],
+            ["(baseline) 8B, 64/64, fixed-interval", "0.91", "0.43", "−0.48"],
+            ["Workload: ShareGPT 2K/2K", "1.00", "0.90", "−0.10"],
+            ["Workload: ShareGPT 4K/4K", "1.00", "1.00", "0.00"],
+            ["Workload: Code (HumanEval)", "1.00", "1.00", "0.00"],
+            ["Workload: Chat (ShareGPT natural)", "0.99", "0.99", "0.00"],
+            ["Workload: Summarization", "1.00", "1.00", "0.00"],
+            ["Model: 120B (TP=8, rate 9)", "0.98", "0.97", "−0.01"],
+            ["Arrival: Poisson", "0.89", "0.35", "−0.54"],
+            ["Arrival: BurstGPT trace †", "0.46", "0.46", "0.00"],
+        ],
+        [4424, 2000, 2000, 1800],
+    )
+)
+blocks.append(
+    par(
+        run(
+            "† BurstGPT replays a fixed total arrival rate not scaled by N, so its N=64 cell is "
+            "not a weak-scaling stress; reported for completeness.",
+            sz=16,
+            color=GRAYTXT,
+        ),
+        after=100,
+    )
+)
 blocks.append(bold_lead("Steady-state serving vs. startup time"))
-blocks.append(body_par(
-    "Everything above is steady-state serving, measured after the cluster reports ready. "
-    "Cluster bring-up behaves differently: it does not scale, and this is Ray’s key "
-    "limitation at HPC scale. Model staging (~50 s for the 8B model), Ray cluster start "
-    "(~45 s), and first-request warm-up (~8 s) are roughly flat in node count, but "
-    "Ray Serve’s serve.run phase grows superlinearly — 171 s at 64 nodes, 470 s at 128, "
-    "and 1,857 s (~31 min) at 256 — and a 512-node bring-up fails outright. The growth is "
-    "concentrated in the proxy readiness wait: on every deployment broadcast, every "
-    "Ray Serve proxy resolves every replica handle against the Ray control store (GCS), "
-    "work that is quadratic in node count and reaches 1.38 million GCS lookups at 256 "
-    "nodes. Budget job walltime as bring-up plus serving window (405B weight loading "
-    "adds more), and reuse a running cluster across experiments where possible."
-))
-blocks.append(bold_lead("Launch-time knobs"))
-blocks.append(body_par(
-    "Environment variables read by the launcher select engines and staging behavior:",
-    after=60,
-))
-blocks.append(data_table([
-    ["Environment knob", "Effect"],
-    ["EXASERVE_ENGINE=sglang", "Select the SGLang engine backend instead of the default vLLM (both plug into the same EngineWorker host)"],
-    ["EXASERVE_PP_SHARD_AWARE=1",
-     "Shard-aware multi-node pipeline-parallel staging and node-pinned replicas "
-     "(405B-class models)"],
-    ["EXASERVE_PP_UMBRELLA=1", "Single root-route ingress over the per-replica PP routes"],
-    ["EXASERVE_NULL_COMPUTE=1",
-     "Skip the engine and simulate latency — control-plane stress tests"],
-    ["EXASERVE_CLEAN_STAGE=1", "Wipe node-local staged weights first (cold-start timing)"],
-], [3300, 6924]))
-blocks.append(body_par(
-    "Scale cliffs and their fixes (Ray/vLLM patches at 256+ nodes, thread-pool clamps) "
-    "are catalogued in doc/KNOWN_ISSUES.md; the launcher applies the fixes automatically."
-))
-blocks.append(callout(
-    "Portability.",
-    "The inference engine and front-end proxy are pluggable (EXASERVE_ENGINE / "
-    "proxy_config.type), but the batch scheduler is PBS-only today: the launcher reads "
-    "$PBS_NODEFILE and stages over mpiexec/PALS. A SchedulerBackend interface is designed "
-    "(doc/design/scheduler_abstraction.md) but not yet implemented — another scheduler "
-    "currently means writing that backend (e.g. srun instead of mpiexec). Slurm is the "
-    "planned first addition. Accelerator support is likewise Intel-XPU-only today, with a "
-    "NVIDIA/AMD vendor abstraction designed but not built.",
-    NOTE_BG,
-))
+blocks.append(
+    body_par(
+        "Everything above is steady-state serving, measured after the cluster reports ready. "
+        "Cluster bring-up behaves differently: it does not scale, and this is Ray’s key "
+        "limitation at HPC scale. Model staging (~50 s for the 8B model), Ray cluster start "
+        "(~45 s), and first-request warm-up (~8 s) are roughly flat in node count, but "
+        "Ray Serve’s serve.run phase grows superlinearly — 171 s at 64 nodes, 470 s at 128, "
+        "and 1,857 s (~31 min) at 256 — and a 512-node bring-up fails outright. The growth is "
+        "concentrated in the proxy readiness wait: on every deployment broadcast, every "
+        "Ray Serve proxy resolves every replica handle against the Ray control store (GCS), "
+        "work that is quadratic in node count and reaches 1.38 million GCS lookups at 256 "
+        "nodes. Budget job walltime as bring-up plus serving window (405B weight loading "
+        "adds more), and reuse a running cluster across experiments where possible."
+    )
+)
+blocks.append(bold_lead("Plan-bound validation controls"))
+blocks.append(
+    body_par(
+        "These controls are compiled into the immutable deployment plan; ambient environment "
+        "variables do not select a different production topology:",
+        after=60,
+    )
+)
+blocks.append(
+    data_table(
+        [
+            ["Environment knob", "Effect"],
+            [
+                "engine: vllm",
+                "The Aurora production SiteProfile rejects unqualified engines such as SGLang",
+            ],
+            [
+                "runtime.pp_shard_aware: true",
+                "Shard-aware multi-node pipeline-parallel staging and node-pinned replicas "
+                "(405B-class models)",
+            ],
+            [
+                "runtime.null_compute: true",
+                "Skip the engine and simulate latency — control-plane stress tests",
+            ],
+            ["runtime.clean_stage: true", "Request a fresh staged-model validation run"],
+        ],
+        [3300, 6924],
+    )
+)
+blocks.append(
+    body_par(
+        "Historical scale cliffs are catalogued in doc/KNOWN_ISSUES.md. The compatibility "
+        "profile activates only version-pinned targeted changes and every required process "
+        "attests the result before READY."
+    )
+)
+blocks.append(
+    callout(
+        "Portability.",
+        "The code has scheduler, gateway, vendor, and engine interfaces, but interfaces are not "
+        "support claims. The default Aurora SiteProfile qualifies only PBS, XPU, vLLM, and "
+        "HAProxy. Slurm/PSI-J, CUDA/ROCm, SGLang, streaming, direct exposure, and alternate "
+        "gateways fail closed or require explicit validation-only plans until separately proven.",
+        NOTE_BG,
+    )
+)
 
 # 6 Clients
 blocks.append(heading(6, "Serving agents and OpenAI-compatible clients"))
-blocks.append(body_par(
-    "The deployment exposes the standard OpenAI API, so any compatible client works unchanged "
-    "— LangChain’s ChatOpenAI, Academy LLM agents, litellm, or the openai SDK — "
-    "by pointing the usual environment variables at the service URL. This makes the framework "
-    "the self-hosted, on-machine complement to a hosted gateway such as MAG: the same agent "
-    "code runs against either.", after=60,
-))
-blocks.append(code_block(
-    "export OPENAI_BASE_URL=http://<head_node>:4001/v1\n"
-    "export OPENAI_API_KEY=EMPTY"
-))
-blocks.append(body_par(
-    "There is no authentication by default; use proxy_config.type: litellm to add API keys, "
-    "rate limiting, and usage tracking."
-))
+blocks.append(
+    body_par(
+        "The deployment exposes the standard OpenAI API, so any compatible client works unchanged "
+        "— LangChain’s ChatOpenAI, Academy LLM agents, litellm, or the openai SDK — "
+        "by pointing the usual environment variables at the service URL. This makes the framework "
+        "the self-hosted, on-machine complement to a hosted gateway such as MAG: the same agent "
+        "code runs against either.",
+        after=60,
+    )
+)
+blocks.append(
+    code_block("export OPENAI_BASE_URL=http://<head_node>:4001/v1\nexport OPENAI_API_KEY=EMPTY")
+)
+blocks.append(
+    body_par(
+        "The current HAProxy exposure is trusted-allocation/internal and has no public-network "
+        "authentication claim. Do not expose it outside that boundary. LiteLLM is validation-only."
+    )
+)
 
 # 7 Examples and Resources
 blocks.append(heading(7, "Examples and Resources"))
-blocks.append(body_par(
-    "Runnable configurations and benchmark specifications live in the repository; code is "
-    "linked rather than copied here. Paths are relative to "
-    "github.com/wenyiwang-us/exaserve."
-))
-blocks.append(data_table([
-    ["Resource", "Location"],
-    ["Source code", "github.com/wenyiwang-us/exaserve"],
-    ["Documentation", "README.md — install, configuration, console-script reference"],
-    ["Machine-actionable card",
-     "doc/exaserve.md — markdown version of this card for coding agents"],
-    ["Deployment templates",
-     "examples/ — HAProxy, LiteLLM, and a fully annotated reference config"],
-    ["Benchmark specs",
-     "eval/specs/refcard/ — the smoke, weak-scaling, and 405B pipeline-parallel "
-     "specs referenced in this card"],
-    ["Scaling analyses",
-     "findings/ and doc/KNOWN_ISSUES.md — root-cause write-ups, scale cliffs and "
-     "fixes"],
-], [2800, 7424]))
+blocks.append(
+    body_par(
+        "Runnable configurations and benchmark specifications live in the repository; code is "
+        "linked rather than copied here. Paths are relative to "
+        "github.com/wenyiwang-us/exaserve."
+    )
+)
+blocks.append(
+    data_table(
+        [
+            ["Resource", "Location"],
+            ["Source code", "github.com/wenyiwang-us/exaserve"],
+            ["Documentation", "README.md — install, configuration, console-script reference"],
+            [
+                "Machine-actionable card",
+                "doc/exaserve.md — markdown version of this card for coding agents",
+            ],
+            [
+                "Deployment templates",
+                "examples/ — HAProxy, LiteLLM, and a fully annotated reference config",
+            ],
+            [
+                "Benchmark specs",
+                "eval/specs/refcard/ — the smoke, weak-scaling, and 405B pipeline-parallel "
+                "specs referenced in this card",
+            ],
+            [
+                "Scaling analyses",
+                "findings/ and doc/KNOWN_ISSUES.md — root-cause write-ups, scale cliffs and fixes",
+            ],
+        ],
+        [2800, 7424],
+    )
+)
 
 # 8 Citation
 blocks.append(heading(8, "Citation"))
-blocks.append(body_par(
-    "The system and its 1–256-node evaluation are described in an SC26 workshop "
-    "paper (in preparation):", after=60,
-))
-blocks.append(code_block(
-    "@misc{wang2026exaserve,\n"
-    "    title = {ExaServe: Deploying and Measuring Large-Scale\n"
-    "             Ray Serve for LLM Inference on Aurora System},\n"
-    "    author = {Wenyi Wang and Shu Shi and Yadu Nand Babuji and\n"
-    "              Ian Foster and Kyle Chard},\n"
-    "    note = {SC26 workshop paper, in preparation},\n"
-    "    year = {2026}\n"
-    "}"
-))
+blocks.append(
+    body_par(
+        "The system and its 1–256-node evaluation are described in an SC26 workshop "
+        "paper (in preparation):",
+        after=60,
+    )
+)
+blocks.append(
+    code_block(
+        "@misc{wang2026exaserve,\n"
+        "    title = {ExaServe: Deploying and Measuring Large-Scale\n"
+        "             Ray Serve for LLM Inference on Aurora System},\n"
+        "    author = {Wenyi Wang and Shu Shi and Yadu Nand Babuji and\n"
+        "              Ian Foster and Kyle Chard},\n"
+        "    note = {SC26 workshop paper, in preparation},\n"
+        "    year = {2026}\n"
+        "}"
+    )
+)
 
 # ------------------------------------------------------------- assemble docx
 with zipfile.ZipFile(SRC) as z:
@@ -582,18 +720,33 @@ rel_entries = "".join(
     for target, _, rid in _images
 )
 
-with zipfile.ZipFile(SRC) as zin, zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zout:
-    for item in zin.infolist():
-        data = zin.read(item.filename)
-        if item.filename == "word/document.xml":
-            data = new_doc.encode("utf-8")
-        elif item.filename == "word/_rels/document.xml.rels":
-            data = data.decode("utf-8").replace(
-                "</Relationships>", rel_entries + "</Relationships>").encode("utf-8")
-        elif item.filename.startswith("word/footer"):
-            data = data.replace(b"Academy", b"ExaServe")
-        zout.writestr(item, data)
-    for target, src, _ in _images:
-        zout.writestr(f"word/{target}", open(src, "rb").read())
+OUT.parent.mkdir(parents=True, exist_ok=True)
+with tempfile.NamedTemporaryFile(
+    prefix=f".{OUT.name}.", suffix=".tmp", dir=OUT.parent, delete=False
+) as temporary:
+    temporary_path = Path(temporary.name)
+try:
+    with (
+        zipfile.ZipFile(SRC) as zin,
+        zipfile.ZipFile(temporary_path, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/document.xml":
+                data = new_doc.encode("utf-8")
+            elif item.filename == "word/_rels/document.xml.rels":
+                data = (
+                    data.decode("utf-8")
+                    .replace("</Relationships>", rel_entries + "</Relationships>")
+                    .encode("utf-8")
+                )
+            elif item.filename.startswith("word/footer"):
+                data = data.replace(b"Academy", b"ExaServe")
+            zout.writestr(item, data)
+        for target, src, _ in _images:
+            zout.writestr(f"word/{target}", src.read_bytes())
+    os.replace(temporary_path, OUT)
+finally:
+    temporary_path.unlink(missing_ok=True)
 
 print("wrote", OUT, f"({len(_images)} figures embedded)")

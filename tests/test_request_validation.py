@@ -7,8 +7,10 @@ import pytest
 from exaserve.request_validation import (
     RequestValidationError,
     parse_sampling,
+    validate_chat_options,
     validate_messages,
     validate_model_field,
+    validate_prompt,
 )
 
 
@@ -19,25 +21,27 @@ def test_valid_sampling_normalized():
     assert parse_sampling({})["max_tokens"] == 1024
 
 
-@pytest.mark.parametrize("body", [
-    {"temperature": "hot"},          # was ValueError -> 500
-    {"temperature": 5.0},            # out of range
-    {"top_p": 2.0},                  # out of range
-    {"max_tokens": -1},              # non-positive
-    {"max_tokens": 10**9},           # absurd
-    {"max_tokens": "lots"},          # wrong type
-    {"max_tokens": True},            # bool is not int here
-    {"min_tokens": 100, "max_tokens": 10},  # min > max
-    {"stop": 42},                    # wrong type
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"temperature": "hot"},  # was ValueError -> 500
+        {"temperature": 5.0},  # out of range
+        {"top_p": 2.0},  # out of range
+        {"max_tokens": -1},  # non-positive
+        {"max_tokens": 10**9},  # absurd
+        {"max_tokens": "lots"},  # wrong type
+        {"max_tokens": True},  # bool is not int here
+        {"min_tokens": 100, "max_tokens": 10},  # min > max
+        {"stop": 42},  # wrong type
+    ],
+)
 def test_invalid_sampling_raises_400_class(body):
     with pytest.raises(RequestValidationError):
         parse_sampling(body)
 
 
 def test_model_field_absent_ok_mismatch_rejected():
-    allowed = {"meta-llama/Meta-Llama-3-8B-Instruct",
-               "meta-llama--Meta-Llama-3-8B-Instruct"}
+    allowed = {"meta-llama/Meta-Llama-3-8B-Instruct", "meta-llama--Meta-Llama-3-8B-Instruct"}
     validate_model_field({}, allowed)  # absent is fine
     validate_model_field({"model": "meta-llama/Meta-Llama-3-8B-Instruct"}, allowed)
     with pytest.raises(RequestValidationError, match="unknown model"):
@@ -46,6 +50,37 @@ def test_model_field_absent_ok_mismatch_rejected():
 
 def test_messages_validation():
     validate_messages([{"role": "user", "content": "hi"}])
-    for bad in ([], "not a list", [{"content": "no role"}]):
+    validate_messages([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+    for bad in (
+        [],
+        "not a list",
+        [{"content": "no role"}],
+        [{"role": 7, "content": "hi"}],
+        [{"role": "user", "content": 7}],
+        [{"role": "user", "content": ["not an object part"]}],
+        [{"role": "user", "content": [{"type": "image_url", "image_url": "x"}]}],
+        [{"role": "user", "content": [{"type": "text", "text": 7}]}],
+        [{"role": "user", "content": [{"type": "text", "text": "x", "extra": True}]}],
+    ):
         with pytest.raises(RequestValidationError):
             validate_messages(bad)
+
+
+def test_chat_template_options_are_typed_before_backend_expansion():
+    validate_chat_options({})
+    validate_chat_options(
+        {"chat_template": "{{ messages }}", "chat_template_kwargs": {"tools": []}}
+    )
+    for bad in (
+        {"chat_template": 7},
+        {"chat_template_kwargs": []},
+    ):
+        with pytest.raises(RequestValidationError):
+            validate_chat_options(bad)
+
+
+def test_completion_prompt_rejects_unimplemented_batch_forms():
+    assert validate_prompt("one prompt") == "one prompt"
+    for unsupported in (["one", "two"], [1, 2], None, 7):
+        with pytest.raises(RequestValidationError, match="prompt must be a string"):
+            validate_prompt(unsupported)

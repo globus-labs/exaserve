@@ -2,16 +2,26 @@
 # Build NGINX from source and install to ~/bin/nginx.
 #
 # Aurora login nodes don't ship nginx, so users of the nginx proxy
-# mode need to build it once. The launcher adds $HOME/bin to PATH.
+# mode need to build it once. The validated runtime PATH must include $HOME/bin.
 #
-# Usage: bash scripts/build_nginx.sh [version]
+# Usage: NGINX_SOURCE_SHA256=<sha256> bash scripts/build_nginx.sh [version]
 #   version defaults to 1.27.3 (mainline at time of writing).
 
 set -euo pipefail
 
 VERSION="${1:-1.27.3}"
+EXPECTED_SHA256="${NGINX_SOURCE_SHA256:-}"
 PREFIX="${NGINX_PREFIX:-$HOME/.local/nginx-$VERSION}"
 BIN_DIR="${NGINX_BIN_DIR:-$HOME/bin}"
+
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "[build_nginx] Invalid version: $VERSION" >&2
+    exit 2
+fi
+if [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "[build_nginx] NGINX_SOURCE_SHA256 must be the audited lowercase SHA-256." >&2
+    exit 2
+fi
 
 TARBALL="nginx-$VERSION.tar.gz"
 URL="https://nginx.org/download/$TARBALL"
@@ -21,8 +31,13 @@ trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 
 echo "[build_nginx] Downloading $URL"
-curl -fsSL -o "$TARBALL" "$URL"
-tar xf "$TARBALL"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$TARBALL" "$URL"
+ACTUAL_SHA256="$(sha256sum "$TARBALL" | awk '{print $1}')"
+if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+    echo "[build_nginx] Source SHA-256 mismatch: $ACTUAL_SHA256" >&2
+    exit 1
+fi
+tar --extract --gzip --file "$TARBALL" --no-same-owner --no-same-permissions
 cd "nginx-$VERSION"
 
 # Minimal build: HTTP only (no mail/stream needed for our load-balancer use),
@@ -55,4 +70,4 @@ ln -sf "$PREFIX/sbin/nginx" "$BIN_DIR/nginx"
 
 echo "[build_nginx] Installed: $BIN_DIR/nginx -> $PREFIX/sbin/nginx"
 "$BIN_DIR/nginx" -v 2>&1 | head -1
-echo "[build_nginx] Add \$HOME/bin to PATH (launch_cluster.sh does this automatically)."
+echo "[build_nginx] Add \$HOME/bin to the validated runtime PATH."

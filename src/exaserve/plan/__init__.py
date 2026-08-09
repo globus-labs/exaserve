@@ -1,20 +1,39 @@
-"""Immutable, validated plan contracts (plan WP1).
+"""The sole public compiled-plan namespace.
 
-The compiler consumes user configuration (including legacy YAML shapes),
-applies strict coercion, and produces frozen plan objects with a canonical
-``plan_hash``. It never mutates or rewrites the source document (PR-003).
-Consumers (serving, eval, ClientLab) migrate onto these contracts in later
-packets; until cutover the legacy loaders remain the default path
-(migration-switch rules, plan §4.1).
+All objects come from :mod:`exaserve.plan.contracts`; all interpretation comes
+from :mod:`exaserve.plan.compiler`. There is no secondary schema namespace.
 """
 
-from .schemas import (  # noqa: F401
+from .compiler import build_receipt_requirements, compile_deployment_plan, compile_run_plan  # noqa: F401
+from .contracts import (  # noqa: F401
+    SCHEMA_VERSION,
+    AllocationBinding,
+    ArtifactPolicy,
+    BackendPolicy,
+    ClientPolicy,
+    ComponentInstanceBinding,
+    ControlLimits,
     DeploymentPlan,
+    ExposureMode,
+    ExposurePlan,
+    GatewayKind,
     GatewayPlan,
     ModelPlan,
     PlanError,
+    ReadinessLimits,
+    ReceiptRequirement,
+    ReplicaPlan,
+    RuntimePolicy,
+    RunPlan,
+    SaturationPolicy,
+    RunProvenance,
     ScaleEnvelope,
     SchedulerPlan,
-    compile_deployment_plan,
-    from_legacy_yaml,
+    SiteProfile,
+    TracePolicy,
+    WorkloadPolicy,
+    build_allocation_binding,
+    canonical_hash,
 )
+
+__all__ = [name for name in globals() if not name.startswith("_")]

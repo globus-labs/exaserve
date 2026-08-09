@@ -13,22 +13,26 @@ Throughput panel shows:
 Raw request-level JSON is expensive to re-parse; per-result-dir processed
 summaries are cached to <results-dir>/processed.json keyed on source mtime.
 """
+
 import os
+
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-claude")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-exaserve")
 
 import json
 import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
+from eval.site_config import get_runs_root  # noqa: E402
 
 try:
     plt.style.use("seaborn-v0_8-darkgrid")
@@ -38,11 +42,12 @@ except OSError:
     except OSError:
         pass
 
-RUNS_ROOT = "/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUNS_ROOT = get_runs_root()
 NODE_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256]
 TARGET_RPS_PER_NODE = 110.0
 GPUS_PER_NODE = 12
-PROCESSED_SCHEMA_VERSION = 3
+PROCESSED_SCHEMA_VERSION = 4
 WARMUP_RUN_INDEX = 0  # treat run 0 as warmup; aggregate stats from runs > 0
 
 SPECS: dict[str, list[tuple[str, str]]] = {
@@ -58,16 +63,22 @@ SERIES_STYLE = {
     # rps_offset: xytext for the RPS+TPS annotation on the throughput panel —
     # staggered per series so low-scale overlaps don't collide.
     "HAProxy (up to 4 MPI clients, 1 LB)": {
-        "color": "#2E86AB", "marker": "o",
-        "rps_offset": (0, 18),   "rps_va": "bottom",
+        "color": "#2E86AB",
+        "marker": "o",
+        "rps_offset": (0, 18),
+        "rps_va": "bottom",
     },
     "Direct-MPI (1 client/node)": {
-        "color": "#A23B72", "marker": "s",
-        "rps_offset": (0, 60),   "rps_va": "bottom",
+        "color": "#A23B72",
+        "marker": "s",
+        "rps_offset": (0, 60),
+        "rps_va": "bottom",
     },
     "LiteLLM (8 workers on head)": {
-        "color": "#E67E22", "marker": "D",
-        "rps_offset": (0, -22),  "rps_va": "top",
+        "color": "#E67E22",
+        "marker": "D",
+        "rps_offset": (0, -22),
+        "rps_va": "top",
     },
 }
 
@@ -80,9 +91,10 @@ PLOT_SUBTITLE = (
 
 # ───────────────────────── processing + caching ────────────────────────
 
-def _latest_result_file(results_dir: Path) -> Path | None:
-    candidates = sorted(results_dir.glob("result*.json"))
-    return candidates[-1] if candidates else None
+
+def _exact_result_file(results_dir: Path) -> Path | None:
+    result = results_dir / "result0.json"
+    return result if result.is_file() else None
 
 
 def _percentile(sorted_vals, p: float) -> float:
@@ -93,7 +105,7 @@ def _percentile(sorted_vals, p: float) -> float:
 
 
 def _compute_processed(result_path: Path) -> dict:
-    """Parse result*.json; derive per-run and aggregate metrics.
+    """Parse the exact result0.json; derive per-run and aggregate metrics.
 
     Aggregates are reported two ways:
       - `*_all`:       mean across every recorded run (including warmup)
@@ -113,14 +125,21 @@ def _compute_processed(result_path: Path) -> dict:
 
     # Aggregate per-run stats from the request list
     from collections import defaultdict
-    stats = defaultdict(lambda: {
-        "total": 0, "successful": 0,
-        "tokens": 0, "successful_tokens": 0,
-        "latencies_ok": [],
-    })
+
+    stats = defaultdict(
+        lambda: {
+            "total": 0,
+            "successful": 0,
+            "tokens": 0,
+            "successful_tokens": 0,
+            "latencies_ok": [],
+        }
+    )
     for r in requests:
         ri = int(r.get("run_index", 0) or 0)
-        tok = int(r.get("actual_prompt_tokens", 0) or 0) + int(r.get("actual_completion_tokens", 0) or 0)
+        tok = int(r.get("actual_prompt_tokens", 0) or 0) + int(
+            r.get("actual_completion_tokens", 0) or 0
+        )
         s = stats[ri]
         s["total"] += 1
         s["tokens"] += tok
@@ -136,21 +155,23 @@ def _compute_processed(result_path: Path) -> dict:
         s = stats[ri]
         dur = per_run_duration.get(ri, 0)
         lats = sorted(s["latencies_ok"])
-        per_run.append({
-            "run_index": ri,
-            "duration_s": dur,
-            "requests": s["total"],
-            "successful": s["successful"],
-            "failures": s["total"] - s["successful"],
-            "tokens": s["tokens"],
-            "successful_tokens": s["successful_tokens"],
-            "rps": (s["total"] / dur) if dur else 0.0,
-            "tps": (s["tokens"] / dur) if dur else 0.0,
-            "rps_ok": (s["successful"] / dur) if dur else 0.0,
-            "tps_ok": (s["successful_tokens"] / dur) if dur else 0.0,
-            "p50_s_ok": _percentile(lats, 50),
-            "p99_s_ok": _percentile(lats, 99),
-        })
+        per_run.append(
+            {
+                "run_index": ri,
+                "duration_s": dur,
+                "requests": s["total"],
+                "successful": s["successful"],
+                "failures": s["total"] - s["successful"],
+                "tokens": s["tokens"],
+                "successful_tokens": s["successful_tokens"],
+                "rps": (s["total"] / dur) if dur else 0.0,
+                "tps": (s["tokens"] / dur) if dur else 0.0,
+                "rps_ok": (s["successful"] / dur) if dur else 0.0,
+                "tps_ok": (s["successful_tokens"] / dur) if dur else 0.0,
+                "p50_s_ok": _percentile(lats, 50),
+                "p99_s_ok": _percentile(lats, 99),
+            }
+        )
 
     def _mean(vals):
         return (sum(vals) / len(vals)) if vals else 0.0
@@ -190,37 +211,12 @@ def _compute_processed(result_path: Path) -> dict:
 
 
 def get_processed(results_dir: Path) -> dict | None:
-    """Return processed summary for the latest result*.json in results_dir.
-
-    Caches to <results_dir>/processed.json keyed on the source file's mtime
-    and schema version. Reads the cache on subsequent calls.
-    """
-    latest = _latest_result_file(results_dir)
-    if latest is None:
+    """Return a processed summary for the exact result0.json identity."""
+    result = _exact_result_file(results_dir)
+    if result is None:
         return None
-
-    cache = results_dir / "processed.json"
-    if cache.exists():
-        try:
-            with open(cache) as f:
-                cached = json.load(f)
-            if (
-                cached.get("schema_version") == PROCESSED_SCHEMA_VERSION
-                and cached.get("source_result") == latest.name
-                and abs(cached.get("source_mtime", 0) - latest.stat().st_mtime) < 1.0
-            ):
-                return cached
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    print(f"  processing {latest} ...")
-    processed = _compute_processed(latest)
-    try:
-        with open(cache, "w") as f:
-            json.dump(processed, f, indent=2)
-    except OSError as e:
-        print(f"  warning: failed to write cache {cache}: {e}")
-    return processed
+    print(f"  processing {result} ...")
+    return _compute_processed(result)
 
 
 def load_one(sources: list[tuple[str, str]]) -> list[tuple[int, dict]]:
@@ -228,7 +224,7 @@ def load_one(sources: list[tuple[str, str]]) -> list[tuple[int, dict]]:
     rows = []
     for n in NODE_COUNTS:
         for spec_name, run_group in sources:
-            results_dir = Path(RUNS_ROOT) / spec_name / run_group / f"{n}-nodes" / "results"
+            results_dir = RUNS_ROOT / spec_name / run_group / f"{n}-nodes" / "results"
             if not results_dir.exists():
                 continue
             p = get_processed(results_dir)
@@ -239,6 +235,7 @@ def load_one(sources: list[tuple[str, str]]) -> list[tuple[int, dict]]:
 
 
 # ───────────────────────── plotting ────────────────────────────────────
+
 
 def _style_axes(ax, xticks, log_y=True):
     ax.set_facecolor("#FAFAFA")
@@ -288,9 +285,9 @@ def _annotate(ax, xs, ys, color, fmt="{:.0f}", xytext=(0, 12), fontsize=8):
 
 def _fmt_tps(v: float) -> str:
     if v >= 1e6:
-        return f"{v/1e6:.2f}M tok/s"
+        return f"{v / 1e6:.2f}M tok/s"
     if v >= 1e3:
-        return f"{v/1e3:.0f}k tok/s"
+        return f"{v / 1e3:.0f}k tok/s"
     return f"{v:.0f} tok/s"
 
 
@@ -310,12 +307,23 @@ def main() -> int:
     ideal_x = NODE_COUNTS
     ideal_y = [TARGET_RPS_PER_NODE * n for n in ideal_x]
     ax_rps.plot(
-        ideal_x, ideal_y, linestyle=":", color="#7A7A7A", linewidth=1.8,
-        alpha=0.8, label=f"Ideal Dispatch ({TARGET_RPS_PER_NODE:g} RPS/node)", zorder=2,
+        ideal_x,
+        ideal_y,
+        linestyle=":",
+        color="#7A7A7A",
+        linewidth=1.8,
+        alpha=0.8,
+        label=f"Ideal Dispatch ({TARGET_RPS_PER_NODE:g} RPS/node)",
+        zorder=2,
     )
     ax_eff.axhline(
-        100, color="#7A7A7A", linestyle="--", linewidth=1.8, alpha=0.8,
-        label="100% efficiency", zorder=2,
+        100,
+        color="#7A7A7A",
+        linestyle="--",
+        linewidth=1.8,
+        alpha=0.8,
+        label="100% efficiency",
+        zorder=2,
     )
 
     for label, sources in SPECS.items():
@@ -327,10 +335,10 @@ def main() -> int:
         nodes = [n for n, _ in rows]
         # Post-warmup aggregates (runs 1..N; run 0 is treated as warmup).
         pw = [p["post_warmup"] for _, p in rows]
-        rps_err = [a["rps"] for a in pw]                    # with errors
-        rps_ok  = [a["rps_ok"] for a in pw]                 # without errors
-        tps_ok  = [a["tps_ok"] for a in pw]
-        p50_ms  = [a["p50_s_ok"] * 1000 for a in pw]
+        rps_err = [a["rps"] for a in pw]  # with errors
+        rps_ok = [a["rps_ok"] for a in pw]  # without errors
+        tps_ok = [a["tps_ok"] for a in pw]
+        p50_ms = [a["p50_s_ok"] * 1000 for a in pw]
         failures = [a["failures_total"] for a in pw]
         attempted = [a["requests_total"] for a in pw]
         # Efficiency uses the error-excluded RPS (real sustained throughput)
@@ -341,16 +349,23 @@ def main() -> int:
             nodes, rps_err, rps_ok, tps_ok, p50_ms, failures, attempted, eff
         ):
             rate = (f / att * 100) if att else 0
-            print(f"    {n:4d} nodes  rps_ok={r_ok:8.1f}  rps_err={r_err:8.1f}  "
-                  f"tps_ok={t_ok:10.1f}  eff={ef:5.1f}%  p50={p:6.1f}ms  "
-                  f"failures={f}/{att} ({rate:.2f}%)")
+            print(
+                f"    {n:4d} nodes  rps_ok={r_ok:8.1f}  rps_err={r_err:8.1f}  "
+                f"tps_ok={t_ok:10.1f}  eff={ef:5.1f}%  p50={p:6.1f}ms  "
+                f"failures={f}/{att} ({rate:.2f}%)"
+            )
 
         style = SERIES_STYLE[label]
         kw_solid = dict(
-            color=style["color"], marker=style["marker"],
-            linewidth=2.6, markersize=8,
-            markerfacecolor=style["color"], markeredgecolor="white",
-            markeredgewidth=1.6, alpha=0.95, zorder=4,
+            color=style["color"],
+            marker=style["marker"],
+            linewidth=2.6,
+            markersize=8,
+            markerfacecolor=style["color"],
+            markeredgecolor="white",
+            markeredgewidth=1.6,
+            alpha=0.95,
+            zorder=4,
         )
         # Dashed marker is hollow (transparent face) and LARGER than the solid
         # marker, with a higher zorder, so a colored ring surrounds the solid
@@ -382,7 +397,8 @@ def main() -> int:
                 (x, y),
                 textcoords="offset points",
                 xytext=off,
-                ha="center", va=va,
+                ha="center",
+                va=va,
                 fontsize=7,
                 fontweight="bold",
                 color=style["color"],
@@ -395,54 +411,75 @@ def main() -> int:
                 ),
             )
 
-        _annotate(ax_eff, nodes, eff, style["color"],
-                  fmt="{:.0f}%", xytext=(0, 10))
-        _annotate(ax_lat, nodes, p50_ms, style["color"],
-                  fmt="{:.0f}", xytext=(0, 10))
+        _annotate(ax_eff, nodes, eff, style["color"], fmt="{:.0f}%", xytext=(0, 10))
+        _annotate(ax_lat, nodes, p50_ms, style["color"], fmt="{:.0f}", xytext=(0, 10))
 
     # Panel titles and axis labels
     ax_rps.set_xlabel("Number of Nodes", fontsize=11, fontweight="bold", color="#333333")
     ax_rps.set_ylabel("Requests per Second (RPS)", fontsize=11, fontweight="bold", color="#333333")
     ax_rps.set_title("Throughput", fontsize=13, fontweight="bold", color="#1A1A1A", pad=30)
     ax_rps.text(
-        0.5, 1.005,
+        0.5,
+        1.005,
         "Requests Per Second (RPS); runs 1–3 (run 0 warmup excluded); TPS annotated",
         transform=ax_rps.transAxes,
-        ha="center", va="bottom",
-        fontsize=10, style="italic", color="#666666",
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        style="italic",
+        color="#666666",
     )
 
     ax_eff.set_xlabel("Number of Nodes", fontsize=11, fontweight="bold", color="#333333")
     ax_eff.set_ylabel("Scaling Efficiency (%)", fontsize=11, fontweight="bold", color="#333333")
     ax_eff.set_title(
         "Efficiency (RPS without errors ÷ ideal)",
-        fontsize=12, fontweight="bold", color="#1A1A1A",
+        fontsize=12,
+        fontweight="bold",
+        color="#1A1A1A",
     )
 
     ax_lat.set_xlabel("Number of Nodes", fontsize=11, fontweight="bold", color="#333333")
     ax_lat.set_ylabel("p50 Latency (ms, log)", fontsize=11, fontweight="bold", color="#333333")
     ax_lat.set_title("Per-Request Latency (p50)", fontsize=12, fontweight="bold", color="#1A1A1A")
 
-    for ax, loc, ncol in [(ax_rps, "upper left", 1),
-                          (ax_eff, "lower left", 1),
-                          (ax_lat, "upper left", 1)]:
+    for ax, loc, ncol in [
+        (ax_rps, "upper left", 1),
+        (ax_eff, "lower left", 1),
+        (ax_lat, "upper left", 1),
+    ]:
         legend = ax.legend(
-            loc=loc, fontsize=9,
-            frameon=True, fancybox=True, shadow=True,
-            framealpha=0.95, edgecolor="#CCCCCC", facecolor="white",
+            loc=loc,
+            fontsize=9,
+            frameon=True,
+            fancybox=True,
+            shadow=True,
+            framealpha=0.95,
+            edgecolor="#CCCCCC",
+            facecolor="white",
             ncol=ncol,
         )
         legend.get_frame().set_linewidth(1.2)
 
     fig.suptitle(PLOT_TITLE, fontsize=16, fontweight="bold", color="#1A1A1A", y=0.995)
     fig.text(
-        0.5, 0.945, PLOT_SUBTITLE,
-        ha="center", va="top", fontsize=11, color="#666666", style="italic",
+        0.5,
+        0.945,
+        PLOT_SUBTITLE,
+        ha="center",
+        va="top",
+        fontsize=11,
+        color="#666666",
+        style="italic",
     )
 
     fig.tight_layout(rect=[0, 0, 1, 0.92])
 
-    out = sys.argv[1] if len(sys.argv) > 1 else "/home/wenyiw/exaserve/findings/weakscaling_three_dispatch_v3.png"
+    out = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else str(REPO_ROOT / "findings/weakscaling_three_dispatch_v3.png")
+    )
     fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white", edgecolor="none")
     plt.close(fig)
     print(f"\nSaved: {out}")

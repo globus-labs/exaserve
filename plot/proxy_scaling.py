@@ -8,23 +8,14 @@ The chart uses:
   - one line per backend count
 
 Usage:
-    python3 plot/proxy_scaling.py
-    python3 plot/proxy_scaling.py --input /path/to/proxy_sweep_*.json
+    python3 plot/proxy_scaling.py --input /path/to/proxy_sweep_ID.json
     python3 plot/proxy_scaling.py --output plot/proxy_scaling.png
 """
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Iterable, List, Tuple
-
-_PLOT_DIR = Path(__file__).parent
-_REPO_ROOT = _PLOT_DIR.parent
-_SRC_DIR = _REPO_ROOT / "src"
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
-from eval.site_config import get_site_config
 
 # Edit this string directly to change the subtitle without lengthening the CLI.
 DEFAULT_SUBTITLE = (
@@ -32,35 +23,6 @@ DEFAULT_SUBTITLE = (
     "probes for a fixed LiteLLM worker/backend configuration. \n"
     "Local loopback."
 )
-
-
-def _candidate_roots():
-    return [
-        Path("data/bench_results"),
-        Path(get_site_config().bench_results_dir),
-        Path("benchmarks/results"),
-    ]
-
-
-def _find_latest_proxy_sweep() -> Path:
-    candidates = []
-    for root in _candidate_roots():
-        if not root.exists():
-            continue
-        candidates.extend(root.rglob("proxy_sweep_*.json"))
-
-    candidates = [
-        path for path in candidates
-        if path.name != "proxy_sweep_checkpoint.json"
-    ]
-    if not candidates:
-        searched = ", ".join(str(root) for root in _candidate_roots())
-        raise FileNotFoundError(
-            "No proxy sweep JSON found. Looked under: "
-            f"{searched}. Pass --input explicitly if your file lives elsewhere."
-        )
-
-    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def _extract_plot_value(row: dict, metric: str):
@@ -149,6 +111,7 @@ def plot_proxy_scaling(
 ) -> None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.ticker import FuncFormatter
@@ -238,8 +201,7 @@ def plot_proxy_scaling(
     ax.margins(x=0.05, y=0.08)
     if omitted_points:
         omitted_labels = ", ".join(
-            f"lw={row['litellm_workers']}/b={row['num_backends']}"
-            for row in omitted_points
+            f"lw={row['litellm_workers']}/b={row['num_backends']}" for row in omitted_points
         )
         fig.text(
             0.5,
@@ -263,11 +225,8 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=str,
-        default=None,
-        help=(
-            "Path to a proxy_sweep_*.json file. If omitted, the latest result is "
-            "discovered under data/bench_results, site_config.bench_results_dir, or benchmarks/results."
-        ),
+        required=True,
+        help="Path to the exact proxy_sweep_ID.json input",
     )
     parser.add_argument(
         "--output",
@@ -315,7 +274,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    input_path = Path(args.input).expanduser() if args.input else _find_latest_proxy_sweep()
+    input_path = Path(args.input).expanduser()
     output_path = Path(args.output).expanduser()
 
     plot_proxy_scaling(

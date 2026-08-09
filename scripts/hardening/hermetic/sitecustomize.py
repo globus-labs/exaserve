@@ -11,13 +11,14 @@ pytest-randomly loads third-party seeders from the frameworks environment
 (deepspeed) that import torch during startup — a property of this machine, not
 of our code, and not present in CI.
 """
+
 import os
 import sys
 
 _DEFAULT = "ray,vllm,torch,transformers"
 _BLOCKED = tuple(
-    name.strip() for name in
-    os.environ.get("EXASERVE_HERMETIC_BLOCK", _DEFAULT).split(",")
+    name.strip()
+    for name in os.environ.get("EXASERVE_HERMETIC_BLOCK", _DEFAULT).split(",")
     if name.strip()
 )
 

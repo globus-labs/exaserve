@@ -16,6 +16,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  go-client:
+    name: Go replay client tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: "1.23.9"
+      - name: Check Go formatting
+        working-directory: eval/go_client
+        run: test -z "$(gofmt -l .)"
+      - name: Vet the production replay binary
+        working-directory: eval/go_client
+        run: go vet ./...
+      - name: Test the production replay binary
+        working-directory: eval/go_client
+        run: go test ./...
+
   test:
     name: hermetic tests (py${{ matrix.python }}, ${{ matrix.order }})
     runs-on: ubuntu-latest
@@ -30,17 +48,15 @@ jobs:
           - python: "3.12"
             order: random
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
       - name: Install (core + dev, no GPU stack)
         run: |
-          python -m pip install --upgrade pip
-          # Core runtime deps + PyYAML/packaging; dev extra for pytest. The
-          # server/proxy/scheduler extras pull GPU/site tooling and are NOT
-          # installed in CI — the hermetic suite must not need them.
-          pip install -e ".[dev]"
+          python -m pip install pip==26.2.1
+          pip install -r requirements/ci.lock
+          pip install --no-deps -e .
       - name: Assert no undeclared host tools are needed
         run: |
           # AC-TST-01: the suite must not require ripgrep or other host bins.
@@ -62,26 +78,33 @@ jobs:
         env:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: python -m pytest -q -p no:randomly
       - name: Run hermetic suite (randomized order, replayable seed)
         if: matrix.order == 'random'
         env:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
-        run: python -m pytest -q -o addopts="" -p randomly -v 2>&1 | tee pytest-random.log
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python -m pytest -q -o addopts="" -p randomly -v
 
   packaged:
     name: packaged wheel test (not an editable checkout)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Build the wheel
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel
+          python -m pip install pip==26.2.1
+          pip install -r requirements/ci.lock
+          # The wheel is built from a freshly extracted sdist and its package
+          # members must exactly match src/ plus declared package data. A plain
+          # `python -m build` builds the wheel first and can reuse stale
+          # build/lib files from a long-lived checkout.
+          python scripts/hardening/build_release_artifacts.py --output-dir dist
       - name: Install the WHEEL and run the suite against it
         run: |
           # IMP-H07: CI previously tested an editable checkout, so a file that
@@ -89,64 +112,59 @@ jobs:
           # venv and running the suite against the INSTALLED package is what
           # proves the artifact a user would get actually works.
           python -m venv /tmp/pkg
-          /tmp/pkg/bin/pip install --upgrade pip
-          /tmp/pkg/bin/pip install dist/*.whl pytest pyyaml
-          cd /tmp   # never import from the source tree
-          /tmp/pkg/bin/python -c "
-          import exaserve, exaserve.plan.compiler, exaserve.compat.receipt_v2
-          import exaserve.control.session, exaserve.control.plan_readiness
-          import exaserve.composition, exaserve.launcher, exaserve.site
-          print('packaged import OK', exaserve.__file__)"
+          /tmp/pkg/bin/pip install pip==26.2.1
+          /tmp/pkg/bin/pip install -r requirements/ci.lock
+          /tmp/pkg/bin/pip install --no-deps dist/*.whl
+          # Use a dedicated empty cwd. A shared /tmp can contain unrelated
+          # namespace-package directories (for example /tmp/ray), which makes
+          # importorskip() believe optional stacks are installed.
+          mkdir -p /tmp/pkg-run
+          cd /tmp/pkg-run   # never import from the source tree
+          EXASERVE_TEST_INSTALLED_WHEEL=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+            /tmp/pkg/bin/python -m pytest -q -p no:randomly "$GITHUB_WORKSPACE"
       - name: Assert the packaged resources shipped
         run: |
           /tmp/pkg/bin/python -c "
           from importlib import resources
           root = resources.files('exaserve') / 'resources'
-          for name in ('launch_cluster.sh', 'distribute_to_nodes.sh', 'bcast.c'):
+          for name in ('bcast.c', 'bcast.Makefile'):
               assert (root / name).is_file(), f'{name} missing from the wheel'
-          script = (root / 'launch_cluster.sh').read_text()
-          assert '-m exaserve.launcher' in script
+          assert not (root / 'launch_cluster.sh').is_file(), 'retired shell adapter shipped'
+          import exaserve.launcher
           print('packaged resources OK')"
 
   ledger:
     name: findings ledger validator
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip pyyaml
+      - run: python -m pip install pip==26.2.1 && pip install -r requirements/ci.lock
       - name: Validate every record against plan section 8
         run: python scripts/hardening/validate_findings.py
 
   lint:
-    name: format + lint
+    name: format + lint + type + security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip ruff
+      - run: python -m pip install pip==26.2.1 && pip install -r requirements/ci.lock
+      - name: Ruff format (release-gating)
+        run: ruff format --check .
       - name: Ruff (correctness-critical rules — release-gating)
-        run: ruff check src eval clientlab tests
-      - name: Ruff (full lint — advisory, non-blocking follow-up)
-        run: ruff check --select E4,E7,F src eval clientlab tests || true
-
-  build:
-    name: wheel build + import
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python -m pip install --upgrade pip build
-      - name: Build sdist + wheel
-        run: python -m build
-      - name: Install the built wheel in a clean venv and import it
-        run: |
-          python -m venv /tmp/wheeltest
-          /tmp/wheeltest/bin/pip install dist/*.whl
-          /tmp/wheeltest/bin/python -c "import exaserve; import exaserve.control.contracts; import exaserve.state.atomic; import exaserve.plan; print('wheel import OK', exaserve.__file__)"
+        run: ruff check .
+      - name: Ruff (production/runtime lint — release-gating)
+        run: ruff check --select E4,E7,F src/exaserve eval/lib eval/cli.py clientlab tests conftest.py
+      - name: High-confidence security static checks
+        run: ruff check --select S102,S307,S602,S608,S609 src/exaserve eval/lib clientlab
+      - name: Typed contract core
+        run: >-
+          mypy --ignore-missing-imports --follow-imports=skip
+          src/exaserve/plan/contracts.py src/exaserve/control/contracts.py
+          src/exaserve/telemetry.py src/exaserve/state/results.py

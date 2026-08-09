@@ -8,20 +8,15 @@
 # Run with:
 #   exaserve-serve-submit examples/config.haproxy.yaml
 
-ray_cluster_config:
-  head_ip: ""
-  port: 6379
-  node_cpus: 64
-
-model_deployment_config:
-  num_nodes: 2
-  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models # ! Change to your own model path
-  local_stage_path: /tmp/hf_home
-  deployment_name: exaserve_serve
-  replica_max_ongoing_requests: 128
-  num_gpus_per_node: 12
-
-  model_configs:
+ray_port: 6379
+node_cpus: 64
+num_nodes: 2
+model_storage_path: /lus/flare/projects/YOUR_PROJECT/YOUR_USER/models # ! Change this
+local_stage_path: /tmp/hf_home
+deployment_name: exaserve_serve
+replica_max_ongoing_requests: 128
+num_gpus_per_node: 12
+models:
     - model_id: meta-llama/Meta-Llama-3-8B-Instruct
       tensor_parallel_size: 1
       pipeline_parallel_size: 1
@@ -31,13 +26,13 @@ model_deployment_config:
       enforce_eager: true
       max_num_seqs: 64
 
-proxy_config:
-  type: haproxy
+gateway:
+  kind: haproxy
   port: 4001          # HAProxy front-end port (clients connect here)
   backend_port: 8000  # Ray Serve HTTP port on each node
-  num_workers: 1      # unused by haproxy; kept for schema symmetry
+  worker_count: 1
   options:
     balance: leastconn   # leastconn | roundrobin | random
-    maxconn: 50000
+    maxconn: 8000
     check_interval: 5000 # ms between backend health probes
     stats_port: 9999     # HAProxy stats page (0 disables)

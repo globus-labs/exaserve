@@ -15,11 +15,13 @@ Reports per-scale:
 from __future__ import annotations
 
 import argparse
-import csv
-import json
-import sys
 from pathlib import Path
 from statistics import mean, median
+
+try:
+    from .analysis_io import read_duration_csv, read_jsonl_objects
+except ImportError:  # Direct ``python eval/tools/analyze_probes.py`` execution.
+    from analysis_io import read_duration_csv, read_jsonl_objects
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -51,7 +53,7 @@ def summarize_run(run_dir: Path) -> dict:
 
     # Per-proxy tallies
     per_proxy_get_actor = {}  # pid -> (count, total_ms, durations)
-    per_proxy_updates = {}    # pid -> list of (n_replicas, duration_s)
+    per_proxy_updates = {}  # pid -> list of (n_replicas, duration_s)
 
     for host_dir in inst_root.iterdir():
         if not host_dir.is_dir():
@@ -59,39 +61,16 @@ def summarize_run(run_dir: Path) -> dict:
         for csv_path in host_dir.glob("get_actor_calls_*.csv"):
             pid = csv_path.stem.split("_")[-1]
             key = f"{host_dir.name}:{pid}"
-            count = 0
-            total_ms = 0.0
-            durations = []
-            try:
-                with csv_path.open() as f:
-                    for row in csv.reader(f):
-                        if len(row) != 2:
-                            continue
-                        try:
-                            dur_ms = float(row[1])
-                        except ValueError:
-                            continue
-                        count += 1
-                        total_ms += dur_ms
-                        durations.append(dur_ms)
-            except Exception:
-                pass
+            durations = read_duration_csv(csv_path)
+            count = len(durations)
+            total_ms = sum(durations)
             if count:
                 per_proxy_get_actor[key] = (count, total_ms, durations)
 
         for jl_path in host_dir.glob("router_updates_*.jsonl"):
             pid = jl_path.stem.split("_")[-1]
             key = f"{host_dir.name}:{pid}"
-            rows = []
-            try:
-                with jl_path.open() as f:
-                    for line in f:
-                        try:
-                            rows.append(json.loads(line))
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            rows = read_jsonl_objects(jl_path)
             if rows:
                 per_proxy_updates[key] = rows
 
@@ -132,10 +111,16 @@ def summarize_run(run_dir: Path) -> dict:
             "p95_ms": round(percentile(all_durations, 95), 3),
             "p99_ms": round(percentile(all_durations, 99), 3),
             "max_ms": round(max(all_durations), 3) if all_durations else 0,
-            "per_proxy_mean_calls": round(mean(per_proxy_call_counts), 1) if per_proxy_call_counts else 0,
+            "per_proxy_mean_calls": round(mean(per_proxy_call_counts), 1)
+            if per_proxy_call_counts
+            else 0,
             "per_proxy_max_calls": max(per_proxy_call_counts) if per_proxy_call_counts else 0,
-            "per_proxy_mean_total_s": round(mean(per_proxy_total_ms) / 1000, 3) if per_proxy_total_ms else 0,
-            "per_proxy_max_total_s": round(max(per_proxy_total_ms) / 1000, 3) if per_proxy_total_ms else 0,
+            "per_proxy_mean_total_s": round(mean(per_proxy_total_ms) / 1000, 3)
+            if per_proxy_total_ms
+            else 0,
+            "per_proxy_max_total_s": round(max(per_proxy_total_ms) / 1000, 3)
+            if per_proxy_total_ms
+            else 0,
         },
         "update_deployment_targets": {
             "total_calls": len(all_update_dur_s),
@@ -144,8 +129,12 @@ def summarize_run(run_dir: Path) -> dict:
             "max_dur_s": round(max(all_update_dur_s), 3) if all_update_dur_s else 0,
             "mean_n_replicas": round(mean(all_update_n), 1) if all_update_n else 0,
             "max_n_replicas": max(all_update_n) if all_update_n else 0,
-            "per_proxy_mean_total_s": round(mean(per_proxy_update_time), 3) if per_proxy_update_time else 0,
-            "per_proxy_max_total_s": round(max(per_proxy_update_time), 3) if per_proxy_update_time else 0,
+            "per_proxy_mean_total_s": round(mean(per_proxy_update_time), 3)
+            if per_proxy_update_time
+            else 0,
+            "per_proxy_max_total_s": round(max(per_proxy_update_time), 3)
+            if per_proxy_update_time
+            else 0,
         },
     }
 
@@ -159,10 +148,13 @@ def main() -> None:
 
     # Print side-by-side table
     def row(label, key_path, fmt="{}"):
-        print(f"  {label:<48} " + " | ".join(
-            fmt.format(_get(s, key_path)) if _get(s, key_path) is not None else "-"
-            for s in summaries
-        ))
+        print(
+            f"  {label:<48} "
+            + " | ".join(
+                fmt.format(_get(s, key_path)) if _get(s, key_path) is not None else "-"
+                for s in summaries
+            )
+        )
 
     scales = [s.get("scale", "?") for s in summaries]
     print(f"\n  {'metric':<48} " + " | ".join(f"{sc:>16}" for sc in scales))
@@ -191,7 +183,11 @@ def main() -> None:
     row("per-call max duration (s)", "update_deployment_targets.max_dur_s", "{:>16}")
     row("mean n_replicas in broadcast", "update_deployment_targets.mean_n_replicas", "{:>16}")
     row("max n_replicas in broadcast", "update_deployment_targets.max_n_replicas", "{:>16}")
-    row("per-proxy mean total time (s)", "update_deployment_targets.per_proxy_mean_total_s", "{:>16}")
+    row(
+        "per-proxy mean total time (s)",
+        "update_deployment_targets.per_proxy_mean_total_s",
+        "{:>16}",
+    )
     row("per-proxy max total time (s)", "update_deployment_targets.per_proxy_max_total_s", "{:>16}")
 
 

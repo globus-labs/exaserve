@@ -46,5 +46,5 @@ backend:
         type: none
 scheduler:
   type: pbs
-  queue: debug
+  queue: capacity
   walltime: 01:00:00

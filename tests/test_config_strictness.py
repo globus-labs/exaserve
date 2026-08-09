@@ -1,103 +1,89 @@
-"""PR-006: a config either means what it says or fails to load."""
+"""The canonical YAML input either means exactly what it says or fails."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from exaserve.schemas import (
-    _deployment_config_from_dict,
-    _model_config_from_dict,
-    load_deployment_config,
-)
+from exaserve.launcher import load_or_compile_plan
+from exaserve.plan import PlanError, compile_deployment_plan
 
 
-def _model(**kw):
-    base = {"model_id": "m"}
-    base.update(kw)
-    return base
+def _raw(**overrides):
+    raw = {
+        "num_nodes": 1,
+        "num_gpus_per_node": 12,
+        "validation_mode": True,
+        "exposure": {"mode": "DIRECT_VALIDATION"},
+        "gateway": None,
+        "models": [{"model_id": "org/model", "max_model_len": 64, "size": 1}],
+    }
+    raw.update(overrides)
+    return raw
 
 
 def test_a_typo_in_a_deployment_key_is_refused_not_defaulted():
-    """`num_node: 64` silently left the deployment at 1 node."""
-    with pytest.raises(ValueError, match="unknown key"):
-        _deployment_config_from_dict({"num_node": 64, "model_configs": []})
+    with pytest.raises(PlanError, match="unknown key.*num_node"):
+        compile_deployment_plan(_raw(num_node=64))
 
 
 def test_a_typo_in_a_model_key_is_refused():
-    with pytest.raises(ValueError, match="unknown key"):
-        _model_config_from_dict(_model(tensor_parallel=2))
-
-
-def test_the_error_names_what_was_wrong_and_what_is_accepted():
-    with pytest.raises(ValueError) as excinfo:
-        _deployment_config_from_dict({"num_node": 64})
-    message = str(excinfo.value)
-    assert "num_node" in message and "num_nodes" in message
+    raw = _raw()
+    raw["models"][0]["tensor_parallel"] = 2
+    with pytest.raises(PlanError, match="unknown key.*tensor_parallel"):
+        compile_deployment_plan(raw)
 
 
 def test_a_missing_model_id_is_refused():
-    with pytest.raises(ValueError, match="model_id"):
-        _model_config_from_dict({"tensor_parallel_size": 2})
+    with pytest.raises(PlanError, match="model_id"):
+        compile_deployment_plan(_raw(models=[{"max_model_len": 64, "size": 1}]))
 
 
 @pytest.mark.parametrize("value", [8.9, "eight", True, [], {}])
 def test_a_non_integer_field_never_silently_truncates(value):
-    with pytest.raises(ValueError):
-        _model_config_from_dict(_model(num_cpus_per_replica=value))
+    raw = _raw()
+    raw["models"][0]["num_cpus_per_replica"] = value
+    with pytest.raises(PlanError, match="integer"):
+        compile_deployment_plan(raw)
 
 
-def test_an_omitted_optional_field_takes_its_default():
-    assert _model_config_from_dict(
-        _model(num_cpus_per_replica=None)).num_cpus_per_replica == 4
+def test_integral_float_and_boolean_are_not_accepted_as_integers():
+    raw = _raw()
+    raw["models"][0]["max_model_len"] = 4096.0
+    with pytest.raises(PlanError, match="integer"):
+        compile_deployment_plan(raw)
+    raw["models"][0]["max_model_len"] = 4096
+    raw["num_nodes"] = True
+    with pytest.raises(PlanError, match="integer"):
+        compile_deployment_plan(raw)
 
 
-def test_an_integral_float_is_accepted():
-    """YAML writes 4.0 for an int often enough that refusing it is hostile."""
-    assert _model_config_from_dict(_model(max_model_len=4096.0)).max_model_len == 4096
+def test_quoted_booleans_are_rejected_instead_of_coerced():
+    raw = _raw(collect_stats="false")
+    with pytest.raises(PlanError, match="boolean"):
+        compile_deployment_plan(raw)
 
 
-def test_a_boolean_in_a_numeric_field_is_refused():
-    """True is an int in Python; it must not read as 1 node."""
-    with pytest.raises(ValueError, match="boolean"):
-        _deployment_config_from_dict({"num_nodes": True, "model_configs": []})
+def test_duplicate_yaml_keys_are_rejected_before_plan_compilation(tmp_path):
+    path = tmp_path / "duplicate.yaml"
+    path.write_text("num_nodes: 1\nnum_nodes: 2\n", encoding="utf-8")
+
+    with pytest.raises(Exception, match="duplicate key 'num_nodes'"):
+        load_or_compile_plan(str(path), deployment_id="duplicate-check")
 
 
-def test_a_quoted_false_does_not_become_true():
-    """The original PR-006 defect: any non-empty string was truthy."""
-    assert _deployment_config_from_dict(
-        {"collect_stats": "false", "model_configs": []}).collect_stats is False
-    assert _deployment_config_from_dict(
-        {"collect_stats": "yes", "model_configs": []}).collect_stats is True
-    with pytest.raises(ValueError, match="boolean"):
-        _deployment_config_from_dict({"collect_stats": "maybe", "model_configs": []})
+def test_every_shipped_yaml_uses_the_canonical_schema():
+    repo_root = Path(__file__).resolve().parents[1]
+    paths = sorted((repo_root / "examples").glob("*.yaml")) + sorted(
+        (repo_root / "scripts/hardening").glob("config.*.yaml")
+    )
+    assert paths
+    for path in paths:
+        plan = load_or_compile_plan(str(path), deployment_id="schema-check")
+        assert plan.models, path
 
 
-def test_a_valid_config_still_loads(tmp_path):
-    path = tmp_path / "c.yaml"
-    path.write_text(
-        "model_deployment_config:\n"
-        "  num_nodes: 2\n"
-        "  num_gpus_per_node: 12\n"
-        "  model_storage_path: /models\n"
-        "  local_stage_path: /tmp/hf\n"
-        "  model_configs:\n"
-        "    - model_id: meta-llama/Meta-Llama-3-8B-Instruct\n"
-        "      tensor_parallel_size: 1\n"
-        "      max_model_len: 4096\n"
-        "      size: 8\n")
-    config = load_deployment_config(str(path))
-    assert config.num_nodes == 2 and len(config.model_configs) == 1
-    assert config.model_configs[0].tensor_parallel_size == 1
-
-
-def test_the_real_hardening_configs_still_load():
-    """The configs used by the smoke harnesses must not regress."""
-    import glob
-
-    from importlib import resources  # noqa: F401
-
-    loaded = 0
-    for path in sorted(glob.glob("scripts/hardening/config.*.yaml")):
-        load_deployment_config(path)
-        loaded += 1
-    assert loaded >= 1, "no hardening configs found to validate"
+def test_retired_nested_schema_is_rejected_explicitly():
+    with pytest.raises(PlanError, match="model_deployment_config"):
+        compile_deployment_plan({"model_deployment_config": {"num_nodes": 1}})

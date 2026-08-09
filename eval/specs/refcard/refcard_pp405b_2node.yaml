@@ -28,6 +28,7 @@ workload:
   rate_per_node: 0.5
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   model_storage_path: /lus/flare/projects/<PROJECT>/<user>/models
   local_stage_path: /lus/flare/projects/<PROJECT>/<user>/models
   models:
@@ -62,8 +63,8 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 50000
+          maxconn: 8000
 scheduler:
   type: pbs
-  queue: debug
+  queue: capacity
   walltime: 01:00:00

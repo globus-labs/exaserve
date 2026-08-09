@@ -44,7 +44,7 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs
   walltime: "04:00:00"

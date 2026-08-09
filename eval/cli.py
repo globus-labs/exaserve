@@ -11,8 +11,9 @@ Subcommands:
   run submit-all <spec_name>       — submit all pending runs for a spec, respecting queue limits
   run execute <run.yaml>            — execute a run inside a PBS job (called by job.pbs)
 
-This CLI replaces the old workflow of:
-  python eval/exp_generator.py -> python eval/submit_all.py -> (PBS runs run_exp.sh)
+Scheduler job bodies are rendered by the shared scheduler backend and invoke
+``run execute`` directly. There is no intermediate lifecycle shell or second
+submission orchestrator.
 """
 
 from __future__ import annotations
@@ -43,10 +44,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     trace_parser = subparsers.add_parser("trace", help="Trace artifact commands")
     trace_subparsers = trace_parser.add_subparsers(dest="command", required=True)
-    trace_materialize = trace_subparsers.add_parser("materialize", help="Materialize traces for a spec")
+    trace_materialize = trace_subparsers.add_parser(
+        "materialize", help="Materialize traces for a spec"
+    )
     trace_materialize.add_argument("spec")
     trace_materialize.add_argument("--trace-root", default=None)
-    trace_materialize.add_argument("--force", action="store_true", help="Regenerate traces even if cached")
+    trace_materialize.add_argument(
+        "--force", action="store_true", help="Regenerate traces even if cached"
+    )
+    trace_materialize.add_argument(
+        "--timeout-s",
+        type=float,
+        default=3600.0,
+        help="Finite deadline for the complete trace materialization (default: 3600)",
+    )
 
     run_parser = subparsers.add_parser("run", help="Run bundle commands")
     run_subparsers = run_parser.add_subparsers(dest="command", required=True)
@@ -55,7 +66,20 @@ def build_parser() -> argparse.ArgumentParser:
     run_materialize.add_argument("--backend", default=None)
     run_materialize.add_argument("--experiments-root", default=None)
     run_materialize.add_argument("--trace-root", default=None)
-    run_materialize.add_argument("--force-trace", action="store_true", help="Regenerate traces even if cached")
+    run_materialize.add_argument(
+        "--force-trace", action="store_true", help="Regenerate traces even if cached"
+    )
+    run_materialize.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Explicitly run the committed-HEAD snapshot while recording excluded dirty files",
+    )
+    run_materialize.add_argument(
+        "--timeout-s",
+        type=float,
+        default=3600.0,
+        help="Finite deadline for parallel run-bundle materialization (default: 3600)",
+    )
 
     run_submit = run_subparsers.add_parser("submit", help="Submit a run bundle or run.yaml")
     run_submit.add_argument("target")
@@ -64,16 +88,20 @@ def build_parser() -> argparse.ArgumentParser:
     run_submit_all = run_subparsers.add_parser(
         "submit-all", help="Submit all pending runs for a spec name"
     )
-    run_submit_all.add_argument("spec_name", nargs="+", help="Spec name(s) (matches runs/<spec_name>/)")
+    run_submit_all.add_argument(
+        "spec_name", nargs="+", help="Spec name(s) (matches runs/<spec_name>/)"
+    )
     run_submit_all.add_argument(
         "--run-group",
-        default="latest",
-        help="Run group to submit (e.g. run0). Default: latest.",
+        required=True,
+        help="Exact run group to submit (for example run0); 'latest' is intentionally unsupported.",
     )
     run_submit_all.add_argument("--experiments-root", default=None)
     run_submit_all.add_argument("--dry-run", action="store_true")
     run_submit_all.add_argument(
-        "--poll-interval", type=int, default=300,
+        "--poll-interval",
+        type=int,
+        default=300,
         help="Seconds between retry attempts when queues are full (default: 300)",
     )
 
@@ -86,8 +114,15 @@ def build_parser() -> argparse.ArgumentParser:
         "derive-params",
         help="Derive client parameters from Phase 0 saturation results",
     )
-    derive_parser.add_argument("result_dir", help="Path to run variant dir containing results/saturation_output.json")
-    derive_parser.add_argument("--headroom", type=float, default=0.7, help="Fraction of saturation rate to use as target (default: 0.7)")
+    derive_parser.add_argument(
+        "result_dir", help="Path to run variant dir containing results/saturation_output.json"
+    )
+    derive_parser.add_argument(
+        "--headroom",
+        type=float,
+        default=0.7,
+        help="Fraction of saturation rate to use as target (default: 0.7)",
+    )
 
     return parser
 
@@ -108,7 +143,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.area == "trace":
         spec_path = find_spec_path(args.spec)
-        artifacts = materialize_traces(spec_path, trace_root=args.trace_root, force=args.force)
+        artifacts = materialize_traces(
+            spec_path,
+            trace_root=args.trace_root,
+            force=args.force,
+            timeout_s=args.timeout_s,
+        )
         for artifact in artifacts:
             print(artifact.trace_path)
         return 0
@@ -122,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
                 experiments_root=args.experiments_root,
                 trace_root=args.trace_root,
                 force_trace=args.force_trace,
+                allow_dirty=args.allow_dirty,
+                timeout_s=args.timeout_s,
             )
             for plan in plans:
                 print(plan.bundle.run_yaml_path)
@@ -153,7 +195,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def _derive_params(result_dir: str, headroom: float) -> int:
     """Derive client config from Phase 0 saturation output."""
-    import json
     import math
     from pathlib import Path
 
@@ -165,7 +206,13 @@ def _derive_params(result_dir: str, headroom: float) -> int:
         print(f"ERROR: saturation_output.json not found in {result_dir}", flush=True)
         return 1
 
-    sat_output = json.loads(sat_path.read_text(encoding="utf-8"))
+    from exaserve.state.atomic import strict_json_load_path
+
+    try:
+        sat_output = strict_json_load_path(sat_path)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: saturation output is invalid: {exc}", flush=True)
+        return 1
     sat_rate = sat_output.get("saturation_rate", 0)
     if sat_rate <= 0:
         print("ERROR: saturation_rate is 0 — no saturation point found", flush=True)
@@ -177,7 +224,9 @@ def _derive_params(result_dir: str, headroom: float) -> int:
         return 1
 
     healthy_steps = [s for s in steps if s.get("healthy")]
-    best = healthy_steps[-1] if healthy_steps else max(steps, key=lambda s: s.get("achieved_rate", 0))
+    best = (
+        healthy_steps[-1] if healthy_steps else max(steps, key=lambda s: s.get("achieved_rate", 0))
+    )
     p99_latency = float(best.get("p99_latency_s", 0))
     p99_ttft = float(best.get("p99_ttft_s", 0))
     achieved_rps = float(best.get("achieved_rate", 0))
@@ -193,14 +242,16 @@ def _derive_params(result_dir: str, headroom: float) -> int:
     print("# Derived client parameters from Phase 0 saturation results")
     print(f"# Source: {sat_path}")
     print(f"# Saturation rate: {sat_rate} rps")
-    print(f"# Best healthy step: achieved={achieved_rps:.1f} rps, p99={p99_latency*1000:.1f}ms" +
-          (f", p99_ttft={p99_ttft*1000:.1f}ms" if p99_ttft > 0 else ""))
+    print(
+        f"# Best healthy step: achieved={achieved_rps:.1f} rps, p99={p99_latency * 1000:.1f}ms"
+        + (f", p99_ttft={p99_ttft * 1000:.1f}ms" if p99_ttft > 0 else "")
+    )
     print(f"# Headroom: {headroom:.0%}")
     print()
     print(f"rate_per_node: {rate_per_node:.1f}")
     print(f"num_go_procs: {num_go_procs}")
     print(f"go_concurrency: {go_concurrency}")
-    print(f"num_go_workers: 4")
+    print("num_go_workers: 4")
     print()
     print("# Paste into your weak-scaling spec under 'client:' and 'workload:'")
     return 0

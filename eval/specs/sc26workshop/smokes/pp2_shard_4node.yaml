@@ -4,10 +4,8 @@ name: pp2_shard_4node
 # Validates the full path: two-group bcast stages each node ONLY its stage's
 # shards (post-ray.init, sharing ordered_pp_nodes() with the node-pinned deploy),
 # vLLM loads the partial per-stage dir, and N node-pinned single-replica
-# deployments serve. PASS criterion = driver reaches "CLUSTER FULLY READY"
-# (staging + per-stage load + serve). Routing across the per-replica routes
-# (/<safe>_r{r}) is TODO, so the replay client may not route — that's expected;
-# the deploy reaching READY is what this test checks.
+# deployments serve. PASS requires a generation-bound READY status whose exact
+# sibling routes, receipts, and canary evidence satisfy the compiled plan.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -27,6 +25,7 @@ workload:
   rate_per_node: 1.0
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   num_nodes: 4
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   local_stage_path: /tmp/pp2_shard_test
@@ -62,7 +61,7 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 50000
+          maxconn: 8000
 scheduler:
   type: pbs
   queue: debug-scaling

@@ -1,6 +1,11 @@
-"""Intel XPU vendor (Aurora PVC). VALIDATED — this replicates the exact device
-behavior the engines had inline before the vendor abstraction, so Aurora is
-unchanged."""
+"""Intel XPU vendor for Aurora PVC.
+
+Aurora's site contract uses ``ZE_AFFINITY_MASK`` exclusively and explicitly
+forbids introducing ``ONEAPI_DEVICE_SELECTOR``.  SGLang is not in the qualified
+Aurora engine envelope; allowing its historical selector workaround here would
+let a direct engine call silently violate the site boundary after the launcher
+had sanitized the environment.
+"""
 
 from __future__ import annotations
 
@@ -15,19 +20,15 @@ class XPUVendor(VendorBackend):
 
     def isolate_devices(self, device_ids: List[int], engine_name: str = "vllm") -> None:
         mask = ",".join(str(g) for g in device_ids) if device_ids else None
-        if engine_name == "sglang":
-            # SGLang's XPU init needs a VALID ONEAPI_DEVICE_SELECTOR (unlike vLLM);
-            # tile isolation stays with ZE_AFFINITY_MASK, which composes with it.
-            os.environ["ONEAPI_DEVICE_SELECTOR"] = "opencl:gpu;level_zero:gpu"
-            if mask is not None:
-                os.environ["ZE_AFFINITY_MASK"] = mask
-        else:  # vLLM / default: ZE_AFFINITY_MASK set, ONEAPI_DEVICE_SELECTOR unset
-            if mask is not None:
-                os.environ["ZE_AFFINITY_MASK"] = mask
-                os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
-            else:
-                os.environ.pop("ZE_AFFINITY_MASK", None)
-                os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
+        # The engine name cannot weaken a site-wide device-isolation rule.
+        # Unsupported XPU/SGLang combinations are rejected by SiteProfile
+        # compilation before this boundary; this method remains fail-closed if
+        # called directly.
+        os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
+        if mask is not None:
+            os.environ["ZE_AFFINITY_MASK"] = mask
+        else:
+            os.environ.pop("ZE_AFFINITY_MASK", None)
 
     def torch_device(self) -> str:
         return "xpu"

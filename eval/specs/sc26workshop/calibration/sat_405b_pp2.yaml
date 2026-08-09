@@ -15,7 +15,7 @@ matrix:
     label_template: '{value}n'
   derived:
   - path: client.num_nodes
-    expr: '2'
+    expr: '1'
 trace:
   kind: weak_scaling
 workload:
@@ -24,6 +24,7 @@ workload:
   output_len: 64
   rate_per_node: 1000.0
 deployment:
+  validation_mode: true
   num_nodes: 2
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   local_stage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
@@ -64,8 +65,8 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 50000
+          maxconn: 8000
 scheduler:
   type: pbs
-  queue: debug
+  queue: capacity
   walltime: 01:00:00

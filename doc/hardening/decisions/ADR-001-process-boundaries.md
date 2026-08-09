@@ -1,110 +1,100 @@
-# ADR-001: Process boundaries, distributed ownership, and control transport
+# ADR-001: Process boundaries, ownership, and control transport
 
-**Status:** PROVISIONAL TARGET; P00/S01 REOPENED on 2026-08-07. The 2026-08-05
-two-node placeholder harness proves useful PALS/TCP feasibility facts, but it
-does not pass the strengthened S01 gate. The architecture below is binding
-because the canonical plan selects it, not because the cited harness fully
-proved it.
+**Status:** SELECTED AND PROVEN FOR FINAL42 AT ONE AND TWO NODES (2026-08-09).
+The four-node candidate run awaits explicit authorization; the product decision
+and larger scale ladder remain in ADR-000.
 
 ## Decision
 
-1. **Target topology (selected; production proof open):** allocation-head
-   `RuntimeSupervisor` (outside the rank set) owns the control listener,
-   `RankLauncher` (one supervised mpiexec), `DeploymentManager`, gateway,
-   readiness, and global state; one `NodeSupervisor` rank per planned node owns
-   only its node-local children. The placeholder harness proves this shape can
-   communicate over PALS, not that the real Ray/Serve lifecycle satisfies it.
-2. **Transport primitive (early feasibility proven; target semantics open):**
-   length-prefixed canonical JSON with HMAC-SHA256 under a 256-bit
-   per-deployment secret delivered via redacted inherited environment through
-   mpiexec worked across two nodes. The version-2 envelope, binding, initial
-   snapshot/acknowledgment/START barrier, reconnect, and complete negative
-   matrix still require the plan's S01 proof.
-3. **Launcher behavior (observed partial evidence):** PALS reports the tested
-   placeholder-rank failures only as job abort (exit 143), losing the rank's
-   own exit code/cause, while the prototype channel delivered a typed
-   `CHILD_EXIT` first. This motivates redundant channel plus launcher evidence;
-   it does not prove both signals on the final real-Ray path.
-4. **Watchdog target (not proven by the old harness):** readiness is revoked at
-   `loss_time`; reconnection remains possible through
-   `loss_time + reconnect_grace_s`; only after grace expiry may node-local
-   cleanup begin, and it must then finish within
-   `watchdog_cleanup_deadline_s`. The historical conn-drop harness killed its
-   placeholder child immediately on disconnect, so it proves only eventual
-   reaping/nonzero exit and must not be cited for this timing contract.
-5. **DeploymentManager placement target:** the outer supervisor owns it and invokes it
-   in-process after compatibility activation by default. If an isolated proof
-   demonstrates that this cannot satisfy import/fault-isolation requirements,
-   retain exactly one outer-supervisor-owned local child behind versioned
-   structured IPC. Rank zero never owns deployment/global state. The
-   in-process/import-order/fault-isolation proof remains part of reopened S01.
-6. **Registration/reconnect target:** listener bind is mandatory before rank
-   launch; every rank registers before START permits Ray children; reconnect
-   inside the compiled grace requires a complete snapshot. The exact deadline
-   fields, snapshot acknowledgment, GOODBYE, and acceptance cases are binding
-   in plan §3.2.1 and are not proven by the old harness.
+1. One allocation-head `RuntimeSupervisor` owns global status, the
+   authenticated control listener, one `RankLauncher`, the gateway, readiness,
+   and exactly one isolated deployment child.
+2. One `NodeSupervisor` rank per planned node owns only the processes it
+   creates on that node. Rank zero owns no global lifecycle or readiness state.
+3. The head/rank transport is length-prefixed canonical JSON authenticated
+   with HMAC-SHA256 and bound to deployment, plan, generation, rank, node,
+   session, sequence, and message kind. Registration is not accepted until a
+   complete snapshot, supervisor receipt, and `SNAPSHOT_ACCEPTED` exchange
+   finish. START, heartbeat, reconnect, DRAIN, STOP, GOODBYE, and grace-expiry
+   are typed messages; stdout is diagnostic only.
+4. Rank control work runs on one private asyncio event loop. Heartbeats,
+   reconnect, command receipt, snapshot replacement, acknowledgements, and
+   backoff are coroutines on that loop. There is no second maintenance thread
+   making lifecycle decisions and no thread parses output for control state.
+5. Ray head/worker daemons, the MPI/PALS launcher, native/MPI staging tools,
+   the external gateway, and the deployment fault boundary remain supervised
+   subprocesses because they are genuine operating-system boundaries. Every
+   boundary uses an argument vector, its own process group where applicable,
+   a deadline, typed result/exit evidence, and bounded escalation.
+6. Serve deployment uses exactly one allocation-head-owned isolated child
+   behind version-2 Unix structured IPC. The receiver validates the kernel
+   peer PID against the exact child it created and validates the complete plan,
+   site, allocation, deployment, and generation identity. The child owns no
+   global status or readiness authority.
 
-## Historical partial evidence (allocation 8734762, nodes x4117c0s7b0n0 + x4117c4s3b0n0)
+## Why the deployment is isolated
 
-Harness: `scripts/hardening/spike_s01.py` via
-`scripts/hardening/run_s01_battery.sh`; verdicts in
-`artifacts/hardening/s01-2n/verdict_*.json`.
+The canonical ladder prefers a stable in-process `DeploymentManager`. The
+pinned Ray 2.53 public lifecycle does provide callable APIs, but all relevant
+entry points (`ray.init`, `serve.start`, `serve.run`, `serve.delete`, and
+`serve.shutdown`) are synchronous and expose neither a timeout nor a
+cancellation token. A native-extension fatal exit or an indefinitely blocked
+call in the same process therefore removes or wedges the global authority; a
+Python exception boundary cannot catch `os._exit`, a segfault, or a stuck C
+call.
 
-| scenario | registered | typed evidence | launcher exit | residue |
-|---|---|---|---|---|
-| clean | 2/2 in 0.38s | RUNNING obs from both ranks; legacy unsolicited GOODBYEs (not target acceptance evidence) | 0 | 0 procs |
-| placeholder-child-death | 2/2 in 0.28s | FAILED obs, reason `CHILD_EXIT`, first cause preserved | 143 (job abort) | 0 procs |
-| sup-death | 2/2 in 0.26s | session drop of acting rank (no GOODBYE) | 143 | 0 procs |
-| conn-drop | 2/2 in 0.25s | session drop; rank watchdog killed child, exited 24 | 143 | 0 procs |
+The reproducible S01 probe injected both failure classes. In-process, exit 86
+removed the authority and the hang required killing the whole process. With
+one child, the authority survived, observed exit 86, and terminated a hung
+child within the deadline while remaining able to persist the cause. The
+probe selected `isolated-deployment-child` and recorded the actual Ray/Serve
+signatures. Evidence:
+`artifacts/hardening/architecture-feasibility-20260809-r2/result.json`, SHA-256
+`6916762f1f091c991f9d1869aed484c3a98cf35baae0ed1f48ce66ebb0801a30`.
 
-Additional facts proven: mpiexec/PALS propagates the inherited environment
-(registration MACs verify ⇒ the secret crossed intact); the head can bind an
-ephemeral port reachable from the worker node; PALS aborts the remaining
-ranks on any rank's nonzero exit (bounded cluster-wide cleanup came from the
-launcher in ≤ seconds in all failure scenarios).
+This is the plan's permitted second rung, not a general subprocess control
+architecture. The child protocol carries observations and terminal causes;
+no readiness or lifecycle decision depends on log text.
 
-Earlier local validation (1-rank, self-reap mode) had found and fixed two
-harness defects: orphaned placeholder children can wedge a pipe-holding
-parent (rank output now goes to files) and failure injection needed a
-configurable acting rank.
+## Acceptance evidence
 
-## Reopened S01 proof owed before P00 technical pass
+- The final42 clean installed-package gate ran outside the source tree:
+  **1207 passed, 9 skipped**, with mypy clean. Evidence:
+  `artifacts/hardening/final42-packaged-gate-20260809-a4/`.
+- The final42 two-node null gate proves real rank registration/START, exact
+  two-rank sessions/receipts, typed worker failure and nonzero global exit,
+  duplicate-port fail-before-launch, partial-worker non-readiness, operator
+  drain, gateway death, first-cause preservation, and bounded exact cleanup.
+  Evidence:
+  `artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json`.
+- The final42 two-node real vLLM/XPU PP=2 gate proves the same ownership tree
+  with an EngineCore and two workers across two physical hosts, a real canary,
+  drain, gateway death, and cleanup. Evidence:
+  `artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json`.
+- The strict supervisor gate kills the exact rank-zero Ray child and rank-one
+  supervisor, preserves authenticated first cause, and proves zero survivors:
+  `artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json`.
 
-- Replace the placeholder child with a real worker Ray child and exercise its
-  death, a worker `NodeSupervisor` death, control loss, partial start,
-  cancellation, stdout/stderr saturation, and SIGINT/SIGTERM under the final
-  supervisor wiring.
-- Prove listener-before-launch, authenticated binding, initial
-  SNAPSHOT/`SNAPSHOT_ACCEPTED`/START, expected DRAIN/STOP GOODBYE, reconnect
-  snapshot inside grace, rejection after grace, immediate readiness revocation,
-  and cleanup only after grace expiry within the cleanup deadline.
-- Prove the preferred in-process `DeploymentManager` after compatibility
-  activation, or record the preferred failure before selecting the one-child
-  structured-IPC fallback.
-- Verify worker-node residue directly and prove both typed first-cause and
-  scheduler-visible nonzero behavior on the real path.
-
-## Caveats / residual evidence limits
-
-- Rank-side residue was asserted on the head node only; worker-node residue
-  after sup-death relies on PALS's job-wide cleanup (indicated by the 143
-  abort). The WP4 fake-launcher tests plus the final WP12 lane re-verify
-  worker-side reaping explicitly (AC-SUP-01).
-- Reconnect-with-snapshot was exercised only against the older unit contract;
-  it does not cover the new replacement snapshot/acknowledgment and clock
-  anchors across nodes.
+All three artifacts name wheel
+`5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`;
+no historical candidate is reused as its qualification.
 
 ## Rejected alternatives
 
-- Rank-zero-owned deployment/global state: rejected by plan §3.2; the old
-  harness establishes only that an external head can reach two ranks.
-- Shared stdout / file polling / Ray actors as control transport: forbidden
-  by plan; the measured PALS exit-code loss (143 for every distinct failure)
-  independently justifies it — stdout/exit codes cannot carry cause.
+- In-process deployment lifecycle: rejected for the pinned stack because it
+  cannot meet bounded cancellation or fault-isolation requirements.
+- More than one deployment child or rank-zero global ownership: unnecessary
+  and violates the selected ownership topology.
+- Shared files, stdout markers, parsed CLI text, Ray actors, or scheduler exit
+  aggregation as the control transport: they cannot preserve authenticated
+  first cause and reconnect semantics.
+- Plain SSH to workers: loses the scheduler/PALS allocation context and PID
+  ownership model.
 
 ## Revisit condition
 
-First close the reopened one-/two-node S01 proof above. Then re-run at whatever
-16/64 or larger tiers the approved envelope requires (registration-storm
-behavior, heartbeat load); any launcher other than PALS mpiexec (srun) re-runs
-the environment-propagation and abort-semantics proofs.
+Re-evaluate the child only if a pinned Ray/Serve release supplies a stable
+cancelable lifecycle API whose native failures can be isolated without taking
+down global control and status. A different launcher must re-run environment
+propagation, worker-exit aggregation, and process-tree cleanup proofs. Scale
+tiers are qualified only after the ADR-000 product scope decision.

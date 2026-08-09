@@ -29,6 +29,7 @@ workload:
   arrival: fixed
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   model_storage_path: /flare/datasets/model-weights/hub
   models:
   - model_id: openai/gpt-oss-120b
@@ -61,6 +62,6 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs

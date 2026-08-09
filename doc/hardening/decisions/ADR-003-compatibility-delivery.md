@@ -1,102 +1,138 @@
 # ADR-003: Compatibility delivery across process lifecycles
 
-**Status:** PROVISIONAL INVENTORY; P00/S03 REOPENED on 2026-08-07. The 2026-08-05
-inventory and spawn observations are valuable reachability evidence, but the
-required per-patch elegant-first fallback ladder and full two-node v2 receipt
-proof have not passed. Evidence:
-`doc/hardening/COMPATIBILITY_INVENTORY.md` (66-record manifest seed),
-`artifacts/hardening/s03-1n/` (attempt logs, shim/proc/canary captures).
-Receipt cardinality/transport was reconciled with plan §3.2.1 on 2026-08-07;
-the existing role-only/Ray-collector implementation is historical partial
-mechanism, not proof that the target transport is complete.
+**Status:** SELECTED AND PROVEN FOR FINAL42 AT ONE AND TWO NODES (2026-08-09).
+The exact candidate's four-node attempt awaits explicit authorization; scale
+qualification and the ADR-000 envelope decision remain separate gates.
 
-## Historical reach facts (measured; not fallback-ladder verdicts)
+## Decision
 
-| Role | Profile reach today | Evidence |
+ExaServe uses one immutable `CompatibilityProfile` and one selected delivery
+architecture:
+
+- public configuration/environment controls for behavior the dependencies
+  already expose;
+- a generated, exact-hash, role-filtered source overlay for the remaining
+  pinned Ray/vLLM Python modules; and
+- the generated EN-01 `sitecustomize` bootstrap only for spawned vLLM
+  EngineCore/worker interpreters that have no supported pre-import hook.
+
+Installed framework files are never edited. The old full-package symlink farm,
+Ray Serve overlay, global import override, import-side-effect patch sweep, and
+runtime-adapter fallback are removed from the production path.
+
+## Mandatory ladder result
+
+The ladder was evaluated in canonical order.
+
+| Rung | Result | Evidence / disposition |
 |---|---|---|
-| Driver | `apply_all()` at import (SV-06) | AuroraPatch lines pid=driver (130024) |
-| Serve replica (EngineWorker) | sitecustomize via `PYTHONPATH` (SV-05) | AuroraPatch lines from replica pid |
-| Spawned EngineCore (pp>1) | **EN-01 generated shim — PROVEN**: `VLLM::EngineCore` environ contains `/tmp/exaserve_pp_shim`; all 12 patches applied in-process; SC-10 fallback observed live per decode step | attempt-4 shim_reach + patch lines pid=135376 |
-| multiprocessing resource tracker | same shim (collateral, harmless) | pid=135375 lines |
-| Ray worker daemons / RayWorkerWrapper | shell env + `ray_env` var copy; patches applied on both nodes | attempt-2 worker-node EngineCore pids 15026x |
-| Serve controller/proxies | constants via public `worker_process_setup_hook` (SV-02/04) | runtime_env creation log with hook name |
-| Functional proof | pp=2 8B generation through the served route returns tokens | attempt-4 canary.json |
+| 1. Public/upstream API | PARTIAL | Public Ray/Serve status, deployment health settings, supported environment controls, and actor `runtime_env` are used where they satisfy the requirement. The remaining entries target pinned private vLLM PP/XPU execution symbols, Ray accelerator internals, the unexposed Serve startup constant, Raylet argv construction, or a spawned-interpreter bootstrap for which the measured public signatures expose no equivalent hook. |
+| 2. Immutable patched wheel/environment | REJECTED AFTER FEASIBILITY ATTEMPT | The installed vLLM distribution records an exact build-wheel URI and hash, but `/input/frameworks/26.26.0/wheelhouse/vllm-0.15.0+xpu-py3-none-any.whl` is absent at runtime. Ray has no `direct_url` provenance. Repacking installed files would capture an unrecorded build environment and Ray native payload rather than produce a source-reproducible release artifact. The probe records 3,014 vLLM files/39.6 MB and 4,829 Ray files/207 MB, including 11 Ray native files. This is unsuitable as ExaServe-owned dependency build output. |
+| 3. Generated exact-hash overlay | PASS / SELECTED | Twelve complete target modules are generated from source bytes whose distribution, version, path, and SHA-256 match the profile. Every output has its own hash and patch-ID set. A role-filtered meta-path finder loads only modules required by the live process role. Real pinned-stack imports and semantic sentinels passed for deployment, Ray head, replica, EngineCore, and engine worker, including a Ray-head-to-replica role transition before target import. |
+| 4. Narrow runtime adapter | NOT SELECTED | The earlier `_sitecustomize` import sweep proved functional reach, but an earlier rung succeeded. Importing `_sitecustomize` is now definition-only and cannot mutate a process. |
+| 5. Unsupported | NOT NEEDED for the selected Aurora/vLLM profile | Unsupported engines, vendors, gateways, and scale dimensions remain rejected by the compiler/support matrix rather than borrowing this profile. |
 
-Also proven live: the stale pin fires a real warning
-(`pinned=2.49.1 runtime=2.53.0 — Patches may break`), i.e. the current system
-runs on an unverified version combination every day (AC-COMP-01 driver).
+Wheel/environment and process-boundary evidence:
+`artifacts/hardening/architecture-feasibility-20260809-r2/result.json`, SHA-256
+`6916762f1f091c991f9d1869aed484c3a98cf35baae0ed1f48ce66ebb0801a30`.
 
-## Candidate disposition map (must not freeze before the ladder proof)
+Selected overlay evidence:
+`artifacts/hardening/compatibility-overlay-20260809-r5/result.json`, SHA-256
+`64c1fdec86a29e9c04cdc1659c398e81b316124bf4ffb2d5ef8d7568e4df320e`.
+That run recorded profile
+`375cec6a84e36545febe4022331a694c01d977d2e6d30e684b509862b1fd0912`,
+compatibility manifest
+`6b5a7ffe2cff553d2fdbbccd9b70c807bc3e4cacca04b515d72737d88fdf30fb`,
+and generated-overlay manifest
+`19fd07ab6e0d91e9d9a0660edb56c91abc8ef4762fafd197b870744cd6031580`.
+The transition observation started with `ray_head` at site bootstrap, rebound
+the same interpreter to `replica` before any affected target import, and proved
+all nine replica sentinels from the generated modules. This models Ray applying
+an actor `runtime_env` after spawning a generic worker interpreter.
+Those identities are feasibility evidence and are superseded by any later
+source change; final qualification records the frozen candidate identities.
 
-1. **Delete-first candidates:** remove OV-DEAD-1/2 and SC-D1/D2/D3 only after a
-   packaged static/reachability test proves they have no supported call path;
-   remove SC-07/SC-08 only after that proof plus a PP regression. Deletion is
-   preferred to carrying an unnecessary patch, but “dead” is an evidence claim,
-   not permission to skip verification.
-2. **Constants are rung-1 candidates:** evaluate the 7 timeout/health constants
-   through SV-01/SV-02/SV-04's supported public setup hook and make them
-   evidence-derived profile capabilities rather than global source mutations.
-   Their semantic/receipt proof is still owed; raised detection windows are
-   load-shedding for large-scale storms, not defaults.
-3. **Instrumentation is unresolved per entry:** first use/drop it in favor of
-   upstream gauges where they satisfy the requirement. For each remaining OV
-   block, try an immutable patched wheel/environment before a generated
-   exact-hash overlay. The overlay is selectable only with recorded wheel-rung
-   failure; the current symlink farm is never the target.
-4. **The current vendor-compat runtime patches are feasibility evidence, not
-   the selected target rung:** SC-01..05, SC-06, SC-09..12, EN-01,
-   EN-05/07/09/11, RS-02/03, and SH-03/04/05/06/13 each follow the canonical
-   order: public/upstream behavior; immutable exact-version patched
-   wheel/environment; generated exact-hash overlay; only then a narrow guarded
-   runtime adapter. The generated EN-01 shim proves spawned-process reach, but
-   does not by itself prove that earlier rungs are infeasible or classify the
-   shim as the production choice.
-5. **Receipts:** profile ID = SHA-256 over the canonical manifest +
-   base-environment identity. Every exact planned managed instance self-reports.
-   Rank-owned receipts use the authenticated §3.2 channel; GLOBAL receipts use
-   only the in-process outer `RuntimeSupervisor` ingress and the same strict
-   validator/global writer. A rank may not submit a GLOBAL receipt. An owning
-   supervisor may attest only one individually identified unmodified external
-   daemon for which the manifest requires no in-process patch. Per-rank batching
-   is transport only; the head reconciles exact requirement/instance identities
-   as specified by plan §3.2.1. Pin corrected to ray 2.53.0/vllm 0.15.0;
-   version assertion added to overlay assembly; a missing, mismatched,
-   role-only, or stale receipt fails READY.
-6. **Mandatory per-patch ladder gate (blocks the S03 verdict/P00 technical
-   pass):** record the rung-1 semantic result; timebox the immutable
-   patched-wheel/environment attempt to at most three days; if and only if it
-   has a reproduced failure, test the generated exact-hash overlay; if and only
-   if that also has a reproduced failure, test the narrow runtime adapter.
-   Record failure evidence and rejection reason for every skipped/infeasible
-   rung. A successful earlier rung wins even if the current runtime patch is
-   easier. Existing runtime patches may remain only on the explicitly legacy
-   path during migration; they are not a frozen production verdict.
+Final42 freezes the selected mechanism in wheel
+`5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`
+with compatibility profile
+`c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3`,
+compatibility manifest
+`cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259`,
+and site profile
+`4814429547fd4397014819a0f8b5c6ec8f7d77c889eaf844d27935b39a0a6e26`.
+The clean installed-package gate is
+`artifacts/hardening/final42-packaged-gate-20260809-a4/`. Real vLLM/XPU
+qualification passed at one node in
+`artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json`
+and at two nodes/PP=2 in
+`artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json`.
+The latter contains one EngineCore receipt and two engine-worker receipts from
+the two planned physical hosts. These receipts, not the earlier feasibility
+hashes, are the release-candidate proof.
 
-## Reopened S03 proof owed before P00 technical pass
+## Selected manifest
 
-- Normalize the inventory so every required patch/role has its rung attempts,
-  exact version/source/artifact hashes, semantic postcondition, delivery timing,
-  and selected-or-rejected verdict with evidence.
-- Run the one-node spawned EngineCore proof using the actually selected profile,
-  then the two-node proof with exact v2 receipts from the outer supervisor, Ray
-  head/workers, every affected Serve actor/replica, and spawned engines.
-- Prove fail-closed behavior for a missing/mismatched/stale receipt and targeted
-  `NOT_REQUIRED`, route rank receipts over the authenticated channel, and inject
-  GLOBAL receipts only through the local outer-supervisor validator.
+| IDs | Target / capability | Required roles | Delivery |
+|---|---|---|---|
+| SC-01..SC-05 | vLLM PP layer lookup, KV binding, forward/attention context, backend lookup | replica and affected engine roles | generated exact-hash modules |
+| SC-09..SC-10 | XPU Ray channel selection and uncompiled PP fallback | replica, EngineCore | generated exact-hash `ray_executor.py` |
+| SC-11..SC-12 | Ray XPU visibility and accelerator-device mapping | replica, engine worker | generated exact-hash Ray modules |
+| EW-01..EW-03 | pre-interpreter worker environment and stable logical worker identity | EngineCore | generated exact-hash vLLM executor modules |
+| RS-01 | Serve startup proxy timeout with no supported Ray 2.53 control | deployment | generated exact-hash constants module |
+| RS-02 | Raylet startup/prestart fanout flags absent from the public CLI | Ray head/worker | generated exact-hash services module; plan values supplied through verified environment |
+| EN-01 | spawned EngineCore/worker pre-import verification and self-attestation | engine core/worker | generated shim |
 
-Until these pass, the ADR is an inventory plus candidate map, not a closed S03
-decision or permission to skip to runtime monkey patches.
+SC-06 is deleted: the generated module loads SC-05 at the target module's own
+import boundary, so a second meta-path patch-on-import adapter is unnecessary.
+Dead SC-D1/D2/D3, obsolete SC-07/08, the instrumentation-only OV files, and
+the old setup-overlay shell path remain deleted.
 
-## Rejected
+## Materialization and activation contract
 
-- Editing installed packages in place (never; enforced by test in WP3).
-- Keeping `builtins.__import__` overrides (highest blast radius; MetaPathFinder
-  replacement specified).
-- `ray.util.state`-based attestation (dashboard absent on this stack; see
-  ADR-002).
+1. Source staging copies a clean ExaServe package and materializes the overlay
+   at
+   `/tmp/exaserve_src/exaserve/_compat_runtime/<compatibility_profile_hash>`.
+   The complete staged tree, including overlay modules, manifest, and bootstrap,
+   is content-inventoried and broadcast transactionally.
+2. The plan-derived environment prepends that compatibility root and the
+   staged source root to `PYTHONPATH`, and binds `EXASERVE_COMPAT_ROLE` before
+   each managed interpreter starts.
+3. Generated `sitecustomize` verifies the exact Python/Ray/vLLM versions, all
+   pinned base source hashes, patch implementation hashes, delivery-code hashes,
+   profile identity, and overlay manifest before installing the finder.
+4. The finder resolves `EXASERVE_COMPAT_ROLE` at each affected target import.
+   This permits a generic Ray worker to receive an actor role after interpreter
+   startup, but only before an affected target is loaded. Reinstalling the same
+   profile/root after a role transition is idempotent. A selected target already
+   loaded from its base distribution, a different root, or a different profile
+   fails closed.
+5. Each generated target module invokes only its manifest-declared helper and
+   establishes a semantic sentinel during import. `CompatibilityActivator`
+   imports the required targets and fails if any sentinel is absent.
+6. The EN-01 child shim binds `engine_bootstrap` inside the child interpreter,
+   verifies the profile before target imports, activates the union needed by
+   EngineCore/worker lifecycles, and later publishes the actual resolved role's
+   exact self receipt. Preparing that child does not change the replica
+   parent's role.
+7. READY requires exact receipt-slot equality. Receipts include dependency,
+   base-source, patch-artifact, and delivery-artifact identities; a missing,
+   stale, mismatched, role-only, or failed semantic result blocks READY.
 
-## Revisit
+## Failure behavior
 
-First close the per-patch ladder and cross-role receipt proof above. Thereafter,
-any Python/Ray/vLLM/frameworks change alters the profile/base identity and
-forces re-verification from rung 1; activation fails closed until then.
+- Missing or wrong base wheels, source drift, target import before overlay
+  install, generated-file tampering, incomplete role binding, mismatched
+  profile/manifest, missing semantic sentinel, or receipt transport failure is
+  fatal before the affected process can count toward readiness.
+- The materializer writes only into a fresh transaction-owned staging tree.
+  A partial tree is removed and never published.
+- No compatibility exception is swallowed to keep serving, and no supervisor
+  claims an in-process patch for another interpreter.
+
+## Revisit condition
+
+Every Python, Ray, vLLM, framework, patch-helper, or delivery-code change
+changes the profile and forces the ladder and hardware proofs to run again.
+If an upstream public hook appears, it replaces the corresponding overlay
+entry. A reproducible vendor-supplied exact patched wheel may replace rung 3
+only after its provenance and multi-process reach pass the same receipt gates.

@@ -49,30 +49,37 @@ def parse_proc_net_dev(interfaces):
             iface = parts[0].rstrip(":")
             if iface not in interfaces:
                 continue
-            results.append({
-                "interface": iface,
-                "rx_bytes": int(parts[1]),
-                "rx_packets": int(parts[2]),
-                "rx_errors": int(parts[3]),
-                "rx_drops": int(parts[4]),
-                "tx_bytes": int(parts[9]),
-                "tx_packets": int(parts[10]),
-                "tx_errors": int(parts[11]),
-                "tx_drops": int(parts[12]),
-            })
+            results.append(
+                {
+                    "interface": iface,
+                    "rx_bytes": int(parts[1]),
+                    "rx_packets": int(parts[2]),
+                    "rx_errors": int(parts[3]),
+                    "rx_drops": int(parts[4]),
+                    "tx_bytes": int(parts[9]),
+                    "tx_packets": int(parts[10]),
+                    "tx_errors": int(parts[11]),
+                    "tx_drops": int(parts[12]),
+                }
+            )
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="Network stats collector via /proc/net/dev")
-    parser.add_argument("--interval", type=float, default=1.0,
-                        help="Polling interval in seconds (default: 1.0)")
-    parser.add_argument("--interfaces", type=str, default=None,
-                        help="Comma-separated interface names (default: all interfaces)")
-    parser.add_argument("--output", type=str, required=True,
-                        help="Output JSONL file path")
-    parser.add_argument("--hostname", type=str, default=None,
-                        help="Hostname label (default: $(hostname))")
+    parser.add_argument(
+        "--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)"
+    )
+    parser.add_argument(
+        "--interfaces",
+        type=str,
+        default=None,
+        help="Comma-separated interface names (default: all interfaces)",
+    )
+    parser.add_argument("--output", type=str, required=True, help="Output JSONL file path")
+    parser.add_argument(
+        "--hostname", type=str, default=None, help="Hostname label (default: $(hostname))"
+    )
     args = parser.parse_args()
 
     hostname = args.hostname or socket.gethostname()

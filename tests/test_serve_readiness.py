@@ -8,103 +8,17 @@ patch that was never requested does not fail a correct configuration.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from exaserve.compat.activator import CompatibilityActivator, _postcondition_sitecustomize
 from exaserve.compat.profile import default_profile
-from exaserve.compat.receipt import ReceiptStore, build_receipt
 from exaserve.control import serve_readiness as sr
-from exaserve.control.serve_readiness import EVIDENCE_FILENAME
-from exaserve.control.readiness import ReadinessCoordinator
-
-
-def _coord(**kw):
-    plan = sr.build_plan(
-        deployment_id="d1", generation=7, plan_hash="h",
-        node_ids=kw.get("nodes", ["n0"]),
-        expected_replicas=kw.get("replicas", {"app": 2}),
-        routes=kw.get("routes", ["app"]))
-    return ReadinessCoordinator(plan, receipts=kw.get("receipts"))
-
-
-def _feed(coord, *, running: int, app_status="RUNNING", proxy_healthy=True,
-          nodes=("n0",)):
-    """Stand in for collect_observations without importing ray."""
-    from exaserve.control.contracts import ComponentState
-
-    for node in nodes:
-        for cid in (f"node@{node}", f"proxy@{node}"):
-            coord.observe(sr._observation(
-                coord.plan, component_id=cid, instance_id="i", node_id=node,
-                role="proxy",
-                state=(ComponentState.RUNNING.value
-                       if proxy_healthy or cid.startswith("node@")
-                       else ComponentState.FAILED.value)))
-    coord.set_replicas("app", [f"app#{i}" for i in range(running)])
-    coord.set_route_health("app", app_status == "RUNNING")
-
-
-def test_ready_requires_replicas_route_and_canary():
-    coord = _coord()
-    _feed(coord, running=2)
-    assert not coord.is_ready()          # canary has not answered yet
-    coord.set_canary("app", True)
-    assert coord.is_ready()
-
-
-def test_readiness_is_revocable_when_a_replica_dies():
-    coord = _coord()
-    _feed(coord, running=2)
-    coord.set_canary("app", True)
-    assert coord.is_ready()
-    _feed(coord, running=1)              # one replica vanished
-    snap = coord.evaluate()
-    assert not snap.ready
-    assert any("1/2 replicas" in b for b in snap.blockers)
-
-
-def test_unhealthy_proxy_blocks_readiness():
-    coord = _coord()
-    _feed(coord, running=2, proxy_healthy=False)
-    coord.set_canary("app", True)
-    assert any("proxy@n0" in b for b in coord.blockers())
-
-
-def test_missing_node_blocks_readiness():
-    coord = _coord(nodes=["n0", "n1"])
-    _feed(coord, running=2, nodes=("n0",))
-    coord.set_canary("app", True)
-    assert any("nodes not reporting" in b for b in coord.blockers())
-
-
-def test_receipts_gate_readiness_by_role():
-    profile = default_profile()
-    store = ReceiptStore(profile, "d1", 7)
-    coord = _coord(receipts=store)
-    _feed(coord, running=2)
-    coord.set_canary("app", True)
-    assert not coord.is_ready()
-    assert any("compatibility receipt" in b for b in coord.blockers())
-
-    for role in profile.required_roles:
-        ok, why = store.add(build_receipt(
-            profile=profile, role=role, deployment_id="d1", generation=7,
-            patch_results={p: True for p in profile.required_patch_ids(role)}))
-        assert ok, why
-    assert coord.is_ready()
-
-
-def test_receipt_from_a_stale_generation_is_rejected():
-    profile = default_profile()
-    store = ReceiptStore(profile, "d1", 7)
-    ok, why = store.add(build_receipt(
-        profile=profile, role="replica", deployment_id="d1", generation=6,
-        patch_results={}))
-    assert not ok and "stale generation" in why
 
 
 # -- compatibility semantics ------------------------------------------------
+
 
 def test_gated_off_patch_is_not_required(monkeypatch):
     monkeypatch.delenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER", raising=False)
@@ -114,21 +28,26 @@ def test_gated_off_patch_is_not_required(monkeypatch):
     assert "SC-01" in profile.required_patch_ids("replica")
 
 
-def test_postcondition_is_not_applicable_when_target_absent():
+def test_postcondition_is_not_applicable_when_target_absent(monkeypatch):
     """A module that was never imported yields None, not a false 'applied'."""
+    import sys
+
+    monkeypatch.delitem(sys.modules, "vllm.config.vllm", raising=False)
     assert _postcondition_sitecustomize("SC-01") is None
 
 
-def test_not_applicable_patches_do_not_claim_to_be_applied(monkeypatch):
+def test_required_patch_cannot_be_downgraded_to_not_applicable(monkeypatch):
     monkeypatch.setenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER", "1")
     activator = CompatibilityActivator(deployment_id="d1", generation=7)
-    receipt = activator.activate("replica", apply_fn=lambda: None,
-                                 verify_environment=False,
-                                 postcondition=lambda pid: None)
-    assert receipt.patch_results == {}
-    assert "SC-01" in receipt.not_applicable
-    ok, why = receipt.is_complete_for(activator.profile.required_patch_ids("replica"))
-    assert ok, why
+    from exaserve.compat.activator import ActivationError
+
+    with pytest.raises(ActivationError, match="no in-process post-condition"):
+        activator.activate(
+            "replica",
+            apply_fn=lambda: None,
+            verify_environment=False,
+            postcondition=lambda pid: None,
+        )
 
 
 def test_a_half_patched_process_is_fatal(monkeypatch):
@@ -137,12 +56,16 @@ def test_a_half_patched_process_is_fatal(monkeypatch):
     from exaserve.compat.activator import ActivationError
 
     with pytest.raises(ActivationError, match="did not take effect"):
-        activator.activate("replica", apply_fn=lambda: None,
-                           verify_environment=False,
-                           postcondition=lambda pid: False)
+        activator.activate(
+            "replica",
+            apply_fn=lambda: None,
+            verify_environment=False,
+            postcondition=lambda pid: False,
+        )
 
 
 # -- canary + snapshot ------------------------------------------------------
+
 
 def test_http_canary_rejects_a_response_without_a_completion(monkeypatch):
     class _Resp:
@@ -155,8 +78,11 @@ def test_http_canary_rejects_a_response_without_a_completion(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(sr.urllib.request, "build_opener",
-                        lambda *a: type("O", (), {"open": lambda s, *a, **k: _Resp()})())
+    monkeypatch.setattr(
+        sr.urllib.request,
+        "build_opener",
+        lambda *a: type("O", (), {"open": lambda s, *a, **k: _Resp()})(),
+    )
     ok, detail = sr.http_canary("http://x/v1/completions")
     assert not ok and "no completion" in detail
 
@@ -172,31 +98,45 @@ def test_health_endpoint_alone_cannot_satisfy_the_canary(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(sr.urllib.request, "build_opener",
-                        lambda *a: type("O", (), {"open": lambda s, *a, **k: _Resp()})())
+    monkeypatch.setattr(
+        sr.urllib.request,
+        "build_opener",
+        lambda *a: type("O", (), {"open": lambda s, *a, **k: _Resp()})(),
+    )
     ok, _ = sr.http_canary("http://x/health")
     assert not ok
 
 
-def test_snapshot_is_written_atomically_and_is_machine_readable(tmp_path):
-    coord = _coord()
-    _feed(coord, running=2)
-    coord.set_canary("app", True)
-    path = sr.write_snapshot(coord.evaluate(), str(tmp_path),
-                             extra={"deployment_id": "d1"})
-    data = json.loads(open(path).read())
-    assert data["ready"] is True and data["generation"] == 7
-    assert data["deployment_id"] == "d1"
-    assert not list(tmp_path.glob("*.tmp.*"))
+def test_the_observation_producer_has_no_shared_file_writer():
+    assert not hasattr(sr, "write_snapshot")
+    assert not hasattr(sr, "write_evidence")
+    assert "deployment_evidence.json" not in open(sr.__file__, encoding="utf-8").read()
 
 
-def test_await_ready_returns_the_last_snapshot_on_timeout(monkeypatch):
-    coord = _coord()
-    monkeypatch.setattr(sr, "collect_observations", lambda *a, **k: {})
-    snap = sr.await_ready(coord, node_id="n0", instance_id="i",
-                          canary=lambda: (False, "down"), routes=["app"],
-                          timeout_s=0.0, poll_s=0.0, log=lambda *_: None)
-    assert not snap.ready and snap.blockers
+def test_event_observer_stop_is_idempotent_and_retains_the_first_failure():
+    import threading
+
+    class BrokenClient:
+        calls = 0
+
+        def stop(self):
+            self.calls += 1
+            raise RuntimeError("client teardown broke")
+
+    observer = object.__new__(sr.ServeEventObserver)
+    observer._lock = threading.RLock()
+    observer._stop_lock = threading.Lock()
+    observer._stop_result = None
+    observer._stop_requested = False
+    observer._failure = None
+    observer._client = BrokenClient()
+    observer._loop = None
+    observer._thread = None
+
+    assert observer.stop() is False
+    assert observer.stop() is False
+    assert observer._failure == "long-poll client stop failed: RuntimeError: client teardown broke"
+    assert observer._client is None
 
 
 def test_sentinel_survives_a_staticmethod_wrapper(monkeypatch):
@@ -232,144 +172,170 @@ def test_sentinel_survives_a_staticmethod_wrapper(monkeypatch):
     assert _postcondition_sitecustomize("SC-11") is False
 
 
-def test_route_sampling_is_recorded_not_implied():
-    routes = [f"app_r{i}" for i in range(24)]
-    sampled = sr.sample_routes(routes, 5)
-    assert routes[0] in sampled and routes[-1] in sampled
-    assert 5 <= len(sampled) <= 7      # first/last may already be in the stride
-    plan = sr.build_plan(deployment_id="d", generation=1, plan_hash="h",
-                         node_ids=["n0"], expected_replicas={r: 1 for r in routes},
-                         routes=routes, canary_routes=sampled)
-    # Only the SAMPLED routes must answer; the rest are not claimed.
-    assert plan.routes_to_canary() == sampled
-
-
-def test_external_attestation_is_a_distinct_and_weaker_evidence_class():
-    """An unmodified daemon cannot prove a sentinel from inside itself.
-
-    It must declare the required patches as not-provable-here and carry the
-    owner's probe — and it must NOT be able to pass by simply omitting them.
-    """
+def test_activator_normalizes_only_scheduler_fallback_not_canonical_id(monkeypatch):
+    """The compiled deployment identity is exact; raw PBS fallback is scoped."""
     from exaserve.compat.activator import CompatibilityActivator
 
-    profile = default_profile()
-    store = ReceiptStore(profile, "d1", 7)
-    activator = CompatibilityActivator(deployment_id="d1", generation=7)
-
-    receipt = activator.attest_external("engine", executable="/usr/bin/python3",
-                                        version_probe="vllm 0.15.0")
-    ok, why = store.add(receipt)
-    assert ok, why
-    assert "engine" in store.externally_attested_roles()
-
-    # No evidence at all must be rejected.
-    from dataclasses import replace
-
-    bare = replace(receipt, versions={}, not_applicable=())
-    ok, why = ReceiptStore(profile, "d1", 7).add(bare)
-    assert not ok and "evidence" in why
-
-
-def test_external_attestation_cannot_claim_in_process_proof(monkeypatch):
-    """A 'supervisor' receipt asserting applied patches is still judged as
-    external evidence, so it cannot masquerade as self-attestation."""
-    monkeypatch.setenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER", "1")
-    profile = default_profile()
-    forged = build_receipt(
-        profile=profile, role="engine", deployment_id="d1", generation=7,
-        patch_results={p: True for p in profile.required_patch_ids("engine")},
-        attestation="supervisor", versions={"executable": "/bin/python"})
-    ok, why = ReceiptStore(profile, "d1", 7).add(forged)
-    assert not ok and "does not account for" in why
-
-
-def test_redelivered_receipts_do_not_inflate_the_count():
-    """The channel is drained every poll and drains are non-destructive."""
-    profile = default_profile()
-    store = ReceiptStore(profile, "d1", 7)
-    receipt = build_receipt(profile=profile, role="replica", deployment_id="d1",
-                            generation=7, patch_results={})
-    assert store.add(receipt) == (True, "ok")
-    assert store.add(receipt) == (True, "duplicate")
-    assert store.count() == 1
-
-
-def test_activator_normalizes_a_raw_scheduler_job_id(monkeypatch):
-    """A raw PBS_JOBID must not produce a receipt the head rejects.
-
-    The head scopes the deployment id (`split('.')[0][:40]`); an activator that
-    read the raw env value built receipts under a different id and every one
-    was rejected as "wrong deployment".
-    """
-    from exaserve.compat.activator import CompatibilityActivator
-
-    for var in ("EXASERVE_DEPLOYMENT_ID", "EXASERVE_SCALING_TRACE_TOKEN",
-                "EXASERVE_JOBID"):
+    for var in ("EXASERVE_DEPLOYMENT_ID", "EXASERVE_SCALING_TRACE_TOKEN", "EXASERVE_JOBID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("PBS_JOBID", "8736431.aurora-pbs-0001.hostmgmt.example")
     assert CompatibilityActivator().deployment_id == "8736431"
 
-    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID",
-                       "8736431.aurora-pbs-0001.hostmgmt.example")
-    assert CompatibilityActivator().deployment_id == "8736431"
+    canonical = "fq-final37-supervisor-watchdog-2n-20260809.with-semantic-suffix"
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", canonical)
+    assert CompatibilityActivator().deployment_id == canonical
 
 
-def test_discovery_caches_targets_but_not_running_counts(monkeypatch):
-    """The gate must not become an O(replicas) fleet-wide poller (KI-A4).
-
-    Declared targets are static within a generation, so the expensive
-    per-replica detail call happens once; running counts come from the light
-    status overview on every pass, and a vanished app revokes readiness.
-    """
+def test_discovery_is_bootstrap_only_and_never_polls_status(monkeypatch):
+    """Repeated reads use local bootstrap state, never ``serve.status()``."""
     calls = {"details": 0}
 
     def _details():
         calls["details"] += 1
-        return {"applications": {"app": {
-            "route_prefix": "/", "status": "RUNNING",
-            "deployments": {"d": {"target_num_replicas": 4,
-                                  "replicas": [{"state": "RUNNING"}] * 4}}}}}
+        return {
+            "applications": {
+                "app": {
+                    "route_prefix": "/",
+                    "status": "RUNNING",
+                    "deployments": {
+                        "d": {"target_num_replicas": 4, "replicas": [{"state": "RUNNING"}] * 4}
+                    },
+                }
+            }
+        }
 
     monkeypatch.setattr(sr, "_serve_details", _details)
     sr.reset_discovery_cache()
     first = sr.discover_applications(use_cache=False)
     assert first["app"]["target"] == 4 and calls["details"] == 1
 
-    class _Serve:
-        @staticmethod
-        def status():
-            return {"applications": {"app": {
-                "status": "RUNNING",
-                "deployments": {"d": {"replica_states": {"RUNNING": 2}}}}}}
-
-    import sys
-    import types
-
-    module = types.ModuleType("ray")
-    module.serve = _Serve
-    monkeypatch.setitem(sys.modules, "ray", module)
     second = sr.discover_applications()
-    assert calls["details"] == 1          # no second expensive call
-    assert second["app"]["target"] == 4   # target remembered
-    assert second["app"]["running"] == 2  # running refreshed
+    assert calls["details"] == 1  # no second expensive call
+    assert second["app"]["target"] == 4  # target remembered
+    assert second["app"]["running"] == 4  # bootstrap state is not re-polled
 
 
-def test_a_vanished_application_revokes_readiness(monkeypatch):
-    sr.reset_discovery_cache()
-    monkeypatch.setattr(sr, "_serve_details", lambda: {"applications": {"app": {
-        "route_prefix": "/", "status": "RUNNING",
-        "deployments": {"d": {"target_num_replicas": 2,
-                              "replicas": [{"state": "RUNNING"}] * 2}}}}})
-    sr.discover_applications(use_cache=False)
+def test_event_stream_replica_or_route_loss_revokes_readiness():
+    import threading
+    from types import SimpleNamespace
 
-    import sys
-    import types
+    key = SimpleNamespace(app_name="app")
+    # SimpleNamespace is unhashable, while the real DeploymentID is frozen.
+    key = ("app", "d")
+    observer = object.__new__(sr.ServeEventObserver)
+    observer.identity = {
+        "deployment_id": "d1",
+        "generation": 1,
+        "deployment_plan_hash": "a" * 64,
+        "site_profile_hash": "b" * 64,
+        "allocation_binding_hash": "c" * 64,
+    }
+    observer._lock = threading.RLock()
+    observer._apps = {"app": {"route_prefix": "/"}}
+    observer._deployments = {key: ("app", 2)}
+    observer._running = {key: 2}
+    observer._available = {key: True}
+    observer._route_apps = {"app"}
+    observer._nodes = []
+    observer._event_count = 0
+    observer._failure = None
+    observer._client = None
+    observer._stop_requested = False
+    assert sr.applications_at_target(observer.snapshot())
 
-    module = types.ModuleType("ray")
-    module.serve = type("S", (), {"status": staticmethod(lambda: {"applications": {}})})
-    monkeypatch.setitem(sys.modules, "ray", module)
-    gone = sr.discover_applications()
-    assert gone["app"]["running"] == 0 and gone["app"]["status"] == "MISSING"
+    observer._deployment_update(
+        key, SimpleNamespace(running_replicas=[object()], is_available=True)
+    )
+    assert not sr.applications_at_target(observer.snapshot())
+    observer._route_update({})
+    assert observer.snapshot()["applications"]["app"]["status"] == "MISSING_ROUTE"
+
+
+def test_route_less_proxy_anchor_is_running_without_a_route_table_entry():
+    import threading
+
+    key = ("_exaserve_proxy_anchor_r1", "ProxyAnchor-rank-1")
+    observer = object.__new__(sr.ServeEventObserver)
+    observer.identity = {
+        "deployment_id": "d1",
+        "generation": 1,
+        "deployment_plan_hash": "a" * 64,
+        "site_profile_hash": "b" * 64,
+        "allocation_binding_hash": "c" * 64,
+    }
+    observer._lock = threading.RLock()
+    observer._apps = {"_exaserve_proxy_anchor_r1": {"route_prefix": None}}
+    observer._deployments = {key: ("_exaserve_proxy_anchor_r1", 1)}
+    observer._running = {key: 1}
+    observer._available = {key: True}
+    observer._route_apps = set()
+    observer._nodes = []
+    observer._event_count = 0
+    observer._failure = None
+    observer._client = None
+    observer._stop_requested = False
+
+    snapshot = observer.snapshot()
+    anchor = snapshot["applications"]["_exaserve_proxy_anchor_r1"]
+    assert anchor == {
+        "running": 1,
+        "target": 1,
+        "route_prefix": None,
+        "status": "RUNNING",
+    }
+    assert sr.applications_at_target(snapshot)
+
+
+def test_snapshot_reconciliation_visits_deployments_once_at_high_cardinality():
+    import threading
+
+    class CountingDict(dict):
+        item_iterations = 0
+
+        def items(self):
+            self.item_iterations += 1
+            return super().items()
+
+    size = 2048
+    observer = object.__new__(sr.ServeEventObserver)
+    observer.identity = {
+        "deployment_id": "d1",
+        "generation": 1,
+        "deployment_plan_hash": "a" * 64,
+        "site_profile_hash": "b" * 64,
+        "allocation_binding_hash": "c" * 64,
+    }
+    observer._lock = threading.RLock()
+    observer._apps = {f"app-{index}": {"route_prefix": None} for index in range(size)}
+    observer._deployments = CountingDict(
+        {(index, "deployment"): (f"app-{index}", 1) for index in range(size)}
+    )
+    observer._running = {key: 1 for key in observer._deployments}
+    observer._available = {key: True for key in observer._deployments}
+    observer._route_apps = set()
+    observer._nodes = []
+    observer._failure = None
+    observer._client = None
+    observer._stop_requested = False
+    started = time.perf_counter()
+    snapshot = observer.snapshot()
+    assert time.perf_counter() - started < 1.0
+    assert len(snapshot["applications"]) == size
+    assert observer._deployments.item_iterations == 1
+
+
+def test_unplanned_route_event_fails_the_observer_closed():
+    import threading
+
+    observer = object.__new__(sr.ServeEventObserver)
+    observer._lock = threading.RLock()
+    observer._apps = {"planned": {"route_prefix": "/"}}
+    observer._route_apps = {"planned"}
+    observer._failure = None
+    observer._event_count = 0
+    route_key = type("RouteKey", (), {"app_name": "unplanned"})()
+    observer._route_update({route_key: object()})
+    assert "unplanned Serve route event" in observer._failure
 
 
 def _stub_cluster(monkeypatch, *, running: int, target: int = 2, canary_ok: bool):
@@ -379,19 +345,47 @@ def _stub_cluster(monkeypatch, *, running: int, target: int = 2, canary_ok: bool
 
     ray = types.ModuleType("ray")
     ray.nodes = lambda: [{"NodeID": "n0", "Alive": True}]
-    ray.serve = type("S", (), {"status": staticmethod(lambda: {
-        "proxies": {"n0": "HEALTHY"},
-        "applications": {"app": {"status": "RUNNING", "deployments": {
-            "d": {"replica_states": {"RUNNING": running}}}}}})})
+    ray.serve = type(
+        "S",
+        (),
+        {
+            "status": staticmethod(
+                lambda: {
+                    "proxies": {"n0": "HEALTHY"},
+                    "applications": {
+                        "app": {
+                            "status": "RUNNING",
+                            "deployments": {"d": {"replica_states": {"RUNNING": running}}},
+                        }
+                    },
+                }
+            )
+        },
+    )
     monkeypatch.setitem(sys.modules, "ray", ray)
     monkeypatch.setitem(sys.modules, "ray.serve", ray.serve)
     sr.reset_discovery_cache()
-    monkeypatch.setattr(sr, "_serve_details", lambda: {"applications": {"app": {
-        "route_prefix": "/", "status": "RUNNING", "deployments": {
-            "d": {"target_num_replicas": target,
-                  "replicas": [{"state": "RUNNING"}] * running}}}}})
-    monkeypatch.setattr(sr, "http_canary",
-                        lambda *a, **k: (canary_ok, "" if canary_ok else "refused"))
+    monkeypatch.setattr(
+        sr,
+        "_serve_details",
+        lambda: {
+            "applications": {
+                "app": {
+                    "route_prefix": "/",
+                    "status": "RUNNING",
+                    "deployments": {
+                        "d": {
+                            "target_num_replicas": target,
+                            "replicas": [{"state": "RUNNING"}] * running,
+                        }
+                    },
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        sr, "http_canary", lambda *a, **k: (canary_ok, "" if canary_ok else "refused")
+    )
 
     class _Store:
         profile = default_profile()
@@ -414,8 +408,44 @@ def _stub_cluster(monkeypatch, *, running: int, target: int = 2, canary_ok: bool
 
     monkeypatch.setattr(_pa, "verify", lambda strict=True: {"stubbed": True})
 
+    class _Observer:
+        def snapshot(self):
+            return {
+                "payload_version": 2,
+                "kind": "SERVE_APPLICATION_SNAPSHOT",
+                "deployment_id": "d1",
+                "generation": 1,
+                "deployment_plan_hash": "a" * 64,
+                "site_profile_hash": "b" * 64,
+                "allocation_binding_hash": "c" * 64,
+                "applications": {
+                    "app": {
+                        "running": running,
+                        "target": target,
+                        "route_prefix": "/",
+                        "status": "RUNNING",
+                    }
+                },
+                "nodes": [],
+                "proxies": [],
+                "observed_at": 1.0,
+            }
 
-def test_the_child_publishes_evidence_and_decides_nothing(monkeypatch, tmp_path):
+    return _Observer()
+
+
+def _identity_kwargs(published):
+    return {
+        "deployment_id": "d1",
+        "generation": 1,
+        "deployment_plan_hash": "a" * 64,
+        "site_profile_hash": "b" * 64,
+        "allocation_binding_hash": "c" * 64,
+        "publish": lambda payload: published.append(payload) or True,
+    }
+
+
+def test_the_child_publishes_evidence_and_decides_nothing(monkeypatch):
     """WP13/IMP-B02: this process is a witness, not the readiness authority.
 
     It could see neither the gateway nor the other ranks' sessions, so the
@@ -423,36 +453,59 @@ def test_the_child_publishes_evidence_and_decides_nothing(monkeypatch, tmp_path)
     replacement reports what this process genuinely observes and returns it;
     `PlanReadiness` in the composition root decides.
     """
-    _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
-    evidence = sr.observe_deployment(deployment_id="d1", generation=1,
-                                     snapshot_dir=str(tmp_path), timeout_s=5.0,
-                                     poll_s=0.01, log=lambda *_: None)
-    assert evidence["applications_running"] is True
-    assert evidence["evidence_only"] is True
-    assert "ready" not in evidence          # not this process's word to say
-    on_disk = json.loads((tmp_path / EVIDENCE_FILENAME).read_text())
-    assert on_disk == evidence
+    observer = _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
+    published = []
+    evidence = sr.observe_deployment(
+        **_identity_kwargs(published),
+        timeout_s=5.0,
+        observer=observer,
+        poll_s=0.01,
+        log=lambda *_: None,
+    )
+    assert sr.applications_at_target(evidence)
+    assert "ready" not in evidence  # not this process's word to say
+    assert published == [evidence]
+    assert evidence["kind"] == "SERVE_APPLICATION_SNAPSHOT"
 
 
-def test_a_shortfall_is_reported_as_not_running_not_as_a_verdict(monkeypatch,
-                                                                 tmp_path):
-    _stub_cluster(monkeypatch, running=1, target=2, canary_ok=True)
-    evidence = sr.observe_deployment(deployment_id="d1", generation=1,
-                                     snapshot_dir=str(tmp_path), timeout_s=0.02,
-                                     poll_s=0.01, log=lambda *_: None)
-    assert evidence["applications_running"] is False
+def test_a_shortfall_times_out_after_publishing_nonready_evidence(monkeypatch):
+    observer = _stub_cluster(monkeypatch, running=1, target=2, canary_ok=True)
+    published = []
+    with pytest.raises(TimeoutError, match="without every application at target"):
+        sr.observe_deployment(
+            **_identity_kwargs(published),
+            timeout_s=0.02,
+            observer=observer,
+            poll_s=0.01,
+            log=lambda *_: None,
+        )
+    evidence = published[-1]
+    assert not sr.applications_at_target(evidence)
     app = next(iter(evidence["applications"].values()))
     assert (app["running"], app["target"]) == (1, 2)
 
 
-def test_the_evidence_file_is_not_the_ready_record(monkeypatch, tmp_path):
-    """One file cannot be both the witness statement and the verdict."""
-    _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
-    sr.observe_deployment(deployment_id="d1", generation=1,
-                          snapshot_dir=str(tmp_path), timeout_s=5.0,
-                          poll_s=0.01, log=lambda *_: None)
-    assert (tmp_path / "deployment_evidence.json").exists()
-    assert not (tmp_path / "readiness.json").exists()
+def test_publishing_evidence_does_not_create_a_shared_file(monkeypatch, tmp_path):
+    observer = _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
+    published = []
+    sr.observe_deployment(
+        **_identity_kwargs(published),
+        timeout_s=5.0,
+        observer=observer,
+        poll_s=0.01,
+        log=lambda *_: None,
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ipc_rejection_is_fatal_not_a_file_fallback(monkeypatch):
+    observer = _stub_cluster(monkeypatch, running=2, target=2, canary_ok=True)
+    kwargs = _identity_kwargs([])
+    kwargs["publish"] = lambda _payload: False
+    with pytest.raises(RuntimeError, match="IPC rejected"):
+        sr.observe_deployment(
+            **kwargs, timeout_s=5.0, observer=observer, poll_s=0.01, log=lambda *_: None
+        )
 
 
 def test_there_is_no_degraded_readiness_escape_hatch():

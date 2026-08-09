@@ -7,17 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import os
-import socket
 import sys
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, Optional
 
-from .base import EngineBackend, EngineCaps, EngineSpec, GenDelta, GenResult
+from ..exception_notes import add_exception_note
+from .base import EngineBackend, EngineCaps, EngineSpec, GenDelta, GenResult, merge_engine_kwargs
 
 
 class SGLangEngine(EngineBackend):
     name = "sglang"
+    _ENGINE_SHUTDOWN_TIMEOUT_S = 30.0
 
     def __init__(self) -> None:
         self.engine = None
@@ -28,37 +29,39 @@ class SGLangEngine(EngineBackend):
     # ---- lifecycle -----------------------------------------------------------
 
     def create(self, spec: EngineSpec) -> None:
-        from ..server import print_red
+        # Keep the backend importable without Ray.  Engine unit tests and
+        # tooling must not load the Ray Serve host merely to use a console
+        # helper.
+        from ..model_staging import print_red
         from ..vendors import get_vendor
 
         init_start = time.monotonic()
         pid = os.getpid()
-        hostname = socket.gethostname()
         self.model_id = spec.model_id
-        self._vendor = get_vendor()
+        self._vendor = get_vendor(spec.vendor_name)
         gpu_ids = list(spec.device_ids)
         device_id = gpu_ids[0] if gpu_ids else 0
 
-        # Device isolation (delegated to the vendor layer; XPU sets a valid
-        # ONEAPI_DEVICE_SELECTOR + ZE_AFFINITY_MASK, CUDA/ROCm set their own).
+        # Device isolation is delegated to the vendor layer.  Aurora XPU uses
+        # ZE_AFFINITY_MASK and explicitly removes ONEAPI_DEVICE_SELECTOR;
+        # CUDA/ROCm adapters set their own visibility variables.
         self._vendor.isolate_devices(gpu_ids, "sglang")
-        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-        os.environ.setdefault("RAYON_NUM_THREADS", "1")
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        os.environ["RAYON_NUM_THREADS"] = "1"
         print(
             f"[SGLangEngine pid={pid}] vendor={self._vendor.name} tile {gpu_ids}",
             flush=True,
         )
 
         model_path = spec.local_path or spec.model_id
-        attention_backend = (
-            os.environ.get("EXASERVE_XPU_SGLANG_ATTENTION")
-            or self._vendor.sglang_default_attention()
-        )
+        attention_backend = self._vendor.sglang_default_attention()
 
         import sglang as sgl
         from transformers import AutoTokenizer
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
+        from ..state.ports import reserve_port
+
         engine_kwargs = dict(
             model_path=model_path,
             device=self._vendor.torch_device(),
@@ -69,39 +72,73 @@ class SGLangEngine(EngineBackend):
             grammar_backend="none",
             page_size=64,
             max_running_requests=(spec.max_num_seqs or 256),
-            trust_remote_code=True,
+            trust_remote_code=False,
             log_level="warning",
-            # unique per node to avoid the get_free_port() race across 12 engines
-            nccl_port=25100 + device_id,
         )
         if attention_backend:
             engine_kwargs["attention_backend"] = attention_backend
-        engine_kwargs.update(spec.extra_engine_kwargs)
+        engine_kwargs = merge_engine_kwargs(
+            engine_kwargs,
+            spec.extra_engine_kwargs,
+            protected=(
+                "device",
+                "model_path",
+                "nccl_port",
+                "tp_size",
+                "trust_remote_code",
+            ),
+        )
 
         # SGLang spawns its scheduler via multiprocessing 'spawn', re-importing
         # __main__ (Ray's default_worker -> pyarrow jemalloc SIGSEGV). Neutralize
         # __main__ so the spawned scheduler re-imports nothing.
         _main = sys.modules.get("__main__")
-        if _main is not None:
-            try:
+        _main_spec = getattr(_main, "__spec__", None) if _main is not None else None
+        _main_had_file = _main is not None and hasattr(_main, "__file__")
+        _main_file = getattr(_main, "__file__", None) if _main_had_file else None
+        port_lease = reserve_port(25100 + device_id * 100, bind_host="0.0.0.0")
+        engine_kwargs["nccl_port"] = port_lease.port
+        try:
+            print(
+                f"[SGLangEngine pid={pid}] Creating sgl.Engine for {spec.model_id} "
+                f"(attn={attention_backend}, nccl_port={port_lease.port})...",
+                flush=True,
+            )
+            if _main is not None:
                 _main.__spec__ = None
-            except Exception:
-                pass
-            if hasattr(_main, "__file__"):
-                try:
+                if _main_had_file:
                     del _main.__file__
-                except Exception:
-                    pass
-        print(
-            f"[SGLangEngine pid={pid}] Creating sgl.Engine for {spec.model_id} "
-            f"(attn={attention_backend})...",
-            flush=True,
-        )
-        self.engine = sgl.Engine(**engine_kwargs)
+            self.engine = sgl.Engine(**engine_kwargs)
+        finally:
+            # The spawn workaround is needed only while Engine creates its
+            # children.  Leaving __main__ corrupted breaks unrelated future
+            # multiprocessing in this long-lived Serve replica.
+            active_error = sys.exc_info()[1]
+            try:
+                if _main is not None:
+                    _main.__spec__ = _main_spec
+                    if _main_had_file:
+                        _main.__file__ = _main_file
+            except BaseException as restore_exc:
+                if active_error is None:
+                    active_error = restore_exc
+                else:
+                    add_exception_note(
+                        active_error,
+                        f"SGLang __main__ restoration also failed: {restore_exc}",
+                    )
+            try:
+                port_lease.release()
+            except BaseException as release_exc:
+                if active_error is None:
+                    raise
+                add_exception_note(
+                    active_error, f"SGLang port lease cleanup also failed: {release_exc}"
+                )
+            if active_error is not None and sys.exc_info()[1] is None:
+                raise active_error
         self._warmed = False
-        print_red(
-            f"[SGLangEngine pid={pid}] ★ INIT TOTAL: {time.monotonic() - init_start:.2f}s ★"
-        )
+        print_red(f"[SGLangEngine pid={pid}] ★ INIT TOTAL: {time.monotonic() - init_start:.2f}s ★")
         self._init_stats = {
             "device_id": device_id,
             "engine": "sglang",
@@ -114,6 +151,25 @@ class SGLangEngine(EngineBackend):
     def capabilities(self) -> EngineCaps:
         return EngineCaps(streaming=True, serving_stats=False, needs_warmup=True)
 
+    async def shutdown(self) -> None:
+        """Bound SGLang's scheduler/detokenizer process-tree teardown."""
+        engine = self.engine
+        if engine is None:
+            return
+        shutdown = getattr(engine, "shutdown", None)
+        if not callable(shutdown):
+            raise RuntimeError("installed SGLang engine exposes no shutdown method")
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(shutdown),
+                timeout=self._ENGINE_SHUTDOWN_TIMEOUT_S,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"SGLang process-tree shutdown exceeded {self._ENGINE_SHUTDOWN_TIMEOUT_S:g} seconds"
+            ) from exc
+        self.engine = None
+
     async def warmup(self) -> None:
         """JIT-compile sglang's paged-allocator kernels before reporting healthy."""
         if self._warmed:
@@ -123,10 +179,10 @@ class SGLangEngine(EngineBackend):
             prompt="warmup", sampling_params={"max_new_tokens": 8, "temperature": 0.0}
         )
         self._warmed = True
-        from ..server import print_red
+        from ..model_staging import print_red
+
         print_red(
-            f"[SGLangEngine pid={os.getpid()}] warmup generate: "
-            f"{time.monotonic() - t_warm:.2f}s"
+            f"[SGLangEngine pid={os.getpid()}] warmup generate: {time.monotonic() - t_warm:.2f}s"
         )
 
     # ---- prompt --------------------------------------------------------------
@@ -140,16 +196,34 @@ class SGLangEngine(EngineBackend):
         chat_template: Optional[str] = None,
         chat_template_kwargs: Optional[dict] = None,
     ) -> str:
-        from ..server import _chat_messages_to_plain_prompt
+        from ..prompting import chat_messages_to_plain_prompt
+
         try:
             return self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
                 continue_final_message=continue_final_message,
+                chat_template=chat_template,
+                **(chat_template_kwargs or {}),
             )
-        except Exception:
-            return _chat_messages_to_plain_prompt(
+        except ValueError as exc:
+            if "chat_template" not in str(exc):
+                raise
+            # Flattening structured messages changes the model input and can
+            # change the answer. It therefore uses the same explicit capability
+            # gate as the vLLM backend rather than silently degrading.
+            from ..capabilities import degrade_or_refuse
+
+            degrade_or_refuse(
+                "chat_template_fallback", f"model {self.model_id} has no chat template"
+            )
+            print(
+                "[ExaServe] Tokenizer has no chat template; "
+                f"falling back to plain-text prompt for {self.model_id}",
+                flush=True,
+            )
+            return chat_messages_to_plain_prompt(
                 messages,
                 add_generation_prompt=add_generation_prompt and not continue_final_message,
             )
@@ -180,14 +254,46 @@ class SGLangEngine(EngineBackend):
     def _finish_reason(meta: dict):
         fr = meta.get("finish_reason") if isinstance(meta, dict) else None
         if isinstance(fr, dict):
-            return fr.get("type", "stop")
-        return fr or "stop"
+            fr = fr.get("type", "stop")
+        if fr is None:
+            return "stop"
+        if not isinstance(fr, str) or not fr:
+            raise RuntimeError("SGLang returned an invalid finish reason")
+        return fr
 
-    def _abort_engine_request(self, rid: str):
+    @staticmethod
+    def _token_count(meta: dict, field: str) -> int:
+        value = meta.get(field, 0)
+        if type(value) is not int or value < 0:
+            raise RuntimeError(f"SGLang returned invalid {field}={value!r}")
+        return value
+
+    @staticmethod
+    def _output(value: object) -> tuple[str, dict]:
+        if isinstance(value, list):
+            if len(value) != 1:
+                raise RuntimeError("SGLang returned an unexpected output list")
+            value = value[0]
+        if not isinstance(value, dict):
+            raise RuntimeError("SGLang returned a non-object output")
+        text = value.get("text")
+        meta = value.get("meta_info", {})
+        if not isinstance(text, str) or not isinstance(meta, dict):
+            raise RuntimeError("SGLang output text/metadata has an invalid type")
+        return text, meta
+
+    def _abort_engine_request(self, rid: str) -> bool:
         try:
             self.engine.tokenizer_manager.abort_request(rid=rid)
-        except Exception:
-            pass
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            print(
+                f"[SGLangEngine] WARNING: failed to abort request {rid}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        return True
 
     async def generate(self, prompt: str, sampling: Dict[str, Any]) -> GenResult:
         sp = self._to_sglang_sp(sampling)
@@ -199,14 +305,12 @@ class SGLangEngine(EngineBackend):
             raise
         except Exception as exc:
             return GenResult(error=f"{type(exc).__name__}: {exc}")
-        if isinstance(out, list):
-            out = out[0]
-        meta = out.get("meta_info", {}) or {}
+        text, meta = self._output(out)
         return GenResult(
-            text=out.get("text", ""),
+            text=text,
             finish_reason=self._finish_reason(meta),
-            prompt_tokens=int(meta.get("prompt_tokens", 0)),
-            completion_tokens=int(meta.get("completion_tokens", 0)),
+            prompt_tokens=self._token_count(meta, "prompt_tokens"),
+            completion_tokens=self._token_count(meta, "completion_tokens"),
         )
 
     async def generate_stream(
@@ -217,19 +321,21 @@ class SGLangEngine(EngineBackend):
         last_meta: Dict[str, Any] = {}
         rid = f"exa-{uuid.uuid4().hex}"
         finished = False
+        saw_output = False
         gen = await self.engine.async_generate(
             prompt=prompt, sampling_params=sp, stream=True, rid=rid
         )
         try:
             async for out in gen:
-                if isinstance(out, list):
-                    out = out[0]
-                text = out.get("text", "")
-                last_meta = out.get("meta_info", {}) or last_meta
-                delta = text[len(prev):]
+                saw_output = True
+                text, meta = self._output(out)
+                last_meta = meta or last_meta
+                delta = text[len(prev) :]
                 prev = text
                 if delta:
                     yield GenDelta(delta=delta)
+            if not saw_output:
+                raise RuntimeError("SGLang stream ended without an output")
             finished = True
         finally:
             if not finished:
@@ -237,6 +343,6 @@ class SGLangEngine(EngineBackend):
         yield GenDelta(
             delta="",
             finish_reason=self._finish_reason(last_meta),
-            prompt_tokens=int(last_meta.get("prompt_tokens", 0)),
-            completion_tokens=int(last_meta.get("completion_tokens", 0)),
+            prompt_tokens=self._token_count(last_meta, "prompt_tokens"),
+            completion_tokens=self._token_count(last_meta, "completion_tokens"),
         )

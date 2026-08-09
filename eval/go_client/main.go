@@ -42,6 +42,47 @@ import (
 // long) overall client timeout. Set from --stall-timeout in main; 0 disables.
 var gStallTimeout time.Duration
 
+func publishReadyHandshake(path string, token string) error {
+	if path == "" || token == "" {
+		return errors.New("--ready-file and --ready-token are required")
+	}
+	payload := struct {
+		SchemaVersion int    `json:"schema_version"`
+		PID           int    `json:"pid"`
+		Token         string `json:"token"`
+	}{SchemaVersion: 1, PID: os.Getpid(), Token: token}
+	blob, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode readiness handshake: %w", err)
+	}
+	directory := filepath.Dir(path)
+	tmp, err := os.CreateTemp(directory, ".go-ready-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create readiness handshake: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("protect readiness handshake: %w", err)
+	}
+	if _, err := tmp.Write(append(blob, '\n')); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write readiness handshake: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync readiness handshake: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close readiness handshake: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("publish readiness handshake: %w", err)
+	}
+	return nil
+}
+
 type traceRequest struct {
 	Timestamp        float64 `json:"timestamp"`
 	Model            string  `json:"model"`
@@ -313,6 +354,8 @@ func run() int {
 	streamMode := flag.Bool("stream", false, "Enable streaming responses for TTFT measurement")
 	stallTimeoutSec := flag.Float64("stall-timeout", 120.0, "Streaming idle deadline (s): fast-fail a stream that sends no bytes for this long (wedged connection); 0 disables. Must exceed worst legit TTFT/inter-token gap.")
 	cpuprofileFlag := flag.String("cpuprofile", "", "Write CPU profile to this file")
+	readyFile := flag.String("ready-file", "", "Atomic readiness handshake output (required)")
+	readyToken := flag.String("ready-token", "", "Nonce bound to --ready-file (required)")
 
 	// Mode selection
 	mode := flag.String("mode", "replay", "Operating mode: replay (default), saturation, or saturation-step")
@@ -340,6 +383,10 @@ func run() int {
 	satMaxP99TTFT := flag.Float64("sat-max-p99-ttft", 0.0, "SLO: max acceptable p99 TTFT in seconds (0=disabled)")
 
 	flag.Parse()
+	if *readyFile == "" || *readyToken == "" {
+		fmt.Fprintln(os.Stderr, "ERROR: --ready-file and --ready-token are required")
+		return 1
+	}
 
 	if *stallTimeoutSec > 0 {
 		gStallTimeout = time.Duration(*stallTimeoutSec * float64(time.Second))
@@ -417,7 +464,10 @@ func run() int {
 			return 1
 		}
 
-		fmt.Println("GO_CLI_READY")
+		if err := publishReadyHandshake(*readyFile, *readyToken); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			return 1
+		}
 
 		if *mode == "saturation-step" {
 			if *satTargetRate <= 0 {
@@ -538,7 +588,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "%s Warm-up done in %.2fs\n", logPrefix, *warmupDuration)
 	}
 
-	fmt.Println("GO_CLI_READY")
+	if err := publishReadyHandshake(*readyFile, *readyToken); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		return 1
+	}
 
 	runT0, err := readRunT0()
 	if err != nil {
@@ -1045,7 +1098,7 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 		sort.Float64s(successLatencies)
 		summary := summaryRecord{
 			Type:               "summary",
-			RequestsCompleted:  completed,
+			RequestsCompleted:  completed + errorsCount,
 			RequestsScheduled:  totalResults,
 			Errors:             errorsCount,
 			ErrorCounts:        errorCounts,
@@ -1104,7 +1157,7 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 			os.Stderr,
 			"%s Summary: completed=%d errors=%d p50=%.3fs p99=%.3fs dispatch_health=%s\n",
 			logPrefix,
-			completed,
+			completed+errorsCount,
 			errorsCount,
 			summary.P50S,
 			summary.P99S,

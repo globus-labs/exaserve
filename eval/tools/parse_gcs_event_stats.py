@@ -9,9 +9,9 @@ Each block in gcs_server.out looks like:
 
     Global stats: 32 total (13 active)
     Event stats:
-    	GcsInMemoryStore.Put - 9 total (6 active), Execution time: mean = 157.78ms, total = 1420.04ms, Queueing time: mean = 160.03ms, max = 1440.26ms, min = 0.00ms, total = 1440.31ms
-    	PeriodicalRunner.RunFnPeriodically - 5 total (2 active, 1 running), Execution time: mean = 0.03ms, total = 0.15ms, Queueing time: mean = 580.63ms, max = 1441.07ms, min = 21.12ms, total = 2903.14ms
-    	...
+        GcsInMemoryStore.Put - 9 total (6 active), Execution time: mean = 157.78ms, total = 1420.04ms, Queueing time: mean = 160.03ms, max = 1440.26ms, min = 0.00ms, total = 1440.31ms
+        PeriodicalRunner.RunFnPeriodically - 5 total (2 active, 1 running), Execution time: mean = 0.03ms, total = 0.15ms, Queueing time: mean = 580.63ms, max = 1441.07ms, min = 21.12ms, total = 2903.14ms
+        ...
     --
 
 Usage: parse_gcs_event_stats.py <gcs_server.out> [--csv OUTFILE]
@@ -23,8 +23,7 @@ import argparse
 import csv
 import re
 import sys
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -110,29 +109,57 @@ def summarize(rows: list[Row]) -> None:
         by_method.setdefault((r.service, r.method), []).append(r)
 
     # Service-method -> final cumulative counts + peak queueing time
-    print(f"{'service':<24} {'method':<48} {'blocks':>7} {'final_total':>12} "
-          f"{'peak_active':>12} {'peak_q_mean_ms':>15} {'peak_q_max_ms':>15}")
+    print(
+        f"{'service':<24} {'method':<48} {'blocks':>7} {'final_total':>12} "
+        f"{'peak_active':>12} {'peak_q_mean_ms':>15} {'peak_q_max_ms':>15}"
+    )
     for (svc, method), group in sorted(by_method.items()):
         final_total = group[-1].total
         peak_active = max(r.active for r in group)
         peak_q_mean = max(r.q_mean_ms for r in group)
         peak_q_max = max(r.q_max_ms for r in group)
-        print(f"{svc:<24} {method:<48} {len(group):>7} {final_total:>12} "
-              f"{peak_active:>12} {peak_q_mean:>15.2f} {peak_q_max:>15.2f}")
+        print(
+            f"{svc:<24} {method:<48} {len(group):>7} {final_total:>12} "
+            f"{peak_active:>12} {peak_q_mean:>15.2f} {peak_q_max:>15.2f}"
+        )
 
 
 def write_csv(rows: list[Row], out_path: Path) -> None:
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow([
-            "timestamp", "service", "method", "total", "active", "running",
-            "exec_mean_ms", "exec_total_ms", "q_mean_ms", "q_max_ms", "q_min_ms", "q_total_ms",
-        ])
+        w.writerow(
+            [
+                "timestamp",
+                "service",
+                "method",
+                "total",
+                "active",
+                "running",
+                "exec_mean_ms",
+                "exec_total_ms",
+                "q_mean_ms",
+                "q_max_ms",
+                "q_min_ms",
+                "q_total_ms",
+            ]
+        )
         for r in rows:
-            w.writerow([
-                r.timestamp, r.service, r.method, r.total, r.active, r.running,
-                r.exec_mean_ms, r.exec_total_ms, r.q_mean_ms, r.q_max_ms, r.q_min_ms, r.q_total_ms,
-            ])
+            w.writerow(
+                [
+                    r.timestamp,
+                    r.service,
+                    r.method,
+                    r.total,
+                    r.active,
+                    r.running,
+                    r.exec_mean_ms,
+                    r.exec_total_ms,
+                    r.q_mean_ms,
+                    r.q_max_ms,
+                    r.q_min_ms,
+                    r.q_total_ms,
+                ]
+            )
 
 
 def main() -> None:
@@ -142,9 +169,12 @@ def main() -> None:
     args = p.parse_args()
 
     rows = parse(args.gcs_log)
-    print(f"Parsed {len(rows)} rows across "
-          f"{len({(r.service, r.method) for r in rows})} distinct service-methods "
-          f"from {args.gcs_log}", file=sys.stderr)
+    print(
+        f"Parsed {len(rows)} rows across "
+        f"{len({(r.service, r.method) for r in rows})} distinct service-methods "
+        f"from {args.gcs_log}",
+        file=sys.stderr,
+    )
 
     if args.csv:
         write_csv(rows, args.csv)

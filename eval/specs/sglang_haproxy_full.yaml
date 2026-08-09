@@ -33,7 +33,7 @@ workload:
 deployment:
   engine: sglang
   # model_storage_path omitted: Meta-Llama-3-8B-Instruct lives in the
-  # site-default storage (AuroraGPT/wenyiw/models), like the paper specs.
+  # site-default model storage configured by the selected SiteProfile.
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
@@ -65,6 +65,6 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs

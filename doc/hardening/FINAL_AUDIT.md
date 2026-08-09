@@ -1,179 +1,172 @@
-# Final audit — production hardening cutover (P00–P06)
+# Final audit — final42 production-hardening candidate
 
-Status date: 2026-08-07. Branch `feature/slurm-amd-support`, baseline `2a7726f`.
+**Audit date:** 2026-08-09
 
-This document states what the cutover changed, what is proven and by what
-evidence, and what is still owed. It is written to be falsifiable: every claim
-names the artifact or test that supports it, and every unproven thing is listed
-as unproven rather than omitted.
+**Verdict:** implementation pass at one and two Aurora nodes; release scope and
+larger-scale qualification pending.
 
-## 1. What the audits actually found, and what changed
+This audit covers code reached by a production deployment. Earlier audit,
+feasibility, Known Issues, and TODO documents remain context; the architecture
+authority is `doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md` and the evidence-bound
+dispositions are in `doc/hardening/FINDINGS.yaml`.
 
-The completion-claim audit's charge was not "the code is wrong". It was that
-components existed, were unit-tested, and **were not what production used**.
-That pattern recurred four times in this pass, and each time it was found by
-running the production path rather than by reading it:
+## 1. Architecture outcome
 
-| Component | Existed and tested | What production did instead |
-|---|---|---|
-| `NodeSupervisor` | yes | `RankLauncher` started `exaserve.driver`; the documented ownership tree described a design, not a process tree |
-| `PlanReadiness` | yes | `server.py` drove the in-child `serve_readiness` gate against an internal endpoint no client uses |
-| `ExactReceiptLedger` | yes | nothing produced a receipt for any planned slot; arriving receipts landed in a list nothing adjudicated |
-| `StatusStore` | yes | nobody wrote to it; consumers had a private file shape or a log line |
+The migration implements the selected design:
 
-Each is now on the reachable path, and each has a test that fails if it is
-detached again — not a test that the component works, but a test that the
-production entry point *calls* it.
+- one allocation-head Python composition root owns all global lifecycle state;
+- one node supervisor per planned rank owns only its local Ray daemon;
+- subprocesses remain at genuine OS/native fault boundaries and are supervised
+  by argv, exact PID/start-time receipts, process groups, deadlines, and typed
+  control messages;
+- Ray startup output is never parsed for READY or failure decisions;
+- serving, eval, ClientLab, scheduler rendering, and result identity share one
+  strict immutable plan family;
+- READY is generation-bound, exact-set based, continuously evaluated, and
+  revoked after component or canary loss;
+- compatibility uses an exact-hash generated overlay plus the narrowly scoped
+  spawned-engine bootstrap; installed framework files are untouched;
+- source/model staging, telemetry, result publication, status history, and
+  cleanup are bounded and fail closed; and
+- scheduler shell is only an environment/setup wrapper around a Python entry
+  point, never a lifecycle authority.
 
-## 2. Architecture as it now stands
+The intentionally isolated deployment child remains necessary for the pinned
+Ray/Serve stack: its public synchronous lifecycle calls have no cancellation
+token and cannot isolate a native fatal exit. It is one typed fault boundary,
+not a return to a subprocess-driven control architecture.
 
-```
-scheduler
-  └── launch_cluster.sh          SITE ADAPTER: env, allocation, package. ONE exec.
-        └── exaserve.launcher    COMPOSITION ROOT (Python owns the lifecycle)
-              ├── compile/verify DeploymentPlan          (one canonical identity)
-              ├── AllocationBinding                       (generation identity)
-              ├── control listener                        FAIL-CLOSED: no listener, no ranks
-              ├── DeploymentStatusPublisher               shared §3.4 boundary
-              ├── staging steps                           finite, result-validated
-              ├── RankLauncher ── NodeSupervisor × N
-              │                     ├── receipt ingress   bounded node-local hop
-              │                     ├── ray daemon        SELF-attests its slot
-              │                     └── deployment (r0)   publishes EVIDENCE only
-              ├── gateway                                 GLOBAL owned component
-              ├── PlanReadiness                           decides, commits ONE READY
-              └── bounded reverse-order shutdown          exit 143 ≠ exit 1
-```
+## 2. Candidate and reproducibility
 
-Five hash boundaries stay distinct: `site_profile_hash`,
-`deployment_plan_hash`, `run_semantic_hash`, `allocation_binding_hash`,
-`run_provenance_hash`.
-
-## 3. Evidence
-
-### Hermetic
-- 476 tests pass (`tests/`, `eval/tests/`, `clientlab/tests/`); ruff clean.
-- Each subtree collects independently (428 / 36 / 4).
-- CI has a `packaged` job that installs the wheel and imports from **outside**
-  the source tree, so a source-layout assumption fails there rather than in a
-  job; and a `ledger` job that runs the §8 validator.
-
-### On hardware (2 nodes, Aurora, `artifacts/hardening/supervisor-smoke`)
-
-```
-[Composition] READY via http://10.112.170.134:8000 —
-  ['sessions: 2 planned ranks established',
-   'receipts: 5/5 exact slots',
-   'model meta-llama/Meta-Llama-3-8B-Instruct: 24/24',
-   'canaries: 1 model(s) answered']
-```
-
-Nine checks, all PASS:
-
-| check | result |
+| Artifact | SHA-256 |
 |---|---|
-| `gate_ready` | PASS — the root's own verdict, not the child's |
-| `shared_status_ready` | PASS — read through the §3.4 API, not a log |
-| `marker_never_precedes_gate` | PASS |
-| `receipt_slots_exact` | PASS (5/5 exact set equality) |
-| `evidence_separate_from_verdict` | PASS |
-| `ray_receipt_actor_retired` | PASS |
-| `engine_self_attested` | PASS (48 engine self-receipts) |
-| `canary` | PASS — a real completion through the compiled endpoint |
-| `tree_reaped` | PASS — `supervisor_exit=143`, group 1→0, named 15→0 |
+| wheel | `5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3` |
+| sdist | `af1f9d75a6a6168806ef128df55bbfb1f4f29db84e4594146c6f0fa35d64eb7b` |
+| artifact manifest | `0bc6f132a167bd5e0e8df2d6651b68217cee0d27a6359358bb5bec09a1d987e6` |
+| site profile | `4814429547fd4397014819a0f8b5c6ec8f7d77c889eaf844d27935b39a0a6e26` |
+| compatibility profile | `c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3` |
+| compatibility manifest | `cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259` |
 
-Every clause of that READY line was decorative or absent a day earlier. The
-receipt slots are exact set equality against the compiled plan, fed by real
-producers; the replica count comes from the plan, not from the survivors; the
-canary is a real completion through the compiled advertised endpoint. 72
-further evidence receipts (24 replica, 48 engine) arrived over the same path.
+The immutable release is `artifacts/hardening/release-20260809-final42`.
+`artifacts/hardening/final42-candidate-review.json` binds the exact artifact,
+package receipt/log hashes, campaign plan hashes, result and cleanup hashes,
+expected scenarios, and unresolved dispositions. The verifier also compares
+every installed bootstrap package member byte-for-byte with the wheel.
 
-The run directory carries the four artifacts the architecture keeps distinct:
-`deployment_status.json` (shared record), `readiness.json` (the root's
-verdict), `deployment_evidence.json` (the child's witness statement), and
-`allocation_binding.json` (this generation's identity).
+The generic adjudicator independently checks those declarations rather than
+compiling a candidate name into code. It refuses changed plan/result bytes,
+candidate drift, incomplete toggle/cell matrices, false READY, wrong first
+cause, malformed proxy metrics/workload identities, or cleanup survivors.
 
-### Identity
-- Core and eval derive **byte-identical** `deployment_plan_hash` for one input
-  (`eval/tests/test_shared_plan_identity.py`), so a serving change cannot alter
-  one side silently.
+## 3. Verification results
 
-## 4. Defects this pass found by running the production path
+### Package and source
 
-Listed because each was invisible to the test suite and to reading:
+- final working-tree source suite: **1216 passed**;
+- exact installed-wheel pytest: **1207 passed, 9 skipped**;
+- exact installed-wheel mypy: **no issues found**;
+- Ruff formatting, lint, and security rules: pass;
+- Python compileall: pass;
+- Go formatting, vet, and tests: pass; and
+- installed package resource/import checks from outside the source tree: pass.
 
-1. `supervise()` ignored its own shutdown flag — SIGTERM left 15 orphans.
-2. Four consecutive environment-chain breaks, each hidden by the previous one:
-   run dir fell back to `cwd`; head IP was passed by **mutating a config file**;
-   `EXASERVE_RUN_LOG_DIR` never reached the ranks; `get_ray_env()` dropped the
-   deployment identity before the server child.
-3. `SessionCoordinator` was never fed by the listener, so `all_registered()`
-   could not become true.
-4. START was computed and undeliverable — no COMMAND dispatch existed.
-5. Node identity: the scheduler's node file is fully qualified, a process
-   reports `socket.gethostname()`, and the literal comparison rejected **every
-   receipt from every correctly-placed rank**.
-6. Inherited node state, twice: a prior generation's Ray session name, and
-   orphaned `EngineCore` processes still holding device memory (`ray stop` does
-   not reap them), which surfaced as `XPU out of memory`.
-7. `EXASERVE_LEGACY_SHELL_LIFECYCLE` was an infinite exec loop, not the
-   run-to-run comparison its comment advertised.
-8. The root's own binding hash was exported only into the ranks' environment,
-   so the root could not attest itself and readiness blocked on
-   `global/supervisor`.
-9. Serve does not name applications after model ids — a single-model
-   deployment is just `default` — so every model resolved to a zero replica
-   target: "the deployment is empty" for a deployment that was fully up.
-10. An orderly SIGTERM published `FAILED` on the shared status record, throwing
-    away the 143-vs-fault distinction the exit code already made. Visible only
-    because the state history now exists to be read.
+Evidence:
 
-## 5. What is NOT proven
+- `artifacts/hardening/final42-final-source-gate-20260809-a3/pytest.log`;
+- `artifacts/hardening/final42-packaged-gate-20260809-a4/`;
+- `artifacts/hardening/final42-final-static-gate-20260809-a2/`; and
+- `artifacts/hardening/release-20260809-final42/artifact_manifest.json`.
 
-Stated plainly, because the release decision depends on it.
+The first packaged-gate attempt (`a1`) exposed a real qualification-harness
+bug: derived paths depended on the caller's current directory. That evidence is
+retained as failed/partial history. The harness was anchored to the repository,
+the supervisor campaign was re-predeclared with the new harness hash, and only
+the current passing `a4` package receipt and q2 supervisor result are
+adjudicated. The final replay includes the generic adjudicator's additional
+bootstrap, repository-bound manifest, and immutable cleanup-evidence tests.
 
-- **Scale.** Everything above is proven at 2 nodes. Nothing in this pass is
-  qualified at 16, 64, 128 or 256 nodes on the new architecture. The 256-node
-  re-run is held at the user's explicit instruction.
-- **The production envelope is unapproved.** `ADR-000` has no durable approval
-  for a 64-node ceiling. Per plan §S00 that means scale records may **not** be
-  closed or reclassified by assuming the narrower scope, and Claude Code may
-  propose but never fill an `ACCEPTED_LIMIT` approval block. Seven records are
-  held on this basis and say so in their evidence field.
-- **`PROXIED_INTERNAL` on hardware.** The root now compiles the gateway argv,
-  starts it as a GLOBAL owned component, attests it, and canaries the compiled
-  advertised endpoint — but the runs recorded here are `DIRECT_VALIDATION`
-  plans. The production exposure path is implemented and unit-tested, not yet
-  demonstrated end to end on hardware.
-- **Gateways other than HAProxy.** `gateway_argv` raises for nginx, envoy and
-  pingora: a named refusal rather than a silent gap, but a gap.
-- **Non-Aurora vendors and schedulers.** Slurm/ROCm/CUDA remain declared and
-  unvalidated (`TD-SLURM-AMD`), as does SGLang (`TD-SGLANG`).
+### Aurora campaigns
 
-## 6. Ledger
+| Nodes | Engine/topology | Gate | Result |
+|---:|---|---|---|
+| 1 | null | `FQ-FINAL42-1N-NULL-XPU-20260809` | PASS |
+| 1 | real vLLM/XPU TP=1/PP=1 | `FQ-FINAL42-1N-REAL-XPU-20260809` | PASS |
+| 2 | null, two planned replicas | `FQ-FINAL42-2N-NULL-XPU-20260809` | PASS |
+| 2 | real vLLM/XPU PP=2 across two hosts | `FQ-FINAL42-2N-REAL-XPU-20260809` | PASS |
+| 1 | real, HAProxy no-delay on | `FQ-FINAL42-PROXY-NODELAY-ON-1N-20260809` | PASS |
+| 1 | real, HAProxy no-delay off | `FQ-FINAL42-PROXY-NODELAY-OFF-1N-20260809` | PASS |
+| 2 | strict supervisor/watchdog faults | `FQ-FINAL42-SUPERVISOR-WATCHDOG-V3Q2-2N-20260809` | PASS |
 
-`doc/hardening/FINDINGS.yaml` is re-adjudicated by
-`scripts/hardening/adjudicate.py` — a script rather than hand edits, so the
-rule applied to each record is explicit and the set is reproducible. Closure
-still requires linked evidence and acceptance tests, enforced separately by
-`scripts/hardening/validate_findings.py`, which CI runs.
+The two-node null campaign proves normal drain, gateway death, authenticated
+worker-Ray loss, duplicate gateway-port fail-before-READY, and partial worker
+proxy non-readiness. The real PP=2 campaign records one EngineCore and two
+engine-worker instances on two physical hosts. The paired proxy arms execute a
+bounded real-engine client workload and derive process/TCP/connection
+diagnostics from exact samples.
 
-Current state: **14 FIXED / 66 IN_PROGRESS / 2 OUT_OF_PRODUCTION_SCOPE**,
-validator passing. Records held open name their reason in the evidence field
-rather than leaving it to inference; the largest group is scale, gated on the
-unapproved envelope.
+The supervisor campaign kills the SELF-attested rank-zero `ray_head` child and
+the SELF-attested rank-one node supervisor. It preserves respectively:
 
-The count is deliberately not impressive. A record closes when its invariant is
-proven on the path production takes, and most of the remaining ledger belongs
-to work packages this cutover did not touch (WP6–WP12) or to scale evidence
-nobody can gather until the envelope decision exists.
+- `rank 0 component ray: exit=137`; and
+- `authenticated rank control session disappeared without GOODBYE for rank(s) [1]`.
 
-## 7. Recommended next steps, in order
+Both return nonzero (not operator-drain 143), publish exactly one FAILED
+terminal record, perform clean bounded shutdown, and produce two-node cleanup
+reports with no matched processes, signals, or survivors.
 
-1. Obtain the S00/ADR-000 production-envelope approval. Until it exists, the
-   scale records cannot be adjudicated in either direction, and roughly a third
-   of the remaining ledger is blocked behind that one decision.
-2. Demonstrate a `PROXIED_INTERNAL` plan end to end on hardware — the last
-   architectural contract implemented but not exercised.
-3. Re-qualify the ladder on the new architecture at the tiers the approved
-   envelope actually claims.
+## 4. Production bugs corrected in this final pass
+
+The last source audit found classes not covered by the earlier completion
+claim and fixed them before final42:
+
+- readiness/control identities now reject booleans, coercion, unplanned routes,
+  stale generations, conflicting duplicates, unissued command waits, and
+  instance-fencing drift;
+- high-cardinality readiness projections are indexed and bounded rather than
+  repeatedly copying full histories;
+- status, deployment, telemetry, diagnostics, and pending-command histories
+  have explicit retention limits and strict durable-load validation;
+- listener/reader startup is transactional and shutdown is idempotent;
+- process cleanup kills only older processes for the same deployment identity,
+  preserving equal/newer generations and other deployments;
+- explicit deployment IDs are byte-exact through observability contracts;
+- empty or malformed exception messages retain a deterministic first cause;
+- supervisor and deployment cleanup preserve primary and secondary failures;
+  and
+- the candidate adjudicator now verifies the current candidate and strict
+  supervisor evidence instead of silently remaining hardcoded to final35.
+
+## 5. Residuals and non-claims
+
+The pinned Ray driver can continue retrying failed GCS/task notifications until
+its 120-second reconnect timeout after injected head/worker loss. ExaServe
+classified and persisted the owner-level cause before that dependency delay;
+the campaign stayed inside its deadline and cleanup proved zero survivors. This
+is bounded shutdown latency, not a claim of immediate recovery.
+
+Aurora also emitted optional Ray metrics-exporter warnings. Exporter health is
+not a READY input, and owned readiness, canary, status, cleanup, and ExaServe
+metrics contracts passed.
+
+Unproven dimensions are:
+
+1. any final42 run above two nodes;
+2. the unapproved proposed 64-node release ceiling and its 4/16/64 ladder;
+3. native Slurm plus CUDA/ROCm;
+4. streaming, public exposure, and non-HAProxy production gateways; and
+5. SGLang under the selected Aurora profile.
+
+Historical 4/16/64/128/256-node runs and earlier candidates are regression
+context only and cannot qualify final42.
+
+## 6. Ledger and release decision
+
+The canonical ledger contains **80 FIXED / 8 IN_PROGRESS / 1
+EXTERNAL_BLOCKER / 3 OUT_OF_PRODUCTION_SCOPE** records. There are no implicit
+waivers, self-approved limits, or unresolved locally actionable code findings
+within the qualified dimensions.
+
+Do not label final42 generally production-ready. It is the immutable,
+technically qualified one/two-node candidate. A product owner must approve the
+release envelope, authorize the corresponding immutable scale campaign, and
+accept its receipts before a broader production release verdict can be issued.

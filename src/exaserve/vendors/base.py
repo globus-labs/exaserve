@@ -7,7 +7,8 @@ vendor owns everything accelerator-specific that used to live inline in the
 engine ``create()`` methods:
 
 - **Device isolation** — which env var pins a replica to its GPU/tile(s):
-  Intel XPU ``ZE_AFFINITY_MASK`` (+ ``ONEAPI_DEVICE_SELECTOR`` quirks),
+  Intel XPU ``ZE_AFFINITY_MASK`` (the Aurora profile forbids
+  ``ONEAPI_DEVICE_SELECTOR``),
   NVIDIA ``CUDA_VISIBLE_DEVICES``, AMD ``ROCR_VISIBLE_DEVICES``.
 - **PyTorch device string** — ``xpu`` vs ``cuda`` (ROCm also uses ``cuda``).
 - **Vendor env defaults** and **distributed/PP workarounds** (the XPU
@@ -38,9 +39,9 @@ class VendorBackend(ABC):
     @abstractmethod
     def isolate_devices(self, device_ids: List[int], engine_name: str = "vllm") -> None:
         """Pin this replica process to ``device_ids`` via the vendor's visibility
-        env var. ``engine_name`` lets a vendor apply engine-specific quirks (e.g.
-        SGLang needs a valid ``ONEAPI_DEVICE_SELECTOR`` on XPU where vLLM needs it
-        unset). Called by the engine before it instantiates the model."""
+        env var. ``engine_name`` may select an engine-specific implementation,
+        but cannot weaken the active site's environment contract. Called by the
+        engine before it instantiates the model."""
 
     # ---- device facts --------------------------------------------------------
 

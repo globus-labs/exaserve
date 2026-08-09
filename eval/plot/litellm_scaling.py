@@ -8,7 +8,9 @@ focusing on three RPS-oriented lines:
 2. Client RPS implied by the configured requests-per-node.
 3. Measured proxy RPS from the result JSONs.
 """
+
 import os
+
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -18,7 +20,6 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import argparse
 import json
-import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -27,6 +28,7 @@ import numpy as np
 from matplotlib.ticker import ScalarFormatter
 
 from eval.lib.run_planner import resolve_run_group_dir
+
 try:
     from .weakscaling import (
         EXPERIMENT_REGISTRY,
@@ -47,7 +49,7 @@ except ImportError:  # pragma: no cover - script-mode fallback
     )
 
 
-PLOT_TITLE_TEMPLATE = "LiteLLM Proxy + Ray Serve (EveryNode) + Dummy RayWorkers (Null-Compute)" 
+PLOT_TITLE_TEMPLATE = "LiteLLM Proxy + Ray Serve (EveryNode) + Dummy RayWorkers (Null-Compute)"
 PLOT_TITLE_TEMPLATE = "LiteLLM Proxy + Ray Serve (EveryNode) + vLLM Workers"
 PLOT_TITLE_TEMPLATE += "\nWeak Scaling (ALCF Aurora)"
 PLOT_SUBTITLE_TEMPLATE = (
@@ -57,32 +59,15 @@ PLOT_SUBTITLE_TEMPLATE = (
 )
 
 
-def _latest_result_file(results_dir: Path) -> Optional[Path]:
-    candidates = list(results_dir.glob("result*.json"))
-    if not candidates:
-        return None
-
-    latest_file = None
-    max_idx = -2
-    for path in candidates:
-        match = re.match(r"result(\d+)\.json", path.name)
-        if match:
-            file_idx = int(match.group(1))
-        elif path.name == "result.json":
-            file_idx = -1
-        else:
-            continue
-
-        if file_idx > max_idx:
-            max_idx = file_idx
-            latest_file = path
-
-    return latest_file
-
-
 def _load_json(path: Path) -> dict:
     with open(path, "r") as handle:
-        return json.load(handle)
+        payload = json.load(handle)
+    from eval.lib.utils import result_is_complete
+
+    complete, reason = result_is_complete(payload)
+    if not complete:
+        raise ValueError(f"[litellm_scaling] {path}: {reason}")
+    return payload
 
 
 def _mean(values: List[float]) -> float:
@@ -198,26 +183,21 @@ def load_raw_results(
                     print(f"Warning: {selected_file} not found, skipping {subdir.name}")
                     continue
             else:
-                selected_file = _latest_result_file(results_dir)
-                if not selected_file:
-                    print(f"Warning: No result files found in {subdir.name}, skipping")
-                    continue
-                print(f"  -> Using {selected_file.name} (latest) for {subdir.name}")
-
-            try:
-                data = _load_json(selected_file)
-                if template_fields is None:
-                    template_fields = _extract_plot_template_fields(data)
-                point = _result_point_from_data(data, node_count)
-                results.append(point)
-                print(
-                    "Loaded "
-                    f"{subdir.name}: {selected_file.name}  "
-                    f"RPS={point['rps']:.2f}, ClientRPS={point['client_rps']:.2f}, "
-                    f"Overhead={point['dispatch_overhead_ratio']:.2%}"
+                raise ValueError(
+                    f"--node-list/--select did not bind a result index for {node_count} nodes"
                 )
-            except Exception as exc:
-                print(f"Error reading {selected_file}: {exc}")
+
+            data = _load_json(selected_file)
+            if template_fields is None:
+                template_fields = _extract_plot_template_fields(data)
+            point = _result_point_from_data(data, node_count)
+            results.append(point)
+            print(
+                "Loaded "
+                f"{subdir.name}: {selected_file.name}  "
+                f"RPS={point['rps']:.2f}, ClientRPS={point['client_rps']:.2f}, "
+                f"Overhead={point['dispatch_overhead_ratio']:.2%}"
+            )
             continue
 
         if target_indices is not None:
@@ -229,16 +209,15 @@ def load_raw_results(
                     missing_files.append(str(file_path))
                     continue
 
-                try:
-                    data = _load_json(file_path)
-                    if first_loaded_data is None:
-                        first_loaded_data = data
-                    selected_points.append(_result_point_from_data(data, node_count))
-                except Exception as exc:
-                    print(f"Error reading {file_path}: {exc}")
+                data = _load_json(file_path)
+                if first_loaded_data is None:
+                    first_loaded_data = data
+                selected_points.append(_result_point_from_data(data, node_count))
 
             if not selected_points:
-                print(f"Warning: No valid results found for {subdir.name} (indices {target_indices})")
+                print(
+                    f"Warning: No valid results found for {subdir.name} (indices {target_indices})"
+                )
                 continue
 
             if template_fields is None and first_loaded_data is not None:
@@ -257,26 +236,12 @@ def load_raw_results(
             )
             continue
 
-        latest_file = _latest_result_file(results_dir)
-        if not latest_file:
-            print(f"Warning: No result files found in {subdir.name}, skipping")
-            continue
+        raise ValueError("target_indices or a complete node_select_map is required")
 
-        print(f"  -> Using {latest_file.name} for {subdir.name}")
-
-        try:
-            data = _load_json(latest_file)
-            if template_fields is None:
-                template_fields = _extract_plot_template_fields(data)
-            point = _result_point_from_data(data, node_count)
-            results.append(point)
-            print(
-                f"Loaded {subdir.name}: RPS={point['rps']:.2f}, "
-                f"ClientRPS={point['client_rps']:.2f}, "
-                f"Overhead={point['dispatch_overhead_ratio']:.2%}"
-            )
-        except Exception as exc:
-            print(f"Error reading {latest_file}: {exc}")
+    if missing_files:
+        raise FileNotFoundError(
+            "explicit result selection is incomplete; missing: " + ", ".join(missing_files)
+        )
 
     results.sort(key=lambda item: item["num_nodes"])
     return results, missing_files, (template_fields or {})
@@ -313,7 +278,7 @@ def plot_litellm_scaling(
     tps_color = "#2D6A4F"
     warning_color = "#C0392B"
 
-    ideal_line, = ax.plot(
+    (ideal_line,) = ax.plot(
         num_nodes,
         ideal_rps,
         linestyle="--",
@@ -325,7 +290,7 @@ def plot_litellm_scaling(
         alpha=0.9,
         zorder=2,
     )
-    client_line, = ax.plot(
+    (client_line,) = ax.plot(
         num_nodes,
         client_rps,
         linestyle="-.",
@@ -339,7 +304,7 @@ def plot_litellm_scaling(
     )
 
     proxy_label = (template_fields or {}).get("proxy_type_label", "LiteLLM")
-    measured_line, = ax.plot(
+    (measured_line,) = ax.plot(
         num_nodes,
         measured_rps,
         linestyle="-",
@@ -376,7 +341,7 @@ def plot_litellm_scaling(
             f"{rps:.1f}",
             (node_count, rps),
             textcoords="offset points",
-            xytext=(0, 28), # prevent overlaping with ideal RPS.
+            xytext=(0, 28),  # prevent overlaping with ideal RPS.
             ha="center",
             fontsize=8,
             fontweight="bold",
@@ -430,9 +395,7 @@ def plot_litellm_scaling(
             )
 
     flagged_results = [
-        result
-        for result in results
-        if result["dispatch_overhead_ratio"] > overhead_threshold
+        result for result in results if result["dispatch_overhead_ratio"] > overhead_threshold
     ]
     if flagged_results:
         print(
@@ -570,8 +533,8 @@ def main():
     parser.add_argument(
         "--run-group",
         type=str,
-        default="latest",
-        help="Run group to read (e.g. run0). Default: latest.",
+        required=True,
+        help="Exact run group to read (for example run0).",
     )
     parser.add_argument(
         "--linear",
@@ -581,10 +544,10 @@ def main():
     parser.add_argument(
         "--indices",
         type=str,
-        default=None,
+        default="0",
         help=(
             "Indices of experiments to aggregate (e.g. '0-2' or '0,1,2'). "
-            "Default: latest result only."
+            "Default: exact result0 only."
         ),
     )
     parser.add_argument(
@@ -605,7 +568,7 @@ def main():
         default=None,
         help=(
             "Comma-separated result indices, one per entry in --node-list. "
-            "Nodes not listed fall back to the latest result file."
+            "Every observed node must be listed."
         ),
     )
     parser.add_argument(
@@ -644,7 +607,9 @@ def main():
     node_select_map = None
     if args.node_list and args.select:
         node_select_map = parse_node_select_mapping(args.node_list, args.select)
-        print(f"Per-node result selection: {{ {', '.join(f'{k}: result{v}.json' for k, v in node_select_map.items())} }}")
+        print(
+            f"Per-node result selection: {{ {', '.join(f'{k}: result{v}.json' for k, v in node_select_map.items())} }}"
+        )
 
     target_indices = None
     if node_select_map is None:
@@ -664,12 +629,7 @@ def main():
         node_select_map=node_select_map,
     )
 
-    if missing_files:
-        print("\n" + "!" * 50)
-        print(f"WARNING: {len(missing_files)} Missing result files:")
-        for missing_file in missing_files:
-            print(f"  - {missing_file}")
-        print("!" * 50 + "\n")
+    assert not missing_files  # load_raw_results fails closed before returning
 
     if not results:
         print("No valid results found!")

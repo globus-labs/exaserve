@@ -10,7 +10,7 @@ ClientLab is a standalone measurement system for studying `eval/go_client/bin/go
 - `python3 -m clientlab compare <study_dir_a> <study_dir_b>`
 - `python3 -m clientlab smoke <preset>`
 
-Built-in presets live in [clientlab/specs](/home/wenyiw/exaserve/clientlab/specs):
+Built-in presets live in [`clientlab/specs`](specs/):
 
 - `client_microbench`
 - `latency_capacity_map`
@@ -59,7 +59,7 @@ Specs use a versioned schema with these top-level sections:
 
 ## Synthetic Target
 
-The built-in synthetic target is `clientlab/targets/cpp_server/bin/synthetic_server --config <json>` (C++, built automatically via `build.sh`).
+The built-in synthetic target is `clientlab/targets/cpp_server/bin/synthetic_server --config <json>` (C++, built automatically through the bounded Python compiler boundary).
 
 It exposes:
 

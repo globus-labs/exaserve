@@ -1,12 +1,15 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <assert.h>
 #include <errno.h>
+#include <signal.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 #include <mpi.h>
 
 #define CHECK_ERROR(cond, errstr)               \
@@ -23,31 +26,7 @@
 
 static double get_elapsed(struct timespec t1, struct timespec t2);
 
-/* PR-004: single-quote a path for safe use inside a /bin/sh command, so a
- * path containing spaces or shell metacharacters cannot inject commands.
- * Returns 0 on success, -1 if the result would not fit (truncation). */
-static int shquote(char *dst, size_t dstsize, const char *src) {
-    size_t di = 0;
-    if (dstsize == 0) return -1;
-    if (di + 1 >= dstsize) return -1;
-    dst[di++] = '\'';
-    for (const char *p = src; *p; p++) {
-        if (*p == '\'') {
-            /* close quote, escaped quote, reopen quote: '\'' */
-            if (di + 4 >= dstsize) return -1;
-            dst[di++] = '\''; dst[di++] = '\\'; dst[di++] = '\''; dst[di++] = '\'';
-        } else {
-            if (di + 1 >= dstsize) return -1;
-            dst[di++] = *p;
-        }
-    }
-    if (di + 2 > dstsize) return -1;
-    dst[di++] = '\'';
-    dst[di] = '\0';
-    return 0;
-}
-
-/* PR-004: recursive mkdir via syscalls instead of system("mkdir -p ...");
+/* PR-004: recursive mkdir via syscalls instead of a shell command;
  * no shell, no injection, and errno is inspectable. Returns 0 on success. */
 static int mkdir_p(const char *path) {
     char tmp[4096];
@@ -66,16 +45,87 @@ static int mkdir_p(const char *path) {
     return 0;
 }
 
-/* Check a pclose() return: 0 iff the child ran and exited 0. */
-static int pipe_ok(int status) {
-    return status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+/* Spawn tar through an argv vector. The old shell-pipe implementation invoked
+ * /bin/sh with a constructed command string; careful quoting reduced the
+ * injection risk but retained an unnecessary shell and truncation boundary. */
+static FILE *spawn_tar_reader(const char *parent, const char *name, pid_t *child_pid) {
+    int fds[2];
+    if (pipe(fds) != 0) return NULL;
+    pid_t pid = fork();
+    if (pid < 0) {
+        int saved = errno;
+        close(fds[0]);
+        close(fds[1]);
+        errno = saved;
+        return NULL;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(126);
+        close(fds[1]);
+        execlp("tar", "tar", "-C", parent, "-chf", "-", name, (char *)NULL);
+        _exit(127);
+    }
+    close(fds[1]);
+    FILE *stream = fdopen(fds[0], "r");
+    if (stream == NULL) {
+        int saved = errno;
+        close(fds[0]);
+        kill(pid, SIGTERM);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+        errno = saved;
+        return NULL;
+    }
+    *child_pid = pid;
+    return stream;
+}
+
+static FILE *spawn_tar_writer(const char *destination, pid_t *child_pid) {
+    int fds[2];
+    if (pipe(fds) != 0) return NULL;
+    pid_t pid = fork();
+    if (pid < 0) {
+        int saved = errno;
+        close(fds[0]);
+        close(fds[1]);
+        errno = saved;
+        return NULL;
+    }
+    if (pid == 0) {
+        close(fds[1]);
+        if (dup2(fds[0], STDIN_FILENO) < 0) _exit(126);
+        close(fds[0]);
+        execlp("tar", "tar", "-xf", "-", "-C", destination, (char *)NULL);
+        _exit(127);
+    }
+    close(fds[0]);
+    FILE *stream = fdopen(fds[1], "w");
+    if (stream == NULL) {
+        int saved = errno;
+        close(fds[1]);
+        kill(pid, SIGTERM);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+        errno = saved;
+        return NULL;
+    }
+    *child_pid = pid;
+    return stream;
+}
+
+/* Close the stream and require the exact child to exit successfully. */
+static int finish_tar(FILE *stream, pid_t child_pid) {
+    int close_failed = fclose(stream) != 0;
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child_pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    return !close_failed && waited == child_pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 int main(int argc, char **argv) {
     struct timespec start, end;
     const char *destdir;
-    char command[8192];
-    char q1[4096], q2[4096];
     int rank;
     unsigned long long total_bytes = 0;
     int no_root_write = 0;
@@ -94,12 +144,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    char *srcpath = (npos >= 1) ? strdup(argv[positional[0]]) : NULL;
-    char *destpath = (npos >= 2) ? strdup(argv[positional[1]]) : strdup("/tmp");
-    destdir = destpath;
-
     MPI_Init(NULL, NULL);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        if (rank == 0) perror("bcast: could not ignore SIGPIPE");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     if (npos < 1) {
         if (rank == 0) fprintf(stderr, "Usage: bcast [--no-root-write] <src> [dest]\n");
@@ -107,38 +157,52 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    char *srcpath = strdup(argv[positional[0]]);
+    char *destpath = (npos >= 2) ? strdup(argv[positional[1]]) : strdup("/tmp");
+    if (srcpath == NULL || destpath == NULL || srcpath[0] == '\0' || destpath[0] == '\0') {
+        if (rank == 0) fprintf(stderr, "bcast: source/destination allocation or value invalid\n");
+        free(srcpath);
+        free(destpath);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    destdir = destpath;
+
     FILE *archive = NULL;
+    pid_t archive_pid = -1;
 
     if (rank == 0) {
-        int last_idx = strlen(srcpath) - 1;
-        if (srcpath[last_idx] == '/') srcpath[last_idx] = '\0';
+        size_t source_len = strlen(srcpath);
+        while (source_len > 1 && srcpath[source_len - 1] == '/') {
+            srcpath[--source_len] = '\0';
+        }
+        if (strcmp(srcpath, "/") == 0) {
+            fprintf(stderr, "bcast: refusing to broadcast the filesystem root\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
 
         char *dup = strdup(srcpath);
+        CHECK_ERROR(!dup, "strdup");
         char *slash = strrchr(dup, '/');
         char *left, *right;
 
         if (slash != NULL) {
-            *slash = '\0';
-            left = dup;
+            if (slash == dup) {
+                left = "/";
+            } else {
+                *slash = '\0';
+                left = dup;
+            }
             right = slash + 1;
         } else {
             left = ".";
             right = dup;
         }
-
-        /* PR-004: quote paths and verify no truncation before running tar. */
-        if (shquote(q1, sizeof(q1), left) != 0 ||
-            shquote(q2, sizeof(q2), right) != 0) {
-            fprintf(stderr, "bcast: source path too long to quote safely\n");
+        if (right[0] == '\0') {
+            fprintf(stderr, "bcast: source basename is empty\n");
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        int n = snprintf(command, sizeof(command), "tar -C %s -chf - %s", q1, q2);
-        if (n < 0 || (size_t)n >= sizeof(command)) {
-            fprintf(stderr, "bcast: tar command truncated\n");
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        archive = popen(command, "r");
-        CHECK_ERROR(!archive, "popen (read)");
+        archive = spawn_tar_reader(left, right, &archive_pid);
+        CHECK_ERROR(!archive, "spawn tar reader");
         free(dup);
 
         printf("bcast: Broadcasting %s to %s ()...\n", srcpath, destdir);
@@ -146,26 +210,18 @@ int main(int argc, char **argv) {
 
     int skip_write = (rank == 0 && no_root_write);
     FILE *dest = NULL;
+    pid_t dest_pid = -1;
 
     if (!skip_write) {
-        /* PR-004: mkdir via syscall (checked), not system(). */
+        /* PR-004: checked mkdir via syscall, with no shell. */
         if (mkdir_p(destdir) != 0) {
             fprintf(stderr, "Rank %d: mkdir_p(%s) failed: %s\n",
                     rank, destdir, strerror(errno));
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
 
-        if (shquote(q1, sizeof(q1), destdir) != 0) {
-            fprintf(stderr, "Rank %d: dest path too long to quote safely\n", rank);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        int n = snprintf(command, sizeof(command), "tar -xf - -C %s", q1);
-        if (n < 0 || (size_t)n >= sizeof(command)) {
-            fprintf(stderr, "Rank %d: extract command truncated\n", rank);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        dest = popen(command, "w");
-        CHECK_ERROR(!dest, "popen (write)");
+        dest = spawn_tar_writer(destdir, &dest_pid);
+        CHECK_ERROR(!dest, "spawn tar writer");
     }
 
     /* PR-004: explicit NULL check (assert is compiled out under -DNDEBUG). */
@@ -193,7 +249,7 @@ int main(int argc, char **argv) {
                 }
                 bytes_read += n;
             }
-            chunk_size = bytes_read;
+            chunk_size = (int)bytes_read;
         }
 
         MPI_Bcast(&chunk_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -206,8 +262,9 @@ int main(int argc, char **argv) {
 
         if (!skip_write) {
             size_t total_written = 0;
-            while (total_written < chunk_size) {
-                size_t n = fwrite((char*)buf + total_written, 1, chunk_size - total_written, dest);
+            size_t wanted = (size_t)chunk_size;
+            while (total_written < wanted) {
+                size_t n = fwrite((char*)buf + total_written, 1, wanted - total_written, dest);
                 if (n == 0) {
                      fprintf(stderr, "Rank %d: Write error (Disk full?)\n", rank);
                      MPI_Abort(MPI_COMM_WORLD, 1);
@@ -223,13 +280,13 @@ int main(int argc, char **argv) {
      * extractor that exits nonzero (partial/corrupt archive, disk full at
      * flush) previously went unnoticed and the broadcast reported success. */
     if (rank == 0) {
-        if (!pipe_ok(pclose(archive))) {
+        if (!finish_tar(archive, archive_pid)) {
             fprintf(stderr, "Rank 0: tar (producer) exited nonzero\n");
             local_fail = 1;
         }
     }
     if (dest) {
-        if (!pipe_ok(pclose(dest))) {
+        if (!finish_tar(dest, dest_pid)) {
             fprintf(stderr, "Rank %d: tar (extractor) exited nonzero\n", rank);
             local_fail = 1;
         }

@@ -12,9 +12,7 @@ import sys
 from collections import defaultdict
 
 # Matches: [Router pid=<pid>,hostname=<host>] Ready (model=<model>)
-PATTERN = re.compile(
-    r"\[Router pid=(\d+),hostname=([^\]]+)\] Ready \(model=([^\)]+)\)"
-)
+PATTERN = re.compile(r"\[Router pid=(\d+),hostname=([^\]]+)\] Ready \(model=([^\)]+)\)")
 
 
 def parse_file(path: str) -> dict[str, set[int]]:

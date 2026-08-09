@@ -17,7 +17,6 @@ matrix:
     expr: '"01:00:00"'
 trace:
   kind: azure_trace
-  input_trace_path: /home/wenyiw/agpt/data/input_traces/AzureLLMInferenceTrace_code_1week.csv
 workload:
   duration: 120.0
   input_len: 512
@@ -27,6 +26,7 @@ workload:
   sampling_strategy: peak
   seed: 42
 deployment:
+  validation_mode: true
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
@@ -56,6 +56,6 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs

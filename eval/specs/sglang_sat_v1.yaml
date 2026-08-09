@@ -72,7 +72,7 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
           abortonclose: true
 scheduler:
   type: pbs

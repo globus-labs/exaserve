@@ -1,8 +1,8 @@
 """
 Envoy backend implementation.
 
-Generates an envoy.yaml that load-balances across Ray Serve HTTP proxies,
-then launches the envoy binary.
+Generates an envoy.yaml that load-balances across Ray Serve HTTP proxies.
+The composition root owns process launch.
 
 Envoy is a high-performance C++ L7 proxy from the Istio/CNCF ecosystem.
 Like HAProxy and NGINX it is OpenAI-agnostic; included as a third pure-LB
@@ -12,23 +12,22 @@ analog to HAProxy's leastconn).
 envoy must be installed and on PATH (see scripts/install_envoy.sh).
 """
 
-import os
-import signal
-import socket
-import subprocess
-import time
-import urllib.error
-import urllib.request
+import re
 from collections import defaultdict
 from pathlib import Path
 
-import yaml
-
-from .base import BackendEndpoint, ProxyBackend
+from .base import (
+    BackendEndpoint,
+    ProxyBackend,
+    reject_unknown_options,
+    strict_int,
+    strict_text,
+    validate_endpoint,
+)
 
 
 class EnvoyProxy(ProxyBackend):
-    """Manages an Envoy process as the request router."""
+    """Render the Envoy artifact consumed by the composition root."""
 
     def generate_config(
         self,
@@ -51,16 +50,55 @@ class EnvoyProxy(ProxyBackend):
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        reject_unknown_options(
+            options,
+            {
+                "admin_port",
+                "concurrency",
+                "connect_timeout",
+                "lb_policy",
+                "listen_port",
+                "max_connections",
+                "request_timeout",
+            },
+            "envoy",
+        )
 
-        lb_policy = options.get("lb_policy", "LEAST_REQUEST")
-        admin_port = int(options.get("admin_port", 9902))
-        request_timeout = int(options.get("request_timeout", 330))
-        connect_timeout = str(options.get("connect_timeout", "5s"))
-        max_connections = int(options.get("max_connections", 50000))
+        lb_policy = strict_text(
+            options.get("lb_policy", "LEAST_REQUEST"),
+            "proxy.options.lb_policy",
+            choices={"LEAST_REQUEST", "ROUND_ROBIN", "RANDOM"},
+        )
+        admin_port = strict_int(
+            options.get("admin_port", 9902), "proxy.options.admin_port", minimum=0, maximum=65535
+        )
+        request_timeout = strict_int(
+            options.get("request_timeout", 330),
+            "proxy.options.request_timeout",
+            minimum=1,
+            maximum=86400,
+        )
+        connect_timeout = strict_text(
+            options.get("connect_timeout", "5s"), "proxy.options.connect_timeout"
+        )
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?(?:ms|s)", connect_timeout):
+            raise ValueError("proxy.options.connect_timeout has invalid duration")
+        max_connections = strict_int(
+            options.get("max_connections", 50000),
+            "proxy.options.max_connections",
+            minimum=1,
+            maximum=10_000_000,
+        )
+        listen_port = strict_int(
+            options.get("listen_port", 4001), "proxy.options.listen_port", minimum=1, maximum=65535
+        )
 
         by_model: dict[str, list[BackendEndpoint]] = defaultdict(list)
         for ep in backends:
+            validate_endpoint(ep, "envoy")
             by_model[ep.model_id].append(ep)
+        if not by_model:
+            raise ValueError("Envoy requires at least one backend endpoint")
 
         # Build clusters (one per model).
         clusters = []
@@ -69,97 +107,117 @@ class EnvoyProxy(ProxyBackend):
             # STRICT_DNS lets Envoy accept DNS hostnames (Aurora HSN endpoints
             # are addressed by `x...hsn.cm.aurora.alcf.anl.gov`, not by IP).
             # Envoy resolves at startup and periodically re-resolves.
-            clusters.append({
-                "name": cluster_name,
-                "type": "STRICT_DNS",
-                "connect_timeout": connect_timeout,
-                "lb_policy": lb_policy,
-                "dns_lookup_family": "V4_ONLY",
-                "circuit_breakers": {
-                    "thresholds": [{
-                        "priority": "DEFAULT",
-                        "max_connections": max_connections,
-                        "max_pending_requests": max_connections,
-                        "max_requests": max_connections,
-                        "max_retries": 3,
-                    }]
-                },
-                "load_assignment": {
-                    "cluster_name": cluster_name,
-                    "endpoints": [{
-                        "lb_endpoints": [
+            clusters.append(
+                {
+                    "name": cluster_name,
+                    "type": "STRICT_DNS",
+                    "connect_timeout": connect_timeout,
+                    "lb_policy": lb_policy,
+                    "dns_lookup_family": "V4_ONLY",
+                    "circuit_breakers": {
+                        "thresholds": [
                             {
-                                "endpoint": {
-                                    "address": {
-                                        "socket_address": {
-                                            "address": ep.host,
-                                            "port_value": ep.port,
+                                "priority": "DEFAULT",
+                                "max_connections": max_connections,
+                                "max_pending_requests": max_connections,
+                                "max_requests": max_connections,
+                                "max_retries": 3,
+                            }
+                        ]
+                    },
+                    "load_assignment": {
+                        "cluster_name": cluster_name,
+                        "endpoints": [
+                            {
+                                "lb_endpoints": [
+                                    {
+                                        "endpoint": {
+                                            "address": {
+                                                "socket_address": {
+                                                    "address": ep.host,
+                                                    "port_value": ep.port,
+                                                }
+                                            }
                                         }
                                     }
-                                }
+                                    for ep in eps
+                                ]
                             }
-                            for ep in eps
-                        ]
-                    }]
-                },
-            })
+                        ],
+                    },
+                }
+            )
 
         # Build routes.
         if len(by_model) == 1:
             cluster_name = _safe_name(next(iter(by_model)))
-            routes = [{
-                "match": {"prefix": "/"},
-                "route": {"cluster": cluster_name, "timeout": f"{request_timeout}s"},
-            }]
+            routes = [
+                {
+                    "match": {"prefix": "/"},
+                    "route": {"cluster": cluster_name, "timeout": f"{request_timeout}s"},
+                }
+            ]
         else:
             routes = []
             for model_id, eps in by_model.items():
                 cluster_name = _safe_name(model_id)
                 path_prefix = _shared_path_prefix(eps)
-                routes.append({
-                    "match": {"prefix": f"{path_prefix}/"},
-                    "route": {"cluster": cluster_name, "timeout": f"{request_timeout}s"},
-                })
-            routes.append({
-                "match": {"prefix": "/"},
-                "direct_response": {
-                    "status": 404,
-                    "body": {"inline_string": "missing or unknown model route prefix\n"},
-                },
-            })
+                routes.append(
+                    {
+                        "match": {"prefix": f"{path_prefix}/"},
+                        "route": {"cluster": cluster_name, "timeout": f"{request_timeout}s"},
+                    }
+                )
+            routes.append(
+                {
+                    "match": {"prefix": "/"},
+                    "direct_response": {
+                        "status": 404,
+                        "body": {"inline_string": "missing or unknown model route prefix\n"},
+                    },
+                }
+            )
 
         listener = {
             "name": "listener_main",
             "address": {
                 "socket_address": {
                     "address": "0.0.0.0",
-                    "port_value": "PORT_PLACEHOLDER",  # patched in start()
+                    "port_value": listen_port,
                 }
             },
-            "filter_chains": [{
-                "filters": [{
-                    "name": "envoy.filters.network.http_connection_manager",
-                    "typed_config": {
-                        "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-                        "stat_prefix": "ingress_http",
-                        "stream_idle_timeout": f"{request_timeout}s",
-                        "route_config": {
-                            "name": "local_route",
-                            "virtual_hosts": [{
-                                "name": "backend",
-                                "domains": ["*"],
-                                "routes": routes,
-                            }],
-                        },
-                        "http_filters": [{
-                            "name": "envoy.filters.http.router",
+            "filter_chains": [
+                {
+                    "filters": [
+                        {
+                            "name": "envoy.filters.network.http_connection_manager",
                             "typed_config": {
-                                "@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+                                "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+                                "stat_prefix": "ingress_http",
+                                "stream_idle_timeout": f"{request_timeout}s",
+                                "route_config": {
+                                    "name": "local_route",
+                                    "virtual_hosts": [
+                                        {
+                                            "name": "backend",
+                                            "domains": ["*"],
+                                            "routes": routes,
+                                        }
+                                    ],
+                                },
+                                "http_filters": [
+                                    {
+                                        "name": "envoy.filters.http.router",
+                                        "typed_config": {
+                                            "@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+                                        },
+                                    }
+                                ],
                             },
-                        }],
-                    },
-                }],
-            }],
+                        }
+                    ],
+                }
+            ],
         }
 
         config = {
@@ -168,125 +226,34 @@ class EnvoyProxy(ProxyBackend):
                 "clusters": clusters,
             },
         }
+        # Concurrency is an Envoy process flag, not a bootstrap field.  Parse
+        # it here so a renderer call still validates the complete option set;
+        # the composition root adds the corresponding ``--concurrency`` argv.
+        strict_int(
+            options.get("concurrency", 0), "proxy.options.concurrency", minimum=0, maximum=4096
+        )
         if admin_port > 0:
             config["admin"] = {
-                "address": {
-                    "socket_address": {"address": "127.0.0.1", "port_value": admin_port}
-                }
+                "address": {"socket_address": {"address": "127.0.0.1", "port_value": admin_port}}
             }
 
         config_path = output_dir / "envoy.yaml"
-        with open(config_path, "w") as f:
-            yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+        from ..state.atomic import atomic_create_or_verify_yaml
+
+        atomic_create_or_verify_yaml(config_path, config, default_flow_style=False, sort_keys=False)
 
         total_servers = sum(len(eps) for eps in by_model.values())
         print(
             f"[EnvoyProxy] Config written to {config_path} "
             f"({len(by_model)} cluster(s), {total_servers} endpoint(s), lb={lb_policy})"
         )
-        # Stash for start()
-        self._concurrency = options.get("concurrency", 0)
-        self._admin_port = admin_port
         return config_path
-
-    def start(self, config_path: Path, host: str, port: int, **kwargs) -> tuple[subprocess.Popen, int]:
-        """Launch envoy with --base-id 1 + concurrency override."""
-        # Patch the port placeholder (we couldn't use a Python int for the
-        # YAML value because Envoy's port_value is an int, not a string,
-        # but we needed it deferred to start() so the spec.port can change).
-        text = config_path.read_text()
-        text = text.replace("port_value: PORT_PLACEHOLDER", f"port_value: {port}")
-        config_path.write_text(text)
-
-        cmd = ["envoy", "-c", str(config_path), "--base-id", "1"]
-        concurrency = int(getattr(self, "_concurrency", 0) or 0)
-        if concurrency > 0:
-            cmd.extend(["--concurrency", str(concurrency)])
-
-        env = os.environ.copy()
-        # Avoid going through ALCF Squid for HSN-internal traffic.
-        env.pop("HTTP_PROXY", None)
-        env.pop("HTTPS_PROXY", None)
-        env.pop("http_proxy", None)
-        env.pop("https_proxy", None)
-
-        log_path = config_path.parent / "envoy_stdout.log"
-        log_fh = open(log_path, "w")
-        self._log_fh = log_fh
-        print(f"[EnvoyProxy] Starting: {' '.join(cmd)} (log={log_path})", flush=True)
-        proc = subprocess.Popen(cmd, env=env, stdout=log_fh, stderr=subprocess.STDOUT)
-        print(f"[EnvoyProxy] Process started (pid={proc.pid}, port={port})", flush=True)
-        return proc, port
-
-    def health_check(
-        self,
-        host: str,
-        port: int,
-        timeout: float = 30.0,
-        process: subprocess.Popen | None = None,
-    ) -> bool:
-        """Use the admin /ready endpoint if available, otherwise TCP poll the data port."""
-        check_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
-        deadline = time.monotonic() + timeout
-        admin_port = int(getattr(self, "_admin_port", 0))
-        attempt = 0
-        while time.monotonic() < deadline:
-            if process is not None and process.poll() is not None:
-                print(
-                    f"[EnvoyProxy] Process exited with code {process.returncode} "
-                    f"before becoming healthy.",
-                    flush=True,
-                )
-                return False
-            attempt += 1
-            # Prefer admin /ready (returns LIVE when the server is fully up).
-            if admin_port > 0:
-                try:
-                    with urllib.request.urlopen(
-                        f"http://127.0.0.1:{admin_port}/ready", timeout=2,
-                    ) as resp:
-                        body = resp.read().decode("utf-8", errors="ignore").strip()
-                        if resp.status == 200 and "LIVE" in body:
-                            print(
-                                f"[EnvoyProxy] Healthy after {attempt} attempt(s) "
-                                f"(admin {admin_port} reports LIVE, data port {port})",
-                                flush=True,
-                            )
-                            return True
-                except (urllib.error.URLError, OSError):
-                    pass
-            else:
-                try:
-                    with socket.create_connection((check_host, port), timeout=2):
-                        print(
-                            f"[EnvoyProxy] Healthy after {attempt} attempt(s) "
-                            f"(port {port} accepts connections)",
-                            flush=True,
-                        )
-                        return True
-                except OSError:
-                    pass
-            time.sleep(1)
-        print(f"[EnvoyProxy] Health check timed out after {timeout}s", flush=True)
-        return False
-
-    def stop(self, process: subprocess.Popen) -> None:
-        if process.poll() is not None:
-            return
-        print(f"[EnvoyProxy] Stopping proxy (pid={process.pid})", flush=True)
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            print("[EnvoyProxy] SIGTERM timed out, sending SIGKILL", flush=True)
-            process.kill()
-            process.wait()
-        print("[EnvoyProxy] Proxy stopped.", flush=True)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _safe_name(model_id: str) -> str:
     return "c_" + model_id.replace("/", "_").replace(".", "_").replace("-", "_")

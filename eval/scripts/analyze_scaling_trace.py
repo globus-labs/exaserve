@@ -19,7 +19,7 @@ def load_trace(path: str) -> dict:
 
 def fmt_s(seconds: float) -> str:
     if seconds < 1:
-        return f"{seconds*1000:.0f}ms"
+        return f"{seconds * 1000:.0f}ms"
     return f"{seconds:.2f}s"
 
 
@@ -43,7 +43,11 @@ def analyze_one(trace: dict, label: str = "") -> None:
     for phase in sorted(phases, key=lambda p: p.get("wall_start", 0)):
         name = phase["name"]
         dur = phase["duration_s"]
-        extras = {k: v for k, v in phase.items() if k not in ("name", "duration_s", "wall_start", "wall_end", "mono_start")}
+        extras = {
+            k: v
+            for k, v in phase.items()
+            if k not in ("name", "duration_s", "wall_start", "wall_end", "mono_start")
+        }
         extra_str = ""
         if extras:
             extra_str = "  " + ", ".join(f"{k}={v}" for k, v in extras.items())
@@ -65,7 +69,9 @@ def analyze_one(trace: dict, label: str = "") -> None:
             mean = total / n
             mx = max(durations)
             mn = min(durations)
-            print(f"    {label_key:40s}  count={n:4d}  total={fmt_s(total):>10s}  mean={fmt_s(mean):>8s}  min={fmt_s(mn):>8s}  max={fmt_s(mx):>8s}")
+            print(
+                f"    {label_key:40s}  count={n:4d}  total={fmt_s(total):>10s}  mean={fmt_s(mean):>8s}  min={fmt_s(mn):>8s}  max={fmt_s(mx):>8s}"
+            )
         print()
 
     # Node registration convergence
@@ -79,7 +85,9 @@ def analyze_one(trace: dict, label: str = "") -> None:
             pct = p.get("pct", "?")
             nodes = p.get("alive_nodes", "?")
             dur = p.get("duration_s", 0)
-            print(f"    iter={it:3}  nodes={nodes:4}  gpus={gpus}/{expected} ({pct}%)  poll_latency={fmt_s(dur)}")
+            print(
+                f"    iter={it:3}  nodes={nodes:4}  gpus={gpus}/{expected} ({pct}%)  poll_latency={fmt_s(dur)}"
+            )
         print()
 
     # Replica init breakdown
@@ -88,9 +96,13 @@ def analyze_one(trace: dict, label: str = "") -> None:
         init_times = [r.get("total_init_s", 0) for r in replicas]
         engine_times = [r.get("engine_create_s", 0) for r in replicas]
 
-        print(f"    total_init:    min={fmt_s(min(init_times))}  max={fmt_s(max(init_times))}  mean={fmt_s(sum(init_times)/len(init_times))}")
+        print(
+            f"    total_init:    min={fmt_s(min(init_times))}  max={fmt_s(max(init_times))}  mean={fmt_s(sum(init_times) / len(init_times))}"
+        )
         if any(engine_times):
-            print(f"    engine_create: min={fmt_s(min(engine_times))}  max={fmt_s(max(engine_times))}  mean={fmt_s(sum(engine_times)/len(engine_times))}")
+            print(
+                f"    engine_create: min={fmt_s(min(engine_times))}  max={fmt_s(max(engine_times))}  mean={fmt_s(sum(engine_times) / len(engine_times))}"
+            )
 
         # Show per-host breakdown
         hosts: dict[str, list] = {}
@@ -100,7 +112,9 @@ def analyze_one(trace: dict, label: str = "") -> None:
             print(f"\n    Per-host replica init ({len(hosts)} hosts):")
             for host, host_replicas in sorted(hosts.items()):
                 times = [r.get("total_init_s", 0) for r in host_replicas]
-                print(f"      {host:20s}  n={len(times):3d}  mean={fmt_s(sum(times)/len(times))}  max={fmt_s(max(times))}")
+                print(
+                    f"      {host:20s}  n={len(times):3d}  mean={fmt_s(sum(times) / len(times))}  max={fmt_s(max(times))}"
+                )
 
         # Show wall-clock timeline: earliest start to latest end
         starts = [r.get("wall_start", 0) for r in replicas if r.get("wall_start")]
@@ -108,8 +122,10 @@ def analyze_one(trace: dict, label: str = "") -> None:
         if starts and ends:
             span = max(ends) - min(starts)
             print(f"\n    Wall-clock span (first replica start → last replica done): {fmt_s(span)}")
-            print(f"    Serialization overhead: {fmt_s(span - max(init_times))} "
-                  f"(span - longest single init)")
+            print(
+                f"    Serialization overhead: {fmt_s(span - max(init_times))} "
+                f"(span - longest single init)"
+            )
         print()
 
     # Driver phases (from all nodes)

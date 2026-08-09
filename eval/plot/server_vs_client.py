@@ -15,6 +15,7 @@ Usage:
   python -m eval.plot.server_vs_client <run_dir> [<run_dir2> ...]
   python -m eval.plot.server_vs_client --label on:<dirA> off:<dirB>
 """
+
 from __future__ import annotations
 
 import json
@@ -48,15 +49,27 @@ def client_side(run_dir: Path) -> dict:
                 tbt.append(float(b))
             if l is not None:
                 lat.append(float(l))
+
     def pp(v):
         if not v:
             return None
         a = np.asarray(v)
-        return {"n": len(a), "mean": float(a.mean()),
-                "p50": float(np.percentile(a, 50)), "p90": float(np.percentile(a, 90)),
-                "p99": float(np.percentile(a, 99)), "max": float(a.max())}
-    return {"n_req": n, "n_err": nerr,
-            "client_ttft": pp(ttft), "client_tbt_p99perreq": pp(tbt), "client_e2e": pp(lat)}
+        return {
+            "n": len(a),
+            "mean": float(a.mean()),
+            "p50": float(np.percentile(a, 50)),
+            "p90": float(np.percentile(a, 90)),
+            "p99": float(np.percentile(a, 99)),
+            "max": float(a.max()),
+        }
+
+    return {
+        "n_req": n,
+        "n_err": nerr,
+        "client_ttft": pp(ttft),
+        "client_tbt_p99perreq": pp(tbt),
+        "client_e2e": pp(lat),
+    }
 
 
 def server_side(run_dir: Path) -> dict:
@@ -84,8 +97,10 @@ def _fmt(d, *keys):
     for k in keys:
         v = d.get(k)
         if isinstance(v, dict):
-            out.append(f"{k}: p50={_n(v.get('p50'))} p99={_n(v.get('p99'))} "
-                       f"mean={_n(v.get('mean'))} n={v.get('n')}")
+            out.append(
+                f"{k}: p50={_n(v.get('p50'))} p99={_n(v.get('p99'))} "
+                f"mean={_n(v.get('mean'))} n={v.get('n')}"
+            )
         else:
             out.append(f"{k}={v}")
     return "\n  ".join(out)
@@ -106,8 +121,10 @@ def report(label: str, run_dir: Path) -> None:
     if s.get("_missing"):
         print("  server_stats.json MISSING")
     else:
-        print(f"  replicas={s.get('replica_count')} total_req={s.get('total_requests')} "
-              f"load_imbalance={s.get('load_imbalance')} mean_batch={s.get('mean_batch')}")
+        print(
+            f"  replicas={s.get('replica_count')} total_req={s.get('total_requests')} "
+            f"load_imbalance={s.get('load_imbalance')} mean_batch={s.get('mean_batch')}"
+        )
         print("  " + _fmt(s, "server_ttft", "server_tbt", "server_e2e"))
 
 

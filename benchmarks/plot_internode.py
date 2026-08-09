@@ -11,7 +11,9 @@ Generates:
 Usage:
     python3 plot_internode.py --input-dir /path/to/internode_YYYYMMDD_HHMMSS
 """
+
 import os
+
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -23,6 +25,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,12 +41,13 @@ except OSError:
 
 # Slingshot-11 theoretical per-NIC limits
 # Aurora nodes have 8 HSN NICs (hsn0–hsn7)
-BW_PER_NIC_GBS = 25.0     # GB/s per direction per NIC
-PPS_PER_NIC = 30e6         # ~30M packets/s per NIC
+BW_PER_NIC_GBS = 25.0  # GB/s per direction per NIC
+PPS_PER_NIC = 30e6  # ~30M packets/s per NIC
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
 
 def load_summary(input_dir: Path):
     """Load internode_summary.json."""
@@ -140,6 +144,7 @@ def compute_rates(records):
 # Plot A: Scaling curve
 # ---------------------------------------------------------------------------
 
+
 def plot_scaling(summary, out_dir: Path):
     """Plot max RPS vs N with scaling efficiency."""
     valid = [r for r in summary if r.get("max_rps") is not None and r["max_rps"] != "null"]
@@ -185,8 +190,15 @@ def plot_scaling(summary, out_dir: Path):
             efficiencies.append(eff)
 
         color_eff = "#FF9800"
-        ax2.plot(ns, efficiencies, "s--", color=color_eff, linewidth=1.5, markersize=6,
-                 label="Scaling Efficiency")
+        ax2.plot(
+            ns,
+            efficiencies,
+            "s--",
+            color=color_eff,
+            linewidth=1.5,
+            markersize=6,
+            label="Scaling Efficiency",
+        )
         ax2.axhline(y=1.0, color=color_eff, linestyle=":", alpha=0.5, label="Ideal (1.0)")
         ax2.set_ylabel("Scaling Efficiency", fontsize=13, color=color_eff)
         ax2.tick_params(axis="y", labelcolor=color_eff)
@@ -206,6 +218,7 @@ def plot_scaling(summary, out_dir: Path):
 # Plot B/C/D: Network time-series
 # ---------------------------------------------------------------------------
 
+
 def _shorten_hostname(hostname: str) -> str:
     """Shorten a long hostname for subplot titles."""
     # Take just the first component
@@ -215,18 +228,26 @@ def _shorten_hostname(hostname: str) -> str:
 def _format_value(val, unit_label):
     """Auto-scale a value to a readable string with SI prefix."""
     if val >= 1e9:
-        return f"{val/1e9:.2f}G {unit_label}"
+        return f"{val / 1e9:.2f}G {unit_label}"
     if val >= 1e6:
-        return f"{val/1e6:.2f}M {unit_label}"
+        return f"{val / 1e6:.2f}M {unit_label}"
     if val >= 1e3:
-        return f"{val/1e3:.2f}K {unit_label}"
+        return f"{val / 1e3:.2f}K {unit_label}"
     return f"{val:.2f} {unit_label}"
 
 
-def plot_network_timeseries(netstats_by_host, n_val, out_dir: Path,
-                            metric_key_rx, metric_key_tx,
-                            ylabel, title_suffix, filename,
-                            hline_value=None, hline_label=None):
+def plot_network_timeseries(
+    netstats_by_host,
+    n_val,
+    out_dir: Path,
+    metric_key_rx,
+    metric_key_tx,
+    ylabel,
+    title_suffix,
+    filename,
+    hline_value=None,
+    hline_label=None,
+):
     """Generic network time-series plotter: one subplot per node, one line per interface.
 
     Y-axis auto-scales to data. If the theoretical limit (hline_value) is far above
@@ -277,27 +298,50 @@ def plot_network_timeseries(netstats_by_host, n_val, out_dir: Path,
             utilization_pct = (peak_val / hline_value) * 100
             if peak_val > hline_value * 0.3:
                 # Data is within range of the limit — draw the line
-                ax.axhline(y=hline_value, color="red", linestyle=":", alpha=0.6,
-                           linewidth=1.5, label=hline_label or f"Limit ({hline_value})")
+                ax.axhline(
+                    y=hline_value,
+                    color="red",
+                    linestyle=":",
+                    alpha=0.6,
+                    linewidth=1.5,
+                    label=hline_label or f"Limit ({hline_value})",
+                )
             else:
                 # Data is far below the limit — annotate instead of drawing line
                 # Auto-scale Y to data and show utilization as text
                 y_max = peak_val * 1.3 if peak_val > 0 else 1
                 ax.set_ylim(bottom=0, top=y_max)
-                limit_str = _format_value(hline_value, ylabel.split("(")[-1].rstrip(")") if "(" in ylabel else "")
-                ax.text(0.98, 0.95,
-                        f"HW limit: {limit_str}\nPeak utilization: {utilization_pct:.2f}%",
-                        transform=ax.transAxes, fontsize=9,
-                        verticalalignment="top", horizontalalignment="right",
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow",
-                                  edgecolor="orange", alpha=0.9))
+                limit_str = _format_value(
+                    hline_value, ylabel.split("(")[-1].rstrip(")") if "(" in ylabel else ""
+                )
+                ax.text(
+                    0.98,
+                    0.95,
+                    f"HW limit: {limit_str}\nPeak utilization: {utilization_pct:.2f}%",
+                    transform=ax.transAxes,
+                    fontsize=9,
+                    verticalalignment="top",
+                    horizontalalignment="right",
+                    bbox=dict(
+                        boxstyle="round,pad=0.3",
+                        facecolor="lightyellow",
+                        edgecolor="orange",
+                        alpha=0.9,
+                    ),
+                )
         elif hline_value is not None and peak_val == 0:
-            ax.text(0.98, 0.95,
-                    f"HW limit: {hline_value} (no traffic detected)",
-                    transform=ax.transAxes, fontsize=9,
-                    verticalalignment="top", horizontalalignment="right",
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow",
-                              edgecolor="gray", alpha=0.9))
+            ax.text(
+                0.98,
+                0.95,
+                f"HW limit: {hline_value} (no traffic detected)",
+                transform=ax.transAxes,
+                fontsize=9,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(
+                    boxstyle="round,pad=0.3", facecolor="lightyellow", edgecolor="gray", alpha=0.9
+                ),
+            )
 
         # Annotate peaks on lines with relatively high values
         if line_peaks and peak_val > 0:
@@ -308,10 +352,17 @@ def plot_network_timeseries(netstats_by_host, n_val, out_dir: Path,
                     ax.annotate(
                         f"{lp_label}\n{_format_value(lp_val, '')}",
                         xy=(lp_time, lp_val),
-                        xytext=(8, 6), textcoords="offset points",
-                        fontsize=7, color=lp_color, fontweight="bold",
-                        bbox=dict(boxstyle="round,pad=0.15", facecolor="white",
-                                  edgecolor=lp_color, alpha=0.8),
+                        xytext=(8, 6),
+                        textcoords="offset points",
+                        fontsize=7,
+                        color=lp_color,
+                        fontweight="bold",
+                        bbox=dict(
+                            boxstyle="round,pad=0.15",
+                            facecolor="white",
+                            edgecolor=lp_color,
+                            alpha=0.8,
+                        ),
                     )
 
         short_name = _shorten_hostname(host)
@@ -333,7 +384,9 @@ def plot_network_timeseries(netstats_by_host, n_val, out_dir: Path,
 
 def plot_bandwidth(netstats_by_host, n_val, out_dir):
     return plot_network_timeseries(
-        netstats_by_host, n_val, out_dir,
+        netstats_by_host,
+        n_val,
+        out_dir,
         metric_key_rx="bw_rx_gbs",
         metric_key_tx="bw_tx_gbs",
         ylabel="Bandwidth (GB/s)",
@@ -346,14 +399,16 @@ def plot_bandwidth(netstats_by_host, n_val, out_dir):
 
 def plot_pps(netstats_by_host, n_val, out_dir):
     return plot_network_timeseries(
-        netstats_by_host, n_val, out_dir,
+        netstats_by_host,
+        n_val,
+        out_dir,
         metric_key_rx="pps_rx",
         metric_key_tx="pps_tx",
         ylabel="Packets/s",
         title_suffix="Packet Rate",
         filename=f"network_pps_N{n_val}.png",
         hline_value=PPS_PER_NIC,
-        hline_label=f"Slingshot-11 limit (~{PPS_PER_NIC/1e6:.0f}M PPS/NIC)",
+        hline_label=f"Slingshot-11 limit (~{PPS_PER_NIC / 1e6:.0f}M PPS/NIC)",
     )
 
 
@@ -389,8 +444,12 @@ def plot_errors_drops(netstats_by_host, n_val, out_dir):
             t = data["time"]
             if not t:
                 continue
-            for key, style in [("errors_rx", "-"), ("errors_tx", "--"),
-                               ("drops_rx", "-."), ("drops_tx", ":")]:
+            for key, style in [
+                ("errors_rx", "-"),
+                ("errors_tx", "--"),
+                ("drops_rx", "-."),
+                ("drops_tx", ":"),
+            ]:
                 vals = data[key]
                 if any(v > 0 for v in vals):
                     ax.plot(t, vals, label=f"{iface} {key}", linewidth=1.2, linestyle=style)
@@ -416,10 +475,12 @@ def plot_errors_drops(netstats_by_host, n_val, out_dir):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Plot inter-node benchmark results")
-    parser.add_argument("--input-dir", type=str, required=True,
-                        help="Path to internode benchmark output directory")
+    parser.add_argument(
+        "--input-dir", type=str, required=True, help="Path to internode benchmark output directory"
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)

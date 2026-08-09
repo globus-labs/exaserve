@@ -1,85 +1,100 @@
 # ADR-000: Initial production envelope and scale topology
 
 **Status:** TECHNICALLY SELECTED, AWAITING EXPLICIT PRODUCT-OWNER SCOPE
-APPROVAL; production support also remains unqualified until the final-
-architecture WP12 gates pass. Drafted 2026-08-05; reconciled with plan §3.2.1
-on 2026-08-07. A worker may not fill the missing approval identity/evidence.
-The older P00 closure is superseded: S01-S03 technical gates are also reopened.
-Only after those pass may plan §4.2's `TECHNICAL_PASS_SCOPE_PENDING` status
-authorize generic P01-P05 mechanics while this approval remains open.
+APPROVAL. Last reconciled 2026-08-09. Final42 passes the clean package and
+one-/two-node final-architecture gates. The release state is
+`TECHNICAL_PASS_SCOPE_PENDING`; the evidence-derived maximum is two nodes.
 
-## Decision
+No worker or agent may fill the missing approval identity/evidence, and no
+historical scale result may qualify this exact candidate.
 
-First-release support dimensions (each independent, per plan S00):
+## Proposed decision
 
-| Dimension | Proposed first-release target (qualification pending) | Gated / not proposed |
+| Dimension | Proposed first-release target | Gated / not proposed |
 |---|---|---|
-| Scheduler/site | Aurora PBS (backend selection finalized in WP8) | Slurm, other sites |
-| Vendor/accelerator | Intel XPU (PVC, 12 GPUs/node) | CUDA, ROCm |
-| Engine | vLLM (frameworks 2025.3.1 profile; exact versions discovered in S03) | SGLang |
-| Gateway implementation | HAProxy | LiteLLM/Envoy/NGINX/Pingora = validation/benchmark only; N/A only for an explicit validation-direct exposure |
-| Exposure | HAProxy-proxied inference on the trusted allocation/internal network; management endpoints local | direct Serve endpoint = validation only; any public exposure |
-| Request mode | Non-streaming | Streaming (capability/scale gates owed) |
-| Nodes | proposed `qualification_target = 64` (1→2→4→16→64) | 128/256 tiers not proposed for this pass; explicit approved envelope expansion required |
-| Replicas | ≤ 12 × nodes (one GPU-replica granularity; PP per AC-PP-01) | multi-replica non-shard PP |
+| Scheduler/site | Aurora PBS | Slurm, other sites |
+| Accelerator | Intel XPU/PVC, 12 tiles per node | CUDA, ROCm |
+| Engine | vLLM under frameworks 2025.3.1 | SGLang |
+| Gateway | HAProxy | alternate gateways are validation/benchmark only |
+| Exposure | proxied inference on trusted allocation network | direct Serve validation only; any public exposure |
+| Request mode | non-streaming completion | streaming requires independent gates |
+| Nodes | proposed target 64 through 1→2→4→16→64 | 128/256 require explicit expansion |
+| Topology | TP=1/PP=1 and capability-gated PP | unsupported canonical combinations |
 
-## Scale-topology question (plan S00 ¶2)
+The 64-node target is a proposal, not an approval.
 
-**Proposed scope decision:** 256-or-more-node service is not a release
-requirement for this pass; final qualification would be
-1 → 2 → 4 → 16 → 64 nodes. This reduction is not frozen until the required
-product-owner approval identity, timestamp, evidence reference, and exact scope
-are recorded. Ray Serve's measured internal `R*N²`
-actor-handle behavior (KI-A3) and the wait_proxies cliff (KI-A4) therefore do
-not force a Ray fork/sharded-control-plane program into this pass; existing
-mitigations (`RAY_gcs_server_num_threads`, UNHEALTHY_THRESHOLD patch) remain
-compatibility-profile capabilities at ≤64 nodes, where the recorded evidence
-(cliff onset ~64n is the boundary tier) must be re-measured at the 64-node
-gate. Scale above the accepted envelope is rejected by plan validation unless
-a separate topology gate passes later (AC-SCALE-01). 128/256 evidence already
-in `findings/` remains recorded but confers no support claim.
+## Exact final42 evidence
 
-`proxy_config.type: none` is not a production gateway or an implicit supported
-exposure mode. During migration it may be accepted only as an explicitly
-validation/benchmark direct-exposure plan. That plan advertises and canaries
-the allocation-reachable Serve endpoint but cannot establish a production
-support claim. An eval-side `dest=direct` choice changes client routing only; it
-does not change the deployment's compiled gateway/exposure contract. Adding
-direct exposure to production requires reopening this ADR and passing its own
-security, readiness, failure, and scale gates.
+Wheel
+`5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`
+passed the clean installed-package gate and these Aurora cells:
 
-**Scalability acceptance for the proposed final 64-node qualification:** run
-the final architecture through HAProxy with the declared client topology and
-compare it to a matched HAProxy baseline. The historical direct result
-(approximately linear weak scaling and ~6.8k aggregate RPS at 64 nodes in
-`findings/weakscaling_short_v3_progress.md`) is contextual regression evidence
-only; it cannot qualify a different gateway/exposure dimension. Preserve exact
-replication/client topology per KI-C5.
+| Tier | Exact-candidate result |
+|---:|---|
+| 1 node | null lifecycle/failure PASS; real XPU PASS; proxy no-delay on/off PASS |
+| 2 nodes | null negative/fault matrix PASS; real PP=2 PASS; supervisor head/worker fault PASS |
+| 4 nodes | not run for final42; authorization and a new predeclared row required |
+| 16 / 64 nodes | not qualified; run only after an owner selects this envelope |
 
-## Rationale
+The compiled envelope records `supported_max_nodes=2`,
+`qualification_target_nodes=64`, `qualification_target_approved=false`, and
+`validation_mode=false`. That is the current evidence boundary, not an implicit
+two-node product decision.
 
-- Aurora XPU/vLLM/HAProxy/non-streaming is the only combination with useful
-  historical end-to-end evidence (audit §2; KNOWN_ISSUES B1-corrected 27.1k
-  @256n non-stream). That is candidate-selection context, not clean packaged
-  target-architecture qualification or a 256-node support claim.
-- The 64-node ladder is the smallest technically coherent candidate matching
-  the hardening campaign, but it still needs the explicit scope approval above.
-- Streaming at scale has a live unexplained failure mode (KI-B2 rare HAProxy
-  process death) — claiming it would violate plan §1 ("works on Aurora" ≠
-  closed).
+The site profile declares no parallel production envelopes for other gateways,
+request modes, or streaming. Unmatched dimensions fail normal compilation.
+Validation mode may create an experiment-only plan but cannot establish a
+production support claim.
+
+## Scale-topology rationale
+
+The proposed pass excludes 128/256-node service and would qualify
+1→2→4→16→64. This reduction is not frozen until an owner, timestamp, evidence
+reference, and exact scope are recorded.
+
+Historical Ray Serve/GCS actor-handle, controller-pressure, proxy-cliff,
+shared-filesystem, and streaming-failure evidence remains relevant risk
+context. It does not require a Ray fork in the qualified one/two-node path, nor
+does it prove that the upstream limits are solved at 64 nodes. Those behaviors
+must be remeasured at the approved boundary.
+
+The final42 supervisor campaign also shows that, after catastrophic head or
+worker loss, the pinned Ray driver may retry failed GCS/task notifications until
+its 120-second reconnect timeout. ExaServe preserves first cause and bounded
+cleanup, but does not claim instantaneous recovery.
+
+`proxy_config.type: none` is validation-direct exposure only. An eval client
+choosing a direct destination does not alter the deployment's compiled
+gateway/exposure contract. Production direct exposure requires a new security,
+readiness, failure, and scale decision.
+
+## Qualification after approval
+
+If 64 nodes is approved:
+
+1. predeclare immutable final42 gates for 4, 16, and 64 nodes;
+2. use the same HAProxy/non-streaming profile and declared client topology;
+3. compare the 64-node result to a matched HAProxy baseline, not historical
+   direct-routing data;
+4. require exact membership, READY, canary, fault, terminal, and cleanup
+   receipts at each tier; and
+5. update the review manifest and ledger only after all selected cells pass.
+
+A different ceiling changes the required ladder. Earlier candidates and old
+research runs cannot substitute.
 
 ## Rejected alternatives
 
-- Claiming 256n now: requires the unresolved single-control-plane topology
-  decision plus prod-queue qualification budget; it is not the selected
-  technical candidate and remains pending the owner's scope decision.
-- Choosing LiteLLM as gateway: fake-streaming semantics (KI-B3) disqualify it
-  as a production gateway candidate.
+- Claiming 256 nodes from historical evidence: no exact-candidate qualification
+  or approved topology exists.
+- Selecting LiteLLM as the production gateway: its historical fake-streaming
+  semantics do not satisfy the selected contract.
+- Self-approving two nodes merely because it is measured: technical evidence
+  cannot replace product scope authority.
 
 ## Revisit condition
 
-First obtain the product-owner decision selecting 64 versus a larger release
-target. After a 64 decision is durably recorded, any later expansion (for
-example 128/256, streaming, SGLang, or Slurm/ROCm) reopens S00 and requires a
-new estimate before affected schema/support fields freeze; `ScaleEnvelope`
-encodes qualification target versus supported maximum explicitly.
+Record the product-owner decision selecting 64 or another release target. Any
+later expansion—128/256 nodes, streaming, public exposure, another engine,
+gateway, scheduler, or accelerator—reopens this ADR and requires a new estimate,
+profile, campaign, and candidate review.

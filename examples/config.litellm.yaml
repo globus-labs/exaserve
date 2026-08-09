@@ -9,20 +9,16 @@
 # Run with:
 #   exaserve-serve-submit examples/config.litellm.yaml
 
-ray_cluster_config:
-  head_ip: ""
-  port: 6379
-  node_cpus: 64
-
-model_deployment_config:
-  num_nodes: 2
-  model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models # ! Change to your own model path
-  local_stage_path: /tmp/hf_home
-  deployment_name: exaserve_serve
-  replica_max_ongoing_requests: 32
-  num_gpus_per_node: 12
-
-  model_configs:
+ray_port: 6379
+node_cpus: 64
+num_nodes: 2
+validation_mode: true
+model_storage_path: /lus/flare/projects/YOUR_PROJECT/YOUR_USER/models # ! Change this
+local_stage_path: /tmp/hf_home
+deployment_name: exaserve_serve
+replica_max_ongoing_requests: 32
+num_gpus_per_node: 12
+models:
     - model_id: meta-llama/Meta-Llama-3-8B-Instruct
       tensor_parallel_size: 1
       pipeline_parallel_size: 1
@@ -32,14 +28,14 @@ model_deployment_config:
       enforce_eager: true
       max_num_seqs: 64
 
-proxy_config:
-  type: litellm
+gateway:
+  kind: litellm
   port: 4001
   backend_port: 8000
 
   # Absolute path to the python in your litellm venv. The launcher derives
   # the `litellm` console script from this (<dir>/litellm).
-  python_path: /home/wenyiw/venv/litellm/bin/python3
+  executable_ref: /path/to/litellm-venv/bin/litellm
 
   # uvicorn worker count. Keep at 1 on Aurora.
   # Higher values fork more children, and individual children frequently
@@ -48,9 +44,9 @@ proxy_config:
   # is plenty for the typical proxy throughput requirement here; raise
   # only after measuring a real throughput ceiling and accepting the
   # longer startup.
-  num_workers: 1
+  worker_count: 1
   options:
-    master_key: "sk-aurora"     # bearer token required from callers
+    master_key: {secret_ref: "ENV:EXASERVE_LITELLM_MASTER_KEY"}
     routing_strategy: least-busy # least-busy | simple-shuffle | latency-based-routing
     num_retries: 2
     timeout: 300

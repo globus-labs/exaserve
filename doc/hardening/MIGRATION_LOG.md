@@ -1534,3 +1534,453 @@ deployment_status.json history:
 An orderly shutdown now ends in `STOPPED`, not `FAILED`. The whole lifecycle is
 legible from one durable record that a consumer can read without touching a log
 or a process table.
+
+## Codex takeover — P00 exact-ledger repair (2026-08-07)
+
+**Finding IDs:** all existing records plus new `IMP-B11..IMP-B20`.
+
+**Invariant:** `FINDINGS.yaml` is an exact, fail-closed §3.2.1 release ledger;
+no empty/malformed record set, invented acceptance ID, invalid approval, prose
+closure, or missing local evidence can pass CI.
+
+**Changes:**
+
+- Replaced the seven-field subset validator with exact key/type/status/severity/
+  work-package/list/approval/acceptance/evidence validation.
+- Added ten negative validator tests, including the previously false-green empty
+  ledger and nonexistent `AC-CUTOVER-01` cases.
+- Replaced the blind auto-closure script with an explicitly gated one-time legacy
+  normalizer that cannot close records and refuses to touch an already canonical
+  ledger.
+- Normalized and truthfully re-adjudicated 82 legacy records; preserved only
+  three evidence-backed WP0 baseline closures, then added the ten concrete
+  integration-audit findings. `IMP-B20` closes the validator defect itself.
+- Marked the earlier final audit as superseded and corrected the current status.
+
+**Commands/results:**
+
+```text
+python scripts/hardening/validate_findings.py
+# records: 92 {'FIXED': 4, 'IN_PROGRESS': 86, 'OUT_OF_PRODUCTION_SCOPE': 2}
+# ledger valid: every record matches the exact canonical §3.2.1 schema
+
+python -m pytest -q tests/test_findings_validator.py
+# 10 passed in 0.59s
+
+python scripts/hardening/adjudicate.py --normalize-legacy
+# refuses with exit 2 after canonical normalization
+```
+
+**Decision/fallback:** strict internal validation selected. No permissive
+fallback is allowed for release accounting.
+
+**Next slice:** P01 canonical plan and SiteProfile convergence (`IMP-B16`,
+`PR-003`, `PR-006`, `PR-007`, `TD-CONSTS`) with acceptance tests written before
+cutting core/eval/ClientLab over.
+
+## Codex takeover — canonical cutover and final34 qualification (2026-08-07 to 2026-08-09)
+
+This entry supersedes intermediate completion counts. It records the reachable
+architecture, the defects found while qualifying it, and the exact final34
+evidence. `FINAL_AUDIT.md` is the current release verdict.
+
+### Control architecture cutover
+
+- Replaced split driver/Bash/deployment lifecycle ownership with one Python
+  composition root. The root owns finite staging, one rank launcher,
+  authenticated rank sessions, deployment child, HAProxy, readiness, terminal
+  publication, and one bounded reverse-order shutdown.
+- Added structural process ownership and PID-reuse-safe process identities.
+  Node supervisors own node-local Ray groups; the head never signals or reaps an
+  unowned remote PID. First cause and scheduler-visible exit remain stable while
+  cleanup continues.
+- Replaced stdout parsing with typed, MAC-authenticated, generation/plan/binding
+  bound channel messages. Registration requires complete snapshot plus exact
+  supervisor receipt and command/result acknowledgement. Reconnect, sequence,
+  replay, size, rank/node, and shutdown semantics fail closed.
+- Replaced readiness latching with one continuously evaluated indexed predicate.
+  READY requires exact membership/resources/components/replicas/engine receipts,
+  owned gateway health, and a real canary through the advertised route; stale or
+  lost observations revoke it.
+- Consolidated core, eval, ClientLab, scheduler materialization, and result
+  identity on one immutable plan family and strict loader. Runtime binding and
+  mutable status/results are separate generation-bound artifacts.
+
+### Compatibility and staging decision
+
+- Ran the ADR-003 ladder. Public controls cover supported surfaces; rebuilding
+  dependency wheels was rejected because the vendor wheel/build provenance is
+  unavailable; a generated exact-hash role-filtered overlay passed and was
+  selected. Installed Ray/vLLM files are never replaced or edited.
+- Removed the legacy full-package symlink farm, vendored Ray Serve overlay,
+  import-time patch sweep, and setup-overlay lifecycle shell path.
+- Added source-byte/delivery-code/profile/manifest verification, role-specific
+  activation, semantic sentinels, and exact self receipts from managed actors,
+  EngineCore, and workers. The spawned-interpreter bootstrap is materialized
+  inside the staged source tree visible to every rank.
+- Made model/source/PP staging transactional with exact manifests, immutable
+  publication, generation/rank receipts, partial-cache rejection, shard-aware
+  PP placement, and bounded native processes. Removed SSH fan-out from active
+  distribution.
+
+### Eval, ClientLab, state, and operations hardening
+
+- Added immutable run bundles, fenced/idempotent submission, durable job
+  identity/heartbeats, strict scheduler observation, safe renderers, and one
+  scheduler implementation shared with eval.
+- Made trace/tokenizer identity content-complete; result manifests and Go replay
+  grammars reject missing, duplicate, trailing, malformed, or partial terminal
+  state. Structured publication and descriptor-bound reads are atomic and
+  fail-closed.
+- Added strict ClientLab defaults/contracts, complete request identity,
+  lifecycle-bounded collectors, diagnostic archive traversal/type checks,
+  request/completion correlation, bounded labels, and owned metrics/status
+  surfaces.
+- Deleted retired experiment lifecycle scripts and documented remaining shell
+  files as setup/build/evidence adapters only.
+
+### Qualification defects and candidate invalidation
+
+Each defect below invalidated its candidate; none was waived:
+
+1. final28 used Ray's HSN address where vLLM needed the management-network IP.
+2. final29 put a spawned-engine bootstrap only in head-local `/tmp`, so a remote
+   worker could not import it.
+3. final30 let a Serve actor change receipt owner to rank 2 while retaining the
+   inherited rank-zero receipt socket. The actor runtime was split into an
+   import-light module and now derives socket routing from `owner_rank`.
+4. final32 referenced removed `BoundReplica.planned_ranks` state; the canonical
+   `owner_rank` field replaced it.
+5. final33 passed lower-tier runs but was invalidated by the subsequent source
+   audit; the discovered source defects were fixed before building final34.
+
+The prior candidate's four-node attempt budget was exhausted while isolating
+item 3. No final34 four-node run was silently substituted; one additional
+attempt remains pending explicit authorization.
+
+### Immutable final34 release
+
+Built sdist then isolated wheel with `setuptools==78.1.1` and `wheel==0.46.3`:
+
+```text
+wheel  2f12f707ff4140471174b902bb49e282eb8e25c14278f8bf558098e279796de4
+sdist  3eca5a43841221dda6538c0af1c7a5b140bb8e258c32ddc5521c718e186e8659
+manifest a044ed41fd2e3be0a1e390e18b94e79654d6992ddcaf51e34b8461ba62a3385d
+site profile 0236f8e531b821074abc0abbeca9ba03a645d3d624307c32cba612eb543ba827
+compatibility profile c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3
+compatibility manifest cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259
+```
+
+The clean compute-node package gate installed that wheel in a new venv and ran
+outside the repository: **1056 passed, 9 skipped; mypy clean; packaged resource
+check pass**. Evidence:
+`artifacts/hardening/final34-packaged-gate-20260809-a3/`.
+
+### Authorized Aurora matrix
+
+All four predeclared lower-tier cells passed with the same wheel hash:
+
+| Cell | Result highlights |
+|---|---|
+| 1n null/HAProxy | READY/canary, orderly drain, owned gateway death, exact cleanup |
+| 1n real vLLM/XPU | real EngineCore receipt, canary, drain/death/cleanup |
+| 2n null/HAProxy | exact two-rank source/receipt set, worker death, port collision, partial worker-proxy non-readiness, cleanup |
+| 2n real vLLM/XPU PP=2 | one replica over two actual hosts, one core + two worker receipts, canary, drain/death/cleanup |
+
+Result roots are `artifacts/hardening/final34-{null,real}-{1n,2n}-20260809-a1/`.
+Optional Ray metrics-exporter warnings were observed but did not participate in
+readiness or affect the owned metrics/status contracts.
+
+### Ledger and documentation closure
+
+Added a candidate-specific adjudication mode that first verifies the wheel,
+package-gate logs/receipt, exact hardware matrix, and an explicit disposition
+for every ID. Final count:
+
+```text
+80 FIXED
+8 IN_PROGRESS             scale/scope proof only
+1 EXTERNAL_BLOCKER        native Slurm + CUDA/ROCm hardware
+3 OUT_OF_PRODUCTION_SCOPE optional features/research
+```
+
+No `ACCEPTED_LIMIT` was self-issued. ADR-000 remains unapproved; the compiled
+envelope truthfully records supported maximum 2, proposed target 64, approval
+false, and validation mode. Current-facing status, final audit, compatibility
+matrix, Known Issues, TODO, ADR-003, and reference-card regeneration guidance
+were reconciled to that exact boundary.
+
+## Codex final source audit and final35 supersession (2026-08-09)
+
+The audit continued after final34 rather than treating its passing lower-tier
+receipts as a reason to stop inspecting source. Final34 remains historical
+evidence and is superseded by final35.
+
+### Additional defects corrected
+
+1. Active site/eval defaults and examples contained an account-specific path.
+   Default account identity now comes from the OS account database, explicit
+   model paths bypass account lookup, runtime path fields are absolute, and
+   source-policy tests scan the active examples, eval tools, and findings
+   script. Historical experiment identities remain unchanged as evidence.
+2. Evidence analysis used permissive parsing that could compute statistics from
+   a malformed partial JSON/JSONL/CSV input. `eval.tools.analysis_io` now owns
+   strict readers with exact file/line errors; controller logs also require
+   strict UTF-8.
+3. Direct replay could hide an unexpected probe/executor exception until a
+   later generic timeout. Unexpected failures now surface immediately with the
+   affected endpoint.
+4. `ijson` was used by the eval path but not declared. It is now pinned in the
+   CI lock and included in the `eval` extra; paper-only dataset/tokenizer
+   dependencies are isolated in a separate `paper` extra.
+5. The default SiteProfile generated 36 scale envelopes for gateway, API, and
+   streaming combinations even though only HAProxy non-streaming completion had
+   candidate evidence. The profile now declares exactly that one production
+   envelope. Unmatched dimensions compile only in explicit validation mode,
+   and production qualification rejects both synthetic and forged envelopes.
+
+### Immutable final35 release
+
+Built sdist then isolated wheel with `setuptools==78.1.1` and `wheel==0.46.3`:
+
+```text
+wheel  8d7341bfbd5a19da04d5e42b14b5df633e7cd1178a8027f0bf711ec16ebfae1b
+sdist  886b8a1f487cf3a7055c4438e5d292a9d173e9b5de6246bef4c18b6291dee1da
+manifest 219ac1bd9912f42121a66c5980bedafc4d746fdbaef56e20520f8ff5743febb0
+site profile 4814429547fd4397014819a0f8b5c6ec8f7d77c889eaf844d27935b39a0a6e26
+compatibility profile c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3
+compatibility manifest cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259
+```
+
+The isolated build's first local-tools attempt failed safely before publishing
+because the ambient environment exposed an undeclared Babel/setuptools plugin.
+The pinned isolated backend succeeded. This was a build-environment isolation,
+not an artifact retry or waived failure.
+
+Source suite evidence:
+`artifacts/hardening/final35-source-gate-20260809-a1/pytest.log`, **1084
+passed**. The clean installed-package gate ran from an empty directory in a
+leased compute session: **1075 passed, 9 skipped; mypy clean**. Evidence:
+`artifacts/hardening/final35-packaged-gate-20260809-a1/`.
+
+### Final35 Aurora qualification
+
+The exact experiment identities were predeclared in
+`artifacts/hardening/final35-experiment-plan.json`. An initial shell invocation
+was rejected before preflight because the historical evidence wrapper lacked
+an executable bit; no attempt directory or workload was created. The corrected
+`bash wrapper` invocation used the still-unused attempt identity, as allowed by
+the plan's pre-workload infrastructure exception.
+
+All four authorized lower-tier cells passed with the exact final35 wheel and
+site profile:
+
+| Cell | Durable result |
+|---|---|
+| 1n null/HAProxy | `final35-null-1n-20260809-a1/qualification/result.json` |
+| 1n real vLLM/XPU | `final35-real-1n-20260809-a1/qualification/result.json` |
+| 2n null/HAProxy fault matrix | `final35-null-2n-20260809-a1/qualification/result.json` |
+| 2n real vLLM/XPU PP=2 | `final35-real-2n-20260809-a1/qualification/result.json` |
+
+The two-node real receipts prove one EngineCore and two engine workers on two
+distinct physical hosts in both generations. Optional Ray metrics-exporter
+warnings and expected vLLM/Ray SIGTERM diagnostics did not participate in the
+READY predicate and did not compromise bounded cleanup.
+
+### Current boundary
+
+The candidate-specific adjudicator now verifies final35 wheel, sdist, artifact
+manifest, experiment-plan identities, package logs, site-profile identity, all
+four hardware cells, and the two-host PP receipt structure. The ledger remains:
+
+```text
+80 FIXED
+8 IN_PROGRESS             scale/scope proof only
+1 EXTERNAL_BLOCKER        native Slurm + CUDA/ROCm hardware
+3 OUT_OF_PRODUCTION_SCOPE optional features/research
+```
+
+No four-node or scale experiment was run without authorization. The proposed
+64-node ceiling remains unapproved, and one additional four-node attempt still
+requires explicit owner authorization. Final35 is therefore a technically
+qualified two-node candidate with release state
+`TECHNICAL_PASS_SCOPE_PENDING`, not a generally approved production release.
+
+### Final working-tree closure
+
+After the ledger and current-facing documents were reconciled, all CI static
+gates passed: Ruff formatting and lint (including the focused syntax/security
+sets), pinned mypy 1.17.1, compile-all, gofmt, `go vet`, and Go tests. A fresh
+one-node compute lease then ran the complete final working tree: **1084 passed
+in 110.15 seconds**. Evidence is
+`artifacts/hardening/final35-final-source-gate-20260809-a1/pytest.log`.
+
+The first batch transport for this source-only rerun failed before preflight
+because its nested shell misquoted the hostname check; it created no evidence
+directory and ran no tests. The retry used stdin script transport, passed every
+allocation and environment preflight, and completed pytest. Because that
+transport left its already-completed shell idle, the exact lease was then
+released explicitly. Neither incident changed or retried a candidate hardware
+qualification identity.
+
+## Final35 evidence-contract reopening and q2 predeclaration (2026-08-09)
+
+A requirement-by-requirement completion audit found that the original final35
+experiment-plan rows declared `attempt_limit: 1`, but the qualification harness
+hard-coded and emitted `attempt_limit: 2` in all four manifests/results. Every
+actual run used attempt 1 and passed, but the contradictory receipt field means
+those result files cannot prove exact predeclaration. The prior adjudicator did
+not compare gate-row metadata to result metadata, so its green verdict was too
+weak. The lower-tier evidence gate is reopened; no artifact was rewritten or
+retroactively amended.
+
+The immutable final35 package candidate is unchanged. The harness now accepts
+only an experiment-plan path and gate ID, derives all gate policy from that
+strict row, verifies the candidate, harness, config, compiled plan, and site
+profile bytes before launch, and emits the full declared row plus the plan hash
+in its receipt. Attempt 2 cannot be represented under an attempt limit of 1.
+
+The corrected lower-tier campaign was predeclared before allocation at
+`artifacts/hardening/final35q2-experiment-plan.json`, SHA-256
+`9e07c903c7afc99b21940cb2b90e99ef7451cb4a41a8728766ca2d65a47f3713`.
+It contains four unique attempt-1-only gates for the 1-node null, 1-node real,
+2-node null fault matrix, and 2-node real PP=2 cells. Every row passed static
+declaration validation and names a previously unused output path. These q2
+receipts must supersede, rather than mutate, the original final35 lower-tier
+receipts before the ledger can be adjudicated again.
+
+The first q2 shell transport was rejected before harness preflight because a
+nested command collapsed `/dev/null` and the next token; its output identity
+remained unused. The corrected wrapper then reached the q2 1-node-null
+workload, where the launcher failed to import `exaserve`: the wrapper had
+exported a repository-relative bootstrap path, and the supervised child changed
+its working directory. This occurred after workload launch, so q2's sole
+attempt is consumed and its partial evidence remains at
+`artifacts/hardening/final35q2-null-1n-20260809-a1/qualification/`. It was not
+retried or rewritten. Monitoring also showed that the evidence harness waited
+for the full READY deadline after the launcher had already exited without
+publishing status. The exact lease was released rather than wasting the
+allocation after the causal error was known.
+
+Both harness defects now have regression tests. The declared bootstrap is
+pinned to its absolute path before any cwd-changing child starts, and status or
+partial-readiness waits fail immediately if the launcher exits without a
+canonical READY/terminal record. The replacement q3 campaign was predeclared
+before allocation at `artifacts/hardening/final35q3-experiment-plan.json`,
+SHA-256
+`8e7e692812d81e8bc87a652a5c93e9eda1d77a4e15a9433387764f93b625dc72`.
+All four q3 rows are attempt 1 of 1, passed strict declaration validation, and
+name new output identities. The evidence-only transport is
+`artifacts/hardening/final35q3-runner.sh`, SHA-256
+`ee6b07a1be7e156e635c8182701bc4431b071809f5c2a05f437ea3907251e366`.
+
+## Final42 source hardening, immutable qualification, and adjudication (2026-08-09)
+
+The q3 campaign repaired the evidence-row mismatch, but a fresh source audit
+still found locally actionable correctness and boundedness defects. Final35
+remains historical evidence and is superseded for release adjudication by
+final42; no old artifact or result was relabeled.
+
+### Source corrections
+
+The final pass hardened the production control path in these areas:
+
+- control-channel messages now use strict identities/rank vocabulary, bounded
+  diagnostics and pending commands, exact receipt IDs, sequence/instance
+  fencing, conflicting-duplicate rejection, and transactional listener start;
+- readiness rejects unplanned routes and malformed booleans/resources, uses
+  planned identity sets and indexed O(K) projections, and has idempotent,
+  transaction-safe listeners;
+- process cleanup targets only older generations of the same deployment,
+  preserving equal/newer generations and unrelated deployments;
+- durable status, deployment history, telemetry, and exception diagnostics are
+  strictly validated and bounded;
+- deployment cleanup preserves primary and secondary failures, empty exception
+  messages receive a deterministic cause, and observability deployment IDs are
+  byte-exact; and
+- high-cardinality, reconnect, stale-generation, fail-closed parsing, and
+  lifecycle-transaction tests were added for each corrected invariant.
+
+A pre-candidate full source run passed **1213 tests**. Static Ruff, security,
+compileall, Go format/vet/test, and focused readiness/control suites also
+passed. The final source replay, after three additional adjudicator contracts,
+passed **1216 tests** at
+`artifacts/hardening/final42-final-source-gate-20260809-a3/pytest.log`.
+
+### Immutable final42 artifact
+
+```text
+release           artifacts/hardening/release-20260809-final42
+wheel SHA-256     5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3
+sdist SHA-256     af1f9d75a6a6168806ef128df55bbfb1f4f29db84e4594146c6f0fa35d64eb7b
+manifest SHA-256  0bc6f132a167bd5e0e8df2d6651b68217cee0d27a6359358bb5bec09a1d987e6
+```
+
+The first package-gate invocation failed before evidence because the outer
+`subjob` shell did not preserve the expected cwd. The next (`a1`) run exposed a
+real harness defect: supervisor derived paths used `Path.cwd()`, so one test
+failed while 1203 passed and 9 skipped. Its partial evidence is retained and is
+not an accepted receipt. The harness now anchors derived paths to the repository
+and rejects escapes. The passing clean-wheel gate is
+`artifacts/hardening/final42-packaged-gate-20260809-a4/`: **1207 passed, 9
+skipped; mypy clean**.
+
+The first combined static receipt (`final42-final-static-gate-20260809-a1`)
+was not accepted: the explicit runtime lint selection found two stale unused
+locals in historical supervisor-evidence tests, and the login environment did
+not provide `mypy`. The locals were removed without changing test behavior.
+The passing `a2` static receipt records full Ruff formatting/lint/security,
+compileall, Go format/vet/test, ledger validation, and candidate verification;
+the pinned mypy result is hash-checked from the clean installed-package gate.
+Because those test-file bytes changed, both final source and installed-package
+test suites were replayed as `a3` and `a4` rather than relying on their prior
+green counts.
+
+Because the supervisor harness bytes changed, its original declaration was not
+used. A replacement q2 campaign was predeclared with the new harness hash. This
+preserved the no-retroactive-evidence rule.
+
+### Predeclared final42 campaigns and results
+
+| Campaign | Plan SHA-256 | Accepted results |
+|---|---|---|
+| lifecycle four-cell matrix | `eaf30924c3abb0a894dbcdc1f38ff3d07f62e32df2232e10d8b05eb7fef558a8` | 1n null, 1n real XPU, 2n null faults, 2n real PP=2 — all PASS |
+| HAProxy no-delay pair | `b4b02ad33d00e8e3d46a2d79868ca7a701abd02c69e6f2b983d06d89fc1e16b4` | no-delay on and off — both PASS |
+| supervisor/watchdog q2 | `782216c25a63bc94f3e6b7a83673bc912b269cb3a78fbd07ffa5aea198518309` | head Ray child death and worker supervisor death — PASS |
+
+Every run used a validated `subjob` lease, sourced `env_aurora`, removed
+`ONEAPI_DEVICE_SELECTOR`, and used the installed final42 bootstrap plus the
+repository harness. No run above two nodes was requested or consumed.
+
+The strict supervisor result preserves `rank 0 component ray: exit=137` and
+authenticated rank-one control-session loss without GOODBYE. Both cases return
+nonzero rather than operator-drain 143, publish one FAILED terminal record, and
+leave no exact-generation survivors on either node. Ray's deployment driver
+continues noisy GCS/task retries until its configured 120-second reconnect
+timeout after these catastrophic faults; this bounded dependency latency is
+recorded as a residual rather than hidden.
+
+### Candidate-bound adjudication
+
+The stale final35-specific adjudicator was replaced by a generic review-driven
+verifier. `artifacts/hardening/final42-candidate-review.json` binds artifact,
+package-log, campaign-plan, result, cleanup, and disposition identities. The
+verifier independently checks package provenance and installed-bootstrap bytes,
+exact four-cell/two-arm matrices, READY/non-READY semantics, PP host evidence,
+proxy request/diagnostic derivation, supervisor first causes, terminal
+uniqueness, and zero-survivor cleanup. Thirteen mutation/acceptance tests prove
+it fails closed on identity, repository escape, bootstrap drift, disposition,
+scenario, request, diagnostic, shutdown, and cleanup drift.
+
+The applied and independently validated ledger is:
+
+```text
+80 FIXED
+8 IN_PROGRESS             owner-approved scale/scope evidence missing
+1 EXTERNAL_BLOCKER        native Slurm + CUDA/ROCm allocation unavailable
+3 OUT_OF_PRODUCTION_SCOPE optional/research capabilities
+```
+
+The formal state remains `TECHNICAL_PASS_SCOPE_PENDING`. Final42 is technically
+qualified at one and two Aurora nodes only; a larger support claim requires an
+owner decision and a new immutable, predeclared scale campaign.

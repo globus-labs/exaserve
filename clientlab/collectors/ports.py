@@ -1,4 +1,5 @@
 import json
+import math
 import threading
 import time
 from pathlib import Path
@@ -53,27 +54,63 @@ def take_snapshot():
 
 class PortCollector(object):
     def __init__(self, interval_s=1.0):
-        self.interval_s = interval_s
+        if (
+            isinstance(interval_s, bool)
+            or not isinstance(interval_s, (int, float))
+            or not math.isfinite(float(interval_s))
+            or interval_s <= 0
+        ):
+            raise ValueError("port collector interval must be finite and positive")
+        self.interval_s = float(interval_s)
         self.samples = []
         self._stop = threading.Event()
         self._thread = None
+        self._failure = None
+        self._failure_lock = threading.Lock()
 
     def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("port collector is already running")
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run)
+        with self._failure_lock:
+            self._failure = None
+        self._thread = threading.Thread(target=self._run, name="clientlab-port-collector")
         self._thread.daemon = True
         self._thread.start()
 
     def _run(self):
-        while not self._stop.is_set():
-            self.samples.append(take_snapshot())
-            self._stop.wait(self.interval_s)
+        try:
+            while not self._stop.is_set():
+                self.samples.append(take_snapshot())
+                self._stop.wait(self.interval_s)
+        except BaseException as exc:
+            with self._failure_lock:
+                self._failure = exc
+            self._stop.set()
 
-    def stop(self):
+    def stop(self, timeout_s=None):
+        timeout_s = self.interval_s + 2.0 if timeout_s is None else timeout_s
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(float(timeout_s))
+            or timeout_s < 0
+        ):
+            raise ValueError("port collector stop timeout must be finite and nonnegative")
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=self.interval_s + 2.0)
-        ephem = [sample["ephemeral_in_use"] for sample in self.samples if sample["ephemeral_in_use"] >= 0]
+            self._thread.join(timeout=float(timeout_s))
+            if self._thread.is_alive():
+                raise RuntimeError("port collector thread did not stop by its deadline")
+        with self._failure_lock:
+            failure = self._failure
+        if failure is not None:
+            raise RuntimeError(
+                f"port collector failed: {type(failure).__name__}: {failure}"
+            ) from failure
+        ephem = [
+            sample["ephemeral_in_use"] for sample in self.samples if sample["ephemeral_in_use"] >= 0
+        ]
         return {
             "ephemeral_range": EPHEMERAL_RANGE,
             "sample_count": len(self.samples),
@@ -88,6 +125,6 @@ def write_port_metrics(path, payload):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     # PR-035: atomic publish so a polling reader never sees a partial file.
-    from ..utils import _atomic_write
+    from ..utils import atomic_write_text
 
-    _atomic_write(target, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(target, json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n")

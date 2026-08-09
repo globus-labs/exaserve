@@ -40,12 +40,13 @@ from typing import Callable, Optional
 
 
 class SessionState(str, Enum):
-    EXPECTED = "EXPECTED"                  # planned, never connected
-    AUTHENTICATED = "AUTHENTICATED"        # REGISTER accepted, snapshot owed
+    EXPECTED = "EXPECTED"  # planned, never connected
+    AUTHENTICATED = "AUTHENTICATED"  # REGISTER accepted, snapshot owed
     SNAPSHOT_PENDING = "SNAPSHOT_PENDING"  # snapshot assembling
-    ESTABLISHED = "ESTABLISHED"            # complete snapshot accepted
-    LOST = "LOST"                          # connection/lease gone, in grace
-    TERMINAL = "TERMINAL"                  # grace expired / fatal violation
+    SNAPSHOT_ACK_PENDING = "SNAPSHOT_ACK_PENDING"  # exact ACK/result owed
+    ESTABLISHED = "ESTABLISHED"  # snapshot ACK round trip accepted
+    LOST = "LOST"  # connection/lease gone, in grace
+    TERMINAL = "TERMINAL"  # grace expired / fatal violation
 
 
 class GenerationState(str, Enum):
@@ -67,6 +68,8 @@ class RankSession:
     last_heartbeat_at: Optional[float] = None
     loss_time: Optional[float] = None
     snapshot_id: str = ""
+    complete_set_hash: str = ""
+    snapshot_command_id: str = ""
     snapshot_accepted: bool = False
     supervisor_receipt_accepted: bool = False
     reconnects: int = 0
@@ -90,8 +93,10 @@ class SnapshotAssembly:
         if index < 0 or index >= self.total_chunks:
             return False, f"chunk index {index} out of range 0..{self.total_chunks - 1}"
         if self.total_chunks > self.limits.max_snapshot_chunks:
-            return False, (f"snapshot declares {self.total_chunks} chunks, limit is "
-                           f"{self.limits.max_snapshot_chunks}")
+            return False, (
+                f"snapshot declares {self.total_chunks} chunks, limit is "
+                f"{self.limits.max_snapshot_chunks}"
+            )
         existing = self.chunks.get(index)
         if existing is not None and existing != payload:
             return False, f"conflicting duplicate for chunk {index}"
@@ -117,8 +122,14 @@ class SnapshotAssembly:
 class SessionCoordinator:
     """Head-side authority over rank sessions for ONE generation."""
 
-    def __init__(self, *, plan, binding, clock: Callable[[], float] = time.monotonic,
-                 log: Callable[[str], None] = print) -> None:
+    def __init__(
+        self,
+        *,
+        plan,
+        binding,
+        clock: Callable[[], float] = time.monotonic,
+        log: Callable[[str], None] = print,
+    ) -> None:
         self.plan = plan
         self.binding = binding
         self.limits = plan.control
@@ -152,7 +163,7 @@ class SessionCoordinator:
             # Unplanned rank: session-local rejection, not generation-fatal.
             return False, f"rank {rank} is not in the allocation binding"
         bound = self.binding.node_for(rank)
-        if bound and node_id != bound:
+        if bound and not self.binding.is_bound_node(rank, node_id):
             # An authenticated rank asserting the wrong node is deterministic
             # and therefore generation-fatal.
             self._fatal(f"rank {rank} registered from {node_id!r}, bound to {bound!r}")
@@ -164,29 +175,48 @@ class SessionCoordinator:
         session.state = SessionState.AUTHENTICATED.value
         session.last_heartbeat_at = self._clock()
         session.loss_time = None
+        session.snapshot_id = ""
+        session.complete_set_hash = ""
+        session.snapshot_command_id = ""
+        session.snapshot_accepted = False
+        session.supervisor_receipt_accepted = False
         return True, "authenticated; complete snapshot owed"
 
-    def begin_snapshot(self, rank: int, snapshot_id: str, total_chunks: int,
-                       complete_hash: str) -> tuple[bool, str]:
+    def begin_snapshot(
+        self, rank: int, snapshot_id: str, total_chunks: int, complete_hash: str
+    ) -> tuple[bool, str]:
         session = self.sessions.get(rank)
         if session is None or session.state == SessionState.EXPECTED.value:
             return False, "snapshot before authentication"
         if total_chunks < 1:
             return False, "snapshot must declare at least one chunk"
         if total_chunks > self.limits.max_snapshot_chunks:
-            return False, (f"{total_chunks} chunks exceeds max_snapshot_chunks "
-                           f"{self.limits.max_snapshot_chunks}")
+            return False, (
+                f"{total_chunks} chunks exceeds max_snapshot_chunks "
+                f"{self.limits.max_snapshot_chunks}"
+            )
+        existing = self._assemblies.get(rank)
+        if existing is not None:
+            if (
+                existing.snapshot_id != snapshot_id
+                or existing.total_chunks != total_chunks
+                or existing.complete_hash != complete_hash
+            ):
+                return False, "a different snapshot is already in flight"
+            return True, "identical snapshot already assembling"
         # One in-flight snapshot per rank.
         self._assemblies[rank] = SnapshotAssembly(
-            snapshot_id=snapshot_id, total_chunks=total_chunks,
-            complete_hash=complete_hash, limits=self.limits,
-            started_at=self._clock())
+            snapshot_id=snapshot_id,
+            total_chunks=total_chunks,
+            complete_hash=complete_hash,
+            limits=self.limits,
+            started_at=self._clock(),
+        )
         session.state = SessionState.SNAPSHOT_PENDING.value
         session.snapshot_accepted = False
         return True, "assembling"
 
-    def add_snapshot_chunk(self, rank: int, index: int,
-                           payload: list) -> tuple[bool, str]:
+    def add_snapshot_chunk(self, rank: int, index: int, payload: list) -> tuple[bool, str]:
         assembly = self._assemblies.get(rank)
         if assembly is None:
             return False, "no snapshot in flight"
@@ -195,8 +225,9 @@ class SessionCoordinator:
             return False, "snapshot assembly deadline expired"
         return assembly.add(index, payload)
 
-    def complete_snapshot(self, rank: int, *, verify_hash: Optional[str] = None,
-                          supervisor_receipt: bool = False) -> tuple[bool, str]:
+    def complete_snapshot(
+        self, rank: int, *, verify_hash: Optional[str] = None, supervisor_receipt: bool = False
+    ) -> tuple[bool, str]:
         """Atomic replacement: an incomplete or mixed snapshot is refused."""
         assembly = self._assemblies.get(rank)
         session = self.sessions.get(rank)
@@ -214,29 +245,68 @@ class SessionCoordinator:
             return False, "snapshot content hash mismatch"
         del self._assemblies[rank]
         session.snapshot_id = assembly.snapshot_id
-        session.snapshot_accepted = True
+        session.complete_set_hash = actual
+        session.snapshot_command_id = f"SNAPSHOT_ACCEPTED:{rank}:{assembly.snapshot_id}"
+        # The complete set has been validated, but the barrier does not cross
+        # until the rank durably processes the exact SNAPSHOT_ACCEPTED command
+        # and returns the matching idempotent COMMAND_RESULT.
+        session.snapshot_accepted = False
         session.supervisor_receipt_accepted = (
-            supervisor_receipt or session.supervisor_receipt_accepted)
+            supervisor_receipt or session.supervisor_receipt_accepted
+        )
         if not session.supervisor_receipt_accepted:
             return False, "snapshot accepted but supervisor receipt is missing"
-        session.state = SessionState.ESTABLISHED.value
+        session.state = SessionState.SNAPSHOT_ACK_PENDING.value
         session.last_heartbeat_at = self._clock()
         session.loss_time = None
+        return True, "snapshot validated; acknowledgment round trip pending"
+
+    def acknowledge_snapshot(
+        self,
+        rank: int,
+        *,
+        command_id: str,
+        snapshot_id: str,
+        complete_set_hash: str,
+        succeeded: bool,
+    ) -> tuple[bool, str]:
+        """Cross the registration barrier only for the exact command/result."""
+        session = self.sessions.get(rank)
+        if session is None:
+            return False, "unknown rank"
+        if session.state != SessionState.SNAPSHOT_ACK_PENDING.value:
+            return False, "no snapshot acknowledgment is pending"
+        if not succeeded:
+            return False, "SNAPSHOT_ACCEPTED command failed"
+        if command_id != session.snapshot_command_id:
+            return False, "snapshot acknowledgment command_id mismatch"
+        if snapshot_id != session.snapshot_id:
+            return False, "snapshot acknowledgment snapshot_id mismatch"
+        if complete_set_hash != session.complete_set_hash:
+            return False, "snapshot acknowledgment complete_set_hash mismatch"
+        session.snapshot_accepted = True
+        session.state = SessionState.ESTABLISHED.value
+        session.last_heartbeat_at = self._clock()
         return True, "established"
 
     def all_registered(self) -> bool:
         """Every planned rank established WITH its snapshot and receipt."""
-        return all(s.is_established() and s.snapshot_accepted
-                   and s.supervisor_receipt_accepted
-                   for s in self.sessions.values())
+        return all(
+            s.is_established() and s.snapshot_accepted and s.supervisor_receipt_accepted
+            for s in self.sessions.values()
+        )
 
     def may_start(self) -> tuple[bool, str]:
         if self.generation_state == GenerationState.TERMINAL.value:
             return False, self.terminal_reason or "generation terminal"
         if not self.all_registered():
-            pending = sorted(r for r, s in self.sessions.items()
-                             if not (s.is_established() and s.snapshot_accepted
-                                     and s.supervisor_receipt_accepted))
+            pending = sorted(
+                r
+                for r, s in self.sessions.items()
+                if not (
+                    s.is_established() and s.snapshot_accepted and s.supervisor_receipt_accepted
+                )
+            )
             return False, f"ranks not established: {pending[:8]}"
         return True, "all planned ranks established"
 
@@ -255,23 +325,36 @@ class SessionCoordinator:
             return None
         pending = sorted(r for r, s in self.sessions.items() if not s.is_established())
         if pending:
-            reason = (f"registration deadline ({self.limits.registration_deadline_s}s) "
-                      f"expired with ranks {pending[:8]} not established")
+            reason = (
+                f"registration deadline ({self.limits.registration_deadline_s}s) "
+                f"expired with ranks {pending[:8]} not established"
+            )
             self._fatal(reason)
             return reason
         return None
 
     # -- phase 3: loss / reconnect ----------------------------------------
-    def on_disconnect(self, rank: int, *, expected: bool = False,
-                      now: Optional[float] = None) -> str:
+    def on_disconnect(
+        self, rank: int, *, expected: bool = False, now: Optional[float] = None
+    ) -> str:
         """EOF/reset. `expected` only after an acknowledged DRAIN/STOP."""
         session = self.sessions.get(rank)
         if session is None:
             return "unknown rank"
         now = self._clock() if now is None else now
-        if expected or rank in self._drain_requested:
+        was_established = session.is_established()
+        if expected:
             session.state = SessionState.TERMINAL.value
             return "expected goodbye"
+        self._assemblies.pop(rank, None)
+        session.snapshot_accepted = False
+        # Before START, transport retries remain bounded by the initial
+        # registration deadline; reconnect grace applies only to an established
+        # generation. A partial registration must begin a fresh snapshot.
+        if not was_established:
+            session.state = SessionState.EXPECTED.value
+            session.loss_time = None
+            return "registration interrupted"
         session.state = SessionState.LOST.value
         session.loss_time = now
         return "lost"
@@ -282,7 +365,7 @@ class SessionCoordinator:
 
     def on_heartbeat(self, rank: int, now: Optional[float] = None) -> None:
         session = self.sessions.get(rank)
-        if session is not None:
+        if session is not None and session.is_established():
             session.last_heartbeat_at = self._clock() if now is None else now
 
     def poll_leases(self, now: Optional[float] = None) -> list:
@@ -303,15 +386,19 @@ class SessionCoordinator:
 
     def readiness_revoked_ranks(self) -> tuple:
         """Any non-established session revokes readiness immediately."""
-        return tuple(sorted(r for r, s in self.sessions.items()
-                            if not s.is_established()))
+        return tuple(sorted(r for r, s in self.sessions.items() if not s.is_established()))
 
-    def reconnect(self, rank: int, node_id: str, instance_id: str,
-                  now: Optional[float] = None) -> tuple[bool, str]:
+    def reconnect(
+        self, rank: int, node_id: str, instance_id: str, now: Optional[float] = None
+    ) -> tuple[bool, str]:
         """Recover inside grace, and only via a complete replacement snapshot."""
         session = self.sessions.get(rank)
         if session is None:
             return False, "unknown rank"
+        if not self.binding.is_bound_node(rank, node_id):
+            self._fatal(f"rank {rank} reconnected from unbound node {node_id!r}")
+            session.state = SessionState.TERMINAL.value
+            return False, "node does not match the allocation binding"
         now = self._clock() if now is None else now
         if session.state == SessionState.TERMINAL.value:
             return False, "session is terminal; a later reconnect cannot resurrect it"
@@ -323,9 +410,20 @@ class SessionCoordinator:
         session.reconnects += 1
         session.snapshot_accepted = False
         session.supervisor_receipt_accepted = False
+        session.snapshot_id = ""
+        session.complete_set_hash = ""
+        session.snapshot_command_id = ""
         session.instance_id = instance_id
         session.state = SessionState.AUTHENTICATED.value
         return True, "reconnected; complete snapshot required before incrementals"
+
+    def protocol_violation(self, rank: int, reason: str) -> None:
+        """A deterministic violation after planned authentication is fatal."""
+        session = self.sessions.get(rank)
+        if session is not None:
+            session.state = SessionState.TERMINAL.value
+        self._assemblies.pop(rank, None)
+        self._fatal(f"rank {rank} protocol violation: {reason}")
 
     def accept_incremental(self, rank: int) -> tuple[bool, str]:
         """An incremental before the replacement snapshot is refused."""
@@ -333,8 +431,10 @@ class SessionCoordinator:
         if session is None:
             return False, "unknown rank"
         if not session.is_established() or not session.snapshot_accepted:
-            return False, ("incremental observation before a complete snapshot; "
-                           "reconnect must replace the whole projection first")
+            return False, (
+                "incremental observation before a complete snapshot; "
+                "reconnect must replace the whole projection first"
+            )
         return True, "accepted"
 
     def check_grace_deadlines(self, now: Optional[float] = None) -> list:
@@ -356,8 +456,11 @@ class SessionCoordinator:
         session = self.sessions.get(rank)
         if session is None or session.loss_time is None:
             return None
-        return (session.loss_time + self.limits.reconnect_grace_s
-                + self.limits.watchdog_cleanup_deadline_s)
+        return (
+            session.loss_time
+            + self.limits.reconnect_grace_s
+            + self.limits.watchdog_cleanup_deadline_s
+        )
 
     # -- reporting ---------------------------------------------------------
     def snapshot_state(self) -> dict:

@@ -264,9 +264,14 @@ This project uses helper scripts in `~/script/`:
 | `~/script/env_aurora` | Environment setup for Ray-only work |
 | `~/script/env_litellm` | Environment setup for LiteLLM work |
 
-Additionally, batch job infrastructure exists under `eval/`:
-- `eval/templates/job.pbs.tmpl` — PBS job template
-- `eval/submit_all.py` — batch job submission orchestrator
+Additionally, batch jobs are materialized and submitted through the shared
+Python control plane:
+- `python3 -m eval.cli run materialize <spec>` — compile immutable run bundles
+- `python3 -m eval.cli run submit <run.yaml>` — submit one exact run identity
+- `python3 -m eval.cli run submit-all <spec>` — bounded, idempotent batch submission
+
+Job bodies are rendered by `src/exaserve/schedulers/`; no shell template owns
+deployment lifecycle, readiness, or cleanup.
 
 When repository-specific instructions conflict with generic behavior, prefer the repository-specific instructions, while still preserving the core rule: **do not run experiments directly on the login node**.
 

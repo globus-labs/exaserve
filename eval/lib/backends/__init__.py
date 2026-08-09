@@ -6,7 +6,8 @@ lifecycle: validate -> build_runtime_manifest -> launch -> wait_ready ->
 discover_targets -> stop.
 
 Currently supported:
-  - "ray": launches the real Ray Serve cluster via src/exaserve/resources/launch_cluster.sh.
+  - "ray": launches the packaged Python composition root directly and reads
+    canonical DeploymentStatus for readiness.
   - "mock": no-op adapter for testing the control plane without a real cluster.
 
 Adding a new backend: implement BackendAdapter, register it in _BACKENDS.

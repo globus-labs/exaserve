@@ -31,6 +31,7 @@ deployment:
 client:
   num_runs: 4
   dest: direct
+  direct_dispatch: mesh
   stream: false
   num_go_procs: 4
   num_go_workers: 4

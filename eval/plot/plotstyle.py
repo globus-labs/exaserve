@@ -14,6 +14,7 @@ by apply(). Per-series choices live here. Helpers:
                                   dashed box border for dashed (non-stream) series
   titles(fig, title, subtitle) -> bold title + multi-line italic subtitle
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -32,12 +33,19 @@ PROXY_COLORS = {
     "litellm": "#66a61e",
 }
 PROXY_MARKERS = {
-    "direct": "o", "haproxy": "s", "envoy": "^", "rayserve": "D", "litellm": "v",
+    "direct": "o",
+    "haproxy": "s",
+    "envoy": "^",
+    "rayserve": "D",
+    "litellm": "v",
 }
 # Pretty display names for legends / axis ticks.
 PROXY_LABEL = {
-    "direct": "Direct", "haproxy": "HAProxy", "envoy": "Envoy",
-    "rayserve": "RayServe", "litellm": "LiteLLM",
+    "direct": "Direct",
+    "haproxy": "HAProxy",
+    "envoy": "Envoy",
+    "rayserve": "RayServe",
+    "litellm": "LiteLLM",
 }
 # mode -> line style (consistent everywhere)
 MODE_LS = {"stream": "-", "nonstream": "--"}
@@ -47,6 +55,7 @@ MODE_LABEL = {"stream": "streaming", "nonstream": "non-stream"}
 def plabel(proxy, mode=None):
     name = PROXY_LABEL.get(proxy, proxy)
     return f"{name} ({MODE_LABEL[mode]})" if mode else name
+
 
 # Series marker/line weights — kept in sync with matplotlibrc (lab convention:
 # thin lines, small markers) so figures read well at final paper size.
@@ -61,35 +70,57 @@ SHOW_VALUE_LABELS = False
 
 def apply():
     import matplotlib
+
     matplotlib.use("Agg")
     rc = Path(__file__).resolve().parent / "matplotlibrc"
     if rc.exists():
         matplotlib.rc_file(rc)
     import matplotlib.pyplot as plt
+
     return plt
 
 
 def proxy_kw(proxy, mode="stream"):
-    return dict(color=PROXY_COLORS[proxy], marker=PROXY_MARKERS[proxy],
-                linestyle=MODE_LS[mode])
+    return dict(color=PROXY_COLORS[proxy], marker=PROXY_MARKERS[proxy], linestyle=MODE_LS[mode])
 
 
 def is_dashed(mode):
     return MODE_LS.get(mode, "-") != "-"
 
 
-def line(ax, xs, ys, proxy, mode="stream", label=None, yerr=None, alpha=0.95,
-         lw=LW, zorder=3):
+def line(ax, xs, ys, proxy, mode="stream", label=None, yerr=None, alpha=0.95, lw=LW, zorder=3):
     """Consistent (optionally error-barred) line for a proxy/mode series."""
     kw = proxy_kw(proxy, mode)
     if yerr is not None:
-        return ax.errorbar(xs, ys, yerr=yerr, label=label, lw=lw, markersize=MS,
-                           markerfacecolor=kw["color"], markeredgecolor="white",
-                           markeredgewidth=MEW, alpha=alpha, zorder=zorder,
-                           capsize=2, capthick=0.6, **kw)
-    return ax.plot(xs, ys, label=label, lw=lw, markersize=MS,
-                   markerfacecolor=kw["color"], markeredgecolor="white",
-                   markeredgewidth=MEW, alpha=alpha, zorder=zorder, **kw)
+        return ax.errorbar(
+            xs,
+            ys,
+            yerr=yerr,
+            label=label,
+            lw=lw,
+            markersize=MS,
+            markerfacecolor=kw["color"],
+            markeredgecolor="white",
+            markeredgewidth=MEW,
+            alpha=alpha,
+            zorder=zorder,
+            capsize=2,
+            capthick=0.6,
+            **kw,
+        )
+    return ax.plot(
+        xs,
+        ys,
+        label=label,
+        lw=lw,
+        markersize=MS,
+        markerfacecolor=kw["color"],
+        markeredgecolor="white",
+        markeredgewidth=MEW,
+        alpha=alpha,
+        zorder=zorder,
+        **kw,
+    )
 
 
 def legend(ax, **kw):
@@ -102,8 +133,11 @@ def legend(ax, **kw):
 
 def plain_log_y(ax):
     from matplotlib.ticker import ScalarFormatter
-    f = ScalarFormatter(); f.set_scientific(False)
-    ax.yaxis.set_major_formatter(f); ax.yaxis.set_minor_formatter(f)
+
+    f = ScalarFormatter()
+    f.set_scientific(False)
+    ax.yaxis.set_major_formatter(f)
+    ax.yaxis.set_minor_formatter(f)
 
 
 def fixed_log_y(ax, ticks):
@@ -111,13 +145,13 @@ def fixed_log_y(ax, ticks):
     but unlabelled. For a series confined to ONE decade, where sparse_log_y would
     label only that decade's endpoint and plain_log_y labels every minor tick and
     they collide."""
-    from matplotlib.ticker import (FixedLocator, LogLocator, ScalarFormatter,
-                                   NullFormatter)
-    f = ScalarFormatter(); f.set_scientific(False)
+    from matplotlib.ticker import FixedLocator, LogLocator, ScalarFormatter, NullFormatter
+
+    f = ScalarFormatter()
+    f.set_scientific(False)
     ax.yaxis.set_major_locator(FixedLocator(list(ticks)))
     ax.yaxis.set_major_formatter(f)
-    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(np.arange(2, 10)),
-                                          numticks=12))
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(np.arange(2, 10)), numticks=12))
     ax.yaxis.set_minor_formatter(NullFormatter())
 
 
@@ -129,19 +163,21 @@ def sparse_log_y(ax, sci=False):
     numticks is pinned (rather than left at 'auto') so EVERY decade keeps its
     label: auto subsamples by axis length, which silently dropped alternate
     decades once the figures were shortened."""
-    from matplotlib.ticker import (LogLocator, ScalarFormatter,
-                                   LogFormatterMathtext, NullFormatter)
+    from matplotlib.ticker import LogLocator, ScalarFormatter, LogFormatterMathtext, NullFormatter
+
     ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=12))
     ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(np.arange(2, 10)), numticks=12))
     if sci:
         ax.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
     else:
-        f = ScalarFormatter(); f.set_scientific(False)
+        f = ScalarFormatter()
+        f.set_scientific(False)
         ax.yaxis.set_major_formatter(f)
     ax.yaxis.set_minor_formatter(NullFormatter())
 
 
 # --- annotations that stack on collision ------------------------------------
+
 
 class AnnotationStacker:
     """Collect value labels per axis; at render, labels sharing an x position are
@@ -161,8 +197,7 @@ class AnnotationStacker:
     def add(self, x, y, color, dashed=False, text=None):
         if y is None or (isinstance(y, float) and np.isnan(y)):
             return
-        self._items.append((x, y, color, dashed,
-                             text if text is not None else self.fmt.format(y)))
+        self._items.append((x, y, color, dashed, text if text is not None else self.fmt.format(y)))
 
     def add_series(self, xs, ys, color, dashed=False):
         for x, y in zip(xs, ys):
@@ -186,25 +221,41 @@ class AnnotationStacker:
             groups[round(float(it[0]), 6)].append(it)
 
         def emit(x, y, color, dashed, text, off, va):
-            ax.annotate(text, (x, y), textcoords="offset points", xytext=(0, off),
-                        ha="center", va=va, fontsize=self.fs, fontweight="bold",
-                        color=color, zorder=6,
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color,
-                                  lw=0.5, ls="--" if dashed else "-", alpha=0.92))
+            ax.annotate(
+                text,
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, off),
+                ha="center",
+                va=va,
+                fontsize=self.fs,
+                fontweight="bold",
+                color=color,
+                zorder=6,
+                bbox=dict(
+                    boxstyle="round,pad=0.15",
+                    fc="white",
+                    ec=color,
+                    lw=0.5,
+                    ls="--" if dashed else "-",
+                    alpha=0.92,
+                ),
+            )
 
         for _, its in groups.items():
             ypts = {id(it): ax.transData.transform((it[0], it[1]))[1] * px_to_pt for it in its}
-            up = sorted(its, key=lambda it: ypts[id(it)])     # ascending
+            up = sorted(its, key=lambda it: ypts[id(it)])  # ascending
             tops, last = [], None
             for it in up:
                 t = ypts[id(it)] + base_pts
                 if last is not None and t < last + min_gap_pts:
                     t = last + min_gap_pts
-                last = t; tops.append(t)
+                last = t
+                tops.append(t)
             if not tops or max(tops) <= y_top - (self.fs + 4):
-                for it, t in zip(up, tops):       # fits: stack upward
+                for it, t in zip(up, tops):  # fits: stack upward
                     emit(*it, off=t - ypts[id(it)], va="bottom")
-            else:                                  # would hit ceiling: stack downward
+            else:  # would hit ceiling: stack downward
                 last = None
                 for it in sorted(its, key=lambda it: -ypts[id(it)]):  # descending
                     b = ypts[id(it)] - base_pts
@@ -218,6 +269,7 @@ def finalize(fig, stackers, out, rect=None):
     """Lay out, THEN render value-label stackers against the final transform,
     then save. Stackers rendered post-layout so collision detection is accurate."""
     import matplotlib.pyplot as plt
+
     fig.tight_layout(rect=rect) if rect else fig.tight_layout()
     fig.canvas.draw()
     for s in stackers:
@@ -229,6 +281,7 @@ def finalize(fig, stackers, out, rect=None):
 
 # --- titles -----------------------------------------------------------------
 
+
 def titles(fig, title, subtitle):
     """Bold title + multi-line italic subtitle, placed by absolute inches from
     the top so it works at any figure height. `subtitle` may be a string (split
@@ -238,13 +291,21 @@ def titles(fig, title, subtitle):
     else:
         lines = list(subtitle)
     H = fig.get_size_inches()[1]
-    n_title = title.count("\n") + 1                 # supports a multi-line title
-    title_extra = 0.16 * (n_title - 1)              # inches added per extra line
+    n_title = title.count("\n") + 1  # supports a multi-line title
+    title_extra = 0.16 * (n_title - 1)  # inches added per extra line
     # fig.text (not suptitle) so tight_layout does not auto-reserve extra space
     # for it on top of our explicit rect — that double-count opened a large gap
     # between the header and the first subplot.
-    fig.text(0.5, 1 - 0.17 / H, title, ha="center", va="top",
-             fontsize=8, fontweight="bold", color="#1a1a1a")
+    fig.text(
+        0.5,
+        1 - 0.17 / H,
+        title,
+        ha="center",
+        va="top",
+        fontsize=8,
+        fontweight="bold",
+        color="#1a1a1a",
+    )
     y = 1 - (0.34 + title_extra) / H
     for ln in lines:
         fig.text(0.5, y, ln, ha="center", fontsize=6, style="italic", color="#555555")

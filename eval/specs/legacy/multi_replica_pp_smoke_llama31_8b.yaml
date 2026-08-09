@@ -25,6 +25,7 @@ deployment:
 client:
   num_runs: 1
   dest: direct
+  direct_dispatch: mesh  # PP exposes replica routes, not one local target per node
   num_go_procs: 16
   num_go_workers: 2
   go_concurrency: 40

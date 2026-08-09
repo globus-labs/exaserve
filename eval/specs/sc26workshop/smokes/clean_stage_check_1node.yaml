@@ -1,7 +1,7 @@
 name: clean_stage_check_1node
 # Validation for the per-run clean-stage flag: 1 node, startup_only (no replay),
 # clean_stage=true. Expect: "CLEAN-STAGE: wiping..." -> cleanup_run.sh output ->
-# model_bcast "Broadcast complete" (NOT "Reusing staged cache") -> CLUSTER READY.
+# model-broadcast result manifest proves a fresh stage before canonical READY.
 matrix:
   name_template: '{num_nodes}_nodes'
   axes:
@@ -24,6 +24,7 @@ workload:
   rate_per_node: 10.0
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
@@ -56,8 +57,8 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs
-  queue: debug
+  queue: capacity
   walltime: 01:00:00

@@ -1,222 +1,162 @@
----
-name: exaserve
-description: Framework for scaling OpenAI-compatible LLM inference across HPC compute nodes — Ray Serve deployments with a pluggable inference engine (vLLM/SGLang) over batch-scheduler allocations (PBS today, Slurm planned), with MPI weight staging, pluggable HAProxy/LiteLLM front ends, multi-node pipeline parallelism, and a declarative scaling-benchmark harness
-package: exaserve
-install: module load frameworks && pip install --user .
-language: python
-python_requires: ">=3.10"
-docs: https://github.com/wenyiwang-us/exaserve/blob/main/README.md
-source: https://github.com/wenyiwang-us/exaserve
-examples: https://github.com/wenyiwang-us/exaserve/tree/main/examples
-benchmarks: https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard
-reference_system: ALCF Aurora (PBS, Intel PVC XPU, 12 tiles/node)
----
+# ExaServe reference card — hardened architecture
 
-# ExaServe Reference Card
+This page is the machine-readable companion to `ExaServe_Reference_Card.docx`.
+The authoritative architecture and acceptance contract is
+[`PRODUCTION_HARDENING_EXECUTION_PLAN.md`](PRODUCTION_HARDENING_EXECUTION_PLAN.md);
+the live release verdict is [`hardening/STATUS.md`](hardening/STATUS.md).
 
-ExaServe (distributed as the `exaserve` package) turns a batch-scheduler allocation of N HPC nodes (e.g. a PBS job) into a single OpenAI-compatible LLM inference endpoint: it launches a Ray cluster over the allocation, stages model weights to node-local storage with an MPI broadcast, and deploys inference replicas as Ray Serve applications — one per accelerator tile for single-tile models, or spanning tiles and nodes via tensor/pipeline parallelism for larger ones — fronted by a head-node proxy such as HAProxy. A single `EngineWorker` deployment hosts the OpenAI HTTP surface over a pluggable engine backend (vLLM or SGLang), and the front-end proxy is likewise pluggable (HAProxy, LiteLLM, …) — Ray + engine-of-choice + proxy-of-choice. Validated on ALCF Aurora at up to 256 nodes / 3,072 XPU tiles: 27.1k non-streaming QPS with Llama-3-8B (one replica per tile) through a single HAProxy front end — 96% weak-scaling efficiency (27.1k of 28.2k offered, 0% errors) — and multi-node pipeline-parallel serving of Llama-3.1-405B (TP8 × PP2).
+## Current support boundary
 
-## Install
+The only production candidate is:
 
-Install is site-specific; the recipe below targets **ALCF Aurora** (other sites to follow). It installs into the Python provided by Aurora's `frameworks` module, which already ships Ray, vLLM, MPI, and the oneAPI toolchain; pip adds only this package.
+- ALCF Aurora, native PBS;
+- Intel PVC/XPU, 12 accelerator tiles per node;
+- vLLM under the exact compatibility profile shipped with the current Aurora
+  frameworks environment;
+- HAProxy on the allocation head;
+- non-streaming OpenAI-compatible requests; and
+- trusted allocation-internal network exposure.
+
+The evidence-backed maximum is two nodes. The proposed 64-node ladder remains a
+candidate pending explicit product-owner scope approval and final-architecture
+4/16/64-node evidence. Historical 128/256-node results are useful regression
+context but do not qualify this architecture.
+
+Slurm/PSI-J, CUDA/ROCm, SGLang, streaming, public exposure, direct Serve
+exposure, and LiteLLM/NGINX/Envoy/Pingora are unsupported or validation-only.
+The presence of an implementation interface is not a support claim.
+
+## Run
 
 ```bash
 module load frameworks
-git clone https://github.com/wenyiwang-us/exaserve && cd exaserve
 python3 -m pip install --user .
 
-# console scripts land in a frameworks-versioned bin dir; add it to PATH:
-export PATH="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))'):$PATH"
-which exaserve-serve-submit   # verify
-```
-
-One-time extras, only for the feature that uses them:
-
-| Component | Needed for | Setup |
-|---|---|---|
-| HAProxy | `proxy_config.type: haproxy` | `bash scripts/build_haproxy.sh` |
-| LiteLLM | `proxy_config.type: litellm` | own venv: `python3 -m venv ~/litellm_venv && ~/litellm_venv/bin/pip install 'litellm[proxy]'` |
-| Go load generator | benchmarking (`eval/`) | `module load go && bash eval/go_client/build.sh` |
-
-## Core commands
-
-| Command | Purpose |
-|---|---|
-| `exaserve-serve-submit <cfg> --wait` | Submit a serving job from a login node; prints the scheduler job id + service URL |
-| `exaserve-serve-submit <cfg> --dry-run` | Write the generated job script without submitting (custom submission pipelines) |
-| `exaserve-launch-cluster <cfg>` | Foreground launch inside an interactive allocation; ready when it prints `[Driver] ALL SERVICES READY` |
-| `exaserve-serve-url <jobid>` | Resolve a running job's service URL |
-| `exaserve-model-bcast --config <cfg> --num-nodes N` | Pre-stage weights node-locally without starting Ray |
-| `qdel <jobid>` | Tear down a deployment — cancel its scheduler job (`qdel` on PBS, `scancel` on Slurm) |
-| `python -m eval.cli run materialize <spec>` | Benchmark spec → traces + per-cell scheduler jobs |
-| `python -m eval.cli run submit-all <spec>` | Submit all cells of a benchmark sweep |
-| `python -m eval.plot.goodput -e <spec> --preset paper` | Score a finished sweep against latency SLOs |
-
-## Minimal runnable example
-
-One YAML file describes a deployment (`ray_cluster_config`, `model_deployment_config`, `proxy_config`). Only `model_storage_path` (your model dir on the shared file system, e.g. Lustre) and `local_stage_path` (node-local staging dir) typically vary per user.
-
-```yaml
-# my_config.yaml — 2 nodes, 24 Llama-3-8B replicas, HAProxy endpoint
-ray_cluster_config:
-  head_ip: ""              # filled in at runtime
-  port: 6379
-  node_cpus: 64
-model_deployment_config:
-  num_nodes: 2
-  model_storage_path: /lus/flare/projects/<PROJECT>/<user>/models
-  local_stage_path: /tmp/hf_home
-  num_gpus_per_node: 12
-  model_configs:
-    - model_id: meta-llama/Meta-Llama-3-8B-Instruct
-      tensor_parallel_size: 1
-      pipeline_parallel_size: 1
-      max_model_len: 4096
-      size: 8                # billions of params; drives replica planning
-      gpu_memory_utilization: 0.90
-      enforce_eager: true
-      max_num_seqs: 64
-proxy_config:
-  type: haproxy              # haproxy | litellm | none
-  port: 4001                 # client-facing port
-  backend_port: 8000         # Ray Serve HTTP port on each node
-```
-
-```bash
+cp examples/config.haproxy.yaml my_config.yaml
+# Edit model_storage_path.
 exaserve-serve-submit my_config.yaml --project-account YOUR_PROJECT --wait
-# 8470123.aurora-pbs-0001...
-# http://x4310c1s0b0n0:4001
-
-curl -sS -X POST "http://x4310c1s0b0n0:4001/v1/chat/completions" \
-     -H 'Content-Type: application/json' \
-     -d '{"model":"meta-llama/Meta-Llama-3-8B-Instruct",
-          "messages":[{"role":"user","content":"hello"}],"max_tokens":8}'
-# {"id":"chatcmpl-...","choices":[{"message":{"content":"Hi!"...}}],...}
-
-qdel 8470123
 ```
 
-Ready-to-customize templates: [examples/](https://github.com/wenyiwang-us/exaserve/tree/main/examples) — `config.haproxy.yaml`, `config.litellm.yaml`, `config.reference.yaml` (every field, annotated).
+The submit command prints the exact job ID. It prints an endpoint only after the
+matching deployment generation publishes canonical `READY`; PBS `RUNNING`, an
+open proxy socket, or stdout text is insufficient.
 
-## Deployment recipes
+```bash
+exaserve-serve-url JOB_ID --wait
+exaserve-status show --run-dir /path/to/run --json
+qdel JOB_ID
+```
 
-### Front-end proxy at scale
-
-All client traffic enters through the head-node proxy (HAProxy recommended). Measured behavior at scale (Llama-3-8B, 64-in/64-out, 110 QPS/node offered, up to 256 nodes / 3,072 single-tile replicas):
-
-- **Non-streaming completions** scale nearly linearly through a single HAProxy: 27.1k QPS at 256 nodes, 0.0% errors; p99 end-to-end latency stays near ~2 s at every scale.
-- **Streaming (SSE)** is harder on a centralized front end: the per-token delivery path saturates the head node's network. HAProxy still completes essentially every request but slowly — throughput plateaus at ~4.7k QPS from 128 nodes, with p50 5.7 s / p99 17 s end-to-end at 256 nodes, so SLO attainment is effectively zero. Other centralized proxies fare worse: Envoy degrades to 3.0k QPS at 44% success (256 nodes), the Ray Serve single-ProxyActor front end falls from 100% success at 1 node to 15% at 16 and 3% at 256, and LiteLLM's uvicorn front end falls to 6.5% success by 64 nodes. Budget streaming capacity per proxy, and prefer non-streaming at extreme scale.
-
-For benchmarking only, the harness's client can bypass the proxy and dispatch to per-node endpoints (`client.dest: direct` in a spec) to isolate front-end overhead from backend capacity — the backends themselves stream at 19.4k QPS with 100% success at 256 nodes when the proxy is bypassed. This mode exposes one endpoint per node and is not a deployment path.
-
-### Multi-node pipeline parallelism (405B-class models)
-
-Llama-3.1-405B spans two nodes per replica: TP=8 within a node × PP=2 across a node pair. Shard-aware staging (`EXASERVE_PP_SHARD_AWARE=1`) gives each pipeline stage only its own weight shard (~380 GiB, fits node-local tmpfs) and pins each replica's deployment to its nodes. The benchmark harness derives this env var automatically from the spec (PP>1 with multiple replicas). Measured at a fixed per-replica offered rate (0.4 QPS per replica), streaming: aggregate successful throughput grows from 0.7 QPS at 2 replicas to 31.0 QPS at 128 replicas (4 → 256 nodes) — 67% weak-scaling efficiency vs the 4-node base, sublinear rather than linear; through a single HAProxy the service tracks the proxy-bypass diagnostic up to 64 nodes (9.3 QPS, 80%) before the head-node streaming ceiling appears. A non-streaming 405B configuration has not been measured.
+## Canonical deployment input
 
 ```yaml
-model_configs:
-  - model_id: meta-llama/Llama-3.1-405B-Instruct
-    tensor_parallel_size: 8
-    pipeline_parallel_size: 2
-    size: 405
-    max_num_seqs: 8
+num_nodes: 2
+num_gpus_per_node: 12
+node_cpus: 64
+ray_port: 6379
+model_storage_path: /lus/flare/projects/PROJECT/USER/models
+local_stage_path: /tmp/hf_home
+deployment_name: exaserve_serve
+replica_max_ongoing_requests: 32
+engine: vllm
+vendor: xpu
+
+models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+    num_cpus_per_replica: 4
+
+exposure:
+  mode: PROXIED_INTERNAL
+  network_boundary: trusted_allocation
+
+gateway:
+  kind: haproxy
+  port: 4001
+  backend_port: 8000
+  executable_ref: PATH:haproxy
+  worker_count: 1
+  options:
+    balance: leastconn
+    maxconn: 8000
 ```
 
-### Workload robustness (one-axis-at-a-time)
+There is no nested `model_deployment_config`, `proxy_config`, or mutable Ray
+runtime schema. `maxconn: 8000` fits Aurora's observed descriptor ceiling;
+ExaServe calculates and checks the exact required `RLIMIT_NOFILE` before
+HAProxy launch.
 
-Holding the 8B baseline fixed and varying one axis at a time, with each row's offered rate pinned at 90% of its single-node saturation. Values are SLO attainment — the fraction of requests meeting TTFT ≤ 2 s and P99 TBT ≤ 250 ms — at N=1 and N=64 nodes with HAProxy:
+## What the control plane proves
 
-| Perturbation | attain (N=1) | attain (N=64) | Δ |
-|---|---|---|---|
-| (baseline) 8B, 64/64, fixed-interval | 0.91 | 0.43 | −0.48 |
-| Workload: ShareGPT 2K/2K | 1.00 | 0.90 | −0.10 |
-| Workload: ShareGPT 4K/4K | 1.00 | 1.00 | 0.00 |
-| Workload: Code (HumanEval) | 1.00 | 1.00 | 0.00 |
-| Workload: Chat (ShareGPT natural) | 0.99 | 0.99 | 0.00 |
-| Workload: Summarization | 1.00 | 1.00 | 0.00 |
-| Model: 120B (TP=8, rate 9) | 0.98 | 0.97 | −0.01 |
-| Arrival: Poisson | 0.89 | 0.35 | −0.54 |
-| Arrival: BurstGPT trace † | 0.46 | 0.46 | 0.00 |
+One Python composition root owns the complete generation. It persists immutable
+plan/site/allocation identities, runs finite staging, supervises all process
+groups, hosts the authenticated rank-control sessions, owns the deployment
+child and HAProxy, evaluates readiness, and performs bounded cleanup.
 
-† BurstGPT replays a fixed total arrival rate not scaled by N, so its N=64 cell is not a weak-scaling stress; reported for completeness.
+`READY` requires the exact planned node sessions, Ray membership/resources,
+Serve applications and replicas, engine/process compatibility receipts, route
+health, the owned gateway, and a real canary through the compiled advertised
+endpoint. Evidence is generation-bound and freshness-limited. Loss after READY
+revokes readiness and triggers the declared failure/teardown policy.
 
-Long-context and moderate-rate workloads (2K/2K, 4K/4K, code, chat, summarization) and the 120B model hold attainment at 64 nodes within a point of their single-node value. The two rows that degrade — the short/high-rate baseline and Poisson arrivals at the same mean — lose their latency margin at the saturation knee once 64 nodes share the streaming path: the failure is load-shape specific, not model- or workload-specific.
+Subprocesses exist only at genuine OS boundaries and use argv vectors,
+deadlines, process-group ownership, and structured handshakes. No shell wrapper
+or output parser decides lifecycle or readiness. Compatibility uses targeted,
+version-pinned activation with attestation; the old full-file overlay/replacement
+path was removed.
 
-### Steady-state serving vs startup time
-
-All numbers above are steady-state serving, measured after the cluster reports ready. Cluster bring-up does **not** scale the same way — this is Ray's key limitation at HPC scale. Of the four bring-up phases, three are roughly flat in node count: MPI model staging (~50 s for 8B; per-replica weight load ~33 s), Ray cluster start (~45 s), and first-request warm-up (~8 s). The fourth, Ray Serve's `serve.run`, grows superlinearly (measured, HAProxy, 12 replicas/node):
-
-| Nodes | Replicas | deploy_apps (s) | wait_proxies (s) | serve.run (s) | Total (s) |
-|---|---|---|---|---|---|
-| 64 | 768 | 115 | 38 | 154 | 171 |
-| 128 | 1,536 | 156 | 300 | 456 | 470 |
-| 256 | 3,072 | 155 | 1,612 | 1,767 | 1,857 |
-
-The growth is concentrated in `wait_proxies` (38 s → 1,612 s, a 42× increase over a 4× node increase): on every deployment broadcast, every Ray Serve proxy resolves every replica handle against the Ray GCS — `R·N²` work that reaches 1.38 M `GetActorInfo` calls and 1,587 s of per-proxy GCS time at 256 nodes. A 512-node bring-up fails outright. Practical consequences: budget job walltime as bring-up + serving window (405B weight loading adds substantially more), and reuse a running cluster across runs where possible instead of re-deploying per experiment.
-
-### Launch-time environment knobs
-
-| Env var | Effect |
-|---|---|
-| `EXASERVE_ENGINE=sglang` | Select the SGLang engine backend instead of the default vLLM (both plug into the same `EngineWorker` host) |
-| `EXASERVE_PP_SHARD_AWARE=1` | Shard-aware multi-node PP staging + node-pinned per-replica deploys |
-| `EXASERVE_PP_UMBRELLA=1` | Single root-route ingress over the per-replica PP routes |
-| `EXASERVE_NULL_COMPUTE=1` | Skip the engine, simulate latency — control-plane/routing stress tests |
-| `EXASERVE_CLEAN_STAGE=1` | Wipe node-local staged weights first (cold-start timing) |
-
-Scale cliffs and fixes (Ray/vLLM patches at 256+ nodes, thread-pool clamps — applied automatically by the launcher): [doc/KNOWN_ISSUES.md](KNOWN_ISSUES.md).
-
-## Limitations
-
-- **Job scheduler — PBS only today.** The inference engine and front-end proxy are pluggable (swap via `EXASERVE_ENGINE` / `proxy_config.type`), but the batch scheduler is not yet: the launcher reads `$PBS_NODEFILE` and stages over `mpiexec`/PALS, and the eval harness submits with `qsub`. The scheduler logic is isolated behind a seam (`scheduler.type` in specs, `eval/lib/schedulers/`) and a `SchedulerBackend` interface is designed in [doc/design/scheduler_abstraction.md](design/scheduler_abstraction.md), but it is **not yet implemented** — running under another scheduler currently means writing that backend (job rendering, submit/poll, and a nodefile + per-node-launch shim, e.g. `srun` instead of `mpiexec`). **Slurm** is the planned first addition given its prevalence; contributions for other schedulers are welcome against that interface.
-- **Accelerator — Intel XPU only today.** Validated on Aurora's Intel PVC (device isolation via `ZE_AFFINITY_MASK`); a vendor abstraction for NVIDIA/AMD is designed ([doc/design/vendor_site_abstraction.md](design/vendor_site_abstraction.md)) but not yet implemented.
-
-## Benchmarking harness
-
-Declarative spec (workload × model × node-count matrix) → materialized traces + per-cell scheduler jobs → multi-node MPI replay client driving a Go load generator. Run 0 of every cell is warm-up and dropped; per-request TTFT/TBT/E2E land in `<experiments_root>/runs/<spec>/<cell>/runN/results/result*.json`.
+## Eval and ClientLab
 
 ```bash
-cp eval/site_config_local.example.py eval/site_config_local.py   # edit paths; once
-python -m eval.cli spec validate eval/specs/refcard/refcard_smoke_1node.yaml
-python -m eval.cli run materialize refcard_smoke_1node
-python -m eval.cli run submit-all refcard_smoke_1node
-python -m eval.plot.goodput -e refcard_smoke_1node --preset paper
+python3 -m eval.cli spec validate eval/specs/smoke_haproxy_1node.yaml
+python3 -m eval.cli run materialize eval/specs/smoke_haproxy_1node.yaml
+python3 -m eval.cli run submit-all smoke_haproxy_1node
+
+python3 -m clientlab plan client_microbench
+python3 -m clientlab smoke client_microbench
 ```
 
-Full spec schema: [eval/DESIGN.md](https://github.com/wenyiwang-us/exaserve/blob/main/eval/DESIGN.md).
+Eval embeds the exact DeploymentPlan inside one immutable RunPlan and requires a
+complete result manifest. ClientLab synthetic results are diagnostic-only; a
+real deployment study must bind its RunPlan, trace, generation, and status
+directory. Neither subsystem owns a private scheduler, serving lifecycle, or
+readiness protocol.
 
-## Serving LLM agents and OpenAI-compatible clients
+## Historical measurements
 
-The deployment is a standard OpenAI-compatible endpoint — any client (LangChain `ChatOpenAI`, Academy LLM agents, `litellm`, `openai` SDK) works by pointing the standard variables at it. No auth by default; use the LiteLLM front end for keys/rate limits.
+The SC26 research campaign includes measurements through 256 Aurora nodes,
+including HAProxy/non-streaming and pipeline-parallel workloads. Those artifacts
+were produced before the final hardened control plane and remain in `findings/`
+for scientific context. They may be used as regression baselines, not as current
+release evidence. A support statement requires the final code, exact packaged
+artifact, approved envelope, canonical status/receipt chain, and required tier
+to pass together.
+
+## Regenerating the Word reference card
+
+`doc/ExaServe_Reference_Card.docx` is generated output. The repository does not
+redistribute the Academy template or the paper figures, so a clean clone needs
+these ignored inputs restored first:
+
+```text
+tmp/ref_card/Academy_Framework_Reference_Card.docx
+doc/figures/fig1_proxy_scaling.png
+doc/figures/fig7_pp405b.png
+```
+
+The two figures come from the paper-analysis output; the template must be
+obtained from its licensed project source. From any working directory, run:
 
 ```bash
-export OPENAI_BASE_URL=http://<head_node>:4001/v1
-export OPENAI_API_KEY=EMPTY
+python3 /path/to/exaserve/tools/make_refcard_docx.py
 ```
 
-## Runnable examples (do not copy; clone and run)
-
-| Example | What | Location |
-|---|---|---|
-| `examples/config.haproxy.yaml` | 2-node quickstart: 24 replicas behind one HAProxy endpoint | [examples/](https://github.com/wenyiwang-us/exaserve/tree/main/examples) |
-| `refcard_smoke_1node` | 1-node benchmark smoke: deploy → replay → TTFT/TBT → SLO score | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
-| `refcard_weakscaling_haproxy` | 8B weak scaling behind HAProxy, 1→64 nodes (extend to 256): 27.1k QPS non-streaming at 256n; streaming plateaus ~4.7k on the head-node network | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
-| `refcard_pp405b_2node` | 405B TP8×PP2 demo on one 2-node replica: 30/30 streaming | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
-| `refcard_pp405b_scale` | 405B weak scaling 2→128 replicas (4→256 nodes) at fixed per-replica load: 0.7 → 31.0 QPS (streaming, 67% efficiency) | [eval/specs/refcard/](https://github.com/wenyiwang-us/exaserve/tree/main/eval/specs/refcard) |
-
-Deeper profiling and scaling analyses: [findings/](https://github.com/wenyiwang-us/exaserve/tree/main/findings).
-
-## Citation
-
-The system and its 1–256-node evaluation are described in an SC26 workshop paper (in preparation):
-
-```bibtex
-@misc{wang2026exaserve,
-    title = {ExaServe: Deploying and Measuring Large-Scale
-             Ray Serve for LLM Inference on Aurora System},
-    author = {Wenyi Wang and Shu Shi and Yadu Nand Babuji and
-              Ian Foster and Kyle Chard},
-    note = {SC26 workshop paper, in preparation},
-    year = {2026}
-}
-```
+The generator resolves all paths relative to its repository, verifies the PNG
+inputs, and atomically replaces the generated DOCX. Edit the generator and
+this Markdown companion rather than editing generated Word XML by hand.

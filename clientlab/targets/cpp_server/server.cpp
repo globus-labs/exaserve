@@ -3,6 +3,8 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <climits>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -52,22 +54,45 @@ void Server::run() {
     int sig_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
     if (sig_fd < 0) { std::perror("signalfd"); return; }
 
-    // Listen socket.
-    int listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (listen_fd < 0) { std::perror("socket"); close(sig_fd); return; }
-    int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    // Prefer a socket bound/listening by the owning launcher. This removes the
+    // probe/close/rebind race and makes a bind collision a startup failure
+    // before the synthetic target can claim health.
+    int listen_fd = -1;
+    const char* inherited = std::getenv("CLIENTLAB_LISTEN_FD");
+    if (inherited != nullptr && *inherited != '\0') {
+        char* end = nullptr;
+        long parsed = std::strtol(inherited, &end, 10);
+        if (end == inherited || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
+            std::fprintf(stderr, "Invalid CLIENTLAB_LISTEN_FD\n");
+            close(sig_fd);
+            return;
+        }
+        listen_fd = static_cast<int>(parsed);
+        if (fcntl(listen_fd, F_GETFD) < 0) {
+            std::perror("inherited listen fd"); close(sig_fd); return;
+        }
+        int flags = fcntl(listen_fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            std::perror("fcntl inherited listen fd"); close(listen_fd); close(sig_fd); return;
+        }
+        fcntl(listen_fd, F_SETFD, FD_CLOEXEC);
+    } else {
+        listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if (listen_fd < 0) { std::perror("socket"); close(sig_fd); return; }
+        int opt = 1;
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(cfg_.port));
-    inet_pton(AF_INET, cfg_.host.c_str(), &addr.sin_addr);
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<uint16_t>(cfg_.port));
+        inet_pton(AF_INET, cfg_.host.c_str(), &addr.sin_addr);
 
-    if (bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        std::perror("bind"); close(listen_fd); close(sig_fd); return;
-    }
-    if (listen(listen_fd, 4096) < 0) {
-        std::perror("listen"); close(listen_fd); close(sig_fd); return;
+        if (bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+            std::perror("bind"); close(listen_fd); close(sig_fd); return;
+        }
+        if (listen(listen_fd, 4096) < 0) {
+            std::perror("listen"); close(listen_fd); close(sig_fd); return;
+        }
     }
 
     std::fprintf(stderr, "Listening on %s:%d\n", cfg_.host.c_str(), cfg_.port);

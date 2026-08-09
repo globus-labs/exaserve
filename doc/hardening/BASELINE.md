@@ -71,3 +71,30 @@ Aurora, PBS; package scheduler default = PSI/J (`get_scheduler()`), eval
 scheduler = PBS/Slurm EvalScheduler stack; site queues: capacity 1–16 nodes,
 debug-scaling 2–256 @ ≤1 h, prod ≥256. Compute sessions per `AGENTS.md`
 (subjob lease preferred; `srundbg`/`srundsc N` fallback).
+
+## Codex takeover checkpoint (2026-08-07)
+
+- Starting revision: `738919cc005698fe84272a349c0bc9840b39f357`, branch
+  `feature/slurm-amd-support`; worktree clean before the takeover slice.
+- Environment after the required login-node modules: Python 3.12.12 from the
+  Aurora frameworks environment, pytest 8.3.5, Go 1.25.3. `PYTHONPATH` contains
+  only the site Advisor Python API path; a real `rg` binary is currently supplied
+  by the editor extension, but tests may not depend on it.
+- Re-audit baseline: 190 selected plan/control/readiness/receipt/status/eval tests
+  passed, while deterministic negative probes proved missing plan/receipt hashes,
+  unqualified production plans, a missing HAProxy config, and stale readiness
+  were accepted. Green tests therefore did not establish production closure.
+- Ledger baseline at takeover: 82 records reported as 14 FIXED / 66 IN_PROGRESS /
+  2 OUT_OF_PRODUCTION_SCOPE even though all 82 violated the exact canonical
+  record shape. The old validator exited zero.
+- P00 ledger repair result: 92 exact records (the ten newly isolated integration
+  findings are `IMP-B11..IMP-B20`), 4 FIXED / 86 IN_PROGRESS /
+  2 OUT_OF_PRODUCTION_SCOPE. Command:
+
+  ```text
+  module load frameworks && module load go
+  python scripts/hardening/validate_findings.py
+  python -m pytest -q tests/test_findings_validator.py
+  ```
+
+  Result: validator PASS; 10 tests passed. No compute workload was used.

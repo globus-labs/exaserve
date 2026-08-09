@@ -9,6 +9,7 @@ This simulates what the ServeController does during startup.
 Usage:
     python3 bench_health_check_contention.py [max_actors]
 """
+
 import os
 import sys
 import time
@@ -42,11 +43,13 @@ def measure_health_check_latency(actors: list) -> dict:
     refs = [a.health_check.remote() for a in actors]
     # Wait for all responses
     results = ray.get(refs, timeout=60)
+    if len(results) != len(actors):
+        raise RuntimeError(f"health-check fanout returned {len(results)}/{len(actors)} results")
     elapsed = time.time() - start
 
     # Measure per-actor response time by submitting one at a time
     per_actor_times = []
-    for a in actors[:min(10, len(actors))]:  # sample 10
+    for a in actors[: min(10, len(actors))]:  # sample 10
         t0 = time.time()
         ray.get(a.health_check.remote(), timeout=30)
         per_actor_times.append(time.time() - t0)

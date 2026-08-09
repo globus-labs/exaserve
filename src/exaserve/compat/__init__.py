@@ -2,8 +2,7 @@
 
 One immutable ``CompatibilityProfile`` describes the exact version/patch
 combination a deployment is allowed to run. ``CompatibilityActivator`` is the
-sole activation API: it verifies the base environment, applies the profile's
-patches, and produces a typed ``CompatibilityReceipt`` per process role.
+sole activation API; exact readiness evidence uses only receipt schema v2.
 
 Fail-closed is the contract: an unknown version, a missing patch, or a failed
 post-condition raises. READY requires a matching receipt from every required
@@ -16,5 +15,13 @@ from .profile import (  # noqa: F401
     ProfileMismatch,
     default_profile,
 )
-from .receipt import CompatibilityReceipt, ReceiptStore  # noqa: F401
-from .activator import ActivationError, CompatibilityActivator  # noqa: F401
+from .activator import (  # noqa: F401
+    ActivationError,
+    ActivationReport,
+    CompatibilityActivator,
+)
+from .receipt_v2 import (  # noqa: F401
+    CompatibilityReceiptV2,
+    ExactReceiptLedger,
+    ReceiptError,
+)

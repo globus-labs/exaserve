@@ -27,7 +27,6 @@ Usage:
 import argparse
 import json
 import math
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -36,10 +35,12 @@ import numpy as np
 
 try:
     import matplotlib
-    matplotlib.use("Agg")   # non-interactive backend (saves files, doesn't need display)
+
+    matplotlib.use("Agg")  # non-interactive backend (saves files, doesn't need display)
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
     from matplotlib.patches import Patch
+
     _MPL_AVAILABLE = True
 except ImportError:
     _MPL_AVAILABLE = False
@@ -74,6 +75,7 @@ def _save_fig(fig, path: str):
 # ---- CLIENT PLOTS ----------------------------------------------------------
 # ---------------------------------------------------------------------------
 
+
 def plot_throughput(data: dict, input_path: str, out_dir: Optional[str]):
     """Actual RPS vs num_workers, one curve per payload size."""
     if not _MPL_AVAILABLE:
@@ -90,8 +92,7 @@ def plot_throughput(data: dict, input_path: str, out_dir: Optional[str]):
     colors = plt.cm.tab10.colors
 
     for i, ps in enumerate(payload_sizes):
-        pts = [(r["num_workers"], r["actual_rps"])
-               for r in results if r["payload_size"] == ps]
+        pts = [(r["num_workers"], r["actual_rps"]) for r in results if r["payload_size"] == ps]
         pts.sort()
         if pts:
             ws, rpss = zip(*pts)
@@ -132,8 +133,15 @@ def plot_dispatch(data: dict, input_path: str, out_dir: Optional[str]):
 
     fig, ax = plt.subplots(figsize=(max(6, len(rpss)), max(4, len(workers))))
     cmap = plt.cm.RdYlGn_r
-    im = ax.imshow(grid, cmap=cmap, aspect="auto",
-                   vmin=0, vmax=max(DISPATCH_THRESHOLD_S * 1000 * 2, np.nanmax(grid) if not np.all(np.isnan(grid)) else 200))
+    im = ax.imshow(
+        grid,
+        cmap=cmap,
+        aspect="auto",
+        vmin=0,
+        vmax=max(
+            DISPATCH_THRESHOLD_S * 1000 * 2, np.nanmax(grid) if not np.all(np.isnan(grid)) else 200
+        ),
+    )
 
     ax.set_xticks(range(len(rpss)))
     ax.set_xticklabels([str(int(r)) for r in rpss], rotation=45)
@@ -141,7 +149,7 @@ def plot_dispatch(data: dict, input_path: str, out_dir: Optional[str]):
     ax.set_yticklabels([str(w) for w in workers])
     ax.set_xlabel("Target RPS")
     ax.set_ylabel("Workers")
-    ax.set_title(f"Dispatch Overhead (ms) — threshold={DISPATCH_THRESHOLD_S*1000:.0f}ms")
+    ax.set_title(f"Dispatch Overhead (ms) — threshold={DISPATCH_THRESHOLD_S * 1000:.0f}ms")
 
     for wi in range(len(workers)):
         for ri in range(len(rpss)):
@@ -178,7 +186,9 @@ def plot_keepup(data: dict, input_path: str, out_dir: Optional[str]):
             grid[wi, ri] = 1.0 if r.get("can_keep_up") else 0.0
 
     fig, ax = plt.subplots(figsize=(max(6, len(rpss)), max(4, len(workers))))
-    cmap = mcolors.ListedColormap(["#aaaaaa", "#d73027", "#1a9850"])  # grey=skip, red=fail, green=pass
+    cmap = mcolors.ListedColormap(
+        ["#aaaaaa", "#d73027", "#1a9850"]
+    )  # grey=skip, red=fail, green=pass
     bounds = [-1.5, -0.5, 0.5, 1.5]
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
     ax.imshow(grid, cmap=cmap, norm=norm, aspect="auto")
@@ -196,12 +206,22 @@ def plot_keepup(data: dict, input_path: str, out_dir: Optional[str]):
         for ri in range(len(rpss)):
             v = grid[wi, ri]
             if not np.isnan(v):
-                ax.text(ri, wi, labels.get(v, "?"), ha="center", va="center",
-                        fontsize=9, color="white", fontweight="bold")
+                ax.text(
+                    ri,
+                    wi,
+                    labels.get(v, "?"),
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="white",
+                    fontweight="bold",
+                )
 
-    legend_elements = [Patch(facecolor="#1a9850", label="Can keep up"),
-                       Patch(facecolor="#d73027", label="Falling behind"),
-                       Patch(facecolor="#aaaaaa", label="Timed out (SKIP)")]
+    legend_elements = [
+        Patch(facecolor="#1a9850", label="Can keep up"),
+        Patch(facecolor="#d73027", label="Falling behind"),
+        Patch(facecolor="#aaaaaa", label="Timed out (SKIP)"),
+    ]
     ax.legend(handles=legend_elements, loc="upper right")
 
     path = _out_path(input_path, "keepup_matrix", out_dir)
@@ -254,6 +274,7 @@ def plot_latency_cdf(data: dict, input_path: str, out_dir: Optional[str]):
 # ---- PROXY PLOTS -----------------------------------------------------------
 # ---------------------------------------------------------------------------
 
+
 def plot_proxy_throughput(data: dict, input_path: str, out_dir: Optional[str]):
     """Proxy actual RPS vs LiteLLM workers, one curve per routing strategy."""
     if not _MPL_AVAILABLE:
@@ -268,8 +289,7 @@ def plot_proxy_throughput(data: dict, input_path: str, out_dir: Optional[str]):
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for i, routing in enumerate(routing_strategies):
-        pts = [(r["litellm_workers"], r["actual_rps"])
-               for r in results if r["routing"] == routing]
+        pts = [(r["litellm_workers"], r["actual_rps"]) for r in results if r["routing"] == routing]
         pts.sort()
         if pts:
             ws, rpss = zip(*pts)
@@ -298,8 +318,11 @@ def plot_proxy_latency(data: dict, input_path: str, out_dir: Optional[str]):
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for i, routing in enumerate(routing_strategies):
-        pts = [(r["target_rps"], r.get("latency_p99_s") or 0)
-               for r in results if r["routing"] == routing]
+        pts = [
+            (r["target_rps"], r.get("latency_p99_s") or 0)
+            for r in results
+            if r["routing"] == routing
+        ]
         pts.sort()
         if pts:
             rpss, lats = zip(*pts)
@@ -327,11 +350,13 @@ def plot_ramp(data: dict, input_path: str, out_dir: Optional[str]):
         steps = run.get("ramp_steps", [])
         if not steps:
             continue
-        label = f"lw={run['litellm_workers']} routing={run['routing']} backends={run['num_backends']}"
+        label = (
+            f"lw={run['litellm_workers']} routing={run['routing']} backends={run['num_backends']}"
+        )
 
-        rpss  = [s["target_rps"]     for s in steps]
-        p99s  = [s.get("latency_p99_s") or 0 for s in steps]
-        errs  = [s.get("error_fraction", 0) * 100 for s in steps]
+        rpss = [s["target_rps"] for s in steps]
+        p99s = [s.get("latency_p99_s") or 0 for s in steps]
+        errs = [s.get("error_fraction", 0) * 100 for s in steps]
         statuses = [s.get("ramp_status", "OK") for s in steps]
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
@@ -370,8 +395,8 @@ def plot_proxy_keepup(data: dict, input_path: str, out_dir: Optional[str]):
         return
 
     workers = sorted(set(r["litellm_workers"] for r in results))
-    rpss    = sorted(set(r["target_rps"]      for r in results))
-    grid    = np.full((len(workers), len(rpss)), np.nan)
+    rpss = sorted(set(r["target_rps"] for r in results))
+    grid = np.full((len(workers), len(rpss)), np.nan)
 
     for r in results:
         wi = workers.index(r["litellm_workers"])
@@ -399,11 +424,21 @@ def plot_proxy_keepup(data: dict, input_path: str, out_dir: Optional[str]):
         for ri in range(len(rpss)):
             v = grid[wi, ri]
             if not np.isnan(v):
-                ax.text(ri, wi, "YES" if v == 1 else "NO", ha="center", va="center",
-                        fontsize=9, color="white", fontweight="bold")
+                ax.text(
+                    ri,
+                    wi,
+                    "YES" if v == 1 else "NO",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="white",
+                    fontweight="bold",
+                )
 
-    legend_elements = [Patch(facecolor="#1a9850", label="OK (err<5%, p99<2s)"),
-                       Patch(facecolor="#d73027", label="Degraded")]
+    legend_elements = [
+        Patch(facecolor="#1a9850", label="OK (err<5%, p99<2s)"),
+        Patch(facecolor="#d73027", label="Degraded"),
+    ]
     ax.legend(handles=legend_elements, loc="upper right")
 
     path = _out_path(input_path, "proxy_keepup_matrix", out_dir)
@@ -413,6 +448,7 @@ def plot_proxy_keepup(data: dict, input_path: str, out_dir: Optional[str]):
 # ---------------------------------------------------------------------------
 # Summary tables
 # ---------------------------------------------------------------------------
+
 
 def print_client_table(data: dict):
     results = data.get("results", [])
@@ -430,26 +466,28 @@ def print_client_table(data: dict):
     print("-" * len(header))
     for r in results:
         # Support both old (dispatch_delay_p99_s) and new (dispatch_overhead_s) result formats
-        ovhd = r.get('dispatch_overhead_s')
-        if ovhd is None and r.get('dispatch_delay_p99_s') is not None:
-            ovhd = r['dispatch_delay_p99_s']   # fall back to per-request p99 as approximation
+        ovhd = r.get("dispatch_overhead_s")
+        if ovhd is None and r.get("dispatch_delay_p99_s") is not None:
+            ovhd = r["dispatch_delay_p99_s"]  # fall back to per-request p99 as approximation
         ovhd_str = f"{ovhd:.2f}" if ovhd is not None else "N/A"
-        l50  = f"{r['latency_p50_s']:.3f}" if r.get('latency_p50_s') is not None else "N/A"
-        l99  = f"{r['latency_p99_s']:.3f}" if r.get('latency_p99_s') is not None else "N/A"
-        if r.get('timed_out'):
+        l50 = f"{r['latency_p50_s']:.3f}" if r.get("latency_p50_s") is not None else "N/A"
+        l99 = f"{r['latency_p99_s']:.3f}" if r.get("latency_p99_s") is not None else "N/A"
+        if r.get("timed_out"):
             ok = "SKIP"
-        elif r.get('can_keep_up'):
+        elif r.get("can_keep_up"):
             ok = "YES"
         else:
             ok = "NO"
-        nw   = r.get('num_workers', '?')
-        trps = r.get('target_rps', '?')
-        arps = r.get('actual_rps')
-        arps_str = f"{arps:.1f}" if isinstance(arps, float) else str(arps or '?')
-        ps   = r.get('payload_size', '?')
-        errs = r.get('errors', r.get('failures', '?'))
-        print(f"{nw:>7} {trps:>8} {arps_str:>8} {ps:>8} "
-              f"{ovhd_str:>7} {l50:>9} {l99:>9} {errs:>6} {ok:>7}")
+        nw = r.get("num_workers", "?")
+        trps = r.get("target_rps", "?")
+        arps = r.get("actual_rps")
+        arps_str = f"{arps:.1f}" if isinstance(arps, float) else str(arps or "?")
+        ps = r.get("payload_size", "?")
+        errs = r.get("errors", r.get("failures", "?"))
+        print(
+            f"{nw:>7} {trps:>8} {arps_str:>8} {ps:>8} "
+            f"{ovhd_str:>7} {l50:>9} {l99:>9} {errs:>6} {ok:>7}"
+        )
     print("=" * len(header) + "\n")
 
 
@@ -468,9 +506,9 @@ def print_proxy_table(data: dict):
     print(header)
     print("-" * len(header))
     for r in results:
-        lw   = r.get("litellm_workers", "?")
-        ro   = r.get("routing", "?")
-        nbe  = r.get("num_backends", "?")
+        lw = r.get("litellm_workers", "?")
+        ro = r.get("routing", "?")
+        nbe = r.get("num_backends", "?")
         if r.get("test_type") == "ramp":
             max_rps = r.get("max_sustainable_rps")
             max_label = f"max={max_rps}" if max_rps is not None else "max=N/A"
@@ -480,16 +518,13 @@ def print_proxy_table(data: dict):
             )
         elif r.get("test_type") == "fixed":
             p99 = f"{r['latency_p99_s']:.3f}" if r.get("latency_p99_s") is not None else "N/A"
-            err = f"{r['error_fraction']*100:.1f}" if "error_fraction" in r else "N/A"
-            ef  = r.get("error_fraction", 1.0)
+            err = f"{r['error_fraction'] * 100:.1f}" if "error_fraction" in r else "N/A"
+            ef = r.get("error_fraction", 1.0)
             lat = r.get("latency_p99_s")
             status = "OK" if ef < 0.05 and (lat is None or lat < 2.0) else "DEGRADED"
             trps = r.get("target_rps", "?")
             arps = r.get("actual_rps", "?")
-            print(
-                f"{lw:>4} {ro:>20} {nbe:>8} "
-                f"{trps:>8} {arps:>8} {p99:>7} {err:>6} {status:>10}"
-            )
+            print(f"{lw:>4} {ro:>20} {nbe:>8} {trps:>8} {arps:>8} {p99:>7} {err:>6} {status:>10}")
         else:
             print(f"  Unknown result type: {r}")
     print("=" * len(header) + "\n")
@@ -498,6 +533,7 @@ def print_proxy_table(data: dict):
 # ---------------------------------------------------------------------------
 # ---- MAX-RPS SEARCH PLOTS --------------------------------------------------
 # ---------------------------------------------------------------------------
+
 
 def print_max_rps_table(data: dict):
     """Print a summary table for find_max_rps results."""
@@ -533,9 +569,11 @@ def print_max_rps_table(data: dict):
     print("=" * (len(header) + 10) + "\n")
 
     meta = data.get("meta", {})
-    print(f"  rps_start={meta.get('rps_start')}  ceiling={meta.get('max_rps_ceiling')}  "
-          f"precision={meta.get('precision')}  probe_duration={meta.get('probe_duration_s')}s  "
-          f"full_duration={meta.get('full_duration_s')}s\n")
+    print(
+        f"  rps_start={meta.get('rps_start')}  ceiling={meta.get('max_rps_ceiling')}  "
+        f"precision={meta.get('precision')}  probe_duration={meta.get('probe_duration_s')}s  "
+        f"full_duration={meta.get('full_duration_s')}s\n"
+    )
 
 
 def plot_max_rps(data: dict, input_path: str, out_dir: Optional[str]):
@@ -550,15 +588,18 @@ def plot_max_rps(data: dict, input_path: str, out_dir: Optional[str]):
         print("  [max_rps] No results found.")
         return
 
-    payload_sizes = sorted(set(r["payload_size"] for r in results),
-                           key=lambda p: list(["small", "medium", "large", "xl"]).index(p)
-                           if p in ["small", "medium", "large", "xl"] else 999)
+    payload_sizes = sorted(
+        set(r["payload_size"] for r in results),
+        key=lambda p: list(["small", "medium", "large", "xl"]).index(p)
+        if p in ["small", "medium", "large", "xl"]
+        else 999,
+    )
     worker_counts = sorted(set(r["num_workers"] for r in results))
 
     n_payloads = len(payload_sizes)
-    n_workers  = len(worker_counts)
-    bar_width  = 0.8 / max(n_payloads, 1)
-    colors     = plt.cm.tab10.colors
+    n_workers = len(worker_counts)
+    bar_width = 0.8 / max(n_payloads, 1)
+    colors = plt.cm.tab10.colors
 
     fig, ax = plt.subplots(figsize=(max(8, n_workers * 2), 5))
 
@@ -570,8 +611,14 @@ def plot_max_rps(data: dict, input_path: str, out_dir: Optional[str]):
             max_rps_vals.append(match[0]["max_rps"] if match else 0.0)
 
         offset = (i - n_payloads / 2 + 0.5) * bar_width
-        bars = ax.bar(x + offset, max_rps_vals, bar_width * 0.9,
-                      label=ps, color=colors[i % len(colors)], alpha=0.85)
+        bars = ax.bar(
+            x + offset,
+            max_rps_vals,
+            bar_width * 0.9,
+            label=ps,
+            color=colors[i % len(colors)],
+            alpha=0.85,
+        )
 
         # Annotate bars with the value
         for bar, val in zip(bars, max_rps_vals):
@@ -580,7 +627,10 @@ def plot_max_rps(data: dict, input_path: str, out_dir: Optional[str]):
                     bar.get_x() + bar.get_width() / 2,
                     bar.get_height() + max(max_rps_vals) * 0.01,
                     f"{val:.0f}",
-                    ha="center", va="bottom", fontsize=7, rotation=45,
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                    rotation=45,
                 )
 
     ax.set_xlabel("Number of Workers")
@@ -613,17 +663,17 @@ def plot_max_rps_search_history(data: dict, input_path: str, out_dir: Optional[s
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 3.5), squeeze=False)
 
     phase_colors = {"probe": "#4C72B0", "bisect": "#DD8452", "validation": "#55A868"}
-    marker_map   = {True: "o", False: "X"}
+    marker_map = {True: "o", False: "X"}
 
     for idx, r in enumerate(results):
-        ax  = axes[idx // ncols][idx % ncols]
+        ax = axes[idx // ncols][idx % ncols]
         history = r.get("search_history", [])
         label_cfg = f"w={r['num_workers']}  {r['payload_size']}"
 
         for step_i, h in enumerate(history):
-            phase  = h.get("phase", "probe")
+            phase = h.get("phase", "probe")
             passed = h.get("can_keep_up", False)
-            color  = phase_colors.get(phase, "grey")
+            color = phase_colors.get(phase, "grey")
             marker = marker_map.get(passed, "s")
             ax.scatter(step_i, h["rps"], color=color, marker=marker, s=70, zorder=3)
 
@@ -631,8 +681,13 @@ def plot_max_rps_search_history(data: dict, input_path: str, out_dir: Optional[s
             rps_vals = [h["rps"] for h in history]
             ax.plot(range(len(history)), rps_vals, color="grey", linewidth=0.8, alpha=0.5)
 
-        ax.axhline(y=r["max_rps"], color="green", linestyle="--", linewidth=1.2,
-                   label=f"max_rps={r['max_rps']:.0f}")
+        ax.axhline(
+            y=r["max_rps"],
+            color="green",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"max_rps={r['max_rps']:.0f}",
+        )
         ax.set_title(label_cfg, fontsize=9)
         ax.set_xlabel("Probe step")
         ax.set_ylabel("RPS")
@@ -662,20 +717,20 @@ def plot_max_rps_search_history(data: dict, input_path: str, out_dir: Optional[s
 
 CLIENT_PLOTS = {
     "throughput": plot_throughput,
-    "dispatch":   plot_dispatch,
-    "keepup":     plot_keepup,
-    "latency":    plot_latency_cdf,
+    "dispatch": plot_dispatch,
+    "keepup": plot_keepup,
+    "latency": plot_latency_cdf,
 }
 
 PROXY_PLOTS = {
     "proxy_throughput": plot_proxy_throughput,
-    "proxy_latency":    plot_proxy_latency,
-    "ramp":             plot_ramp,
-    "proxy_keepup":     plot_proxy_keepup,
+    "proxy_latency": plot_proxy_latency,
+    "ramp": plot_ramp,
+    "proxy_keepup": plot_proxy_keepup,
 }
 
 MAX_RPS_PLOTS = {
-    "max_rps":         plot_max_rps,
+    "max_rps": plot_max_rps,
     "max_rps_history": plot_max_rps_search_history,
 }
 
@@ -702,9 +757,11 @@ def main():
         description="Analyze and visualize benchmark results.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--input",   type=str, required=True,  help="Path to JSON result file.")
+    parser.add_argument("--input", type=str, required=True, help="Path to JSON result file.")
     parser.add_argument(
-        "--plots", type=str, default="all",
+        "--plots",
+        type=str,
+        default="all",
         help=(
             "Comma-separated plot names to generate, or 'all'. "
             "Client: throughput, dispatch, keepup, latency. "
@@ -712,7 +769,7 @@ def main():
         ),
     )
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory for plots.")
-    parser.add_argument("--no-plots", action="store_true",    help="Skip plotting; print tables only.")
+    parser.add_argument("--no-plots", action="store_true", help="Skip plotting; print tables only.")
     args = parser.parse_args()
 
     data = _load(args.input)

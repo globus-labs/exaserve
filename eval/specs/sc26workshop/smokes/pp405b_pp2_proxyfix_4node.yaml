@@ -33,6 +33,7 @@ workload:
   arrival: fixed
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   num_nodes: 4
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   local_stage_path: /tmp/pp405b_shard
@@ -67,6 +68,6 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 50000
+          maxconn: 8000
 scheduler:
   type: pbs

@@ -60,7 +60,7 @@ EPHEMERAL_MIN = 32768
 EPHEMERAL_MAX = 60999
 EPHEMERAL_RANGE = EPHEMERAL_MAX - EPHEMERAL_MIN + 1  # 28,232 on most Linux
 
-WARN_FRACTION = 0.80   # warn above 80 %
+WARN_FRACTION = 0.80  # warn above 80 %
 DANGER_FRACTION = 0.95  # critical above 95 %
 
 # TCP state codes in /proc/net/tcp (hex)
@@ -83,15 +83,16 @@ _TCP_STATES = {
 # Predictive model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PortPrediction:
     rps: float
     num_workers: int
     pool_size_per_worker: int
-    http_version: str           # "1.1" or "2"
-    keepalive_expiry_s: float   # httpx default 4 s
-    time_wait_s: float          # OS default 60 s
-    avg_latency_s: float        # assumed server response latency
+    http_version: str  # "1.1" or "2"
+    keepalive_expiry_s: float  # httpx default 4 s
+    time_wait_s: float  # OS default 60 s
+    avg_latency_s: float  # assumed server response latency
     num_client_nodes: int
 
     # --- derived ---
@@ -115,7 +116,7 @@ class PortPrediction:
         if self.http_version == "2":
             # HTTP/2 multiplexes; port count bounded by the connection pool
             self.active_connections_per_node = min(pool, self.rps * self.avg_latency_s)
-            self.time_wait_per_node = pool   # upper bound; actual churn is very low
+            self.time_wait_per_node = pool  # upper bound; actual churn is very low
             self.peak_ports_per_node = pool
         else:
             # HTTP/1.1 with keepalive:
@@ -137,13 +138,13 @@ class PortPrediction:
             self.status = "DANGER"
             self.warnings.append(
                 f"PORT EXHAUSTION LIKELY: predicted {self.total_peak_ports:.0f} ports "
-                f"({self.fraction_used*100:.1f}% of {self.available_range})"
+                f"({self.fraction_used * 100:.1f}% of {self.available_range})"
             )
         elif self.fraction_used >= WARN_FRACTION:
             self.status = "WARN"
             self.warnings.append(
                 f"Port usage high: predicted {self.total_peak_ports:.0f} ports "
-                f"({self.fraction_used*100:.1f}% of {self.available_range})"
+                f"({self.fraction_used * 100:.1f}% of {self.available_range})"
             )
         else:
             self.status = "OK"
@@ -191,7 +192,7 @@ def print_prediction(p: PortPrediction):
     print(f"  Peak ports/node:   {p.peak_ports_per_node:.1f}")
     print(f"  Total peak ports:  {p.total_peak_ports:.1f}")
     print(f"  Ephemeral range:   {EPHEMERAL_MIN}-{EPHEMERAL_MAX} ({p.available_range} ports)")
-    print(f"  Usage fraction:    {p.fraction_used*100:.1f}%")
+    print(f"  Usage fraction:    {p.fraction_used * 100:.1f}%")
     print(f"  Status:            {p.status}")
     for w in p.warnings:
         print(f"  !! {w}")
@@ -202,6 +203,7 @@ def print_prediction(p: PortPrediction):
 # Live monitor
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PortSnapshot:
     timestamp: float
@@ -210,7 +212,7 @@ class PortSnapshot:
     syn_sent: int
     close_wait: int
     total_tcp: int
-    ephemeral_in_use: int   # estimated from TIME_WAIT + ESTABLISHED with ephemeral src
+    ephemeral_in_use: int  # estimated from TIME_WAIT + ESTABLISHED with ephemeral src
 
 
 def _read_proc_net_tcp() -> list[PortSnapshot]:
@@ -323,7 +325,9 @@ class PortMonitor:
             snap = _take_snapshot()
             self._samples.append(snap)
             frac = snap.ephemeral_in_use / EPHEMERAL_RANGE if snap.ephemeral_in_use >= 0 else 0
-            status = "DANGER" if frac >= DANGER_FRACTION else ("WARN" if frac >= WARN_FRACTION else "OK")
+            status = (
+                "DANGER" if frac >= DANGER_FRACTION else ("WARN" if frac >= WARN_FRACTION else "OK")
+            )
             print(
                 f"[PortMonitor] ESTAB={snap.established:5d}  TW={snap.time_wait:5d}  "
                 f"EPHEM={snap.ephemeral_in_use:5d}/{EPHEMERAL_RANGE}  [{status}]",
@@ -345,6 +349,7 @@ class PortMonitor:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def _cmd_predict(args):
     http_ver = "2" if args.http2 else "1.1"
@@ -388,21 +393,31 @@ def main():
 
     # --- predict ---
     p = sub.add_parser("predict", help="Predict ephemeral port usage from workload parameters.")
-    p.add_argument("--rps",              type=float, required=True,  help="Requests per second")
-    p.add_argument("--workers",          type=int,   default=4,      help="Number of client workers")
-    p.add_argument("--pool-size",        type=int,   default=100,    help="HTTP connection pool size per worker")
-    p.add_argument("--http2",            action="store_true",        help="Use HTTP/2 model (much lower port usage)")
-    p.add_argument("--keepalive-expiry", type=float, default=4.0,   help="Keepalive expiry in seconds (HTTP/1.1)")
-    p.add_argument("--time-wait",        type=float, default=60.0,  help="TCP TIME_WAIT duration in seconds")
-    p.add_argument("--avg-latency",      type=float, default=1.0,   help="Expected average server latency in seconds")
-    p.add_argument("--nodes",            type=int,   default=1,      help="Number of client nodes")
-    p.add_argument("--json",             action="store_true",        help="Also print JSON output")
+    p.add_argument("--rps", type=float, required=True, help="Requests per second")
+    p.add_argument("--workers", type=int, default=4, help="Number of client workers")
+    p.add_argument(
+        "--pool-size", type=int, default=100, help="HTTP connection pool size per worker"
+    )
+    p.add_argument("--http2", action="store_true", help="Use HTTP/2 model (much lower port usage)")
+    p.add_argument(
+        "--keepalive-expiry", type=float, default=4.0, help="Keepalive expiry in seconds (HTTP/1.1)"
+    )
+    p.add_argument(
+        "--time-wait", type=float, default=60.0, help="TCP TIME_WAIT duration in seconds"
+    )
+    p.add_argument(
+        "--avg-latency", type=float, default=1.0, help="Expected average server latency in seconds"
+    )
+    p.add_argument("--nodes", type=int, default=1, help="Number of client nodes")
+    p.add_argument("--json", action="store_true", help="Also print JSON output")
 
     # --- monitor ---
     m = sub.add_parser("monitor", help="Live monitor of ephemeral port usage.")
-    m.add_argument("--interval", type=float, default=1.0,               help="Polling interval in seconds")
-    m.add_argument("--duration", type=float, default=60.0,              help="Total monitoring duration in seconds")
-    m.add_argument("--output",   type=str,   default="port_usage.json", help="Output JSON file path")
+    m.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds")
+    m.add_argument(
+        "--duration", type=float, default=60.0, help="Total monitoring duration in seconds"
+    )
+    m.add_argument("--output", type=str, default="port_usage.json", help="Output JSON file path")
 
     args = parser.parse_args()
     if args.cmd == "predict":

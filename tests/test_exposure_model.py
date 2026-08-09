@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from exaserve.proxy.base import BackendEndpoint
@@ -70,5 +72,26 @@ def test_haproxy_admin_requires_auth():
 
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(ValueError, match="stats_auth"):
-            HAProxyProxy().generate_config(_backends(), Path(tmp),
-                                           stats_enabled=True, stats_admin=True)
+            HAProxyProxy().generate_config(_backends(), Path(tmp), stats_admin=True)
+
+
+@pytest.mark.parametrize(
+    "module_name,class_name",
+    [
+        ("haproxy_proxy", "HAProxyProxy"),
+        ("litellm_proxy", "LiteLLMProxy"),
+        ("nginx_proxy", "NGINXProxy"),
+        ("envoy_proxy", "EnvoyProxy"),
+        ("pingora_proxy", "PingoraProxy"),
+    ],
+)
+def test_proxy_backends_are_pure_strict_renderers(tmp_path, module_name, class_name):
+    module = __import__(f"exaserve.proxy.{module_name}", fromlist=[class_name])
+    backend_type = getattr(module, class_name)
+    source = inspect.getsource(module)
+    assert "subprocess" not in source and "Popen" not in source
+    assert not any(hasattr(backend_type, name) for name in ("start", "stop", "health_check"))
+    with pytest.raises(ValueError, match="unknown fields"):
+        backend_type().generate_config(_backends(), tmp_path / class_name, invented_option=True)
+    with pytest.raises(ValueError, match="at least one backend"):
+        backend_type().generate_config([], tmp_path / f"empty-{class_name}")

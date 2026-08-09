@@ -1,75 +1,42 @@
-import subprocess
-import sys
-import textwrap
+"""WP13: the old marker-parsing driver is a one-way alias only."""
 
-from exaserve.driver import (
-    EXASERVE_SERVE_READY_MARKER,
-    ProcessOutputRelay,
-    wait_for_process_ready_marker,
-)
+from __future__ import annotations
+
+import inspect
 
 
-def _start_output_process(lines: list[str], delay_s: float = 0.05) -> subprocess.Popen[str]:
-    script = textwrap.dedent(
-        f"""
-        import time
+def test_driver_contains_no_lifecycle_or_readiness_marker_parser():
+    from exaserve import driver
 
-        lines = {lines!r}
-        for line in lines:
-            print(line, flush=True)
-            time.sleep({delay_s})
-        """
-    )
-    return subprocess.Popen(
-        [sys.executable, "-c", script],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+    source = inspect.getsource(driver)
+    for forbidden in (
+        "CLUSTER FULLY READY",
+        "Popen",
+        "ready_marker",
+        "ray start",
+        "start_proxy",
+        "wait_for_process",
+    ):
+        assert forbidden not in source
+    assert "launcher_main(argv)" in source
 
 
-def test_wait_for_process_ready_marker_detects_cluster_ready():
-    process = _start_output_process(
-        [
-            "[ExaServe] Stage 1: Initializing Ray cluster...",
-            f"{EXASERVE_SERVE_READY_MARKER} Total time: 12.34s",
-        ]
-    )
-    relay = ProcessOutputRelay(
-        process=process,
-        ready_marker=EXASERVE_SERVE_READY_MARKER,
-        label="ExaServe",
-    ).start()
+def test_rank_identity_is_fail_closed(monkeypatch):
+    from exaserve.control.ray_runtime import get_rank
 
-    try:
-        assert wait_for_process_ready_marker(relay, timeout=2.0) is True
-    finally:
-        process.wait(timeout=2.0)
-        relay.close()
+    for name in (
+        "PALS_RANKID",
+        "PMI_RANK",
+        "PMI_ID",
+        "ALPS_APP_PE",
+        "SLURM_PROCID",
+        "OMPI_COMM_WORLD_RANK",
+        "EXASERVE_TEST_LOCAL_RANK",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    import pytest
 
-
-def test_wait_for_process_ready_marker_fails_when_process_exits_early():
-    process = _start_output_process(
-        [
-            "[ExaServe] Stage 1: Initializing Ray cluster...",
-            "[ExaServe] Stage 3: Deploying model services...",
-        ]
-    )
-    relay = ProcessOutputRelay(
-        process=process,
-        ready_marker=EXASERVE_SERVE_READY_MARKER,
-        label="ExaServe",
-    ).start()
-
-    try:
-        assert wait_for_process_ready_marker(relay, timeout=2.0) is False
-        process.wait(timeout=2.0)
-        if relay._thread is not None:
-            relay._thread.join(timeout=1.0)
-        assert list(relay.recent_lines) == [
-            "[ExaServe] Stage 1: Initializing Ray cluster...",
-            "[ExaServe] Stage 3: Deploying model services...",
-        ]
-    finally:
-        relay.close()
+    with pytest.raises(RuntimeError, match="refusing to guess rank zero"):
+        get_rank()
+    monkeypatch.setenv("PALS_RANKID", "3")
+    assert get_rank() == 3

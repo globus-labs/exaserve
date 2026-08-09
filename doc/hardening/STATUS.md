@@ -1,359 +1,105 @@
-# ExaServe Production-Hardening — Status
+# ExaServe production-hardening status
 
-> **2026-08-07 (later) — THE CUTOVER IS ON THE PRODUCTION PATH AND REACHED
-> READY BY THE NEW ARCHITECTURE.**
->
-> ```
-> [Composition] READY via http://10.112.170.100:8000 —
->   ['sessions: 2 planned ranks established',
->    'receipts: 5/5 exact slots',
->    'model meta-llama/Meta-Llama-3-8B-Instruct: 24/24',
->    'canaries: 1 model(s) answered']
-> ```
->
-> Every clause there was decorative or absent a day earlier. The receipt slots
-> are *exact set equality* against the compiled plan, fed by real producers over
-> a bounded node-local hop and the authenticated channel; the replica count
-> comes from the plan, not from the survivors; the canary is a real completion
-> through the compiled advertised endpoint. 72 further evidence receipts (24
-> replica, 48 engine self-receipts) arrived over the same path.
->
-> **Ledger: 14 FIXED / 66 IN_PROGRESS / 2 OUT_OF_PRODUCTION_SCOPE**, validator
-> passing. Seven scale records are held EXPLICITLY on the unapproved production
-> envelope and say so in their evidence field. The 64-node ceiling still has no
-> approval and I still cannot infer one.
->
-> What this does **not** show is in `doc/hardening/FINAL_AUDIT.md` §5, at the
-> same length: everything is 2 nodes, `PROXIED_INTERNAL` is implemented but not
-> yet demonstrated on hardware, and non-HAProxy gateways raise a named refusal.
->
-> Five defects were found by *running* the path, none visible to the suite:
-> node identity (FQDN vs short hostname rejected every receipt from every
-> correctly-placed rank), a prior generation's Ray session name, orphaned
-> EngineCore processes still holding device memory, the root's own binding hash
-> missing from its own environment, and Serve applications not being named after
-> model ids.
+**Status date:** 2026-08-09
 
-> **2026-08-07 — LEDGER RE-ADJUDICATED AGAINST THE COMPLETION-CLAIM AUDIT.**
-> `doc/PRODUCTION_HARDENING_COMPLETION_CLAIM_AUDIT_2026-08-06.md` rejected the
-> "67 FIXED" accounting. Applying its §8 rule mechanically — a record is FIXED
-> only with linked evidence *and* acceptance tests proving the invariant on the
-> production path, and an ACCEPTED_LIMIT without a product-owner approval block
-> is not closure — leaves:
->
-> **2 FIXED / 78 IN_PROGRESS / 2 OUT_OF_PRODUCTION_SCOPE.**
->
-> That number is the honest one. `scripts/hardening/validate_findings.py` is the
-> gate that produced it and now passes; it refuses to invent placeholder
-> metadata to preserve a count.
->
-> The five former ACCEPTED_LIMIT records are reopened: approval requires
-> `approver_id` / `approved_at` / `evidence_ref` / `scope` from the actual
-> product owner, and I may propose that block but never fill it. **The 64-node
-> first-release ceiling remains unapproved and I cannot infer it.**
->
-> **2-node validation of the new architecture (2026-08-07).** The composition
-> root path is verified working: `gate_ready`, `marker_never_precedes_gate`,
-> `receipts` (75), `canary`, and `engine_self_attested` all PASS.
-> `tree_reaped` initially read FAIL (4 left). Diagnosing it found **one real
-> bug and one measurement artifact**: a SIGTERM shutdown exited 1 instead of
-> the 143 the supervisor already classified, and the smoke was looking for a
-> `launch_cluster.sh` child the new architecture no longer has, so it counted
-> process group 0. The same run's real figure was `named_before=15,
-> named_after=0` — the tree WAS fully reaped.
->
-> After both fixes, **all six checks PASS** with `supervisor_exit=143`,
-> `group 1 -> 0`, `named 15 -> 0`.
->
-> Getting there took four env-chain fixes, each found only by running it:
-> the root fell back to `cwd` for its run directory; the head IP was
-> communicated by mutating a config file; `EXASERVE_RUN_LOG_DIR` was not
-> propagated to ranks; and `get_ray_env()` dropped the deployment identity
-> before the server child. Until the last of those, the deployment reached
-> READY while every consumer reported not-ready, because the record was
-> written where nobody looks.
+**Verdict:** `TECHNICAL_PASS_SCOPE_PENDING` — every locally resolvable
+production-hardening gate passes for the exact final42 artifact at one and two
+Aurora nodes. This is not an approved general production release and does not
+claim support above the measured boundary.
 
+## Exact candidate
 
-> **2026-08-06 — CLAIM WITHDRAWN.**
-> `doc/PRODUCTION_HARDENING_COMPLETION_CLAIM_AUDIT_2026-08-06.md` audited the
-> "67 FIXED / only 256-node work remains" claim and rejected it: **0 of 18
-> canonical finding groups are closed**, and 0 of 12 release-definition clauses
-> are demonstrated end-to-end. That audit is correct and this file's earlier
-> accounting was wrong.
->
-> The central error was mine and it is worth naming precisely: I built
-> primitives, unit-tested them, and recorded them as closed **without checking
-> that the production path used them**. The decisive example is one line of my
-> own code — `supervisor_main.py` launched `python -m exaserve.driver`, so
-> `NodeSupervisor` had no production consumer at all. Several tests encoded the
-> weaker behaviour and so passed, which is worse than no test.
->
-> 38 records have been reopened as IN_PROGRESS. Their prior evidence is
-> retained for reference, not as closure.
->
-> **Fixed since the audit:** the rank entry point (§4.1.1) — `exaserve.rank_main`
-> now runs `NodeSupervisor` on every rank, which creates the children it owns
-> and treats an unexpected exit as fatal regardless of status.
->
-> Everything else in that audit is open work and is not claimed.
+| Identity | Value |
+|---|---|
+| Release | `artifacts/hardening/release-20260809-final42` |
+| Wheel SHA-256 | `5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3` |
+| sdist SHA-256 | `af1f9d75a6a6168806ef128df55bbfb1f4f29db84e4594146c6f0fa35d64eb7b` |
+| Artifact-manifest SHA-256 | `0bc6f132a167bd5e0e8df2d6651b68217cee0d27a6359358bb5bec09a1d987e6` |
+| Site-profile hash | `4814429547fd4397014819a0f8b5c6ec8f7d77c889eaf844d27935b39a0a6e26` |
+| Compatibility-profile hash | `c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3` |
+| Compatibility-manifest hash | `cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259` |
+| Candidate review | `artifacts/hardening/final42-candidate-review.json` |
 
+The wheel was built from the sdist in an isolated environment. Installed Ray
+and vLLM files are never edited; the selected compatibility mechanism is the
+hash-verified, role-filtered generated overlay described in ADR-003.
 
-**Updated:** 2026-08-06, after the implementation audit
-(`doc/PRODUCTION_HARDENING_IMPLEMENTATION_AUDIT.md`) of commit `e73f3eb`.
-Companion to `MIGRATION_LOG.md` (chronological) and `FINDINGS.yaml`
-(authoritative ledger, 82 records).
+## Passed gates
 
-## Headline — read this first
-
-**NOT production ready. The target architecture is not yet wired into the
-production path.**
-
-An earlier version of this file claimed "34 of 35 audit findings fixed" and
-that no open item was a production blocker. **That claim was wrong** and has
-been withdrawn. The work in `e73f3eb` is genuine and useful, but it is
-P00/P01-class foundations plus incremental repairs to the *legacy* path — not
-the WP4/WP5/WP13 cutover that owns the blocker invariants.
-
-Current ledger (YAML-parsed, not regex-counted — the previous count was also
-wrong):
-
-| Status | All records (82) | Audit findings (35) |
+| Gate | Result | Durable evidence |
 |---|---|---|
-| FIXED | 30 | 15 |
-| IN_PROGRESS | 28 | 20 |
-| OPEN | 22 | 0 |
-| OUT_OF_PRODUCTION_SCOPE | 2 | 0 |
+| Final working-tree source suite | PASS — 1216 passed | `artifacts/hardening/final42-final-source-gate-20260809-a3/pytest.log` |
+| Clean installed-package gate | PASS — 1207 passed, 9 skipped; mypy clean | `artifacts/hardening/final42-packaged-gate-20260809-a4/` |
+| Final static/ledger gate | PASS — Ruff, security, compileall, Go, ledger, adjudicator | `artifacts/hardening/final42-final-static-gate-20260809-a2/` |
+| 1-node null engine | PASS — READY, typed canary, drain, gateway death, cleanup | `artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json` |
+| 1-node real vLLM/XPU | PASS — real EngineCore receipt, canary, drain, gateway death, cleanup | `artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json` |
+| 2-node null engine | PASS — exact membership/receipts, worker death, port collision, partial-start non-readiness, cleanup | `artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json` |
+| 2-node real vLLM/XPU PP=2 | PASS — one replica spans two physical hosts with core and both worker receipts | `artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json` |
+| HAProxy no-delay on | PASS — bounded real-engine workload, diagnostics, cleanup | `artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json` |
+| HAProxy no-delay off | PASS — paired bounded real-engine workload, diagnostics, cleanup | `artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json` |
+| Supervisor/watchdog faults | PASS — exact head Ray child and worker supervisor deaths, one first cause, zero survivors | `artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json` |
 
-(Counts are YAML-parsed from `FINDINGS.yaml`, not regex-counted. Pass 3 moved
-**PR-008 to FIXED** on the on-hardware evidence below, and pass 4 moved
-**PR-009 to FIXED** (per-rank ownership) and **PR-001 to FIXED** (two
-independent nonzero-producing failure signals). **KI-D1 stays
-IN_PROGRESS**: the mechanism is closed and validated at 2 and 16 nodes, but the
-original false-ready symptom was observed at **256n** and has not been re-run
-there — the ledger and `KNOWN_ISSUES.md` agree on that wording deliberately.)
+The package gate ran from a clean installed wheel inside a one-node lease. All
+hardware runs used `subjob`, the pinned Aurora environment, immutable
+predeclared campaign rows, and the same wheel/site/compatibility identities.
 
-A record is `FIXED` only when its invariant holds **on the path a production
-deployment actually takes**. Anything owned by the un-cut-over architecture is
-`IN_PROGRESS` with the narrow completed slice named in its `evidence` field.
+## Architecture now reached in production
 
-## What is genuinely complete (narrow, verified)
+- One Python composition root owns staging, rank launch, deployment, gateway,
+  readiness, terminal publication, and cleanup.
+- Ray daemons, PALS/MPI, HAProxy, native staging, and one isolated deployment
+  child remain subprocesses because they are genuine operating-system fault
+  boundaries. They use argv vectors, exact process identity, deadlines, typed
+  receipts, and owned process groups; no thread parses logs for control state.
+- `ray.scripts.scripts.cli.main` runs inside the supervised `exaserve.ray_start`
+  daemon boundary. Ray's informational CLI output is presentation only.
+- Canonical READY is a typed, generation-bound, continuously revocable
+  predicate. `CLUSTER READY` and other stdout text cannot advance state.
+- Compatibility has one exact-version delivery path. No installed dependency
+  replacement, version-control mutation, or two-tier monkey-patch fallback is
+  present on the selected path.
+- Scheduler-rendered shell contains only site setup and the final Python entry
+  point; no Bash script owns deployment lifecycle, readiness, or cleanup.
 
-- Source config copied before runtime head-IP mutation (PR-003 slice).
-- Derived model-identity collision checks (PR-007).
-- AST-restricted matrix expressions (PR-016), with escape-attempt tests.
-- Required-model default placement failure (PR-023).
-- HAProxy admin lockdown + `haproxy -c` / `nginx -t` preflight (PR-024 slice).
-- ClientLab `faults` default + argv-vector SSH (PR-030).
-- Spec enum/bound validation (PR-020); benchmark-gateway marking (PR-025).
-- Scheduler/eval job-body shell quoting **after** the IMP-B09 fix below.
-- Atomic single-writer publication helpers; lifecycle enums/transition tables.
+## Ledger
 
-## Defects found by the audit and now fixed (this pass)
+`FINDINGS.yaml` validates against the exact canonical schema:
 
-Each has a regression test in `tests/test_audit_regressions.py` (17 tests):
+| Disposition | Count | Meaning |
+|---|---:|---|
+| `FIXED` | 80 | Candidate-bound tests and/or final42 receipts close the invariant at the qualified boundary. |
+| `IN_PROGRESS` | 8 | Scale/scope approval or measurements are missing; none is a hidden two-node code defect. |
+| `EXTERNAL_BLOCKER` | 1 | Native Slurm plus CUDA/ROCm needs unavailable offsite hardware. |
+| `OUT_OF_PRODUCTION_SCOPE` | 3 | Optional caching, concurrent download optimization, and paper-only C++ client. |
 
-| ID | Defect | Fix |
-|---|---|---|
-| IMP-B09 | **Self-inflicted shell injection**: my PR-015 "fix" pasted `shlex.quote` output *inside* double quotes, where single quotes lose their power — `$(cmd)` in a path executed | assign to a shell var (single-quoted), reference as `"$var"`; regression test renders `$()`/backtick payloads |
-| IMP-B05 | completion marker trusted by existence; deleting weights still read "complete"; tokenizer-only download wrote a full-model marker | marker inventory verified against disk (name+size); `kind` recorded; tokenizer-only never certifies a model |
-| IMP-B07 | lease takeover unfenced (stale holder's `release()` deleted the successor's live lease); two stealers could both win; status CAS had an ABA hole; a record could initialize directly as READY | per-acquisition fencing token + `holds_lease()`/`renew()`; O_EXCL arbitration for takeover; `expected_revision` CAS; initial states restricted to PLANNED |
-| IMP-B06 | an authenticated rank could forge another rank's or a **GLOBAL** observation; malformed observations were skipped not fail-closed; `all_registered` stayed true after disconnect; unbounded listener state | observation identity bound to the authenticated session (scope/rank/node); fail-closed termination; registration cleared on disconnect; bounded dedup/audit; per-component sequence enforcement; heartbeat recorded as a lease timestamp |
-| IMP-H01 | `plan_hash` included `source_path` (same intent → different identity); frozen plan held caller-owned mutable dicts (content changed, hash didn't); `nan` accepted; `reservation_topology: false` bypassed node-agreement; top-level `envelope` ignored | hash covers semantic intent only; deep-freeze of nested options; non-finite rejected; reservation topology must be a non-empty string; `envelope` block honored |
-| IMP-H04 | list/scalar bodies escaped as `AttributeError`/`TypeError` (500 not 400); `"false"` was truthy for `stream`/`ignore_eos`/HAProxy options | `require_object_body()` + typed model check + `strict_flag()` wired into both handlers and HAProxy options |
-| IMP-B08 | partial replay / missing rank shards / failed required stats still wrote `succeeded` | incomplete runs are written as `partial` with reasons; `_is_completed` treats partial as needing human triage, not resubmission |
-| IMP-H04b | `serve_url` looked for `proxy_out/proxy_port` beside the **source** config while the launcher writes it beside the run-scoped runtime config | search run-log tree (newest first), then legacy location |
-| IMP-H07 | randomized CI job used `pytest -p randomly` without declaring `pytest-randomly` | added to `[dev]` extra |
-| IMP-B10 | ledger recorded labels, not demonstrated closure; record count itself was wrong | 23 audit findings reopened as IN_PROGRESS; all 82 records now carry required plan §8 fields; counts YAML-parsed |
+The eight open records are `PR-033`, `KI-A1`, `KI-A3`, `KI-A7`, `KI-B2`,
+`KI-D2`, `TD-COPPER`, and `IMP-B16`.
 
-**Suite at that pass: 123 passed / 0 failed.**
+## Support boundary and residuals
 
+The evidence-derived maximum is two Aurora nodes for the exact PBS / Intel PVC
+XPU / Ray 2.53.0 / vLLM 0.15.0+xpu / HAProxy / non-streaming completion /
+trusted-allocation profile. SGLang, streaming, public exposure, alternate
+production gateways, and native Slurm/CUDA/ROCm are unqualified or rejected.
 
-## Pass 3 (2026-08-06): the architecture reaches the production path
+Injected head/worker loss is classified promptly by the owning control plane,
+but the pinned Ray driver may continue emitting failed GCS/task notifications
+until its configured 120-second reconnect timeout. Cleanup remained within the
+declared gate and left zero exact-generation survivors. This bounded latency is
+a dependency residual, not an instant-recovery claim.
 
-The blocker in the previous section was that the target architecture existed
-but nothing on a real deployment's path used it. That is no longer true for
-readiness, supervision, and compatibility.
+Optional Ray metrics-exporter warnings were observed on Aurora. Metrics export
+is not a readiness conjunct; owned status, canary, cleanup, and ExaServe metrics
+contracts passed.
 
-### What a deployment now does that it did not before
+## Remaining external decisions
 
-1. **Readiness is a predicate, not a print.** `server.py` calls
-   `control.serve_readiness.enforce_readiness()` before the
-   `CLUSTER FULLY READY` marker. It requires exact node membership, a healthy
-   proxy per node, `target_num_replicas` running per application, app status
-   RUNNING, a **real completion through the external route**, and a
-   compatibility receipt from every required role. Unsatisfied → the process
-   fails closed with each blocker named.
-2. **Readiness is revocable.** Observations refresh every poll and replica sets
-   are absolute, so a replica that dies lowers the count below target and
-   readiness goes back off. The old marker could only ever latch.
-3. **Consumers read a fact, not text.** The gate writes `readiness.json`;
-   `eval/lib/backends/base.py` consumes it, and a snapshot that says *not
-   ready* **overrides** the stdout marker. The marker path survives only as a
-   logged fallback for pre-gate backends.
-4. **The launch is supervised.** `cli.launch_cluster` hands off to
-   `RuntimeSupervisor` (signals installed before any child, own process group,
-   unexpected exit-0 is fatal, first cause preserved, typed exit code).
-5. **Compatibility is attested per role.** Replicas self-attest with
-   sentinel-proved patches; Ray daemons and the engine core are attested by
-   their owner. Receipts flow over a named Ray actor and gate READY.
-6. **Staging is generation-isolated.** `/tmp/exaserve_src.<generation>` with an
-   atomic symlink publish, so a run cannot import a previous run's deleted
-   modules.
+1. A product owner must approve a release ceiling (the current ADR proposal is
+   64 nodes) or select another envelope.
+2. Any envelope above two nodes requires authorization and a new immutable,
+   predeclared final42 ladder. For a 64-node ceiling the outstanding cells are
+   4, 16, and 64 nodes.
+3. Offsite Slurm/CUDA/ROCm support requires an appropriate native allocation.
 
-### Evidence
-
-- Unit/contract suite: **182 passed / 0 failed** (`tests/`, `eval/tests/`,
-  `clientlab/tests/`); ruff correctness gate (E9,F63,F7,F82,F401,F841) clean on
-  all touched modules.
-- On-hardware 2-node runs on Aurora drove every fix below; each failure was
-  found by running the gate on a real cluster, not by inspection.
-
-### Defects this pass found in its OWN new code
-
-| Defect | Why it mattered |
-|---|---|
-| Atomic staging publish could not replace a pre-existing real directory | first live run failed staging outright (`mv: cannot overwrite directory`) |
-| `ComponentObservation` built without its mandatory §3.1 fields | the live collector would have raised `TypeError` on first use; caught by a unit test before it ran |
-| `get_serve_details()` returns a **dict**, not a model | attribute-only access silently fell back to a path where target == running, so a dead replica could not revoke readiness |
-| SC-11 sentinel hidden behind a `staticmethod` wrapper | a correctly patched replica was judged half-patched; **all 24 replicas** refused to publish and the gate blamed the wrong subsystem |
-| receipt-channel identity depended on ambient env; collector name normalized differently from the head | receipts were unroutable in principle whenever `PBS_JOBID` was the id source |
-| external attestation had no evidence class | an unmodified daemon can never prove an in-process sentinel, so `engine` could never satisfy a profile that demanded one |
-| one canary result was applied to **every** route | claimed routes had answered that were never probed |
-
-The recurring lesson, and the one worth carrying forward: **a fail-closed check
-is only as strong as the evidence it can actually see.** Three separate times
-this pass, a check that could not observe a correct state reported a healthy
-cluster as broken and named the wrong cause. Fail-closed is right; blind is
-not.
-
-## Pass 4 (2026-08-06): ownership becomes structural
-
-- **The S01 topology is real.** `RuntimeSupervisor` owns exactly one
-  `RankLauncher` (one mpiexec/srun); each rank runs a `NodeSupervisor` owning
-  that node's children. Because the head holds exactly one PID, there is no
-  path by which it *could* signal a remote one — the invariant is structural,
-  not a rule. `NodeSupervisor` enforces the same from the other side: it
-  refuses to adopt a component that already has a process.
-- **`launch_cluster.sh` is a site adapter.** Environment and preflight stay in
-  the shell; the run is handed to `exaserve.supervisor_main`, which decides the
-  launch, owns it, decides terminal state, and produces the exit code.
-- **`DeploymentManager`** gives the lifecycle the five WP4.1 operations with
-  typed exceptions, a state machine that refuses illegal transitions, and a
-  revocable READY.
-- **Engine self-attestation (EN-01) closed** — the engine writes its own
-  receipt from inside the engine process.
-
-Verified on 2 Aurora nodes through the full new stack: `[supervisor] owning 1
-rank launcher over 2 node(s)`, `[Deployment] state=READY`, and
-gate_ready / marker_never_precedes_gate / receipts / canary / tree_reaped /
-engine_self_attested **all PASS**; supervisor exits 143 with the tree reaped
-(17 named processes → 0). Suite: **219 passed / 0 failed**.
-
-### Closed in this pass
-
-- **`server.py` is a callable entry point.** The `__main__` block became
-  `main()`, which also fixed a latent scope bug: as a block, `for app in
-  built_apps:` silently rebound the module-level FastAPI `app` at import time.
-- **The control channel's second failure signal is wired.** The head binds an
-  ephemeral port before rank launch and hands ranks the address and secret;
-  ranks register and report their own lifecycle. A fatal rank observation ends
-  the run immediately rather than waiting for the launch to unwind, and a lost
-  lease counts as that rank's failure. Verified across nodes on Aurora
-  (`Rank 0`/`Rank 1 registered on the control channel`, rank 1 remote over HSN).
-
-### What still remains (honest scope)
-
-- **Scale evidence.** The gate is validated at 2 and 16 nodes; KI-D1's original
-  256n symptom has not been re-run at that scale (held at the user's request).
-- **`cli.server()` still re-execs** rather than calling `main()` in-process:
-  compatibility patches must be applied before Ray/vLLM import and the calling
-  interpreter may already have imported them. This is the WP4.6 fallback,
-  taken knowingly rather than by omission.
-- **Command dispatch over the channel** (head → rank commands, snapshots on
-  reconnect) is not implemented; ranks currently publish and the head consumes.
-- Legacy switches (`EXASERVE_READINESS_GATE=0`, `EXASERVE_USE_SUPERVISOR=0`,
-  `EXASERVE_PYTHON_RANK_LAUNCH=0`, `EXASERVE_ALLOW_DEGRADED_READINESS=1`) are
-  present by design and are removed at the WP13 cutover.
-
-### On-hardware verdict (2 nodes, Aurora, 2026-08-06)
-
-`scripts/hardening/run_supervisor_smoke.sh`, 8B direct mode, 24 replicas
-across 2 nodes, driven through the packaged CLI (`exaserve.cli.launch_cluster`
-→ `RuntimeSupervisor` → `launch_cluster.sh`):
-
-| Check | Result |
-|---|---|
-| `gate_ready` — the predicate, not the marker | **PASS** |
-| `marker_never_precedes_gate` | **PASS** |
-| `receipts` from all required roles | **PASS** |
-| `canary` — real completion via the external route | **PASS** (`" Paris, located in the north-central part"`) |
-| `tree_reaped` on SIGTERM | **PASS** (process group 4→0, named ExaServe/Ray processes 17→0) |
-| supervisor exit code | 143 (typed SIGTERM) |
-
-Snapshot recorded by the gate:
-
-```
-satisfied: membership: 2 nodes | components: 2 healthy |
-           model default: 24/24 replicas | routes: 1 healthy |
-           canaries: 1/1 routes answered | receipts: all required roles attested
-```
-
-### Weak-scaling through the gate
-
-| Nodes | Source of READY | Aggregate RPS | Per-node RPS | Errors | p50 / p99 |
-|---|---|---|---|---|---|
-| 2 (new path) | snapshot | 43.3 | **21.66** | 0 | 1.459 / 1.607 s |
-| 16 (new path) | snapshot | 345.3 | **21.58** | 0 | 1.466 / 1.576 s |
-| 16 (baseline, pre-gate) | marker | 344.4 | 21.53 | 0 | 1.465 / 1.593 s |
-| 64 (baseline, pre-gate) | marker | 1373.9 | 21.47 | 0 | 1.469 / 1.585 s |
-
-Per-node RPS is flat at 21.5–21.7 across 2→64 nodes and 16-node throughput
-through the gate matches its pre-gate baseline within noise (345.3 vs 344.4,
-zero errors both). The readiness gate, the per-role receipt collection, and
-generation-isolated staging cost nothing measurable in throughput or latency.
-Readiness also arrives no later than the marker did (16n: 240s via snapshot vs
-260s via marker), so the gate is not a bring-up tax.
-
-At 16 nodes the gate accounted for 192/192 replicas, 16 healthy proxies, an
-answered canary, and receipts from all four roles required on that path
-(`supervisor` is correctly not demanded when nothing stamped the environment).
-
-## Pass 5 (2026-08-06): the rest of the ledger
-
-Pass 4 finished the architecture. This pass worked the remaining 47 records —
-verifying the ones that had been reopened only because they depended on the
-un-cut-over architecture, and doing the real work on the ones that were
-genuinely open.
-
-### Defects this pass found and fixed
-
-| Item | What was actually wrong |
-|---|---|
-| PR-006 | Unknown config keys were silently ignored, so `num_node: 64` (singular) left the deployment at **one node** with no diagnostic. `True` in a numeric field read as 1; `int(8.9)` truncated. |
-| PR-012 / KI-A2 | `get_open_port` bound a probe, closed it, and returned the number — a TOCTOU window that twelve-plus replicas per node hit simultaneously (the EADDRINUSE class). |
-| PR-010 | nginx `/nginx-status` carried `allow all`, publishing connection counters to anything that could reach the proxy. |
-| PR-026 | Nine private Ray/Serve symbols were depended on implicitly; drift surfaced as an ImportError mid-deploy, after staging models and starting a cluster. |
-| PR-031 | The "hermetic" CI claim was unverified. Running it properly found **ten tests added earlier the same day** that needed Ray and would have broken the lane. |
-| PR-032 | No ExaServe-owned operational surface at all: stdout or a disabled Ray dashboard. |
-| KI-A4 | Bring-up issued one actor RPC per proxy and waited on all of them from the head — the wait_proxies cliff, now redundant given the gate. |
-| KI-A6 | The receipt collector was a **detached** actor: unbounded and never reaped, so it outlived every deployment in a reused Ray cluster. |
-| KI-C5 | `client.num_nodes` defaulted to `deployment.num_nodes` for proxy runs — the shape that put 256 client ranks on one proxy and was misread as a proxy regression. |
-| KI-B3 | Nothing stopped litellm's fake-streamed (degenerate) TBT from entering a real-streaming comparison. |
-| KI-D4 / TD-CHATTPL | Multi-replica PP and the chat-template fallback both silently did something *different* from what was asked. |
-
-### The through-line
-
-Almost every one of these is the same failure: **the system did something
-other than what was asked, and said nothing.** A silently ignored key, a
-silently substituted prompt, a silently truncated file, a silently degenerate
-metric. The fix in each case is not more checking but making the substitution
-impossible to perform quietly — refuse when the difference changes the answer,
-degrade loudly and record it when it only changes performance.
-
-### Evidence
-
-- Suite: **291 passed** with the full stack; **287 passed / 7 skipped** in the
-  hermetic lane, in both fixed and randomized order (`scripts/hardening/run_hermetic_check.sh`).
-- Ruff correctness gate clean on every touched module.
-- On-hardware 2-node validation after each architectural change; 16-node
-  throughput matching the pre-gate baseline.
+Historical or earlier-candidate runs cannot satisfy these cells. Do not rebuild,
+relabel, or broaden final42 without creating a new candidate review.

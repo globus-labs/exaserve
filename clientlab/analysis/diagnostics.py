@@ -1,7 +1,6 @@
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 
 DIAGNOSES = {
@@ -29,7 +28,9 @@ def histogram_mean_seconds(histogram):
     return float(histogram.get("sum_s") or 0.0) / count
 
 
-def summarize_point(run_config, client_metrics, target_metrics, port_metrics, netstats_summary=None):
+def summarize_point(
+    run_config, client_metrics, target_metrics, port_metrics, netstats_summary=None
+):
     histograms = client_metrics.get("histograms", {})
     queue_wait_mean = histogram_mean_seconds(histograms.get("queue_wait", {}))
     slot_hold_mean = histogram_mean_seconds(histograms.get("slot_hold", {}))
@@ -38,7 +39,9 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
     time_to_headers_mean = histogram_mean_seconds(histograms.get("time_to_headers", {}))
     body_read_mean = histogram_mean_seconds(histograms.get("body_read", {}))
 
-    completed = float(client_metrics.get("requests_succeeded") or client_metrics.get("requests_completed") or 0.0)
+    completed = float(
+        client_metrics.get("requests_succeeded") or client_metrics.get("requests_completed") or 0.0
+    )
     configured_duration_s = max(float(run_config["client"]["duration_s"]), 1e-9)
     run_t0 = float(client_metrics.get("run_t0") or 0.0)
     last_request_start_at = float(client_metrics.get("last_request_start_at") or 0.0)
@@ -49,7 +52,9 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
         measured_dispatch_s = last_request_start_at - run_t0
     if run_t0 > 0 and last_body_done_at >= run_t0:
         measured_completion_s = last_body_done_at - run_t0
-    effective_duration_s = measured_completion_s if measured_completion_s > 0 else configured_duration_s
+    effective_duration_s = (
+        measured_completion_s if measured_completion_s > 0 else configured_duration_s
+    )
     achieved_rps = completed / max(effective_duration_s, 1e-9)
     requested_rps = float(run_config["client"]["rate"])
     success_fraction = 1.0
@@ -67,7 +72,9 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
     reuse_ratio = reused_connections / max(total_completed, 1.0)
     max_queue_depth = int(client_metrics.get("max_observed_queue_depth") or 0)
     max_active = int(client_metrics.get("max_observed_active") or 0)
-    configured_active = int(client_metrics.get("max_active_requests") or run_config["client"]["max_active_requests"])
+    configured_active = int(
+        client_metrics.get("max_active_requests") or run_config["client"]["max_active_requests"]
+    )
     max_time_wait = int(port_metrics.get("max_time_wait") or 0)
 
     target_queue_peak = int(target_metrics.get("aggregate", {}).get("max_queue_depth", 0))
@@ -87,7 +94,10 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
     diagnosis = "inconclusive"
     reasons = []
     if netstats_summary:
-        if int(netstats_summary.get("max_rx_drops", 0)) > 0 or int(netstats_summary.get("max_tx_drops", 0)) > 0:
+        if (
+            int(netstats_summary.get("max_rx_drops", 0)) > 0
+            or int(netstats_summary.get("max_tx_drops", 0)) > 0
+        ):
             diagnosis = "network_packet_bound"
             reasons.append("Non-zero NIC drops were observed.")
         elif float(netstats_summary.get("max_bandwidth_fraction", 0.0)) >= 0.80:
@@ -101,11 +111,18 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
         reasons.append("Target queue grew while client success fraction fell.")
     if diagnosis == "inconclusive" and queue_fraction >= 0.25 and max_queue_depth > 0:
         diagnosis = "client_queue_bound"
-        reasons.append("A significant fraction of slot hold time was spent waiting in the client queue.")
+        reasons.append(
+            "A significant fraction of slot hold time was spent waiting in the client queue."
+        )
     # Check concurrency_saturated and healthy BEFORE transport/churn diagnoses.
     # When achieved ≈ expected (Little's Law ceiling), the system is working correctly
     # even if max_active == configured_active — that's expected, not a bottleneck.
-    if diagnosis == "inconclusive" and max_active >= configured_active and requested_rps > expected_rps * 1.1 and achieved_rps >= expected_rps * 0.85:
+    if (
+        diagnosis == "inconclusive"
+        and max_active >= configured_active
+        and requested_rps > expected_rps * 1.1
+        and achieved_rps >= expected_rps * 0.85
+    ):
         diagnosis = "concurrency_saturated"
         reasons.append(
             f"Arrival rate ({requested_rps:.0f} req/s) exceeds concurrency ceiling "
@@ -114,16 +131,33 @@ def summarize_point(run_config, client_metrics, target_metrics, port_metrics, ne
         )
     # Healthy: achieved is near the effective ceiling (min of rate limit and concurrency ceiling).
     effective_ceiling = min(expected_rps, requested_rps) if expected_rps > 0 else requested_rps
-    if diagnosis == "inconclusive" and effective_ceiling > 0 and achieved_rps >= effective_ceiling * 0.85:
+    if (
+        diagnosis == "inconclusive"
+        and effective_ceiling > 0
+        and achieved_rps >= effective_ceiling * 0.85
+    ):
         diagnosis = "healthy"
         reasons.append(
             f"Achieved {achieved_rps:.0f} req/s is within 15% of effective ceiling "
             f"({effective_ceiling:.0f} req/s). No dominant bottleneck."
         )
-    if diagnosis == "inconclusive" and connect_mean > 0 and configured_active > 0 and max_active >= configured_active and achieved_rps < requested_rps * 0.9:
+    if (
+        diagnosis == "inconclusive"
+        and connect_mean > 0
+        and configured_active > 0
+        and max_active >= configured_active
+        and achieved_rps < requested_rps * 0.9
+    ):
         diagnosis = "transport_conn_bound"
-        reasons.append("Configured active request slots saturated while throughput stayed below target.")
-    if diagnosis == "inconclusive" and connection_churn_ratio >= 0.25 and reuse_ratio < 0.5 and max_time_wait > configured_active:
+        reasons.append(
+            "Configured active request slots saturated while throughput stayed below target."
+        )
+    if (
+        diagnosis == "inconclusive"
+        and connection_churn_ratio >= 0.25
+        and reuse_ratio < 0.5
+        and max_time_wait > configured_active
+    ):
         diagnosis = "connection_churn_bound"
         reasons.append("Connection churn and TIME_WAIT exceeded the active request budget.")
     if diagnosis == "inconclusive" and dispatch_lag_mean >= 0.05 and queue_fraction < 0.10:
@@ -174,10 +208,15 @@ def build_operating_envelope(point_summaries):
     stable_points = [
         item
         for item in point_summaries
-        if float(item.get("success_fraction", 1.0)) >= 0.99 and float(item.get("queue_fraction", 0.0)) <= 0.25
+        if float(item.get("success_fraction", 1.0)) >= 0.99
+        and float(item.get("queue_fraction", 0.0)) <= 0.25
     ]
     if not stable_points:
-        return {"max_stable_rps": 0.0, "safe_active_budget": 0, "notes": ["No stable points met the default envelope criteria."]}
+        return {
+            "max_stable_rps": 0.0,
+            "safe_active_budget": 0,
+            "notes": ["No stable points met the default envelope criteria."],
+        }
     best = max(stable_points, key=lambda item: item["achieved_rps"])
     best_queue_fraction = float(best.get("queue_fraction", 0.0))
     safe_budget = int(best.get("safe_active_budget_estimate") or best.get("configured_active") or 0)
@@ -210,7 +249,9 @@ def compare_point_summaries(points_a, points_b):
     return {"rows": rows}
 
 
-def summarize_saturation(run_config, saturation_output, target_metrics, port_metrics, netstats_summary=None):
+def summarize_saturation(
+    run_config, saturation_output, target_metrics, port_metrics, netstats_summary=None
+):
     """Summarize saturation finder results into a diagnosis dict compatible with reporting."""
     sat_rate = int(saturation_output.get("saturation_rate", 0))
     steps = saturation_output.get("steps", [])
@@ -282,6 +323,6 @@ def write_json(path, payload):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     # PR-035: atomic publish so a polling reader never sees a partial file.
-    from ..utils import _atomic_write
+    from ..utils import atomic_write_text
 
-    _atomic_write(target, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(target, json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n")

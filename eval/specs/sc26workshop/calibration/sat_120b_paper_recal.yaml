@@ -25,6 +25,7 @@ workload:
   arrival: fixed
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   num_nodes: 1
   model_storage_path: /flare/datasets/model-weights/hub
   models:
@@ -58,9 +59,9 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs
-  queue: debug
+  queue: capacity
   walltime: 01:00:00
   nodes: 1

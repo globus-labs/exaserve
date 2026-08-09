@@ -1,53 +1,44 @@
-# ExaServe generic-HPC refactor — design index
+# Hardened architecture notes
 
-ExaServe is being generalized from an Aurora/Intel-XPU/PBS-specific stack into a
-portable HPC serving platform: **Ray + engine-of-choice + proxy-of-choice**, with
-pluggable schedulers and vendors. This directory holds the design; the table below
-is the source of truth for **what is built vs. proposed**.
+These notes describe the implemented architecture after the production-hardening
+cutover. The normative architecture and acceptance gates remain
+[`../PRODUCTION_HARDENING_EXECUTION_PLAN.md`](../PRODUCTION_HARDENING_EXECUTION_PLAN.md).
+If a design note conflicts with that plan, the plan wins.
 
-## Roadmap & status
+## Implemented boundaries
 
-| Step | Scope | Doc | Status |
-|---|---|---|---|
-| (1) | Rename `aurora_rayserver` → `exaserve` (package, CLI, env vars, brand) | — (commit `6a2faa9`) | **Done & validated on real compute** (1-node all-features, 2-node 24-replica proxy/internode; 405B PP re-smoke in progress) |
-| (2) | Pluggable **engine** interface (+ proxy polish) | [pluggable_interfaces.md](pluggable_interfaces.md) | **Partially built**: `engines/` ABC + `NullEngine` + registry shipped; `server.py` extraction (VLLM/SGLang engines behind one `EngineWorker`) **not started** |
-| (3) | Pluggable **scheduler** (PBS → Slurm) | [scheduler_abstraction.md](scheduler_abstraction.md) | **Built** (`feature/slurm-amd-support`): package `SchedulerBackend` PBS+Slurm + srun/nodefile runtime seam. PBS validated, Slurm untested (offsite). Eval harness also Slurm-capable. |
-| (4) | Pluggable **vendor** (XPU → CUDA/ROCm) + **site** config | [vendor_site_abstraction.md](vendor_site_abstraction.md) | **Built** (`feature/slurm-amd-support`): `VendorBackend` XPU/CUDA/ROCm, engines delegate device isolation. XPU validated, CUDA/ROCm untested (offsite). `SiteConfig` object still deferred (env-var based). See [deploy_slurm_amd.md](../deploy_slurm_amd.md). |
-| (5) | Update `doc/exaserve.md`, README, paper to the generic framing | — | Not started (do last, once the above land) |
+| Concern | Canonical owner | Selection authority |
+|---|---|---|
+| Deployment topology | `exaserve.plan.compiler` | immutable `DeploymentPlan` |
+| Site capabilities | `exaserve.site` | hash-bearing `SiteProfile` |
+| Allocation membership | scheduler plus `AllocationBinding` | verified runtime artifact |
+| Scheduler jobs | `exaserve.schedulers.SchedulerBackend` | `SchedulerPlan`, constrained by `SiteProfile` |
+| Accelerator behavior | `exaserve.vendors.VendorBackend` | `DeploymentPlan.vendor` |
+| Inference engine | `exaserve.engines.EngineBackend` | `DeploymentPlan.engine` |
+| Gateway rendering | `exaserve.proxy.ProxyBackend` | `DeploymentPlan.gateway` |
+| Process lifecycle | `RuntimeSupervisor` / `NodeSupervisor` | typed observations and deadlines |
+| Readiness | `ReadinessCoordinator` | generation-bound status, receipts, and canaries |
+| Eval and ClientLab | shared plan/status APIs | exact plan and run hashes |
 
-## The common pattern
+Runtime environment variables used by native dependencies are outputs of
+`runtime_environment(plan)`. They are not public configuration switches.
 
-All four axes converge on one shape, already proven by the proxy layer
-(`proxy/base.py::ProxyBackend` + `proxy/get_proxy()`):
+## Release support versus implemented adapters
 
-> an **ABC** + a lazy **registry** + a single **host/caller** that touches only the
-> interface, selected by an `EXASERVE_*` env var or the site config.
+The default release profile accepts native PBS, Intel XPU, vLLM, and HAProxy
+for production-mode configuration. Direct exposure and other gateway adapters
+require explicit validation mode. Slurm, PSI/J, CUDA, ROCm, and SGLang code is
+retained for future qualification but the Aurora profile rejects it before
+submission or launch. Implemented does not mean production-qualified.
 
-- Proxy: `ProxyBackend` / `get_proxy` — **already clean** (the template).
-- Engine: `EngineBackend` / `get_engine` — interface shipped, host wiring pending.
-- Scheduler: `SchedulerBackend` / `get_scheduler` — proposed.
-- Vendor: `VendorBackend` / `get_vendor` — proposed.
-- Site: `SiteConfig` composes the above (picks vendor + scheduler, supplies facts).
+The currently evidence-backed node maximum and the larger unapproved candidate
+target are recorded in `SiteProfile.scale_envelopes` and the hardening status
+documents; historical runs do not automatically qualify the new architecture.
 
-## Validation gate (applies to every step)
+## Related notes
 
-Any refactor of the serving/launch path must re-pass the smoke set the rename was
-validated against, with numbers matching baselines:
-`nullcompute_smoke_1node`, `refcard_smoke_1node` (≈28.6 rps, 0 err),
-`smoke_slo_stream_{proxy,direct,rayserve}`, `serverstats_ttft_{off,on}delay_1node`,
-`serverstats_ttft_ondelay_2node` (24 replicas, ≈39 rps, 0 err), and the 405B PP
-runs (`pp405b_pp2_proxyfix` 4-node, `pp405b_verify_2node`).
-
-## What stays site/vendor-specific (not portable, by design)
-
-Aurora `subjob`/`keepalive` dev tooling, `env_aurora`/`/opt/aurora`/frameworks
-module, the Intel-XPU `EXASERVE_XPU_*` workarounds, and the PVC/Triton-SYCL
-quirks — these are inputs to the abstractions, consumed via `SiteConfig` /
-`VendorBackend`, never hardcoded in the serving core.
-
-## Offsite / unprovable here
-
-Slurm end-to-end and NVIDIA/AMD end-to-end **cannot** be validated on Aurora
-(PBS + XPU only). Those backends can be unit-tested for command/env shape here;
-real validation is owed on a Slurm system and CUDA/ROCm hardware respectively, and
-must be flagged unproven until then.
+- [`pluggable_interfaces.md`](pluggable_interfaces.md): engine and gateway seams
+- [`scheduler_abstraction.md`](scheduler_abstraction.md): shared scheduler boundary
+- [`vendor_site_abstraction.md`](vendor_site_abstraction.md): site and accelerator ownership
+- [`../deploy_slurm_amd.md`](../deploy_slurm_amd.md): unsupported-platform qualification guide
+- [`../../eval/DESIGN.md`](../../eval/DESIGN.md): eval control plane

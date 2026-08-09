@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
-from typing import Dict, List
+
+from clientlab.utils import atomic_write_text
 
 
 PLOT_COLORS = [
@@ -66,7 +67,7 @@ def _svg_escape(value):
 
 
 def render_line_plot_svg(title, labels, series_map, y_label):
-    max_label_len = max((len(str(l)) for l in labels), default=0)
+    max_label_len = max((len(str(label)) for label in labels), default=0)
     width = 960
     margin_left = 68
     margin_right = 24
@@ -77,7 +78,7 @@ def render_line_plot_svg(title, labels, series_map, y_label):
     plot_height = height - margin_top - margin_bottom
 
     x_count = max(len(labels), 1)
-    x_step = plot_width / max(x_count-1, 1)
+    x_step = plot_width / max(x_count - 1, 1)
     all_values = []
     for values in series_map.values():
         all_values.extend(_safe_float(value) for value in values)
@@ -95,21 +96,26 @@ def render_line_plot_svg(title, labels, series_map, y_label):
         return margin_top + plot_height - (normalized * plot_height)
 
     lines = [
-        '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">' % (width, height, width, height),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">'
+        % (width, height, width, height),
         '<rect x="0" y="0" width="%d" height="%d" fill="white" />' % (width, height),
-        '<text x="%d" y="24" font-size="18" font-family="sans-serif" font-weight="700">%s</text>' % (margin_left, _svg_escape(title)),
-        '<text x="16" y="%d" font-size="12" font-family="sans-serif" transform="rotate(-90 16,%d)">%s</text>' % (
+        '<text x="%d" y="24" font-size="18" font-family="sans-serif" font-weight="700">%s</text>'
+        % (margin_left, _svg_escape(title)),
+        '<text x="16" y="%d" font-size="12" font-family="sans-serif" transform="rotate(-90 16,%d)">%s</text>'
+        % (
             margin_top + plot_height / 2.0,
             margin_top + plot_height / 2.0,
             _svg_escape(y_label),
         ),
-        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#111827" stroke-width="1.5" />' % (
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#111827" stroke-width="1.5" />'
+        % (
             margin_left,
             margin_top + plot_height,
             margin_left + plot_width,
             margin_top + plot_height,
         ),
-        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#111827" stroke-width="1.5" />' % (
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#111827" stroke-width="1.5" />'
+        % (
             margin_left,
             margin_top,
             margin_left,
@@ -160,7 +166,9 @@ def render_line_plot_svg(title, labels, series_map, y_label):
     for series_idx, name in enumerate(sorted(series_map)):
         color = PLOT_COLORS[series_idx % len(PLOT_COLORS)]
         y = legend_y + series_idx * 18
-        lines.append('<rect x="%d" y="%d" width="10" height="10" fill="%s" />' % (legend_x, y, color))
+        lines.append(
+            '<rect x="%d" y="%d" width="10" height="10" fill="%s" />' % (legend_x, y, color)
+        )
         lines.append(
             '<text x="%d" y="%d" font-size="11" font-family="sans-serif" dominant-baseline="hanging">%s</text>'
             % (legend_x + 16, y - 1, _svg_escape(name))
@@ -227,7 +235,9 @@ def generate_plots(study_dir, points):
             {
                 "target_queue_peak": _series_for_points(ordered_points, "target_queue_peak"),
                 "target_rejections": _series_for_points(ordered_points, "target_rejections"),
-                "target_error_fraction": _series_for_points(ordered_points, "target_error_fraction"),
+                "target_error_fraction": _series_for_points(
+                    ordered_points, "target_error_fraction"
+                ),
             },
             "mixed units",
         ),
@@ -247,7 +257,7 @@ def generate_plots(study_dir, points):
     for filename, title, series_map, y_label in plot_specs:
         svg = render_line_plot_svg(title, labels, series_map, y_label)
         path = plot_dir / filename
-        path.write_text(svg, encoding="utf-8")
+        atomic_write_text(path, svg)
         plots[filename[:-4]] = str(path)
 
     return plots

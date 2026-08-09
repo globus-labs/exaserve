@@ -7,8 +7,13 @@ materialize -> execute pipeline.
 
 from __future__ import annotations
 
-from .base import BackendAdapter, BackendRunContext, LaunchedBackend, ProcessMonitor, RuntimeEnvSpec
-from ..utils import dump_yaml_file
+from .base import (
+    BackendAdapter,
+    BackendProcessHandle,
+    BackendRunContext,
+    LaunchedBackend,
+    RuntimeEnvSpec,
+)
 
 
 class MockBackendAdapter(BackendAdapter):
@@ -18,7 +23,9 @@ class MockBackendAdapter(BackendAdapter):
         return
 
     def build_runtime_manifest(self, run_plan) -> str:
-        dump_yaml_file(
+        from exaserve.state.atomic import atomic_create_yaml
+
+        atomic_create_yaml(
             run_plan.runtime_manifest_path,
             {
                 "mock": True,
@@ -32,8 +39,9 @@ class MockBackendAdapter(BackendAdapter):
         return RuntimeEnvSpec(env_script="~/script/env_aurora")
 
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:
-        monitor = ProcessMonitor(process=None, log_path=f"{run_ctx.run_plan.bundle.logs_dir}/mock_backend.log")
-        monitor.ready_event.set()
+        monitor = BackendProcessHandle(
+            process=None, log_path=f"{run_ctx.run_plan.bundle.logs_dir}/mock_backend.log"
+        )
         return LaunchedBackend(monitor=monitor)
 
     def wait_ready(self, run_ctx: BackendRunContext, launched: LaunchedBackend) -> None:

@@ -20,7 +20,6 @@ Usage (exaserve_serve.py / driver.py):
 """
 
 import glob
-import json
 import os
 import socket
 import threading
@@ -78,9 +77,7 @@ def default_scaling_trace_path() -> str:
 
 def trace_part_path(kind: str, prefix: str, *, suffix: str = ".json") -> str:
     ts = time.strftime("%Y%m%d_%H%M%S")
-    filename = (
-        f"{prefix}_{_sanitize_token(socket.gethostname())}_{os.getpid()}_{ts}{suffix}"
-    )
+    filename = f"{prefix}_{_sanitize_token(socket.gethostname())}_{os.getpid()}_{ts}{suffix}"
     return os.path.join(trace_root_dir(), kind, filename)
 
 
@@ -146,9 +143,7 @@ class ScalingTracer:
                 if self._phase_stack and self._phase_stack[-1] is entry:
                     self._phase_stack.pop()
                 self._phases.append(entry)
-            _print_trace(
-                f"PHASE {name}: {entry['duration_s']:.3f}s", extra
-            )
+            _print_trace(f"PHASE {name}: {entry['duration_s']:.3f}s", extra)
 
     def record_phase(self, name: str, duration_s: float, **extra: Any) -> None:
         """Manually record a phase that was timed externally."""
@@ -303,11 +298,14 @@ class ScalingTracer:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = self.to_dict()
         # PR-035: atomic publish (crash/concurrent-reader safe).
-        from exaserve.state.atomic import atomic_write_text
-        atomic_write_text(path, json.dumps(data, indent=2, default=str))
-        _print_trace(f"Trace written to {path} ({len(data['phases'])} phases, "
-                     f"{len(data['api_calls'])} API calls, "
-                     f"{len(data['replicas'])} replicas)")
+        from exaserve.state.atomic import atomic_write_json
+
+        atomic_write_json(path, data)
+        _print_trace(
+            f"Trace written to {path} ({len(data['phases'])} phases, "
+            f"{len(data['api_calls'])} API calls, "
+            f"{len(data['replicas'])} replicas)"
+        )
         return path
 
     def save_replica_trace(self, path: Optional[str] = None) -> Optional[str]:
@@ -323,8 +321,9 @@ class ScalingTracer:
                 "pid": os.getpid(),
                 "replicas": list(self._replicas),
             }
-        from exaserve.state.atomic import atomic_write_text
-        atomic_write_text(path, json.dumps(data, indent=2, default=str))
+        from exaserve.state.atomic import atomic_write_json
+
+        atomic_write_json(path, data)
         return path
 
 
@@ -352,72 +351,78 @@ _STATS_COLLECTOR_NAMESPACE = "serve"
 
 
 def _stats_collector_name() -> str:
-    # PR-029: deployment-scoped so a reused Ray cluster never mixes two
-    # deployments' replica-init traces under one detached actor.
-    for var in ("EXASERVE_DEPLOYMENT_ID", "EXASERVE_SCALING_TRACE_TOKEN",
-                "EXASERVE_JOBID", "PBS_JOBID"):
-        val = os.environ.get(var)
-        if val:
-            return f"ReplicaStatsCollector:{str(val).split('.')[0][:40]}"
-    return "ReplicaStatsCollector:default"
+    from .telemetry import TelemetryIdentity, telemetry_actor_name
+
+    return telemetry_actor_name("replica_init", TelemetryIdentity.from_environment())
 
 
-
-
-class _ReplicaStatsCollectorImpl:
-    """Collects replica init stats in-memory on the head node."""
-
-    def __init__(self):
-        self._replicas: list[dict] = []
-
-    def report(self, replica_info: dict) -> None:
-        self._replicas.append(replica_info)
-
-    def get_all(self) -> list[dict]:
-        return list(self._replicas)
-
-    def count(self) -> int:
-        return len(self._replicas)
-
-
-def create_stats_collector():
+def create_stats_collector(expected_replicas: int):
     """Create the named ReplicaStatsCollector actor. Call once on head node
     after ray.init(), before serve.run() spawns replicas."""
     if not tracing_enabled():
         return None
     import ray
-    actor_cls = ray.remote(_ReplicaStatsCollectorImpl)
-    return actor_cls.options(
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+    from .telemetry import OWNED_TELEMETRY_ACTORS, ReplicaInitStatsStore, TelemetryIdentity
+
+    identity = TelemetryIdentity.from_environment()
+    node_id = ray.get_runtime_context().get_node_id()
+    actor_cls = ray.remote(ReplicaInitStatsStore)
+    actor = actor_cls.options(
         name=_stats_collector_name(),
         namespace=_STATS_COLLECTOR_NAMESPACE,
-        lifetime="detached",
         num_cpus=0,
-    ).remote()
+        scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
+    ).remote(identity.to_dict(), expected_replicas)
+    return OWNED_TELEMETRY_ACTORS.register("replica_init", actor)
 
 
 def _get_stats_collector():
     """Get the named collector actor, or None if tracing is disabled."""
     if not tracing_enabled():
         return None
+    import ray
+
     try:
-        import ray
         return ray.get_actor(_stats_collector_name(), namespace=_STATS_COLLECTOR_NAMESPACE)
-    except Exception:
+    except ValueError:
+        # A missing named actor is the expected optional-telemetry case. Other
+        # Ray failures propagate to the caller and are recorded as drops.
         return None
 
 
 def report_replica_stats(replica_info: dict) -> None:
     """Fire-and-forget: report replica init stats to the collector actor.
     Called from VLLMWorker.__init__ on every node."""
+    if not tracing_enabled():
+        return
     collector = _get_stats_collector()
     if collector is None:
+        print("[ScalingTrace] replica-init collector unavailable; report dropped", flush=True)
+        from .observability import record_telemetry_drop
+
+        record_telemetry_drop("replica_init", "collector_unavailable")
         return
     try:
-        collector.report.remote(replica_info)
-    except Exception:
-        pass  # best effort; don't crash replica init
+        import ray
+        from .telemetry import TelemetryIdentity, replica_init_envelope
 
+        try:
+            replica_id = str(ray.get_runtime_context().get_actor_id())
+        except (AttributeError, RuntimeError):
+            replica_id = f"{socket.gethostname()}:{os.getpid()}"
+        envelope = replica_init_envelope(
+            identity=TelemetryIdentity.from_environment(),
+            replica_id=replica_id,
+            payload=replica_info,
+        )
+        ray.get(collector.report.remote(envelope), timeout=10)
+    except Exception as exc:
+        # Instrumentation is optional, but the loss is explicit and observable.
+        from .observability import record_telemetry_drop
 
+        record_telemetry_drop("replica_init", "push_failed")
+        print(f"[ScalingTrace] replica-init report dropped: {exc}", flush=True)
 
 
 def collect_replica_stats() -> list[dict]:
@@ -427,10 +432,31 @@ def collect_replica_stats() -> list[dict]:
     if collector is None:
         return []
     import ray
+
     try:
-        stats = ray.get(collector.get_all.remote(), timeout=60)
-        ray.kill(collector)
-        return stats
+        from .telemetry import TelemetryIdentity, validate_replica_init_snapshot
+
+        snapshot = validate_replica_init_snapshot(
+            ray.get(collector.snapshot.remote(), timeout=60),
+            expected_identity=TelemetryIdentity.from_environment(),
+        )
+        if not snapshot["complete"]:
+            print(
+                "[ScalingTrace] replica-init telemetry incomplete: "
+                f"{snapshot['received_replicas']}/"
+                f"{snapshot['expected_replicas']}",
+                flush=True,
+            )
+        return list(snapshot["replicas"].values())
     except Exception as exc:
         print(f"[ScalingTrace] Failed to collect replica stats: {exc}", flush=True)
         return []
+    finally:
+        try:
+            ray.kill(collector, no_restart=True)
+        except (RuntimeError, ValueError) as exc:
+            print(f"[ScalingTrace] replica-init actor cleanup failed: {exc}", flush=True)
+        else:
+            from .telemetry import OWNED_TELEMETRY_ACTORS
+
+            OWNED_TELEMETRY_ACTORS.release("replica_init")

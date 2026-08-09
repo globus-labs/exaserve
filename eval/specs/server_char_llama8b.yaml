@@ -41,7 +41,7 @@ matrix:
   name_template: mns{max_num_seqs}
 name: server_char_llama8b
 scheduler:
-  queue: debug
+  queue: capacity
   type: pbs
   walltime: 01:00:00
 trace:

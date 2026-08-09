@@ -1,5 +1,6 @@
 from pathlib import Path
-from typing import Any, Dict, List
+
+from clientlab.utils import atomic_write_text
 
 
 def render_report(study_manifest, points, envelope):
@@ -47,7 +48,13 @@ def render_key_questions(points):
     valid_points = [p for p in points if p.get("summary", {}).get("diagnosis") != "error"]
     if not valid_points:
         return ["No completed points were available."]
-    by_active = sorted(valid_points, key=lambda item: (item["run_config"]["client"]["max_active_requests"], item["summary"].get("requested_rps", 0)))
+    by_active = sorted(
+        valid_points,
+        key=lambda item: (
+            item["run_config"]["client"]["max_active_requests"],
+            item["summary"].get("requested_rps", 0),
+        ),
+    )
     first = by_active[0]
     last = by_active[-1]
     delta_rps = last["summary"].get("achieved_rps", 0) - first["summary"].get("achieved_rps", 0)
@@ -72,4 +79,4 @@ def render_key_questions(points):
 def write_report(path, content):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    atomic_write_text(target, content)

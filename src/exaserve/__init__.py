@@ -1,39 +1,26 @@
-"""exaserve: Ray Serve helpers and scale patches for Aurora.
+"""ExaServe canonical planning and supervised serving package.
 
-Public API (all importable as ``from exaserve import …``):
-
-    Configuration / schema:
-        DeploymentConfig, ModelConfig, ProxyConfig
-        load_deployment_config, load_proxy_config
-
-    Patch installer:
-        apply_all  (must be called BEFORE any ``import ray.serve`` / ``import vllm``;
-                    see ``exaserve.patches.apply_all`` for the why-explicit
-                    rationale: Ray instantiates ``ray.serve._private`` classes during
-                    package import, so monkey-patching after the fact is too late.)
-
-The launcher (``exaserve-launch-cluster``) and ``exaserve.driver`` both
-call ``apply_all()`` themselves at the right point in the lifecycle. If you
-embed the package in your own code, call it explicitly before importing
-ray.serve or vllm.
+The public configuration boundary is the immutable plan family. Legacy YAML
+is accepted only through the one-way compiler adapter; runtime code consumes
+verified artifacts and cannot select the former schema or lifecycle paths.
 """
 
-from .schemas import (  # noqa: F401
-    DeploymentConfig,
-    ModelConfig,
-    ProxyConfig,
-    load_deployment_config,
-    load_proxy_config,
+from .plan import (  # noqa: F401
+    AllocationBinding,
+    DeploymentPlan,
+    RunPlan,
+    SiteProfile,
+    compile_deployment_plan,
+    compile_run_plan,
 )
-from .patches import apply_all  # noqa: F401
+from ._version import __version__
 
 __all__ = [
-    "DeploymentConfig",
-    "ModelConfig",
-    "ProxyConfig",
-    "load_deployment_config",
-    "load_proxy_config",
-    "apply_all",
+    "__version__",
+    "AllocationBinding",
+    "DeploymentPlan",
+    "RunPlan",
+    "SiteProfile",
+    "compile_deployment_plan",
+    "compile_run_plan",
 ]
-
-__version__ = "0.3.0"

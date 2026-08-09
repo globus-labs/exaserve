@@ -17,9 +17,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("spec")
     run_parser.add_argument("--output-dir", default=None)
     run_parser.add_argument("--local", action="store_true", help="Force local execution mode.")
-    run_parser.add_argument("--pbs", action="store_true", help="Force PBS interactive execution mode.")
+    run_parser.add_argument(
+        "--pbs", action="store_true", help="Force PBS interactive execution mode."
+    )
 
-    report_parser = sub.add_parser("report", help="Generate or refresh report artifacts for a study directory.")
+    report_parser = sub.add_parser(
+        "report", help="Generate or refresh report artifacts for a study directory."
+    )
     report_parser.add_argument("study_dir")
 
     compare_parser = sub.add_parser("compare", help="Compare two completed study directories.")
@@ -46,7 +50,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
     if args.command == "run":
-        study_dir = run_study(args.spec, output_dir=args.output_dir, force_local=args.local, force_pbs=args.pbs)
+        study_dir = run_study(
+            args.spec, output_dir=args.output_dir, force_local=args.local, force_pbs=args.pbs
+        )
         print(study_dir)
         return 0
     if args.command == "report":

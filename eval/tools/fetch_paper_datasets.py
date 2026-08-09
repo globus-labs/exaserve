@@ -26,23 +26,27 @@ the HF tokenizer, which would get a login node killed. Run it inside a subjob:
 
 Network egress uses the proxy that env_aurora exports (HTTPS_PROXY).
 """
+
 from __future__ import annotations
 
 import argparse
 import gzip
 import io
 import json
-import os
 import sys
 import urllib.request
 from pathlib import Path
 
-DEFAULT_DATA_ROOT = "/lus/flare/projects/AuroraGPT/wenyiw/data"
+from eval.site_config import get_site_config
+
+DEFAULT_DATA_ROOT = get_site_config().user_data_root
 
 HUMANEVAL_URL = "https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz"
 # Cleaned single-region BurstGPT trace (≈1.4M rows); closest analogue to the
 # Azure code trace already wired into burstgpt_v1.yaml.
-BURSTGPT_URL = "https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_without_fails_1.csv"
+BURSTGPT_URL = (
+    "https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_without_fails_1.csv"
+)
 BURSTGPT_FALLBACK_URL = "https://github.com/HPMLL/BurstGPT/raw/master/data/BurstGPT_1.csv"
 
 # Output-length policy (see module docstring).
@@ -66,7 +70,7 @@ def _download(url: str, dest: Path) -> None:
             if not chunk:
                 break
             out.write(chunk)
-    _log(f"  -> {dest} ({dest.stat().st_size/1e6:.1f} MB)")
+    _log(f"  -> {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
 def _write_jsonl(rows: list[dict], dest: Path) -> None:
@@ -80,6 +84,7 @@ def _write_jsonl(rows: list[dict], dest: Path) -> None:
 # --------------------------------------------------------------------------- #
 # datasets
 # --------------------------------------------------------------------------- #
+
 
 def fetch_humaneval(out_dir: Path, sample: int | None) -> None:
     _log("humaneval: downloading")
@@ -95,8 +100,14 @@ def fetch_humaneval(out_dir: Path, sample: int | None) -> None:
             obj = json.loads(line)
             prompt = obj.get("prompt")
             if prompt:
-                rows.append({"prompt": prompt, "output_len": HUMANEVAL_OUTPUT_LEN,
-                             "input_len": None, "source": "humaneval"})
+                rows.append(
+                    {
+                        "prompt": prompt,
+                        "output_len": HUMANEVAL_OUTPUT_LEN,
+                        "input_len": None,
+                        "source": "humaneval",
+                    }
+                )
     if sample:
         rows = rows[:sample]
     _write_jsonl(rows, out_dir / "humaneval.jsonl")
@@ -106,8 +117,10 @@ def fetch_cnn_dailymail(out_dir: Path, sample: int | None) -> None:
     try:
         from datasets import load_dataset
     except ImportError:
-        _log("cnn_dailymail: ERROR — `datasets` not importable. "
-             "Run under `module load frameworks` / env_aurora, or `pip install datasets`.")
+        _log(
+            "cnn_dailymail: ERROR — `datasets` not importable. "
+            "Run under `module load frameworks` / env_aurora, or `pip install datasets`."
+        )
         raise
     n = sample or 5000
     _log(f"cnn_dailymail: loading test split (target {n} articles)")
@@ -116,14 +129,20 @@ def fetch_cnn_dailymail(out_dir: Path, sample: int | None) -> None:
     for ex in ds:
         article = (ex.get("article") or "").strip()
         if article:
-            rows.append({"prompt": CNN_PROMPT_PREFIX + article,
-                         "output_len": CNN_OUTPUT_LEN, "input_len": None,
-                         "source": "cnn_dailymail"})
+            rows.append(
+                {
+                    "prompt": CNN_PROMPT_PREFIX + article,
+                    "output_len": CNN_OUTPUT_LEN,
+                    "input_len": None,
+                    "source": "cnn_dailymail",
+                }
+            )
     _write_jsonl(rows, out_dir / "cnn_dailymail.jsonl")
 
 
-def fetch_sharegpt_natural(out_dir: Path, sample: int | None, sharegpt_path: Path,
-                           tokenizer_id: str) -> None:
+def fetch_sharegpt_natural(
+    out_dir: Path, sample: int | None, sharegpt_path: Path, tokenizer_id: str
+) -> None:
     if not sharegpt_path.exists():
         _log(f"sharegpt_natural: ERROR — bank not found at {sharegpt_path}")
         raise FileNotFoundError(sharegpt_path)
@@ -150,8 +169,14 @@ def fetch_sharegpt_natural(out_dir: Path, sample: int | None, sharegpt_path: Pat
         out_len = len(tok.encode(gpt, add_special_tokens=False))
         if in_len == 0 or out_len == 0:
             continue
-        rows.append({"prompt": human, "output_len": out_len, "input_len": in_len,
-                     "source": "sharegpt_natural"})
+        rows.append(
+            {
+                "prompt": human,
+                "output_len": out_len,
+                "input_len": in_len,
+                "source": "sharegpt_natural",
+            }
+        )
         if len(rows) >= limit:
             break
     _write_jsonl(rows, out_dir / "sharegpt_natural.jsonl")
@@ -171,26 +196,45 @@ def fetch_burstgpt(data_root: Path) -> None:
 
 # --------------------------------------------------------------------------- #
 
+
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data-root", default=DEFAULT_DATA_ROOT,
-                   help=f"Lustre data root (default: {DEFAULT_DATA_ROOT})")
-    p.add_argument("--datasets", nargs="*",
-                   default=["humaneval", "cnn_dailymail", "sharegpt_natural", "burstgpt"],
-                   choices=["humaneval", "cnn_dailymail", "sharegpt_natural", "burstgpt"],
-                   help="Subset to fetch (default: all). Use a small subset to validate first.")
-    p.add_argument("--sample", type=int, default=None,
-                   help="Cap rows per dataset (for a quick validation pass).")
-    p.add_argument("--tokenizer", default="meta-llama/Meta-Llama-3-8B-Instruct",
-                   help="Tokenizer for natural ShareGPT output-length measurement.")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--data-root",
+        default=DEFAULT_DATA_ROOT,
+        help=f"Lustre data root (default: {DEFAULT_DATA_ROOT})",
+    )
+    p.add_argument(
+        "--datasets",
+        nargs="*",
+        default=["humaneval", "cnn_dailymail", "sharegpt_natural", "burstgpt"],
+        choices=["humaneval", "cnn_dailymail", "sharegpt_natural", "burstgpt"],
+        help="Subset to fetch (default: all). Use a small subset to validate first.",
+    )
+    p.add_argument(
+        "--sample",
+        type=int,
+        default=None,
+        help="Cap rows per dataset (for a quick validation pass).",
+    )
+    p.add_argument(
+        "--tokenizer",
+        default="meta-llama/Meta-Llama-3-8B-Instruct",
+        help="Tokenizer for natural ShareGPT output-length measurement.",
+    )
     args = p.parse_args(argv)
 
     data_root = Path(args.data_root)
     out_dir = data_root / "paper_datasets"
-    sharegpt_path = data_root / "input_traces" / "ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json"
+    sharegpt_path = (
+        data_root / "input_traces" / "ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json"
+    )
 
-    _log(f"data_root={data_root}  out_dir={out_dir}  datasets={args.datasets}  sample={args.sample}")
+    _log(
+        f"data_root={data_root}  out_dir={out_dir}  datasets={args.datasets}  sample={args.sample}"
+    )
     for name in args.datasets:
         if name == "humaneval":
             fetch_humaneval(out_dir, args.sample)

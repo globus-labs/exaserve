@@ -1,119 +1,595 @@
-"""EN-01: the engine attests itself instead of being described by its owner."""
+"""EN-01: spawned EngineCore produces an exact schema-v2 self receipt."""
 
 from __future__ import annotations
 
 import json
 import os
+import socket
+import sys
+import time
+
+import pytest
 
 from exaserve.compat import engine_shim
-from exaserve.compat.profile import default_profile
-from exaserve.compat.receipt import ReceiptStore
+from exaserve.compat.profile import (
+    MULTIPROC_WORKER_PATCH_GATE,
+    PP_PATCH_GATE,
+    RAY_WORKER_PATCH_GATE,
+)
 
 
-def test_install_writes_the_shim_and_points_the_child_at_it(tmp_path, monkeypatch):
+@pytest.fixture(autouse=True)
+def _restore_shim_environment():
+    snapshot = engine_shim.environment_snapshot()
+    yield
+    engine_shim.restore_environment(snapshot)
+
+
+def _identity(monkeypatch) -> None:
+    monkeypatch.setenv("EXASERVE_PLAN_HASH", "1" * 64)
+    monkeypatch.setenv("EXASERVE_SITE_PROFILE_HASH", "2" * 64)
+    monkeypatch.setenv("EXASERVE_ALLOCATION_BINDING_HASH", "3" * 64)
+    monkeypatch.setenv("EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE", "engine/slot0/core")
+    monkeypatch.setenv("EXASERVE_RECEIPT_COMPONENT_ID_ENGINE", "engine-slot0/core")
+    monkeypatch.setenv("EXASERVE_RECEIPT_RANK", "0")
+
+
+def _start_receipt_ingress(tmp_path, monkeypatch):
+    from exaserve.compat.local_ingress import LocalReceiptIngress, socket_path_for
+
+    path = socket_path_for("engine-attestation-test", 0, root=str(tmp_path))
+    ingress = LocalReceiptIngress(path)
+    assert ingress.start()
+    monkeypatch.setenv("EXASERVE_RECEIPT_SOCKET", path)
+    return ingress
+
+
+def _stage_bootstrap(tmp_path, monkeypatch):
+    """Model the compatibility root source staging publishes on every rank."""
+    from exaserve.compat.generated_overlay import ROOT_ENV
+
+    root = tmp_path / "compat-root"
+    root.mkdir(exist_ok=True)
+    (root / "sitecustomize.py").write_text(engine_shim.shim_source())
+    existing = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        str(root) + (os.pathsep + existing if existing else ""),
+    )
+    monkeypatch.setenv(ROOT_ENV, str(root))
+    return root
+
+
+def test_prepare_uses_the_staged_cross_node_bootstrap(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/pre/existing")
-    shim_dir = tmp_path / "shim"
+    bootstrap_root = _stage_bootstrap(tmp_path, monkeypatch)
     receipts = tmp_path / "receipts"
-    assert engine_shim.install(str(shim_dir), str(receipts), import_patches=True,
-                               deployment_id="d1", generation=7, vendor="xpu",
-                               versions={"ray": "2.53.0"})
-    source = (shim_dir / "sitecustomize.py").read_text()
-    assert "exaserve._sitecustomize" in source
-    assert "write_engine_receipt" in source
-    assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(shim_dir)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=True,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+        versions={"ray": "2.53.0"},
+    )
+    source = (bootstrap_root / "sitecustomize.py").read_text()
+    assert "verify_engine_bootstrap" in source
+    assert "import exaserve._sitecustomize" not in source
+    assert "start_engine_attestation" in source
+    assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(bootstrap_root)
     assert "/pre/existing" in os.environ["PYTHONPATH"]
     assert os.environ["EXASERVE_ENGINE_SHIM_PATCHES"] == "1"
-    assert os.environ["EXASERVE_VERSION_RAY"] == "2.53.0"
 
 
-def test_a_non_pp_engine_records_patches_as_undelivered(tmp_path, monkeypatch):
-    """Non-PP deliberately does not deliver the patch set to the engine.
+def test_prepare_rejects_a_tampered_staged_bootstrap(tmp_path, monkeypatch):
+    bootstrap_root = _stage_bootstrap(tmp_path, monkeypatch)
+    (bootstrap_root / "sitecustomize.py").write_text("# drifted\n")
+    with pytest.raises(RuntimeError, match="does not match EN-01"):
+        engine_shim.prepare_environment(
+            str(tmp_path / "receipts"),
+            import_patches=True,
+            deployment_id="d1",
+            generation=7,
+            vendor="xpu",
+        )
 
-    The receipt must say so — not claim the patches applied, and not report a
-    failure that would block readiness on a correct deployment.
-    """
-    monkeypatch.setenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER", "1")
+
+def test_engine_bootstrap_installs_overlay_without_eager_target_import(monkeypatch):
+    from types import SimpleNamespace
+
+    from exaserve.compat import activator, generated_overlay, producers, profile as profile_module
+
+    selected = SimpleNamespace(profile_id="a" * 64)
+    observed = {}
+
+    class StubActivator:
+        def __init__(self, *, profile):
+            observed["activator_profile"] = profile
+
+        def activate(self, role, *, apply_fn):
+            observed["activation_role"] = role
+            apply_fn()
+
+    def install(profile, root, *, role):
+        observed["install"] = (profile, root, role)
+
+    monkeypatch.setattr(profile_module, "default_profile", lambda vendor: selected)
+    monkeypatch.setattr(producers, "manifest_hash", lambda profile: "b" * 64)
+    monkeypatch.setattr(activator, "CompatibilityActivator", StubActivator)
+    monkeypatch.setattr(generated_overlay, "install", install)
+    monkeypatch.setattr(
+        generated_overlay,
+        "activate_patch_ids",
+        lambda *args, **kwargs: pytest.fail("engine bootstrap imported patch targets eagerly"),
+    )
+    monkeypatch.setenv("EXASERVE_VENDOR", "xpu")
+    monkeypatch.setenv("EXASERVE_COMPAT_PROFILE_ID", selected.profile_id)
+    monkeypatch.setenv("EXASERVE_COMPAT_MANIFEST_HASH", "b" * 64)
+    monkeypatch.setenv(generated_overlay.ROOT_ENV, "/verified/overlay")
+
+    engine_shim.verify_engine_bootstrap("vllm")
+
+    assert observed == {
+        "activator_profile": selected,
+        "activation_role": "engine_bootstrap",
+        "install": (selected, "/verified/overlay", "engine_bootstrap"),
+    }
+
+
+def test_parent_environment_can_be_restored_after_the_engine_spawn(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/before")
+    _stage_bootstrap(tmp_path, monkeypatch)
+    snapshot = engine_shim.environment_snapshot()
+    engine_shim.prepare_environment(
+        str(tmp_path / "receipts"),
+        import_patches=False,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+        versions={"ray": "2.53.0"},
+    )
+    engine_shim.restore_environment(snapshot)
+    assert os.environ["PYTHONPATH"] == snapshot["PYTHONPATH"]
+    assert "EXASERVE_ENGINE_RECEIPT_DIR" not in os.environ
+    assert "EXASERVE_VERSION_RAY" not in os.environ
+
+
+def test_generated_watcher_rejects_a_non_engine_multiprocessing_helper(monkeypatch):
+    import multiprocessing
+
+    monkeypatch.delitem(sys.modules, "vllm.v1.engine.core", raising=False)
+    assert engine_shim._engine_process_ready("vllm") is False
+    fake = type(sys)("vllm.v1.engine.core")
+    monkeypatch.setitem(sys.modules, "vllm.v1.engine.core", fake)
+    assert engine_shim._engine_process_ready("vllm") is False
+    monkeypatch.setattr(multiprocessing.current_process(), "name", "EngineCore_DP0")
+    assert engine_shim._engine_process_ready("vllm") is True
+
+
+def test_multiproc_bootstrap_records_exact_worker_rank(monkeypatch):
+    from exaserve import _sitecustomize
+
+    observed = {}
+
+    def original(*args, **kwargs):
+        observed.update(kwargs)
+        return "done"
+
+    monkeypatch.setattr(_sitecustomize, "_EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN", original)
+    assert _sitecustomize._exaserve_multiproc_worker_main(rank=3, local_rank=1) == "done"
+    assert os.environ[engine_shim.ENGINE_WORKER_KIND_ENV] == "multiproc"
+    assert os.environ[engine_shim.ENGINE_WORKER_RANK_ENV] == "3"
+    assert observed == {"rank": 3, "local_rank": 1}
+
+
+def test_worker_receipt_identity_uses_logical_rank_not_physical_gpu(tmp_path, monkeypatch):
+    from exaserve.plan.compiler import compile_deployment_plan
+    from exaserve.plan.contracts import build_allocation_binding
+    from exaserve.plan.io import write_allocation_binding, write_deployment_plan
+    from exaserve.site import default_site_profile
+
+    plan = compile_deployment_plan(
+        {
+            "num_nodes": 1,
+            "num_gpus_per_node": 12,
+            "validation_mode": True,
+            "models": [
+                {
+                    "model_id": "org/model",
+                    "tensor_parallel_size": 2,
+                    "max_model_len": 128,
+                    "size": 8,
+                }
+            ],
+        },
+        site=default_site_profile(),
+        deployment_id="d1",
+    )
+    binding = build_allocation_binding(
+        plan=plan,
+        generation=7,
+        scheduler_allocation_id="job1",
+        nodes=[socket.gethostname()],
+    )
+    plan_path = tmp_path / "deployment.plan.json"
+    binding_path = tmp_path / "allocation_binding.json"
+    write_deployment_plan(str(plan_path), plan)
+    write_allocation_binding(str(binding_path), binding)
+    monkeypatch.setenv("EXASERVE_PLAN_PATH", str(plan_path))
+    monkeypatch.setenv("EXASERVE_ALLOCATION_BINDING_PATH", str(binding_path))
+    monkeypatch.setenv(engine_shim.ENGINE_MODEL_ENV, "org/model")
+    monkeypatch.setenv(engine_shim.ENGINE_REPLICA_INDEX_ENV, "0")
+    monkeypatch.setenv(engine_shim.ENGINE_WORKER_KIND_ENV, "multiproc")
+    monkeypatch.setenv(engine_shim.ENGINE_WORKER_RANK_ENV, "1")
+    # These physical ids are deliberately reversed and neither value is the
+    # logical plan's worker ordinal. They remain resource observations only.
+    monkeypatch.setenv(engine_shim.ENGINE_DEVICE_IDS_ENV, "11,10")
+    fake_runner = type(sys)("vllm.v1.worker.gpu_model_runner")
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker.gpu_model_runner", fake_runner)
+
+    identity = engine_shim._engine_receipt_identity("vllm")
+
+    assert identity is not None
+    assert identity["requirement_id"] == ("model/org--model/replica/0/engine/worker/stage0/device1")
+    assert identity["owner_rank"] == 0
+
+
+def test_non_pp_engine_writes_exact_v2_receipt(tmp_path, monkeypatch):
+    _identity(monkeypatch)
+    ingress = _start_receipt_ingress(tmp_path, monkeypatch)
+    for gate in (PP_PATCH_GATE, RAY_WORKER_PATCH_GATE, MULTIPROC_WORKER_PATCH_GATE):
+        monkeypatch.delenv(gate, raising=False)
     receipts = tmp_path / "receipts"
-    engine_shim.install(str(tmp_path / "shim"), str(receipts), import_patches=False,
-                        deployment_id="d1", generation=7, vendor="xpu",
-                        versions={"ray": "2.53.0", "vllm": "0.15.0"})
-    path = engine_shim.write_engine_receipt(patches_imported=False)
-    data = json.loads(open(path).read())
-    assert data["role"] == "engine"
-    assert data["attestation"] == "self"
-    assert data["patches_delivered"] is False
-
-    profile = default_profile()
-    required = set(profile.required_patch_ids("engine"))
-    # EN-01 is the shim reaching this process; writing the receipt proves it,
-    # so it must be APPLIED. Only the gated vLLM/PP patches are not-applicable.
-    assert data["patch_results"] == {"EN-01": True}
-    assert set(data["not_applicable"]) == required - {"EN-01"}
-
-    # And the store accepts it: everything required is accounted for.
-    from exaserve.compat.collector import receipt_from_dict
-
-    ok, why = ReceiptStore(profile, "d1", 7).add(receipt_from_dict(data))
-    assert ok, why
-
-
-def test_an_unconditional_patch_cannot_be_reported_not_applicable():
-    """Audit #15: a shim that ran but delivered nothing put every required
-    patch in not_applicable and the store accepted it."""
-    from dataclasses import replace
-
-    from exaserve.compat.receipt import build_receipt
-
-    profile = default_profile()
-    forged = build_receipt(
-        profile=profile, role="engine", deployment_id="d1", generation=7,
-        patch_results={}, not_applicable=profile.required_patch_ids("engine"))
-    ok, why = ReceiptStore(profile, "d1", 7).add(forged)
-    assert not ok and "unconditional" in why
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=False,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    monkeypatch.setattr(
+        "exaserve.compat.activator._postcondition_sitecustomize", lambda patch_id: True
+    )
+    try:
+        path = engine_shim.write_engine_receipt(patches_imported=True)
+    finally:
+        ingress.stop()
+    assert path is not None
+    data = json.loads(open(path, encoding="utf-8").read())
+    assert data["schema_version"] == 2
+    assert data["role"] == "engine_core"
+    assert data["attestation_type"] == "SELF"
+    assert data["receipt_requirement_id"] == "engine/slot0/core"
+    assert data["patch_results"]["EN-01"]["status"] == "APPLIED"
+    gated = {key: value for key, value in data["patch_results"].items() if key != "EN-01"}
+    assert all(value["status"] == "NOT_REQUIRED" for value in gated.values())
 
 
-def test_a_pp_engine_that_is_half_patched_is_reported_as_failed(tmp_path, monkeypatch):
-    """Patches delivered but not effective must NOT pass as not-applicable."""
-    monkeypatch.setenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER", "1")
+def test_engine_core_patch_requirements_follow_the_selected_executor(monkeypatch):
+    from exaserve.compat.profile import default_profile
+
+    profile = default_profile("xpu")
+    for gate in (PP_PATCH_GATE, RAY_WORKER_PATCH_GATE, MULTIPROC_WORKER_PATCH_GATE):
+        monkeypatch.setenv(gate, "0")
+    assert profile.required_patch_ids("engine_core") == ("EN-01",)
+
+    monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "1")
+    assert set(profile.required_patch_ids("engine_core")) == {"EN-01", "EW-01", "EW-03"}
+
+    monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "0")
+    monkeypatch.setenv(MULTIPROC_WORKER_PATCH_GATE, "1")
+    assert set(profile.required_patch_ids("engine_core")) == {"EN-01", "EW-02"}
+
+
+def test_engine_delivery_uses_configured_socket_only_for_its_own_rank(monkeypatch):
+    from types import SimpleNamespace
+
+    from exaserve.compat.local_ingress import socket_path_for
+
+    monkeypatch.setenv("EXASERVE_RECEIPT_SOCKET", "/tmp/coordinator-receipts.sock")
+    monkeypatch.setenv("EXASERVE_RECEIPT_RANK", "0")
+    coordinator = SimpleNamespace(deployment_id="d1", generation=7, owner_rank=0)
+    remote_worker = SimpleNamespace(deployment_id="d1", generation=7, owner_rank=1)
+
+    assert engine_shim._receipt_delivery_target(coordinator) == ("/tmp/coordinator-receipts.sock")
+    assert engine_shim._receipt_delivery_target(remote_worker) == socket_path_for(
+        "d1", 7, owner_rank=1
+    )
+
+
+def test_bound_serve_actor_rebinds_rank_local_receipt_socket(monkeypatch):
+    from exaserve.actor_runtime import build_actor_runtime_env
+    from exaserve.compat.local_ingress import socket_path_for
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    monkeypatch.setenv(
+        "EXASERVE_RECEIPT_SOCKET",
+        socket_path_for("four-node-test", 17, owner_rank=0),
+    )
+
+    env_vars = build_actor_runtime_env(receipt_owner_rank=2)["env_vars"]
+
+    assert env_vars["EXASERVE_RECEIPT_RANK"] == "2"
+    assert env_vars["EXASERVE_RECEIPT_SOCKET"] == socket_path_for(
+        "four-node-test", 17, owner_rank=2
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "EXASERVE_DEPLOYMENT_ID",
+        "EXASERVE_GENERATION",
+        "EXASERVE_PLAN_HASH",
+        "EXASERVE_ALLOCATION_BINDING_HASH",
+        "EXASERVE_COMPAT_ROLE",
+        "EXASERVE_RECEIPT_RANK",
+        "EXASERVE_RECEIPT_SOCKET",
+    ],
+)
+def test_actor_extras_cannot_override_canonical_identity(monkeypatch, field):
+    from exaserve.actor_runtime import build_actor_runtime_env
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    with pytest.raises(ValueError, match="cannot override"):
+        build_actor_runtime_env({field: "forged"}, receipt_owner_rank=1)
+
+
+@pytest.mark.parametrize("extra", [{"OK": 1}, {"": "value"}, [("OK", "value")]])
+def test_actor_extras_require_a_string_mapping(monkeypatch, extra):
+    from exaserve.actor_runtime import build_actor_runtime_env
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    with pytest.raises(TypeError, match="map of non-empty strings"):
+        build_actor_runtime_env(extra, receipt_owner_rank=1)
+
+
+@pytest.mark.parametrize("owner_rank", [True, -1, "2"])
+def test_bound_serve_actor_rejects_invalid_receipt_owner_rank(monkeypatch, owner_rank):
+    from exaserve.actor_runtime import build_actor_runtime_env
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    with pytest.raises(ValueError, match="receipt_owner_rank"):
+        build_actor_runtime_env(receipt_owner_rank=owner_rank)
+
+
+def test_engine_delivery_materializes_node_local_diagnostic_directory(tmp_path, monkeypatch):
+    _identity(monkeypatch)
+    ingress = _start_receipt_ingress(tmp_path, monkeypatch)
+    receipts = tmp_path / "remote-node-receipts"
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=False,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    receipts.rmdir()
+    monkeypatch.setattr(
+        "exaserve.compat.activator._postcondition_sitecustomize", lambda patch_id: True
+    )
+    try:
+        path = engine_shim.write_engine_receipt(patches_imported=True)
+    finally:
+        ingress.stop()
+    assert path is not None
+    assert receipts.is_dir()
+    assert os.stat(receipts).st_mode & 0o777 == 0o700
+
+
+def test_pp_half_patch_is_failed_and_not_published_as_complete(tmp_path, monkeypatch):
+    _identity(monkeypatch)
+    ingress = _start_receipt_ingress(tmp_path, monkeypatch)
+    monkeypatch.setenv(PP_PATCH_GATE, "1")
+    monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "1")
+    monkeypatch.setenv(MULTIPROC_WORKER_PATCH_GATE, "0")
     receipts = tmp_path / "receipts"
-    engine_shim.install(str(tmp_path / "shim"), str(receipts), import_patches=True,
-                        deployment_id="d1", generation=7, vendor="xpu")
-    monkeypatch.setattr("exaserve.compat.activator._postcondition_sitecustomize",
-                        lambda pid: False)
-    path = engine_shim.write_engine_receipt(patches_imported=True)
-    data = json.loads(open(path).read())
-    gated = {k: v for k, v in data["patch_results"].items() if k != "EN-01"}
-    assert gated and all(v is False for v in gated.values())
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=True,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    monkeypatch.setattr(
+        "exaserve.compat.activator._postcondition_sitecustomize", lambda patch_id: False
+    )
+    try:
+        path = engine_shim.write_engine_receipt(patches_imported=True)
+    finally:
+        ingress.stop()
+    data = json.loads(open(path, encoding="utf-8").read())
+    from exaserve.compat.profile import default_profile
 
-    from exaserve.compat.collector import receipt_from_dict
+    required = set(default_profile("xpu").required_patch_ids("engine_core")) - {"EN-01"}
+    failed = [data["patch_results"][key] for key in required]
+    assert failed and all(value["status"] == "FAILED" for value in failed)
+    assert data["patch_results"]["EW-02"]["status"] == "NOT_REQUIRED"
 
-    ok, why = ReceiptStore(default_profile(), "d1", 7).add(receipt_from_dict(data))
-    assert not ok and "failed patches" in why
 
-
-def test_collect_reads_every_engine_receipt(tmp_path, monkeypatch):
+def test_watcher_waits_until_postconditions_pass(tmp_path, monkeypatch):
+    _identity(monkeypatch)
+    ingress = _start_receipt_ingress(tmp_path, monkeypatch)
+    monkeypatch.setenv(PP_PATCH_GATE, "1")
+    monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "1")
+    monkeypatch.setenv(MULTIPROC_WORKER_PATCH_GATE, "0")
     receipts = tmp_path / "receipts"
-    engine_shim.install(str(tmp_path / "shim"), str(receipts), import_patches=False,
-                        deployment_id="d1", generation=7, vendor="xpu")
-    engine_shim.write_engine_receipt(patches_imported=False)
-    os.makedirs(receipts, exist_ok=True)
-    (receipts / "engine_99999.json").write_text(json.dumps({"role": "engine"}))
-    found = engine_shim.collect(str(receipts))
-    assert len(found) == 2
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=True,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    ready = {"value": False}
+    monkeypatch.setattr(
+        "exaserve.compat.activator._postcondition_sitecustomize", lambda patch_id: ready["value"]
+    )
+    watcher = engine_shim.start_engine_attestation(
+        patches_imported=True, timeout_s=1.0, poll_s=0.01
+    )
+    time.sleep(0.05)
+    assert engine_shim.collect(str(receipts)) == []
+    ready["value"] = True
+    deadline = time.monotonic() + 2
+    try:
+        while time.monotonic() < deadline and not engine_shim.collect(str(receipts)):
+            time.sleep(0.02)
+        assert len(engine_shim.collect(str(receipts))) == 1
+        assert watcher.stop()
+    finally:
+        ingress.stop()
+
+
+def test_failed_engine_delivery_cannot_publish_a_success_receipt(tmp_path, monkeypatch):
+    _identity(monkeypatch)
+    receipts = tmp_path / "receipts"
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=False,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    from exaserve.compat.local_ingress import socket_path_for
+
+    monkeypatch.setenv(
+        "EXASERVE_RECEIPT_SOCKET",
+        socket_path_for("dead-engine-ingress-test", 0, root=str(tmp_path)),
+    )
+    monkeypatch.setattr(
+        "exaserve.compat.activator._postcondition_sitecustomize", lambda patch_id: True
+    )
+    assert engine_shim.write_engine_receipt(patches_imported=True) is None
+    assert engine_shim.collect(str(receipts)) == []
+    errors = list(receipts.glob("engine_error_*.json"))
+    assert len(errors) == 1
+    error = json.loads(errors[0].read_text())
+    assert error["error_type"] == "LocalDeliveryError"
+    assert "transport failed" in error["error"]
+
+
+def test_watcher_records_and_logs_the_exact_incomplete_patch_set(tmp_path, monkeypatch, capsys):
+    _identity(monkeypatch)
+    monkeypatch.setenv(PP_PATCH_GATE, "0")
+    monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "1")
+    monkeypatch.setenv(MULTIPROC_WORKER_PATCH_GATE, "0")
+    receipts = tmp_path / "receipts"
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=True,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    monkeypatch.setattr(
+        "exaserve.compat.activator._postcondition_sitecustomize", lambda patch_id: None
+    )
+    watcher = engine_shim.start_engine_attestation(
+        patches_imported=True, timeout_s=0.2, poll_s=0.01
+    )
+    try:
+        deadline = time.monotonic() + 1
+        diagnostic = None
+        while time.monotonic() < deadline and diagnostic is None:
+            diagnostic = engine_shim.latest_error(str(receipts))
+            time.sleep(0.01)
+        assert diagnostic is not None
+        assert "EW-01=NOT_REQUIRED/postcondition=False" in diagnostic["error"]
+        assert "EW-03=NOT_REQUIRED/postcondition=False" in diagnostic["error"]
+        assert "[ExaServe EngineShim] attestation pending" in capsys.readouterr().err
+    finally:
+        assert watcher.stop()
+
+
+@pytest.mark.parametrize(
+    ("timeout_s", "poll_s"),
+    [(0.0, 0.1), (float("nan"), 0.1), (1.0, 0.0), (1.0, float("inf"))],
+)
+def test_watcher_rejects_unbounded_timing(timeout_s, poll_s):
+    with pytest.raises(ValueError, match="finite and positive"):
+        engine_shim.start_engine_attestation(
+            patches_imported=True, timeout_s=timeout_s, poll_s=poll_s
+        )
+
+
+def test_collect_ignores_malformed_receipts(tmp_path, monkeypatch):
+    _identity(monkeypatch)
+    ingress = _start_receipt_ingress(tmp_path, monkeypatch)
+    receipts = tmp_path / "receipts"
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=False,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    try:
+        engine_shim.write_engine_receipt(patches_imported=False)
+    finally:
+        ingress.stop()
+    (receipts / "engine_99999.json").write_text(json.dumps({"role": "engine_core"}))
+    assert len(engine_shim.collect(str(receipts))) == 1
+
+
+def test_collect_never_substitutes_a_sibling_engine_receipt(tmp_path, monkeypatch):
+    _identity(monkeypatch)
+    ingress = _start_receipt_ingress(tmp_path, monkeypatch)
+    receipts = tmp_path / "receipts"
+    _stage_bootstrap(tmp_path, monkeypatch)
+    engine_shim.prepare_environment(
+        str(receipts),
+        import_patches=False,
+        deployment_id="d1",
+        generation=7,
+        vendor="xpu",
+    )
+    try:
+        engine_shim.write_engine_receipt(patches_imported=False)
+    finally:
+        ingress.stop()
+    assert engine_shim.collect(str(receipts), requirement_id="engine/other") == []
+    assert (
+        len(
+            engine_shim.collect(
+                str(receipts),
+                requirement_id="engine/slot0/core",
+                component_id="engine-slot0/core",
+                consume=True,
+            )
+        )
+        == 1
+    )
+    assert engine_shim.collect(str(receipts)) == []
 
 
 def test_collect_returns_empty_without_waiting_forever(tmp_path):
-    import time
-
     start = time.monotonic()
     assert engine_shim.collect(str(tmp_path / "nothing"), timeout_s=0.3) == []
     assert time.monotonic() - start < 5.0
 
 
 def test_receipt_dir_is_generation_scoped():
-    a = engine_shim.receipt_dir_for("d1", 1)
-    b = engine_shim.receipt_dir_for("d1", 2)
-    assert a != b, "a prior generation's engine receipts must not be readable"
+    assert engine_shim.receipt_dir_for("d1", 1) != engine_shim.receipt_dir_for("d1", 2)
+
+
+def test_receipt_dir_is_component_scoped_and_path_safe():
+    first = engine_shim.receipt_dir_for("../../hostile", 1, "engine/a")
+    second = engine_shim.receipt_dir_for("../../hostile", 1, "engine/b")
+    assert first != second
+    assert first.startswith("/tmp/exaserve_engine_receipt_")
+    assert ".." not in first and "hostile" not in first
 
 
 def test_the_shim_never_raises_without_a_receipt_dir(monkeypatch):

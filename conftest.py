@@ -13,7 +13,11 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-for _path in (REPO_ROOT, os.path.join(REPO_ROOT, "src")):
+_TEST_PATHS = [REPO_ROOT]
+if os.environ.get("EXASERVE_TEST_INSTALLED_WHEEL") != "1":
+    _TEST_PATHS.append(os.path.join(REPO_ROOT, "src"))
+
+for _path in _TEST_PATHS:
     if _path not in sys.path:
         sys.path.insert(0, _path)
 

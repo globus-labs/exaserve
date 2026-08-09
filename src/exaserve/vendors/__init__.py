@@ -2,11 +2,12 @@
 Pluggable accelerator vendors.
 
     from exaserve.vendors import get_vendor
-    vendor = get_vendor()                 # EXASERVE_VENDOR, default "xpu"
+    vendor = get_vendor(plan.vendor)
     vendor.isolate_devices([0, 1], "vllm")
 
-Selected by ``EXASERVE_VENDOR`` (default ``xpu`` so Aurora is unchanged). To add
-a vendor, implement ``VendorBackend`` (base.py) and register it in ``_register``.
+Production callers pass the vendor from the verified DeploymentPlan. The
+environment fallback exists only for isolated compatibility tooling. To add a
+vendor, implement ``VendorBackend`` (base.py) and register it in ``_register``.
 
 Design doc: doc/design/vendor_site_abstraction.md
 """

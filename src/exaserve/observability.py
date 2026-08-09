@@ -19,6 +19,8 @@ startup time on every one of hundreds of replicas.
 from __future__ import annotations
 
 import os
+import json
+import math
 import socket
 import threading
 import time
@@ -61,6 +63,7 @@ class _Registry:
             self._help[name] = help_text
 
     def inc(self, name: str, value: float = 1.0, labels: Optional[dict] = None) -> None:
+        value = _finite_metric_value(value, name=name, nonnegative=True)
         key = self._key(name, labels)
         with self._lock:
             if not self._room(key):
@@ -68,11 +71,12 @@ class _Registry:
             self._counters[key] = self._counters.get(key, 0.0) + value
 
     def set(self, name: str, value: float, labels: Optional[dict] = None) -> None:
+        value = _finite_metric_value(value, name=name, nonnegative=False)
         key = self._key(name, labels)
         with self._lock:
             if not self._room(key):
                 return
-            self._gauges[key] = float(value)
+            self._gauges[key] = value
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -96,7 +100,7 @@ class _Registry:
         with self._lock:
             emitted: set = set()
             for kind, store in (("counter", self._counters), ("gauge", self._gauges)):
-                for (name, labels) in sorted(store):
+                for name, labels in sorted(store):
                     if name not in emitted:
                         emitted.add(name)
                         help_text = self._help.get(name, name)
@@ -104,12 +108,13 @@ class _Registry:
                         lines.append(f"# TYPE {name} {kind}")
                     merged = dict(base)
                     merged.update(dict(labels))
-                    rendered = ",".join(
-                        f'{k}="{_escape(v)}"' for k, v in sorted(merged.items()))
+                    rendered = ",".join(f'{k}="{_escape(v)}"' for k, v in sorted(merged.items()))
                     suffix = f"{{{rendered}}}" if rendered else ""
                     lines.append(f"{name}{suffix} {_number(store[(name, labels)])}")
-            lines.append("# HELP exaserve_metrics_dropped_series_total "
-                         "Series refused because the cardinality cap was reached")
+            lines.append(
+                "# HELP exaserve_metrics_dropped_series_total "
+                "Series refused because the cardinality cap was reached"
+            )
             lines.append("# TYPE exaserve_metrics_dropped_series_total counter")
             lines.append(f"exaserve_metrics_dropped_series_total {self.dropped_series}")
         return "\n".join(lines) + "\n"
@@ -119,6 +124,18 @@ def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
+def _finite_metric_value(value: object, *, name: str, nonnegative: bool) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or (nonnegative and value < 0)
+    ):
+        qualifier = "nonnegative " if nonnegative else ""
+        raise ValueError(f"metric {name} requires a finite {qualifier}number")
+    return float(value)
+
+
 def _number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else repr(float(value))
 
@@ -126,12 +143,18 @@ def _number(value: float) -> str:
 REGISTRY = _Registry()
 
 REGISTRY.declare("exaserve_requests_total", "Requests handled, by route and outcome")
-REGISTRY.declare("exaserve_request_duration_seconds_total",
-                 "Cumulative request service time, by route")
+REGISTRY.declare(
+    "exaserve_request_duration_seconds_total", "Cumulative request service time, by route"
+)
 REGISTRY.declare("exaserve_tokens_total", "Tokens produced, by kind (prompt/completion)")
+REGISTRY.declare(
+    "exaserve_telemetry_dropped_total",
+    "Telemetry observations dropped, by bounded channel and reason",
+)
 REGISTRY.declare("exaserve_replica_up", "1 while this replica is serving")
-REGISTRY.declare("exaserve_replica_start_time_seconds",
-                 "Unix time at which this replica became ready")
+REGISTRY.declare(
+    "exaserve_replica_start_time_seconds", "Unix time at which this replica became ready"
+)
 
 
 def identity_labels() -> dict:
@@ -150,18 +173,109 @@ def identity_labels() -> dict:
     }
 
 
-def record_request(route: str, outcome: str, duration_s: float,
-                   prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+def record_request(
+    route: str, outcome: str, duration_s: float, prompt_tokens: int = 0, completion_tokens: int = 0
+) -> None:
     """One request's operational facts. Labels are bounded by construction."""
-    REGISTRY.inc("exaserve_requests_total", 1.0,
-                 {"route": route, "outcome": outcome})
-    REGISTRY.inc("exaserve_request_duration_seconds_total", float(duration_s),
-                 {"route": route})
+    if route not in _OBSERVED_REQUEST_ROUTES:
+        raise ValueError(f"unknown request route {route!r}")
+    if outcome not in {"ok", "client_error", "server_error", "exception", "incomplete"}:
+        raise ValueError(f"unknown request outcome {outcome!r}")
+    _finite_metric_value(duration_s, name="request duration", nonnegative=True)
+    for name, value in (("prompt_tokens", prompt_tokens), ("completion_tokens", completion_tokens)):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+    REGISTRY.inc("exaserve_requests_total", 1.0, {"route": route, "outcome": outcome})
+    REGISTRY.inc("exaserve_request_duration_seconds_total", float(duration_s), {"route": route})
     if prompt_tokens:
         REGISTRY.inc("exaserve_tokens_total", float(prompt_tokens), {"kind": "prompt"})
     if completion_tokens:
-        REGISTRY.inc("exaserve_tokens_total", float(completion_tokens),
-                     {"kind": "completion"})
+        REGISTRY.inc("exaserve_tokens_total", float(completion_tokens), {"kind": "completion"})
+
+
+def record_tokens(*, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+    """Record token totals separately from the transport request lifecycle."""
+    for name, value in (("prompt_tokens", prompt_tokens), ("completion_tokens", completion_tokens)):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+    if prompt_tokens:
+        REGISTRY.inc("exaserve_tokens_total", float(prompt_tokens), {"kind": "prompt"})
+    if completion_tokens:
+        REGISTRY.inc("exaserve_tokens_total", float(completion_tokens), {"kind": "completion"})
+
+
+_TELEMETRY_CHANNELS = frozenset({"replica_init", "serving_stats"})
+_TELEMETRY_DROP_REASONS = frozenset(
+    {"collector_unavailable", "invalid_configuration", "push_failed", "shutdown_timeout"}
+)
+
+
+def record_telemetry_drop(channel: str, reason: str) -> None:
+    """Count an optional telemetry loss without accepting unbounded labels."""
+    if channel not in _TELEMETRY_CHANNELS:
+        raise ValueError(f"unknown telemetry channel {channel!r}")
+    if reason not in _TELEMETRY_DROP_REASONS:
+        raise ValueError(f"unknown telemetry drop reason {reason!r}")
+    REGISTRY.inc("exaserve_telemetry_dropped_total", 1.0, {"channel": channel, "reason": reason})
+
+
+_OBSERVED_REQUEST_ROUTES = frozenset({"/v1/chat/completions", "/v1/completions"})
+
+
+class RequestMetricsMiddleware:
+    """Record a request when its final ASGI body is sent.
+
+    Timing ``call_next`` would stop before a ``StreamingResponse`` has emitted
+    its body. Wrapping the ASGI ``send`` callable instead gives streaming and
+    non-streaming requests the same completion definition and records exactly
+    once. Only the two finite OpenAI routes are observed, preventing caller-
+    controlled paths from creating metric series.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http" or scope.get("path") not in _OBSERVED_REQUEST_ROUTES:
+            await self.app(scope, receive, send)
+            return
+
+        route = scope["path"]
+        started = time.monotonic()
+        status = 500
+        recorded = False
+
+        def finish(outcome: str) -> None:
+            nonlocal recorded
+            if recorded:
+                return
+            recorded = True
+            record_request(route, outcome, max(0.0, time.monotonic() - started))
+
+        async def observed_send(message) -> None:
+            nonlocal status
+            if message.get("type") == "http.response.start":
+                status = int(message.get("status", 500))
+            await send(message)
+            if message.get("type") == "http.response.body" and not message.get("more_body", False):
+                if status < 400:
+                    outcome = "ok"
+                elif status < 500:
+                    outcome = "client_error"
+                else:
+                    outcome = "server_error"
+                finish(outcome)
+
+        try:
+            await self.app(scope, receive, observed_send)
+        except BaseException:
+            finish("exception")
+            raise
+        finally:
+            # Defensive coverage for an ASGI app that returns without a final
+            # body. Client cancellation raises and is handled above.
+            if not recorded:
+                finish("incomplete")
 
 
 def mark_replica_ready() -> None:
@@ -190,6 +304,23 @@ def correlation_id(headers, fallback: str) -> str:
     # would break a log line or a metric label.
     cleaned = "".join(c for c in str(supplied) if c.isprintable() and c not in '"\\\n')
     return cleaned[:128] or fallback
+
+
+def emit_request_link(*, route: str, request_id: str, completion_id: str, model_id: str) -> None:
+    """Emit the bounded structured join between transport and engine identity."""
+    if route not in _OBSERVED_REQUEST_ROUTES:
+        raise ValueError(f"unknown request route {route!r}")
+    identity = identity_labels()
+    payload = {
+        "event": "request_link",
+        "deployment_id": identity["deployment_id"],
+        "generation": identity["generation"],
+        "route": route,
+        "request_id": str(request_id)[:128],
+        "completion_id": str(completion_id)[:128],
+        "model_id": str(model_id)[:256],
+    }
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
 
 
 def bounded_series() -> Tuple[int, int]:

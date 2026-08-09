@@ -11,15 +11,15 @@ Modules:
 - ``supervisor``: ``RuntimeSupervisor`` + ``ManagedComponent`` — typed child
   lifecycle, process-group ownership, first-cause capture, bounded cleanup.
 
-``rank_launcher``/``node_supervisor`` (the MPI rank-set split) land with the
-WP13 cutover; until then the supervisor drives the legacy launcher as one
-managed component behind the EXASERVE_USE_SUPERVISOR switch.
+``rank_launcher``/``node_supervisor`` implement the active MPI rank-set split.
+The retired shell lifecycle and supervisor feature switch are not reachable.
 """
 
 from .readiness import (  # noqa: F401
+    DeploymentPhase,
     ReadinessCoordinator,
-    ReadinessPlan,
     ReadinessSnapshot,
+    ReadinessVerdict,
 )
 from .supervisor import (  # noqa: F401
     FirstCause,

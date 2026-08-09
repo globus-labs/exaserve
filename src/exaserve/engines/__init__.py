@@ -14,8 +14,8 @@ To add an engine:
        only be imported when that engine is actually selected, because vLLM and
        SGLang pin conflicting transformers versions).
 
-Selection at runtime is driven by ``EXASERVE_ENGINE`` (default "vllm"), read in
-server.py's deploy_model.
+Selection is passed from the verified DeploymentPlan. Native subprocesses also
+receive the same value as a deterministic environment projection.
 """
 
 from __future__ import annotations
@@ -44,18 +44,14 @@ def _register() -> None:
     from .base import NullEngine  # noqa: F811
 
     _REGISTRY["null"] = NullEngine
-    # vLLM / SGLang backends are added by their modules once ported
-    # (see doc/design/pluggable_interfaces.md migration plan):
-    try:
-        from .vllm import VLLMEngine
-        _REGISTRY["vllm"] = VLLMEngine
-    except ImportError:
-        pass
-    try:
-        from .sglang import SGLangEngine
-        _REGISTRY["sglang"] = SGLangEngine
-    except ImportError:
-        pass
+    # These modules do not import their heavyweight engine packages until
+    # create(). A local import failure is therefore an ExaServe defect and must
+    # retain its original cause instead of masquerading as an unknown engine.
+    from .sglang import SGLangEngine
+    from .vllm import VLLMEngine
+
+    _REGISTRY["vllm"] = VLLMEngine
+    _REGISTRY["sglang"] = SGLangEngine
 
 
 def get_engine(name: str, **kwargs) -> EngineBackend:
@@ -71,14 +67,16 @@ def get_engine(name: str, **kwargs) -> EngineBackend:
     _register()
     key = name.lower()
     if key not in _REGISTRY:
-        raise KeyError(
-            f"unknown engine {name!r}; registered: {sorted(_REGISTRY)}"
-        )
+        raise KeyError(f"unknown engine {name!r}; registered: {sorted(_REGISTRY)}")
     return _REGISTRY[key](**kwargs)
 
 
 def available_engines() -> list[str]:
-    """List registered engine names (those whose deps import successfully)."""
+    """List registered engine names without importing heavyweight dependencies.
+
+    Availability means ExaServe ships the adapter. Exact dependency/profile
+    compatibility is validated before launch and again when ``create()`` runs.
+    """
     _register()
     return sorted(_REGISTRY)
 

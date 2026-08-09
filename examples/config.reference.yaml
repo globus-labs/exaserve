@@ -1,131 +1,55 @@
-# --- Full reference config -----------------------------------------------
-# Every knob exposed by the launcher, each with its schema default, grouped
-# by the dataclass that consumes it. Not meant to be run as-is — pick the
-# fields you need and drop this into your own config.
-#
-# Authoritative definitions (keep this file in sync if those change):
-#   src/exaserve/schemas.py             RayClusterConfig, DeploymentConfig, ModelConfig, ProxyConfig
-#   src/exaserve/proxy/haproxy_proxy.py HAProxy options
-#   src/exaserve/proxy/litellm_proxy.py LiteLLM options
-#
-# PBS submission settings are NOT in this YAML. The deployment YAML
-# describes the cluster (Ray + vLLM + proxy); PBS scheduling parameters
-# (queue, project, walltime, filesystems) come from exaserve-serve-submit's
-# CLI flags or env vars. See "PBS submission environment variables"
-# at the bottom of this file.
+# Canonical ExaServe deployment input. Scheduler selection/allocation fields
+# belong to exaserve-serve-submit or the eval RunPlan, not this document.
 
-# --------------------------------------------------------------- cluster ---
-ray_cluster_config:
-  head_ip: ""         # Auto-populated by exaserve-launch-cluster; leave empty.
-  port: 6379          # Ray GCS port (head).
-  node_cpus: 8        # CPUs advertised to Ray per node. Raise (e.g. 64) for
-                      # serve-heavy deployments so Raylet can schedule more
-                      # HTTP workers + replica actors.
+num_nodes: 1
+num_gpus_per_node: 12
+node_cpus: 64
+ray_port: 6379
+model_storage_path: /lus/path/to/models
+local_stage_path: /tmp/hf_home
+deployment_name: exaserve_serve
+replica_max_ongoing_requests: 32
+collect_stats: false
+engine: vllm
+vendor: xpu
 
-# ------------------------------------------------------------ deployment ---
-model_deployment_config:
-  num_nodes: 1                      # Required. Must equal qsub -l select=N.
-  model_storage_path: ""            # Lustre path where weights live (or will
-                                    # be downloaded to on first run).
-  local_stage_path: "/tmp/hf_home"  # Absolute path on each node's local scratch;
-                                    # model_bcast.py stages weights here.
-  deployment_name: "exaserve_serve"   # Ray Serve application name.
-  replica_max_ongoing_requests: 32  # Per-replica concurrency cap. 128+ for
-                                    # high-throughput workloads.
-  num_gpus_per_node: 12             # Aurora default: 12 XPU tiles/node.
-  collect_stats: false              # Enable per-replica vLLM stats collection.
+models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    enable_log_requests: true
+    max_num_seqs: 64
+    num_replicas: 1
+    num_cpus_per_replica: 4
 
-  model_configs:
-    - model_id: "meta-llama/Meta-Llama-3-8B-Instruct"  # Required.
-      tensor_parallel_size: 1              # Required.
-      max_model_len: 4096                  # Required. Max context window.
-      size: 8                              # Required. Model size in B params
-                                           # (used for placement sizing).
-      pipeline_parallel_size: 1
-      gpu_memory_utilization: 0.90
-      enforce_eager: true                  # Disable torch.compile; more stable.
-      enable_log_requests: true            # vLLM per-request logging.
-      max_num_seqs: null                   # vLLM scheduler concurrency cap;
-                                           # null = vLLM default.
-      num_replicas: null                   # null = auto-size from
-                                           # num_nodes * num_gpus_per_node / tp.
-      num_cpus_per_replica: 4              # Ray Serve scheduler hint.
+exposure:
+  mode: PROXIED_INTERNAL
+  advertised_scheme: http
+  advertised_path: /v1
+  network_boundary: trusted_allocation
+  request_body_limit_bytes: 16777216
 
-# ----------------------------------------------------------------- proxy ---
-proxy_config:
-  type: "none"        # "none" | "haproxy" | "litellm"
-  port: 4001          # Front-end port users connect to.
-  backend_port: 8000  # Ray Serve HTTP port on each node (don't change
-                      # unless you also edit src/exaserve_serve.py).
-  python_path: ""     # Interpreter for the proxy subprocess (empty = current).
-                      # For litellm, point at your litellm venv's python3.
-  num_workers: 1      # uvicorn worker count for litellm. Keep at 1 — see
-                      # config.litellm.yaml for the rationale.
+gateway:
+  kind: haproxy
+  port: 4001
+  backend_port: 8000
+  executable_ref: PATH:haproxy
+  worker_count: 1
+  options:
+    balance: leastconn
+    check_interval: 5000
+    check_fall: 3
+    check_rise: 2
+    stats_port: 9999
+    maxconn: 8000
 
-  # ------------------------ options: type=haproxy ------------------------
-  # options:
-  #   balance: "leastconn"   # "leastconn" | "roundrobin" | "random"
-  #   check_interval: 5000   # ms between backend health probes
-  #   check_fall: 3          # consecutive fails before marking backend DOWN
-  #   check_rise: 2          # consecutive successes to mark backend UP
-  #   stats_port: 9999       # HAProxy stats page port (0 disables)
-  #   maxconn: 50000         # total concurrent connections ceiling
-
-  # ------------------------ options: type=litellm ------------------------
-  # options:
-  #   master_key: ""                    # required bearer token; empty = no auth
-  #   routing_strategy: "least-busy"    # "least-busy" | "simple-shuffle"
-  #                                     # | "latency-based-routing"
-  #   num_retries: 2                    # retries on backend failure
-  #   timeout: 300                      # per-request timeout (s)
-  #   db_url: ""                        # SQLAlchemy URL for usage DB
-  #                                     # (empty = no DB, no Prisma needed)
-  #   extra_general: {}                 # merged verbatim into general_settings
-  #   extra_router: {}                  # merged verbatim into router_settings
-
-  options: {}
-
-# ----------------------------- PBS submission environment variables ---
-# Read by ``exaserve-serve-submit`` when rendering a PBS script. CLI flags
-# (--queue, --walltime, --project-account) override these per-invocation.
-# All values listed are the built-in defaults if neither the CLI flag
-# nor the env var is set.
-#
-#   EXASERVE_PROJECT_ACCOUNT=AuroraGPT       PBS allocation/account (-A)
-#   EXASERVE_DEFAULT_QUEUE=debug-scaling     PBS queue name (-q)
-#   EXASERVE_DEFAULT_WALLTIME=01:00:00       PBS walltime (-l walltime=)
-#   EXASERVE_DEFAULT_FILESYSTEMS=home:flare  PBS filesystems (-l filesystems=)
-#   EXASERVE_PBS_KEEP_FLAG=doe               PBS -k flag (keep stdout/stderr
-#                                          on exec host across rerun)
-#
-# --------------------------- runtime environment variables (compute) ---
-# Not in the YAML schema, set on the launcher shell to tune compute-side
-# behavior. These take effect when exaserve-launch-cluster (i.e. the body
-# of the PBS job) runs, NOT at submit time.
-#
-#   EXASERVE_SCALING_TRACE=1       Emit per-replica startup timing traces.
-#                                Adds ~10 min overhead on Lustre at 128+ nodes.
-#   EXASERVE_NULL_COMPUTE=1        Skip model staging & vLLM init (infra test).
-#   EXASERVE_DEBUG_HOLD_ON_FAILURE_S=300   Keep Ray alive for N seconds after
-#                                        the server exits on error, so you
-#                                        can ssh in and inspect.
-#   EXASERVE_RAY_SERVE_INSTRUMENTATION=1   Activate the Ray Serve overlay
-#                                        with probes / /tmp/exaserve_inst
-#                                        writes. (Legacy name
-#                                        EXASERVE_INSTRUMENTATION still works.)
-#   EXASERVE_VLLM_PATCH_PP_LAYER_FILTER=1  vLLM PP layer-filter monkey-patches.
-#                                        On by default; set to 0 to disable.
-#   EXASERVE_PROJECT_ROOT, EXASERVE_WORKDIR   Override the launcher's PROJECT_ROOT.
-#                                        Defaults to a source-tree heuristic
-#                                        then $PWD.
-#   EXASERVE_RUN_LOG_DIR, EXASERVE_RUN_LOG_ROOT   Override where the launcher
-#                                             writes its run logs (default:
-#                                             $PROJECT_ROOT/run_logs/<stamp>_<config>).
-#   EXASERVE_BCAST_BUILD_DIR                Where model_bcast extracts its
-#                                         packaged C source + Makefile.
-#                                         Defaults: $EXASERVE_RUN_LOG_DIR/bcast_build
-#                                         then $PWD/.exaserve_build/bcast.
-#   RAYON_NUM_THREADS=1                  Already set by launch_cluster.sh to
-#   TOKENIZERS_PARALLELISM=false         avoid HF tokenizer rayon panics at 128+.
-#   RAY_num_server_call_thread=4         Serve HTTP proxy thread count.
-#   RAY_gcs_server_num_threads=8         GCS worker threads for 256+ nodes.
+runtime:
+  null_compute: false
+  null_compute_latency_s: 1.0
+  instrumentation: false
+  pp_shard_aware: false
+  clean_stage: false

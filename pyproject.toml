@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==78.1.1", "wheel==0.46.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "exaserve"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Ray Serve helpers and scale patches for LLM inference on HPC clusters (reference platform: ALCF Aurora)"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -16,14 +16,17 @@ dependencies = [
 [project.optional-dependencies]
 server = [
     "fastapi>=0.100",
-    "ray[serve]>=2.49",
-    "vllm",
+    # The generated overlay and private-API capability profile are exact-byte
+    # qualified against this stack. A broader dependency range would install
+    # versions that ExaServe intentionally rejects before launch.
+    "ray[serve]==2.53.0",
+    "vllm==0.15.0",
 ]
 proxy = [
     "litellm",
 ]
-# PR-027: PSI/J is the DEFAULT submit backend; declare it so the advertised
-# default is self-contained. Native pbs/slurm need no extra dependency.
+# PSI/J is an explicitly selected scheduler capability. The Aurora release
+# default is native PBS; native pbs/slurm need no extra Python dependency.
 scheduler = [
     "psij-python>=0.9",
 ]
@@ -34,18 +37,31 @@ dev = [
     # clean runner; `pytest -p randomly` fails without it.
     "pytest-randomly>=3",
 ]
+eval = [
+    "numpy>=2.0",
+    "matplotlib>=3.9",
+    "ijson>=3.4",
+]
+paper = [
+    "datasets>=4.5,<5",
+    "ijson>=3.4",
+    "transformers==4.57.6",
+]
 
 [project.scripts]
 exaserve-launch-cluster = "exaserve.cli:launch_cluster"
 exaserve-driver         = "exaserve.cli:driver"
-exaserve-server         = "exaserve.cli:server"
 exaserve-model-bcast    = "exaserve.cli:model_bcast"
 exaserve-ray-start      = "exaserve.cli:ray_start"
 exaserve-serve-submit   = "exaserve.cli:serve_submit"
 exaserve-serve-url      = "exaserve.cli:serve_url"
+exaserve-status         = "exaserve.cli:status"
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "exaserve._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -54,8 +70,7 @@ namespaces = true
 
 [tool.setuptools.package-data]
 "exaserve" = ["py.typed"]
-"exaserve.patches" = ["ray_serve_overlay/ray/serve/_private/*.py"]
-"exaserve.resources" = ["*.sh", "*.c", "*.Makefile"]
+"exaserve.resources" = ["*.c", "*.Makefile"]
 
 [tool.pytest.ini_options]
 # WP0 canonical test policy (doc/hardening/BASELINE.md): deterministic order
@@ -64,21 +79,21 @@ namespaces = true
 addopts = "-p no:randomly"
 
 [tool.ruff]
-# PR-031: lint the first-party surfaces. The vendored Ray Serve overlay and
-# the large monkeypatch module are excluded — they intentionally mirror
-# upstream and are governed by the WP3 compatibility manifest, not style.
+# Lint the first-party surfaces. The generated compatibility bootstrap is
+# governed by its exact source hash and excluded from mechanical style churn.
 target-version = "py310"
 line-length = 100
 extend-exclude = [
-    "src/exaserve/patches/ray_serve_overlay",
     "src/exaserve/_sitecustomize.py",
 ]
 
 [tool.ruff.lint]
-# PR-031: the release-gating subset is correctness-critical only — syntax
-# errors (E9), undefined names / bad comparisons / f-string bugs (F63/F7/F82),
-# and redefinitions (F811). This is already clean across the whole tree and
-# catches real bugs. The broader style/unused-import cleanup (full "F", "E4",
-# "E7") is tracked as an incremental follow-up and is NOT release-gating yet.
+# The default is the correctness-critical whole-tree floor. CI additionally
+# applies E4/E7/F to production/runtime surfaces and a high-confidence security
+# subset, plus `ruff format --check` across all first-party Python.
 select = ["E9", "F63", "F7", "F82", "F811"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Compatibility activation must run before importing Ray/Serve.
+"src/exaserve/server.py" = ["E402"]

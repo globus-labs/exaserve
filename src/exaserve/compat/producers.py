@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import time
 from typing import Any, Mapping, Optional, Sequence
 
@@ -42,53 +43,72 @@ from .receipt_v2 import (
     SCHEMA_VERSION,
 )
 
-_ZERO_SHA = "0" * 64
-_EXEC_HASH_CACHE: dict[str, str] = {}
-
 # Excluded from the prepared-environment hash: values that legitimately differ
 # per process would make the hash useless, and the channel secret must not be
 # an input to anything that leaves the node.
-_ENV_EXCLUDE_PREFIXES = ("EXASERVE_CONTROL_SECRET", "PMI_", "PALS_", "MPI_",
-                         "SLURM_", "PBS_", "LS_COLORS", "SSH_", "_")
+_ENV_EXCLUDE_PREFIXES = (
+    "EXASERVE_CONTROL_SECRET",
+    "PMI_",
+    "PALS_",
+    "MPI_",
+    "SLURM_",
+    "PBS_",
+    "LS_COLORS",
+    "SSH_",
+    "_",
+)
 
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def file_hash(path: str, *, max_bytes: int = 64 << 20) -> str:
-    """Hash an executable. A file we cannot read hashes to a stable zero.
+def file_hash(path: str) -> str:
+    """Hash the complete resolved executable or fail closed.
 
-    Returning the zero digest rather than raising keeps the receipt structurally
-    valid while making "we could not identify this executable" visible in the
-    payload instead of aborting a rank over a permissions quirk.
+    A zero digest and a fixed-size prefix hash both produced structurally valid
+    receipts without proving which executable ran.  Hash the opened inode in
+    full and reject concurrent mutation instead.  Symlinked executable names
+    are resolved deliberately; the receipt identifies the target bytes.
     """
-    if not path:
-        return _ZERO_SHA
-    cached = _EXEC_HASH_CACHE.get(path)
-    if cached is not None:
-        return cached
+    if not isinstance(path, str) or not path:
+        raise ReceiptError("receipt executable path must be non-empty text")
+    resolved = os.path.realpath(path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     digest = hashlib.sha256()
     try:
-        with open(path, "rb") as handle:
-            read = 0
-            while read < max_bytes:
-                chunk = handle.read(1 << 20)
-                if not chunk:
-                    break
+        fd = os.open(resolved, flags)
+        with os.fdopen(fd, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ReceiptError("receipt executable must resolve to a regular file")
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
-                read += len(chunk)
-        value = digest.hexdigest()
-    except OSError:
-        value = _ZERO_SHA
-    _EXEC_HASH_CACHE[path] = value
-    return value
+            after = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise ReceiptError(f"could not hash receipt executable {path!r}: {exc}") from exc
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ctime_ns != after.st_ctime_ns
+    ):
+        raise ReceiptError("receipt executable changed while it was being hashed")
+    return digest.hexdigest()
 
 
 def argv_hash(argv: Optional[Sequence[str]]) -> Optional[str]:
-    if not argv:
+    if argv is None:
         return None
-    return sha256_text(json.dumps([str(a) for a in argv], separators=(",", ":")))
+    if isinstance(argv, (str, bytes)):
+        raise ReceiptError("receipt argv must be a sequence of non-empty strings")
+    items = tuple(argv)
+    if any(not isinstance(item, str) or not item for item in items):
+        raise ReceiptError("receipt argv must be a sequence of non-empty strings")
+    if not items:
+        return None
+    return sha256_text(json.dumps(items, separators=(",", ":")))
 
 
 def prepared_environment_hash(env: Optional[Mapping[str, str]] = None) -> str:
@@ -98,24 +118,37 @@ def prepared_environment_hash(env: Optional[Mapping[str, str]] = None) -> str:
     *prepared environment* rather than an accident of the shell.
     """
     source = os.environ if env is None else env
+    if not isinstance(source, Mapping):
+        raise ReceiptError("prepared environment must be a string mapping")
     keep = {}
     for key, value in source.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ReceiptError("prepared environment must be a string mapping")
         if key.startswith(_ENV_EXCLUDE_PREFIXES):
             continue
-        if key.startswith(("EXASERVE_", "RAY_", "VLLM_", "ZE_", "ONEAPI_", "PYTHON",
-                           "LD_LIBRARY_PATH", "PATH", "VIRTUAL_ENV", "CONDA_")):
+        if key.startswith(
+            (
+                "EXASERVE_",
+                "RAY_",
+                "VLLM_",
+                "ZE_",
+                "ONEAPI_",
+                "PYTHON",
+                "LD_LIBRARY_PATH",
+                "PATH",
+                "VIRTUAL_ENV",
+                "CONDA_",
+            )
+        ):
             keep[key] = value
     return sha256_text(json.dumps(keep, sort_keys=True, separators=(",", ":")))
 
 
 def manifest_hash(profile) -> str:
     """Hash of the resolved patch manifest, distinct from the profile id."""
-    manifest = [
-        {"patch_id": p.patch_id, "target": getattr(p, "target", ""),
-         "roles": sorted(p.roles), "required": bool(getattr(p, "required", True)),
-         "env_gate": getattr(p, "env_gate", "")}
-        for p in sorted(profile.patches, key=lambda p: p.patch_id)
-    ]
+    from dataclasses import asdict
+
+    manifest = [asdict(p) for p in sorted(profile.patches, key=lambda p: p.patch_id)]
     return sha256_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
 
 
@@ -132,8 +165,7 @@ def _identity(profile) -> dict[str, Any]:
         "generation": int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
         "deployment_plan_hash": os.environ.get("EXASERVE_PLAN_HASH", ""),
         "site_profile_hash": os.environ.get("EXASERVE_SITE_PROFILE_HASH", ""),
-        "allocation_binding_hash": os.environ.get(
-            "EXASERVE_ALLOCATION_BINDING_HASH", ""),
+        "allocation_binding_hash": os.environ.get("EXASERVE_ALLOCATION_BINDING_HASH", ""),
         "compatibility_profile_hash": profile.profile_id,
         "manifest_hash": manifest_hash(profile),
     }
@@ -141,17 +173,42 @@ def _identity(profile) -> dict[str, Any]:
 
 def _observed_versions() -> dict[str, str]:
     import platform
+    from importlib import metadata
 
     observed = {"python": platform.python_version()}
-    for module in ("ray", "vllm", "torch"):
-        found = __import__("sys").modules.get(module)
-        if found is not None and getattr(found, "__version__", None):
-            observed[module] = str(found.__version__)
+    for distribution, key in (("ray", "ray"), ("vllm", "vllm"), ("torch", "torch")):
+        try:
+            observed[key] = metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            pass
     return observed
 
 
-def _patch_results(profile, role: str, *,
-                   postcondition=None) -> tuple[dict, tuple[str, ...]]:
+def _observed_profile_hashes(profile) -> tuple[dict[str, str], dict[str, str]]:
+    """Hashes re-derived while the producer constructs its own profile.
+
+    A profile mismatch changes ``profile_id`` and is rejected by the head. The
+    maps also preserve which exact distribution/source artifact this process
+    observed, rather than leaving the v2 evidence fields permanently empty.
+    """
+    packages: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    by_distribution: dict[str, list[tuple[str, str]]] = {}
+    for patch in profile.patches:
+        sources[f"target:{patch.patch_id}"] = patch.target_source_hash
+        sources[f"artifact:{patch.patch_id}"] = patch.patch_artifact_hash
+        sources[f"delivery:{patch.patch_id}"] = patch.delivery_artifact_hash
+        by_distribution.setdefault(patch.target_distribution, []).append(
+            (patch.target_version, patch.target_source_hash)
+        )
+    for distribution, entries in by_distribution.items():
+        packages[distribution] = sha256_text(
+            json.dumps(sorted(set(entries)), separators=(",", ":"))
+        )
+    return dict(sorted(packages.items())), dict(sorted(sources.items()))
+
+
+def _patch_results(profile, role: str, *, postcondition=None) -> tuple[dict, tuple[str, ...]]:
     """Resolve the role's required patches into v2 results.
 
     A patch the resolved manifest does not target here is NOT_REQUIRED; a
@@ -169,34 +226,44 @@ def _patch_results(profile, role: str, *,
     for patch_id in required:
         try:
             verdict = check(patch_id)
-        except Exception:                         # noqa: BLE001
+        except Exception:  # noqa: BLE001
             verdict = False
         if verdict is None:
-            results[patch_id] = PatchResult(status=PatchStatus.NOT_REQUIRED.value,
-                                            postcondition_passed=False)
+            results[patch_id] = PatchResult(
+                status=PatchStatus.NOT_REQUIRED.value, postcondition_passed=False
+            )
             not_required.append(patch_id)
         elif verdict:
-            results[patch_id] = PatchResult(status=PatchStatus.APPLIED.value,
-                                            postcondition_passed=True)
+            results[patch_id] = PatchResult(
+                status=PatchStatus.APPLIED.value, postcondition_passed=True
+            )
         else:
-            results[patch_id] = PatchResult(status=PatchStatus.FAILED.value,
-                                            postcondition_passed=False)
+            results[patch_id] = PatchResult(
+                status=PatchStatus.FAILED.value, postcondition_passed=False
+            )
     for patch_id in gated_out:
-        results.setdefault(patch_id, PatchResult(
-            status=PatchStatus.NOT_REQUIRED.value, postcondition_passed=False))
+        results.setdefault(
+            patch_id, PatchResult(status=PatchStatus.NOT_REQUIRED.value, postcondition_passed=False)
+        )
         not_required.append(patch_id)
     return results, tuple(sorted(set(not_required)))
 
 
-def attest_self(*, requirement_id: str, role: str, component_id: str,
-                instance_id: Optional[str] = None,
-                owner_scope: str = OwnerScope.RANK.value,
-                owner_rank: Optional[int] = None,
-                profile=None, executable: Optional[str] = None,
-                argv: Optional[Sequence[str]] = None,
-                node_id: Optional[str] = None,
-                actor_id: Optional[str] = None,
-                postcondition=None) -> CompatibilityReceiptV2:
+def attest_self(
+    *,
+    requirement_id: str,
+    role: str,
+    component_id: str,
+    instance_id: Optional[str] = None,
+    owner_scope: str = OwnerScope.RANK.value,
+    owner_rank: Optional[int] = None,
+    profile=None,
+    executable: Optional[str] = None,
+    argv: Optional[Sequence[str]] = None,
+    node_id: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    postcondition=None,
+) -> CompatibilityReceiptV2:
     """Build a SELF receipt for the process that calls this function."""
     from .profile import default_profile
 
@@ -205,6 +272,7 @@ def attest_self(*, requirement_id: str, role: str, component_id: str,
     pid = os.getpid()
     results, not_required = _patch_results(profile, role, postcondition=postcondition)
     identity = _identity(profile)
+    package_hashes, source_hashes = _observed_profile_hashes(profile)
     receipt = CompatibilityReceiptV2(
         schema_version=SCHEMA_VERSION,
         receipt_requirement_id=requirement_id,
@@ -220,26 +288,32 @@ def attest_self(*, requirement_id: str, role: str, component_id: str,
         argv_hash=argv_hash(argv),
         prepared_environment_hash=prepared_environment_hash(),
         observed_versions=_observed_versions(),
-        observed_package_hashes={},
-        observed_source_hashes={},
+        observed_package_hashes=package_hashes,
+        observed_source_hashes=source_hashes,
         patch_results=results,
         capabilities=profile.capabilities(),
         attestation_type=AttestationType.SELF.value,
         attested_at=_rfc3339(),
         **identity,
     )
-    del not_required        # the head re-resolves this from the shared manifest
+    del not_required  # the head re-resolves this from the shared manifest
     return receipt.finalize()
 
 
-def attest_supervisor(*, requirement_id: str, role: str, component_id: str,
-                      executable: str, instance_id: Optional[str] = None,
-                      owner_scope: str = OwnerScope.GLOBAL.value,
-                      owner_rank: Optional[int] = None,
-                      argv: Optional[Sequence[str]] = None,
-                      pid: Optional[int] = None,
-                      node_id: Optional[str] = None,
-                      profile=None) -> CompatibilityReceiptV2:
+def attest_supervisor(
+    *,
+    requirement_id: str,
+    role: str,
+    component_id: str,
+    executable: str,
+    instance_id: Optional[str] = None,
+    owner_scope: str = OwnerScope.GLOBAL.value,
+    owner_rank: Optional[int] = None,
+    argv: Optional[Sequence[str]] = None,
+    pid: Optional[int] = None,
+    node_id: Optional[str] = None,
+    profile=None,
+) -> CompatibilityReceiptV2:
     """Attest an UNMODIFIED external daemon this supervisor owns.
 
     Refuses when the resolved manifest requires an in-process patch for the
@@ -254,9 +328,11 @@ def attest_supervisor(*, requirement_id: str, role: str, component_id: str,
     if required:
         raise ReceiptError(
             f"role {role!r} requires in-process patch(es) {list(required)}; "
-            "supervisor attestation cannot satisfy them")
+            "supervisor attestation cannot satisfy them"
+        )
     host = node_id or socket.gethostname()
     identity = _identity(profile)
+    package_hashes, source_hashes = _observed_profile_hashes(profile)
     receipt = CompatibilityReceiptV2(
         schema_version=SCHEMA_VERSION,
         receipt_requirement_id=requirement_id,
@@ -272,8 +348,8 @@ def attest_supervisor(*, requirement_id: str, role: str, component_id: str,
         argv_hash=argv_hash(argv),
         prepared_environment_hash=prepared_environment_hash(),
         observed_versions=_observed_versions(),
-        observed_package_hashes={},
-        observed_source_hashes={},
+        observed_package_hashes=package_hashes,
+        observed_source_hashes=source_hashes,
         patch_results={},
         capabilities=(),
         attestation_type=AttestationType.SUPERVISOR.value,
@@ -281,6 +357,76 @@ def attest_supervisor(*, requirement_id: str, role: str, component_id: str,
         **identity,
     )
     return receipt.finalize()
+
+
+def _requirement_patch_environment(plan, requirement_id: str) -> dict[str, str]:
+    """Resolve patch gates from one immutable planned logical slot."""
+    requirement = next(
+        (
+            item
+            for item in plan.receipt_requirements
+            if item.receipt_requirement_id == requirement_id
+        ),
+        None,
+    )
+    if requirement is None:
+        raise ReceiptError(f"no planned receipt requirement {requirement_id!r}")
+
+    pp_enabled = any(model.pipeline_parallel_size > 1 for model in plan.models)
+    multiproc_enabled = any(
+        model.pipeline_parallel_size == 1 and model.tensor_parallel_size > 1
+        for model in plan.models
+    )
+    if requirement.role in {"replica", "engine_core", "engine_worker"}:
+        matching = [
+            model
+            for model in plan.models
+            if requirement_id.startswith(f"model/{model.route_name}/replica/")
+        ]
+        if len(matching) != 1:
+            raise ReceiptError(
+                f"model receipt requirement {requirement_id!r} maps to "
+                f"{len(matching)} planned models"
+            )
+        pp_enabled = matching[0].pipeline_parallel_size > 1
+        multiproc_enabled = (
+            matching[0].pipeline_parallel_size == 1 and matching[0].tensor_parallel_size > 1
+        )
+    from .profile import (
+        MULTIPROC_WORKER_PATCH_GATE,
+        PP_PATCH_GATE,
+        RAY_WORKER_PATCH_GATE,
+    )
+
+    return {
+        PP_PATCH_GATE: "1" if pp_enabled else "0",
+        RAY_WORKER_PATCH_GATE: "1" if pp_enabled else "0",
+        MULTIPROC_WORKER_PATCH_GATE: "1" if multiproc_enabled else "0",
+    }
+
+
+def patch_requirements_for_plan(
+    plan, requirement_id: str, profile=None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return head-authoritative required/excluded patches for one slot."""
+    from .profile import default_profile
+
+    profile = profile or default_profile(plan.vendor)
+    requirement = next(
+        (
+            item
+            for item in plan.receipt_requirements
+            if item.receipt_requirement_id == requirement_id
+        ),
+        None,
+    )
+    if requirement is None:
+        raise ReceiptError(f"no planned receipt requirement {requirement_id!r}")
+    env = _requirement_patch_environment(plan, requirement_id)
+    return (
+        profile.required_patch_ids(requirement.role, env),
+        profile.gated_out(requirement.role, env),
+    )
 
 
 def resolved_not_required(role: str, profile=None) -> tuple[str, ...]:
@@ -310,7 +456,8 @@ def _rfc3339(when: Optional[float] = None) -> str:
 
 
 def deliver(receipt: CompatibilityReceiptV2, *, path: Optional[str] = None) -> bool:
-    """Hand one exact receipt to the owning NodeSupervisor over the local hop."""
-    from .local_ingress import deliver_receipt
+    """Hand one required receipt to its owner or raise the transport cause."""
+    from .local_ingress import deliver_receipt_checked
 
-    return deliver_receipt(receipt.to_dict(), path=path)
+    deliver_receipt_checked(receipt.to_dict(), path=path)
+    return True

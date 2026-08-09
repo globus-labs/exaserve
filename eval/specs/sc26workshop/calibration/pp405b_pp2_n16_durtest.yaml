@@ -61,6 +61,7 @@ deployment:
 client:
   num_runs: 2                # run0 warmup (discard) + run1 measured, as in the sweep
   dest: direct               # proxy removed, matching the sweep the numbers came from
+  direct_dispatch: mesh      # PP exposes 8 replica routes across 16 deployment nodes
   stream: true
   num_go_procs: 8
   num_go_workers: 4

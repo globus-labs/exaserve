@@ -39,6 +39,7 @@ workload:
   arrival: fixed              # (~saturation stress; sat_405b_pp2 knee ~0.31 rps/replica)
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   num_nodes: 4
   # Shard-aware PP (EXASERVE_PP_SHARD_AWARE=1): model_storage_path = Lustre SOURCE
   # (full 405B via flat-form symlink); local_stage_path = NODE-LOCAL tmpfs dest.
@@ -77,6 +78,6 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 50000
+          maxconn: 8000
 scheduler:
   type: pbs

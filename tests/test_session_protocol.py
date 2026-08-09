@@ -22,28 +22,48 @@ class _Clock:
 
 
 def _plan(nodes=2, **limits):
-    control = ControlLimits(registration_deadline_s=100.0, reconnect_grace_s=30.0,
-                            heartbeat_interval_s=1.0, lease_timeout_s=10.0,
-                            snapshot_assembly_deadline_s=20.0,
-                            watchdog_cleanup_deadline_s=40.0, **limits)
+    control = ControlLimits(
+        registration_deadline_s=100.0,
+        reconnect_grace_s=30.0,
+        heartbeat_interval_s=1.0,
+        lease_timeout_s=10.0,
+        snapshot_assembly_deadline_s=20.0,
+        watchdog_cleanup_deadline_s=40.0,
+        **limits,
+    )
     site = SiteProfile(
-        schema_version=2, site_id="s", max_nodes=64, gpus_per_node=12,
-        cpus_per_node=64, scheduler_types=("pbs",), gateway_kinds=("haproxy",),
-        vendors=("xpu",), engines=("vllm",), model_storage_path="/m",
-        local_stage_path="/t", control=control).finalize()
-    raw = {"num_nodes": nodes, "models": [{"model_id": "a/b",
-           "tensor_parallel_size": 1, "max_model_len": 4096, "size": 8}],
-           "gateway": {"kind": "haproxy", "port": 4001}}
+        schema_version=3,
+        site_id="s",
+        max_nodes=64,
+        gpus_per_node=12,
+        cpus_per_node=64,
+        scheduler_types=("pbs",),
+        gateway_kinds=("haproxy",),
+        vendors=("xpu",),
+        engines=("vllm",),
+        model_storage_path="/m",
+        local_stage_path="/t",
+        launcher_capabilities=("ray_serve.run_many",),
+        control=control,
+    ).finalize()
+    raw = {
+        "num_nodes": nodes,
+        "models": [
+            {"model_id": "a/b", "tensor_parallel_size": 1, "max_model_len": 4096, "size": 8}
+        ],
+        "gateway": {"kind": "haproxy", "port": 4001},
+    }
     return compile_deployment_plan(raw, site=site, deployment_id="d")
 
 
 def _coord(nodes=2, clock=None):
     plan = _plan(nodes)
-    binding = build_allocation_binding(plan=plan, generation=1,
-                                       scheduler_allocation_id="j",
-                                       nodes=[f"n{i}" for i in range(nodes)])
-    return SessionCoordinator(plan=plan, binding=binding,
-                              clock=clock or _Clock(), log=lambda *_: None)
+    binding = build_allocation_binding(
+        plan=plan, generation=1, scheduler_allocation_id="j", nodes=[f"n{i}" for i in range(nodes)]
+    )
+    return SessionCoordinator(
+        plan=plan, binding=binding, clock=clock or _Clock(), log=lambda *_: None
+    )
 
 
 def _establish(coord, rank, *, items=None, instance="i1"):
@@ -52,10 +72,20 @@ def _establish(coord, rank, *, items=None, instance="i1"):
     items = items if items is not None else [{"obs": rank}]
     assert coord.begin_snapshot(rank, f"snap{rank}", 1, canonical_hash(items))[0]
     assert coord.add_snapshot_chunk(rank, 0, items)[0]
-    return coord.complete_snapshot(rank, supervisor_receipt=True)
+    ok, why = coord.complete_snapshot(rank, supervisor_receipt=True)
+    assert ok, why
+    session = coord.sessions[rank]
+    return coord.acknowledge_snapshot(
+        rank,
+        command_id=session.snapshot_command_id,
+        snapshot_id=session.snapshot_id,
+        complete_set_hash=session.complete_set_hash,
+        succeeded=True,
+    )
 
 
 # -- registration is the START gate ------------------------------------------
+
 
 def test_no_start_until_every_rank_is_established():
     coord = _coord(3)
@@ -77,6 +107,36 @@ def test_register_alone_does_not_count_as_registered():
     assert not coord.may_start()[0]
 
 
+def test_validated_snapshot_does_not_count_until_matching_ack_result():
+    coord = _coord(1)
+    assert coord.register(0, "n0", "i1")[0]
+    items = [{"obs": 1}]
+    assert coord.begin_snapshot(0, "s", 1, canonical_hash(items))[0]
+    assert coord.add_snapshot_chunk(0, 0, items)[0]
+    ok, why = coord.complete_snapshot(0, supervisor_receipt=True)
+    assert ok and "acknowledgment" in why
+    assert coord.sessions[0].state == SessionState.SNAPSHOT_ACK_PENDING.value
+    assert not coord.all_registered()
+    session = coord.sessions[0]
+    ok, why = coord.acknowledge_snapshot(
+        0,
+        command_id="wrong",
+        snapshot_id=session.snapshot_id,
+        complete_set_hash=session.complete_set_hash,
+        succeeded=True,
+    )
+    assert not ok and "command_id mismatch" in why
+    assert not coord.all_registered()
+    assert coord.acknowledge_snapshot(
+        0,
+        command_id=session.snapshot_command_id,
+        snapshot_id=session.snapshot_id,
+        complete_set_hash=session.complete_set_hash,
+        succeeded=True,
+    )[0]
+    assert coord.all_registered()
+
+
 def test_a_snapshot_without_the_supervisor_receipt_is_refused():
     coord = _coord(1)
     coord.register(0, "n0", "i1")
@@ -85,6 +145,15 @@ def test_a_snapshot_without_the_supervisor_receipt_is_refused():
     coord.add_snapshot_chunk(0, 0, items)
     ok, why = coord.complete_snapshot(0, supervisor_receipt=False)
     assert not ok and "supervisor receipt" in why
+
+
+def test_short_and_fully_qualified_bound_node_names_are_equivalent():
+    coord = _coord(1)
+    # Replace the test binding's short node with the scheduler-style FQDN.
+    from dataclasses import replace
+
+    coord.binding = replace(coord.binding, rank_to_node=((0, "n0.example.org"),))
+    assert coord.register(0, "n0", "i1")[0]
 
 
 def test_one_missing_rank_at_the_deadline_is_terminal():
@@ -123,6 +192,7 @@ def test_an_authenticated_rank_asserting_the_wrong_node_is_generation_fatal():
 
 
 # -- snapshots ---------------------------------------------------------------
+
 
 def test_an_incomplete_snapshot_is_refused():
     coord = _coord(1)
@@ -170,9 +240,11 @@ def test_snapshot_assembly_has_a_deadline():
 
 # -- loss, grace, reconnect --------------------------------------------------
 
+
 def test_disconnect_revokes_readiness_immediately():
     coord = _coord(2)
-    _establish(coord, 0); _establish(coord, 1)
+    _establish(coord, 0)
+    _establish(coord, 1)
     assert coord.readiness_revoked_ranks() == ()
     coord.on_disconnect(1)
     assert coord.readiness_revoked_ranks() == (1,)
@@ -240,14 +312,24 @@ def test_grace_is_not_double_counted_with_the_lease():
 
 def test_expected_and_unsolicited_goodbye_differ():
     coord = _coord(2)
-    _establish(coord, 0); _establish(coord, 1)
+    _establish(coord, 0)
+    _establish(coord, 1)
     coord.request_drain(0)
-    assert coord.on_disconnect(0, expected=False) == "expected goodbye"
-    assert coord.sessions[0].state == SessionState.TERMINAL.value
-    # Rank 1 never drained: its goodbye is a loss, not a clean exit.
-    assert coord.on_disconnect(1) == "lost"
-    assert coord.sessions[1].state == SessionState.LOST.value
-    assert coord.sessions[1].loss_time is not None
+    # Authorizing GOODBYE does not turn an abrupt EOF into GOODBYE.
+    assert coord.on_disconnect(0, expected=False) == "lost"
+    assert coord.sessions[0].state == SessionState.LOST.value
+    # Rank 1 emits the actual protocol frame after an acknowledged drain.
+    coord.request_drain(1)
+    assert coord.on_disconnect(1, expected=True) == "expected goodbye"
+    assert coord.sessions[1].state == SessionState.TERMINAL.value
+
+
+def test_disconnect_without_drain_is_a_loss():
+    coord = _coord(1)
+    _establish(coord, 0)
+    assert coord.on_disconnect(0) == "lost"
+    assert coord.sessions[0].state == SessionState.LOST.value
+    assert coord.sessions[0].loss_time is not None
 
 
 def test_heartbeats_keep_a_session_alive():

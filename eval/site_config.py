@@ -7,6 +7,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, List, Optional
 
+from exaserve.site import local_account_name
+
 
 _FIELD_DEFAULTS = OrderedDict(
     [
@@ -27,7 +29,7 @@ _FIELD_DEFAULTS = OrderedDict(
         ("local_stage_path", "/tmp/hf_home"),
         # Python for the SGLang serving stack (frameworks-inheriting venv with SGLang
         # added). Used when a spec sets deployment.engine: sglang. Empty -> frameworks.
-        ("sglang_python_path", "/home/wenyiw/sglang_test/fwvenv/bin/python"),
+        ("sglang_python_path", ""),
     ]
 )
 _FIELD_NAMES = set(_FIELD_DEFAULTS)
@@ -48,6 +50,7 @@ _PATH_FIELDS = {
     "env_script_aurora",
     "env_script_litellm",
     "local_stage_path",
+    "sglang_python_path",
 }
 _CACHE = None
 
@@ -143,12 +146,18 @@ def _apply_overrides(config: SiteConfig, overrides: Dict[str, Any]) -> SiteConfi
 
 
 def _normalize_config(config: SiteConfig) -> SiteConfig:
-    current_user = os.environ.get("USER") or Path.home().name or "user"
+    current_user = (
+        local_account_name() if not config.user_data_root or not config.model_storage_path else ""
+    )
     home_dir = str(Path.home())
 
     project_root = _coerce_field_value("project_root", config.project_root)
+    if not os.path.isabs(project_root):
+        raise ValueError("project_root must be an absolute path")
     user_data_root = config.user_data_root or os.path.join(project_root, current_user, "data")
-    model_storage_path = config.model_storage_path or os.path.join(project_root, current_user, "models")
+    model_storage_path = config.model_storage_path or os.path.join(
+        project_root, current_user, "models"
+    )
     input_trace_path = config.input_trace_path or os.path.join(
         user_data_root,
         "input_traces",
@@ -177,9 +186,11 @@ def _normalize_config(config: SiteConfig) -> SiteConfig:
         "bench_results",
     )
     env_script_aurora = config.env_script_aurora or os.path.join(home_dir, "script", "env_aurora")
-    env_script_litellm = config.env_script_litellm or os.path.join(home_dir, "script", "env_litellm")
+    env_script_litellm = config.env_script_litellm or os.path.join(
+        home_dir, "script", "env_litellm"
+    )
 
-    return config.with_updates(
+    normalized = config.with_updates(
         project_root=project_root,
         user_data_root=_coerce_field_value("user_data_root", user_data_root),
         model_storage_path=_coerce_field_value("model_storage_path", model_storage_path),
@@ -194,6 +205,11 @@ def _normalize_config(config: SiteConfig) -> SiteConfig:
         env_script_litellm=_coerce_field_value("env_script_litellm", env_script_litellm),
         local_stage_path=_coerce_field_value("local_stage_path", config.local_stage_path),
     )
+    for field_name in sorted(_PATH_FIELDS):
+        value = getattr(normalized, field_name)
+        if value and not os.path.isabs(value):
+            raise ValueError(f"{field_name} must be an absolute path")
+    return normalized
 
 
 def get_site_config() -> SiteConfig:
@@ -206,6 +222,12 @@ def get_site_config() -> SiteConfig:
     config = _apply_overrides(config, _load_env_overrides())
     _CACHE = _normalize_config(config)
     return _CACHE
+
+
+def get_runs_root() -> Path:
+    """Return the configured immutable run-store root used by analysis tools."""
+
+    return Path(get_site_config().experiments_root) / "runs"
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

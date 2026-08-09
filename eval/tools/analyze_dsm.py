@@ -14,10 +14,13 @@ Reports per-scale:
 from __future__ import annotations
 
 import argparse
-import json
-import sys
 from pathlib import Path
 from statistics import mean, median
+
+try:
+    from .analysis_io import read_jsonl_objects
+except ImportError:  # Direct ``python eval/tools/analyze_dsm.py`` execution.
+    from analysis_io import read_jsonl_objects
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -49,13 +52,8 @@ def summarize(run_dir: Path) -> dict:
         return {"run_dir": str(run_dir), "error": "no dsm_updates file"}
 
     all_ticks = []
-    for f in dsm_files:
-        with f.open() as ff:
-            for line in ff:
-                try:
-                    all_ticks.append(json.loads(line))
-                except Exception:
-                    pass
+    for path in dsm_files:
+        all_ticks.extend(read_jsonl_objects(path))
 
     if not all_ticks:
         return {"run_dir": str(run_dir), "scale": run_dir.name, "n_ticks": 0}
@@ -83,6 +81,7 @@ def summarize(run_dir: Path) -> dict:
         "n_ticks": len(all_ticks),
         "mean_n_replicas": round(mean(n_replicas_vals), 1) if n_replicas_vals else 0,
         "max_n_replicas": max(n_replicas_vals) if n_replicas_vals else 0,
+        "mean_n_broadcasts": round(mean(n_broadcasts_vals), 1) if n_broadcasts_vals else 0,
         "total_mean_ms": round(1000 * mean(totals), 2),
         "total_p50_ms": round(1000 * median(totals), 2),
         "total_p99_ms": round(1000 * percentile(totals, 99), 2),
@@ -134,20 +133,32 @@ def main() -> None:
     row("MAX", "total_max_ms")
 
     print("\n--- Per-step MEAN time (ms) ---")
-    for k in ["s1_check_and_update_replicas", "s2_check_curr_status",
-              "s3_drain_nodes", "s4_scale_replicas", "s5_update_status",
-              "s6_schedule_and_stop", "s7_broadcast"]:
+    for k in [
+        "s1_check_and_update_replicas",
+        "s2_check_curr_status",
+        "s3_drain_nodes",
+        "s4_scale_replicas",
+        "s5_update_status",
+        "s6_schedule_and_stop",
+        "s7_broadcast",
+    ]:
         row(k, f"step_mean_ms.{k}")
 
     print("\n--- Per-step MAX time (ms) — peak stalls ---")
-    for k in ["s1_check_and_update_replicas", "s2_check_curr_status",
-              "s3_drain_nodes", "s4_scale_replicas", "s5_update_status",
-              "s6_schedule_and_stop", "s7_broadcast"]:
+    for k in [
+        "s1_check_and_update_replicas",
+        "s2_check_curr_status",
+        "s3_drain_nodes",
+        "s4_scale_replicas",
+        "s5_update_status",
+        "s6_schedule_and_stop",
+        "s7_broadcast",
+    ]:
         row(k, f"step_max_ms.{k}")
 
     print("\n--- Worst tick breakdown (ms) ---")
     for s in summaries:
-        print(f"\n{s.get('scale','?')}:")
+        print(f"\n{s.get('scale', '?')}:")
         for wt in s.get("worst_ticks", []):
             print(f"  n_replicas={wt.get('n_replicas')} subs={wt.get('subs_ms')}")
 

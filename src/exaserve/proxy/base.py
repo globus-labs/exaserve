@@ -1,41 +1,96 @@
 """
 Abstract interface for pluggable proxy backends.
 
-Each concrete backend (LiteLLM, HAProxy, custom) implements ProxyBackend.
-driver.py is the only caller -- it uses only this interface and never imports
-backend-specific code directly.
+Each backend is a pure, deterministic config renderer.  The composition root
+is the sole lifecycle owner: it preflights the rendered artifact, starts one
+``ManagedComponent``, observes it, and performs bounded cleanup.  Keeping
+``Popen`` out of renderers prevents a second, less supervised launch path.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-import subprocess
+import re
 
 
 @dataclass
 class BackendEndpoint:
     """A single Ray Serve HTTP endpoint (one per cluster node)."""
-    host: str       # cluster-fabric hostname or IP, e.g. "node0042.hsn.cluster.example"
-    port: int       # Ray Serve HTTP port, e.g. 8000
-    model_id: str   # e.g. "meta-llama/Meta-Llama-3-8B-Instruct"
+
+    host: str  # cluster-fabric hostname or IP, e.g. "node0042.hsn.cluster.example"
+    port: int  # Ray Serve HTTP port, e.g. 8000
+    model_id: str  # e.g. "meta-llama/Meta-Llama-3-8B-Instruct"
     path_prefix: str = ""  # e.g. "/meta-llama--Llama-3-1-8B-Instruct" for multi-model
-    # Shard-aware PP: this model is served as N node-pinned single-replica
-    # deployments at routes <path_prefix>_r0.._r{N-1}. >0 tells the proxy to
-    # round-robin across those replica routes. 0 = normal single route.
-    shard_replicas: int = 0
+    # A model with multiple canonical replicas is served as N node-pinned,
+    # single-replica applications at <path_prefix>_r0.._r{N-1}. A positive
+    # value tells the production gateway to distribute over those routes.
+    replica_routes: int = 0
+
+
+def reject_unknown_options(options: dict, allowed: set[str], kind: str) -> None:
+    unknown = sorted(set(options) - allowed)
+    if unknown:
+        raise ValueError(f"{kind} proxy options contain unknown fields: {unknown}")
+
+
+def strict_int(value, path: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{path} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{path} must be in {minimum}..{maximum}")
+    return value
+
+
+def strict_text(value, path: str, *, choices=None, allow_empty=False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise ValueError(f"{path} must be text")
+    if choices is not None and value not in choices:
+        raise ValueError(f"{path} must be one of {sorted(choices)}")
+    return value
+
+
+def validate_endpoint(endpoint: BackendEndpoint, kind: str) -> None:
+    if (
+        not isinstance(endpoint.host, str)
+        or not endpoint.host
+        or len(endpoint.host) > 253
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", endpoint.host)
+        or ".." in endpoint.host
+    ):
+        raise ValueError(f"unsafe {kind} backend host {endpoint.host!r}")
+    if (
+        isinstance(endpoint.port, bool)
+        or not isinstance(endpoint.port, int)
+        or not 1 <= endpoint.port <= 65535
+    ):
+        raise ValueError(f"invalid {kind} backend port {endpoint.port!r}")
+    if (
+        not isinstance(endpoint.model_id, str)
+        or not endpoint.model_id
+        or any(ord(char) < 32 for char in endpoint.model_id)
+    ):
+        raise ValueError(f"invalid {kind} backend model_id")
+    if endpoint.path_prefix and (
+        not isinstance(endpoint.path_prefix, str)
+        or not re.fullmatch(r"/[A-Za-z0-9._~/-]+", endpoint.path_prefix)
+        or ".." in endpoint.path_prefix
+    ):
+        raise ValueError(f"unsafe {kind} route prefix {endpoint.path_prefix!r}")
+    if (
+        isinstance(endpoint.replica_routes, bool)
+        or not isinstance(endpoint.replica_routes, int)
+        or endpoint.replica_routes < 0
+    ):
+        raise ValueError(f"invalid {kind} replica-route count")
 
 
 class ProxyBackend(ABC):
     """
     Contract for all proxy implementations.
 
-    Lifecycle called by driver.py (rank 0 only):
+    Lifecycle called by the composition root (rank 0 only):
         backends = discover_backends(...)
         config_path = proxy.generate_config(backends, output_dir, **options)
-        proc = proxy.start(config_path, host, port)
-        proxy.health_check(host, port)          # blocks until ready
-        ...
-        proxy.stop(proc)                         # on shutdown
     """
 
     @abstractmethod
@@ -55,53 +110,4 @@ class ProxyBackend(ABC):
 
         Returns:
             Absolute path to the generated config file.
-        """
-
-    @abstractmethod
-    def start(self, config_path: Path, host: str, port: int, **kwargs) -> tuple[subprocess.Popen, int]:
-        """
-        Launch the proxy process.
-
-        Args:
-            config_path: Path returned by generate_config().
-            host:        Interface to bind (e.g. "0.0.0.0").
-            port:        Preferred port to listen on (e.g. 4001). The
-                         implementation may fall back to a different port if
-                         the preferred one is unavailable.
-            **kwargs:    Backend-specific options (e.g. num_workers).
-
-        Returns:
-            (proc, actual_port) — Popen handle and the port the proxy
-            actually bound to (may differ from the requested port).
-        """
-
-    @abstractmethod
-    def health_check(
-        self,
-        host: str,
-        port: int,
-        timeout: float = 30.0,
-        process: subprocess.Popen | None = None,
-    ) -> bool:
-        """
-        Block until the proxy is accepting requests or timeout expires.
-
-        Args:
-            host:    Host to poll (use "127.0.0.1" for localhost checks).
-            port:    Port to poll.
-            timeout: Max seconds to wait.
-            process: If provided, check whether the process is still alive
-                     on each poll iteration and return False immediately
-                     if it has exited.
-
-        Returns:
-            True if healthy, False if timed out or the process died.
-        """
-
-    @abstractmethod
-    def stop(self, process: subprocess.Popen) -> None:
-        """
-        Gracefully stop the proxy process.
-
-        Should send SIGTERM first, then SIGKILL after a short grace period.
         """

@@ -1,0 +1,7 @@
+# Qualified heavy runtime supplied by `module load frameworks/2025.3.1`.
+# This file is an environment identity/verification lock, not a public-PyPI
+# installation recipe: ALCF supplies locally built XPU distributions.
+ray[serve]==2.53.0
+vllm==0.15.0+xpu
+torch==2.10.0a0+git449b176
+transformers==4.57.6

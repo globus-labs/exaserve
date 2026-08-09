@@ -55,6 +55,7 @@ deployment:
 client:
   num_runs: 6
   dest: direct                # <-- proxy-bypass: client hits replica stage-0 nodes directly
+  direct_dispatch: mesh       # clients distribute over replica routes; targets are not per-node
   stream: false               # <-- non-stream: full completion per response (vs SSE stream)
   num_go_procs: 8             # direct precedent (each rank its own node; no proxy contention)
   num_go_workers: 4

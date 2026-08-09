@@ -43,11 +43,11 @@ func (sg *SynthGenerator) Next() preparedRequest {
 	id := sg.counter.Add(1)
 	return preparedRequest{
 		traceRequest: traceRequest{
-			ReqID:    fmt.Sprintf("sat_%d", id),
-			Model:    sg.model,
-			Mode:     "chat",
-			Prompt:   "",
-			InputLen: sg.inputLen,
+			ReqID:     fmt.Sprintf("sat_%d", id),
+			Model:     sg.model,
+			Mode:      "chat",
+			Prompt:    "",
+			InputLen:  sg.inputLen,
 			OutputLen: sg.outLen,
 		},
 		body:     sg.body,

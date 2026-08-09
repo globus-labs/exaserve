@@ -127,7 +127,7 @@ backend:
       launch:
         # Override the env script used inside the PBS job if needed.
         # env_script: /home/<user>/script/env_aurora
-        # Sets EXASERVE_NULL_COMPUTE=1 for the launcher / serving stack.
+        # Compiles null_compute into the hash-bearing DeploymentPlan runtime policy.
         null_compute: false
         # Ray head port written into the runtime manifest.
         ray_head_port: 6379
@@ -161,7 +161,7 @@ backend:
         #   check_fall: 3
         #   check_rise: 2
         #   stats_port: 9999
-        #   maxconn: 50000
+        #   maxconn: 8000
         options: {}
 
 scheduler:
@@ -170,7 +170,7 @@ scheduler:
   # Base value when the matrix does not overwrite scheduler.nodes.
   nodes: 1
   # Optional. If omitted, eval chooses a queue from node count.
-  queue: debug
+  queue: capacity
   # Optional. If omitted, eval chooses a default walltime from node count.
   walltime: "01:00:00"
   project: AuroraGPT

@@ -3,6 +3,26 @@ import os
 import re
 import sys
 
+# Every top-level compatibility mutation in this module must map to one exact
+# manifest patch ID.  A static regression compares this registry with the
+# executed module-level calls, preventing a helper from becoming an invisible
+# third patch policy outside CompatibilityProfile and its receipts.
+DECLARED_PATCH_FUNCTIONS = {
+    "_patch_vllm_layer_lookup": "SC-01",
+    "_patch_vllm_bind_kv_cache": "SC-02",
+    "_patch_vllm_forward_context_aliases": "SC-03",
+    "_patch_vllm_attention_context": "SC-04",
+    "_patch_vllm_gpu_model_runner_attn_backend": "SC-05",
+    "_patch_vllm_ray_worker_runtime_env": "EW-01",
+    "_patch_vllm_multiproc_worker_identity": "EW-02",
+    "_patch_vllm_ray_worker_identity": "EW-03",
+    "_patch_vllm_ray_executor_channel_type": "SC-09",
+    "_patch_vllm_ray_executor_uncompiled_pp": "SC-10",
+    "_patch_ray_oneapi_selector": "SC-11",
+    "_patch_ray_accelerator_context": "SC-12",
+    "_install_ray_serve_timeout_import_hook": "RS-01",
+}
+
 
 def _patch_log(message: str) -> None:
     if os.getenv("EXASERVE_VLLM_PATCH_VERBOSE") == "1":
@@ -72,10 +92,7 @@ def _find_stage_relative_key(mapping: dict, layer_name: str) -> str | None:
     candidates.sort()
     relative_key = candidates[target_ordinal % len(candidates)][1]
     if relative_key != layer_name:
-        _patch_log(
-            "Using stage-relative layer alias: "
-            f"{layer_name} -> {relative_key}"
-        )
+        _patch_log(f"Using stage-relative layer alias: {layer_name} -> {relative_key}")
     return relative_key
 
 
@@ -235,10 +252,7 @@ def _resolve_mapping_value(mapping: dict, layer_name: str, resolved_key: str | N
     if fallback_key is None:
         return None, None
 
-    _patch_log(
-        "Falling back to representative mapping entry: "
-        f"{layer_name} <- {fallback_key}"
-    )
+    _patch_log(f"Falling back to representative mapping entry: {layer_name} <- {fallback_key}")
     return fallback_key, mapping[fallback_key]
 
 
@@ -277,8 +291,7 @@ def _patch_vllm_layer_lookup() -> None:
                 layer = _find_backend_fallback_layer(typed_layers, layer_name)
                 if layer is not None:
                     _patch_log(
-                        "Falling back to representative layer for backend lookup: "
-                        f"{layer_name}"
+                        f"Falling back to representative layer for backend lookup: {layer_name}"
                     )
             if layer is not None:
                 resolved_layers[layer_name] = layer
@@ -289,9 +302,6 @@ def _patch_vllm_layer_lookup() -> None:
     if getattr(config_pkg, "get_layers_from_vllm_config", None) is get_layers:
         config_pkg.get_layers_from_vllm_config = get_layers_from_vllm_config
     _patch_log("Applied vLLM PP layer lookup patch")
-
-
-_patch_vllm_layer_lookup()
 
 
 def _patch_vllm_bind_kv_cache() -> None:
@@ -312,9 +322,9 @@ def _patch_vllm_bind_kv_cache() -> None:
 
         index2name = worker_utils.defaultdict(list)
         for layer_name in kv_caches:
-            index2name[
-                worker_utils.extract_layer_index(layer_name, num_attn_module)
-            ].append(layer_name)
+            index2name[worker_utils.extract_layer_index(layer_name, num_attn_module)].append(
+                layer_name
+            )
 
         for layer_index in sorted(index2name.keys()):
             layer_names = index2name[layer_index]
@@ -335,8 +345,7 @@ def _patch_vllm_bind_kv_cache() -> None:
                 if fallback_key is not None and fallback_key in forward_context:
                     matches = [(fallback_key, forward_context[fallback_key])]
                     _patch_log(
-                        "Using direct KV cache binding fallback: "
-                        f"{layer_name} -> {fallback_key}"
+                        f"Using direct KV cache binding fallback: {layer_name} -> {fallback_key}"
                     )
             if not matches:
                 _patch_log(f"Skipped KV cache binding for unmatched layer {layer_name}")
@@ -350,12 +359,10 @@ def _patch_vllm_bind_kv_cache() -> None:
                     f"{layer_name} via {resolved_key} "
                     f"with shape={tuple(kv_cache.shape)}"
                 )
+
     bind_kv_cache._exaserve_pp_kv_bind_patch = True
     worker_utils.bind_kv_cache = bind_kv_cache
     _patch_log("Applied vLLM KV cache binding patch")
-
-
-_patch_vllm_bind_kv_cache()
 
 
 def _patch_vllm_forward_context_aliases() -> None:
@@ -398,9 +405,6 @@ def _patch_vllm_forward_context_aliases() -> None:
     _patch_log("Applied vLLM forward-context layer alias patch")
 
 
-_patch_vllm_forward_context_aliases()
-
-
 def _patch_vllm_attention_context() -> None:
     if os.getenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER") != "1":
         return
@@ -419,9 +423,7 @@ def _patch_vllm_attention_context() -> None:
     def resolve_metadata(attn_metadata, layer_name: str, resolved_key: str | None):
         if not isinstance(attn_metadata, dict):
             return attn_metadata
-        _, metadata_value = _resolve_mapping_value(
-            attn_metadata, layer_name, resolved_key
-        )
+        _, metadata_value = _resolve_mapping_value(attn_metadata, layer_name, resolved_key)
         if metadata_value is not None:
             return metadata_value
         return attn_metadata
@@ -490,9 +492,6 @@ def _patch_vllm_attention_context() -> None:
     attention_layer.get_attention_context = get_attention_context_with_aliases
     attention_layer.unified_kv_cache_update = unified_kv_cache_update_with_aliases
     _patch_log("Applied vLLM attention-context alias patch")
-
-
-_patch_vllm_attention_context()
 
 
 def _patch_vllm_gpu_model_runner_attn_backend() -> None:
@@ -566,14 +565,10 @@ def _patch_vllm_gpu_model_runner_attn_backend() -> None:
 
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-                if isinstance(
-                    layer_kv_cache_spec, gpu_model_runner.UniformTypeKVCacheSpecs
-                ):
+                if isinstance(layer_kv_cache_spec, gpu_model_runner.UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
                 key = (full_cls_name, layer_kv_cache_spec)
-                attn_backends[key] = AttentionGroupKey(
-                    attn_backend, layer_kv_cache_spec
-                )
+                attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
             return (
                 {attn_backends[k]: v for k, v in attn_backend_layers.items()},
@@ -613,496 +608,160 @@ def _patch_vllm_gpu_model_runner_attn_backend() -> None:
     _patch_log("Applied vLLM GPUModelRunner backend lookup patch")
 
 
-_patch_vllm_gpu_model_runner_attn_backend()
+def _patch_vllm_ray_worker_runtime_env() -> None:
+    """Deliver the generated shim before each vLLM Ray actor starts.
 
-
-def _install_vllm_gpu_model_runner_import_hook() -> None:
-    if os.getenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER") != "1":
-        return
-
+    Mutating ``os.environ`` in EngineCore is insufficient: Ray actors are
+    created by raylets and do not inherit the driver's late environment.
+    ``runtime_env.env_vars`` is the supported pre-interpreter boundary, so it
+    is the only point where worker ``sitecustomize`` can run before vLLM
+    imports.  The allowlist deliberately excludes head-control credentials and
+    arbitrary ambient ``EXASERVE_*`` values.
+    """
     try:
-        import builtins
-    except Exception:
-        return
-
-    original_import = builtins.__import__
-    if getattr(original_import, "_exaserve_gpu_model_runner_import_hook", False):
-        return
-
-    hook_state = {"active": False}
-
-    def exaserve_import(name, globals=None, locals=None, fromlist=(), level=0):
-        module = original_import(name, globals, locals, fromlist, level)
-        if hook_state["active"]:
-            return module
-
-        if not name.startswith("vllm"):
-            return module
-
-        try:
-            hook_state["active"] = True
-            if "vllm.v1.worker.gpu_model_runner" in sys.modules:
-                _patch_vllm_gpu_model_runner_attn_backend()
-        finally:
-            hook_state["active"] = False
-        return module
-
-    exaserve_import._exaserve_gpu_model_runner_import_hook = True
-    builtins.__import__ = exaserve_import
-    _patch_log("Installed vLLM GPUModelRunner import hook")
-
-
-_install_vllm_gpu_model_runner_import_hook()
-
-
-def _patch_vllm_ray_multigpu_bundles() -> None:
-    # STATUS: written to let multi-GPU per-stage bundles pass vLLM 0.15's
-    # one-GPU-per-bundle check, but server.py now emits per-GPU bundles
-    # (commit 17b88be) which pass the upstream check unpatched — so this is
-    # likely redundant. It only loads in the EngineCore at all since the
-    # PYTHONPATH sitecustomize shim (commit 4d9d846). Kept because the
-    # verified 405B PP run had it loaded; removal needs a PP re-test.
-    if os.getenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER") != "1":
-        return
-
-    try:
-        from collections import defaultdict
-
-        import ray
-        import vllm.v1.executor.ray_executor as ray_executor
-        import vllm.v1.executor.ray_utils as ray_utils
-    except Exception:
-        return
-
-    initialize_ray_cluster = ray_utils.initialize_ray_cluster
-    if getattr(initialize_ray_cluster, "_exaserve_multigpu_bundle_patch", False):
-        return
-
-    def _format_device_count(count: float) -> str:
-        if float(count).is_integer():
-            return str(int(count))
-        return f"{count:g}"
-
-    def _verify_bundles(
-        placement_group,
-        parallel_config,
-        device_str: str,
-    ) -> None:
-        assert ray.is_initialized(), (
-            "Ray is not initialized although distributed-executor-backend is ray."
-        )
-        pg_data = ray_utils.placement_group_table(placement_group)
-        bundle_to_node_ids = pg_data["bundles_to_node_id"]
-        bundles = pg_data["bundles"]
-        node_id_to_bundle = defaultdict(list)
-
-        for bundle_idx, node_id in bundle_to_node_ids.items():
-            node_id_to_bundle[node_id].append(bundles[bundle_idx])
-        driver_node_id = ray.get_runtime_context().get_node_id()
-
-        if driver_node_id not in node_id_to_bundle:
-            raise RuntimeError(
-                f"driver node id {driver_node_id} is not included in a placement "
-                f"group {placement_group.id}. Node id -> bundles "
-                f"{node_id_to_bundle}. "
-                "You don't have enough GPUs available in a current node. Check "
-                "`ray status` and `ray list nodes` to see if you have available "
-                "GPUs in a node `{driver_node_id}` before starting an vLLM engine."
-            )
-
-        for node_id, node_bundles in node_id_to_bundle.items():
-            reserved_devices = sum(
-                float(bundle.get(device_str, 0) or 0) for bundle in node_bundles
-            )
-            if reserved_devices + 1e-9 < parallel_config.tensor_parallel_size:
-                ray_utils.logger.warning(
-                    "tensor_parallel_size=%d "
-                    "is bigger than a reserved number of %ss (%s "
-                    "%ss) in a node %s. Tensor parallel workers can be "
-                    "spread out to 2+ nodes which can degrade the performance "
-                    "unless you have fast interconnect across nodes, like "
-                    "Infiniband. To resolve this issue, make sure you have more "
-                    "than %d GPUs available at each node.",
-                    parallel_config.tensor_parallel_size,
-                    device_str,
-                    _format_device_count(reserved_devices),
-                    device_str,
-                    node_id,
-                    parallel_config.tensor_parallel_size,
-                )
-
-    def initialize_ray_cluster(parallel_config, ray_address=None):
-        ray_utils.assert_ray_available()
-        from vllm.platforms import current_platform
-
-        if current_platform.is_cuda() and parallel_config.world_size > 1:
-            from vllm.utils.torch_utils import cuda_device_count_stateless
-
-            available_gpus = cuda_device_count_stateless()
-            if parallel_config.world_size > available_gpus:
-                ray_utils.logger.warning(
-                    "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                    "This may result in Ray placement group allocation failures. "
-                    "Consider reducing tensor_parallel_size to %d or less, "
-                    "or ensure your Ray cluster has %d GPUs available.",
-                    parallel_config.world_size,
-                    available_gpus,
-                    available_gpus,
-                    parallel_config.world_size,
-                )
-
-        if ray.is_initialized():
-            ray_utils.logger.info(
-                "Ray is already initialized. Skipping Ray initialization."
-            )
-        elif current_platform.is_rocm() or current_platform.is_xpu():
-            try:
-                ray.init("auto")
-            except ConnectionError:
-                ray_utils.logger.warning(
-                    "No existing RAY instance detected. "
-                    "A new instance will be launched with current node resources."
-                )
-                ray.init(
-                    address=ray_address,
-                    num_gpus=parallel_config.world_size,
-                    runtime_env=parallel_config.ray_runtime_env,
-                )
-        else:
-            ray.init(
-                address=ray_address,
-                runtime_env=parallel_config.ray_runtime_env,
-            )
-
-        device_str = current_platform.ray_device_key
-        if not device_str:
-            raise ValueError(
-                f"current platform {current_platform.device_name} does not support ray."
-            )
-
-        if parallel_config.placement_group:
-            current_placement_group = parallel_config.placement_group
-        else:
-            current_placement_group = ray.util.get_current_placement_group()
-
-        if current_placement_group:
-            ray_utils.logger.info("Using the existing placement group")
-
-            total_devices = sum(
-                float(bundle.get(device_str, 0) or 0)
-                for bundle in current_placement_group.bundle_specs
-            )
-            if parallel_config.world_size > total_devices + 1e-9:
-                raise ValueError(
-                    f"The number of required {device_str}s exceeds the total "
-                    f"number of available {device_str}s in the placement group. "
-                    f"Required number of devices: {parallel_config.world_size}. "
-                    f"Total number of devices: {_format_device_count(total_devices)}."
-                )
-        else:
-            ray_utils.logger.info(
-                "No current placement group found. Creating a new placement group."
-            )
-            num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
-            if parallel_config.world_size > num_devices_in_cluster:
-                ray_utils.logger.warning(
-                    "The number of required %ss exceeds the total "
-                    "number of available %ss in the placement group.",
-                    device_str,
-                    device_str,
-                )
-            placement_group_specs = [
-                {device_str: 1.0} for _ in range(parallel_config.world_size)
-            ]
-
-            current_ip = ray_utils.get_ip()
-            current_node_id = ray.get_runtime_context().get_node_id()
-            current_node_resource = ray_utils.available_resources_per_node()[
-                current_node_id
-            ]
-            if current_node_resource.get(device_str, 0) < 1:
-                raise ValueError(
-                    f"Current node has no {device_str} available. "
-                    f"current_node_resource={current_node_resource}. "
-                    f"vLLM engine cannot start without "
-                    f"{device_str}. Make sure you have at least 1 {device_str} "
-                    f"available in a node current_node_id={current_node_id} "
-                    f"current_ip={current_ip}."
-                )
-            placement_group_specs[0][f"node:{current_ip}"] = 0.001
-
-            current_placement_group = ray.util.placement_group(
-                placement_group_specs,
-                strategy="PACK",
-            )
-            ray_utils._wait_until_pg_ready(current_placement_group)
-
-        assert current_placement_group is not None
-        _verify_bundles(current_placement_group, parallel_config, device_str)
-        parallel_config.placement_group = current_placement_group
-
-    _verify_bundles._exaserve_multigpu_bundle_patch = True
-    initialize_ray_cluster._exaserve_multigpu_bundle_patch = True
-    ray_utils._verify_bundles = _verify_bundles
-    ray_utils.initialize_ray_cluster = initialize_ray_cluster
-    ray_executor.initialize_ray_cluster = initialize_ray_cluster
-    _patch_log("Applied vLLM Ray multi-GPU placement-group patch")
-
-
-_patch_vllm_ray_multigpu_bundles()
-
-
-def _patch_vllm_ray_executor_bundle_indices() -> None:
-    # STATUS: written to allow duplicate VLLM_RAY_BUNDLE_INDICES (multiple
-    # workers sharing a multi-GPU stage bundle). server.py no longer sets
-    # that env var and emits per-GPU bundles (commit 17b88be), so the
-    # default no-env path here matches upstream behavior — likely redundant.
-    # Same caveat as _patch_vllm_ray_multigpu_bundles: loaded during the
-    # verified 405B PP run via the 4d9d846 shim; removal needs a PP re-test.
-    if os.getenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER") != "1":
-        return
-
-    try:
-        from collections import defaultdict
-
-        import ray
         import vllm.v1.executor.ray_executor as ray_executor
     except Exception:
         return
 
     executor_cls = ray_executor.RayDistributedExecutor
     init_workers = executor_cls._init_workers_ray
-    if getattr(init_workers, "_exaserve_bundle_index_patch", False):
+    if getattr(init_workers, "_exaserve_worker_runtime_env_patch", False):
         return
 
+    exact_keys = {
+        "PYTHONPATH",
+        "EXASERVE_ENGINE_RECEIPT_DIR",
+        "EXASERVE_ENGINE_SHIM_PATCHES",
+        "EXASERVE_ENGINE_SHIM_KIND",
+        "EXASERVE_RECEIPT_MODEL_ID_ENGINE",
+        "EXASERVE_RECEIPT_DEVICE_IDS_ENGINE",
+        "EXASERVE_RECEIPT_REPLICA_INDEX",
+        "EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE",
+        "EXASERVE_RECEIPT_COMPONENT_ID_ENGINE",
+        "EXASERVE_RECEIPT_RANK",
+        "EXASERVE_RECEIPT_SOCKET",
+        "EXASERVE_DEPLOYMENT_ID",
+        "EXASERVE_GENERATION",
+        "EXASERVE_VENDOR",
+        "EXASERVE_PLAN_PATH",
+        "EXASERVE_ALLOCATION_BINDING_PATH",
+        "EXASERVE_PLAN_HASH",
+        "EXASERVE_SITE_PROFILE_HASH",
+        "EXASERVE_ALLOCATION_BINDING_HASH",
+        "EXASERVE_COMPAT_PROFILE_ID",
+        "EXASERVE_COMPAT_MANIFEST_HASH",
+    }
+    prefix_keys = ("EXASERVE_VERSION_", "EXASERVE_VLLM_", "EXASERVE_XPU_")
+
     def _init_workers_ray(self, placement_group, **ray_remote_kwargs):
-        num_gpus = ray_executor.envs.VLLM_RAY_PER_WORKER_GPUS
-
-        self.driver_dummy_worker = None
-        self.workers = []
-        self.pp_tp_workers = []
-
-        if self.parallel_config.ray_workers_use_nsight:
-            ray_remote_kwargs = self._configure_ray_workers_use_nsight(
-                ray_remote_kwargs
-            )
-
-        preserve_bundle_order = False
-        if ray_executor.envs.VLLM_RAY_BUNDLE_INDICES:
-            bundle_indices = list(
-                map(int, ray_executor.envs.VLLM_RAY_BUNDLE_INDICES.split(","))
-            )
-            assert len(bundle_indices) == self.parallel_config.world_size, (
-                "VLLM_RAY_BUNDLE_INDICES must have the same size"
-                f" as the world size, but got bundle_indices={bundle_indices} "
-                "and "
-                f"world_size={self.parallel_config.world_size}"
-            )
-            preserve_bundle_order = True
+        runtime_env = ray_remote_kwargs.get("runtime_env")
+        if runtime_env is None:
+            runtime_env = {}
+        elif not isinstance(runtime_env, dict):
+            raise RuntimeError("vLLM worker runtime_env must be a mapping")
         else:
-            bundle_indices = []
-            for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-                bundle_devices = float(
-                    bundle.get(ray_executor.current_platform.ray_device_key, 0) or 0
-                )
-                if bundle_devices <= 0:
-                    continue
-                workers_in_bundle = max(
-                    1,
-                    int(round(bundle_devices / float(num_gpus))),
-                )
-                bundle_indices.extend([bundle_id] * workers_in_bundle)
-            bundle_indices = bundle_indices[: self.parallel_config.world_size]
-
-        worker_metadata = []
-        driver_ip = (
-            os.environ.get("VLLM_HOST_IP")
-            or os.environ.get("MASTER_ADDR")
-            or ray_executor.get_ip()
-        )
-        for rank, bundle_id in enumerate(bundle_indices):
-            scheduling_strategy = ray_executor.PlacementGroupSchedulingStrategy(
-                placement_group=placement_group,
-                placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=bundle_id,
-            )
-
-            if ray_executor.current_platform.ray_device_key == "GPU":
-                worker = ray.remote(
-                    num_cpus=0,
-                    num_gpus=num_gpus,
-                    scheduling_strategy=scheduling_strategy,
-                    **ray_remote_kwargs,
-                )(ray_executor.RayWorkerWrapper).remote(rpc_rank=rank)
-            else:
-                worker = ray.remote(
-                    num_cpus=0,
-                    num_gpus=0,
-                    resources={
-                        ray_executor.current_platform.ray_device_key: num_gpus
-                    },
-                    scheduling_strategy=scheduling_strategy,
-                    **ray_remote_kwargs,
-                )(ray_executor.RayWorkerWrapper).remote(rpc_rank=rank)
-
-            worker_metadata.append(
-                ray_executor.RayWorkerMetaData(worker=worker, created_rank=rank)
-            )
-
-        worker_ips = ray.get(
-            [
-                each.worker.get_node_ip.remote()  # type: ignore[attr-defined]
-                for each in worker_metadata
-            ]
-        )
-
-        for each, ip in zip(worker_metadata, worker_ips):
-            each.ip = ip
-
-        ray_executor.logger.debug("workers: %s", worker_metadata)
-        ray_executor.logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
-
-        if preserve_bundle_order:
-            sorted_worker_metadata = worker_metadata
+            runtime_env = dict(runtime_env)
+        env_vars = runtime_env.get("env_vars")
+        if env_vars is None:
+            env_vars = {}
+        elif not isinstance(env_vars, dict):
+            raise RuntimeError("vLLM worker runtime_env.env_vars must be a mapping")
         else:
-            ip_counts = {}
-            for ip in worker_ips:
-                ip_counts[ip] = ip_counts.get(ip, 0) + 1
+            env_vars = dict(env_vars)
+        for key, value in os.environ.items():
+            if key in exact_keys or key.startswith(prefix_keys):
+                env_vars[key] = value
+        env_vars["EXASERVE_ENGINE_WORKER_KIND"] = "ray"
+        env_vars["EXASERVE_COMPAT_ROLE"] = "engine_worker"
+        runtime_env["env_vars"] = env_vars
+        ray_remote_kwargs["runtime_env"] = runtime_env
+        return init_workers(self, placement_group, **ray_remote_kwargs)
 
-            def sort_by_driver_then_worker_ip(item):
-                ip = item.ip
-                return 0 if ip == driver_ip else 1, ip_counts[ip], ip
-
-            sorted_worker_metadata = sorted(
-                worker_metadata,
-                key=sort_by_driver_then_worker_ip,
-            )
-
-        for i, item in enumerate(sorted_worker_metadata):
-            item.adjusted_rank = i
-        self.workers = [item.worker for item in sorted_worker_metadata]
-        rerank_mapping = {
-            item.created_rank: item.adjusted_rank
-            for item in sorted_worker_metadata
-        }
-        self.collective_rpc("adjust_rank", args=(rerank_mapping,))
-
-        worker_node_and_gpu_ids = []
-        for worker in [self.driver_dummy_worker] + self.workers:
-            if worker is None:
-                continue
-            worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote())
-            )  # type: ignore[attr-defined]
-
-        node_workers = defaultdict(list)
-        node_gpus = defaultdict(list)
-
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
-            node_workers[node_id].append(i)
-            gpu_ids = [int(x) for x in gpu_ids]
-            node_gpus[node_id].extend(gpu_ids)
-        for node_id, gpu_ids in node_gpus.items():
-            node_gpus[node_id] = sorted(gpu_ids)
-
-        single_node_worker_topology = len(node_workers) == 1
-        if single_node_worker_topology:
-            driver_ip = "127.0.0.1"
-
-        all_ips = set(worker_ips)
-        if not single_node_worker_topology and (
-            not preserve_bundle_order or driver_ip in all_ips
-        ):
-            all_ips.add(driver_ip)
-        n_ips = len(all_ips)
-        n_nodes = len(node_workers)
-
-        if (
-            preserve_bundle_order
-            and not single_node_worker_topology
-            and driver_ip not in set(worker_ips)
-        ):
-            _patch_log(
-                "Driver IP is not among worker IPs for explicit bundle order; "
-                f"using driver_ip={driver_ip}, worker_ips={worker_ips}"
-            )
-        elif not single_node_worker_topology and n_nodes != n_ips:
-            raise RuntimeError(
-                f"Every node should have a unique IP address. Got {n_nodes}"
-                f" nodes with node ids {list(node_workers.keys())} and "
-                f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP`"
-                " environment variable, make sure it is unique for"
-                " each node."
-            )
-
-        all_args_to_update_environment_variables = [
-            {
-                ray_executor.current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
-            for (node_id, _) in worker_node_and_gpu_ids
-        ]
-
-        env_vars_to_copy = ray_executor.get_env_vars_to_copy(
-            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(
-                ray_executor.current_platform.additional_env_vars
-            ).union(self.ADDITIONAL_ENV_VARS),
-            destination="workers",
-        )
-
-        for args in all_args_to_update_environment_variables:
-            for name in env_vars_to_copy:
-                if name in os.environ:
-                    args[name] = os.environ[name]
-
-        self._env_vars_for_all_workers = all_args_to_update_environment_variables
-
-        self.collective_rpc(
-            "update_environment_variables",
-            args=(self._get_env_vars_to_be_updated(),),
-        )
-
-        distributed_init_method = ray_executor.get_distributed_init_method(
-            driver_ip,
-            ray_executor.get_open_port(),
-        )
-
-        all_kwargs = []
-        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
-            local_rank = node_workers[node_id].index(rank)
-            kwargs = dict(
-                vllm_config=self.vllm_config,
-                local_rank=local_rank,
-                rank=rank,
-                distributed_init_method=distributed_init_method,
-                is_driver_worker=(not self.parallel_config)
-                or (rank % self.parallel_config.tensor_parallel_size == 0),
-            )
-            all_kwargs.append(kwargs)
-        self.collective_rpc("init_worker", args=(all_kwargs,))
-
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
-
-        for pp_rank in range(self.parallel_config.pipeline_parallel_size):
-            self.pp_tp_workers.append([])
-            for tp_rank in range(self.parallel_config.tensor_parallel_size):
-                rank = (
-                    pp_rank * self.parallel_config.tensor_parallel_size
-                ) + tp_rank
-                assert len(self.pp_tp_workers[pp_rank]) == tp_rank
-                assert pp_rank < len(self.pp_tp_workers)
-                self.pp_tp_workers[pp_rank].append(self.workers[rank])
-
-    _init_workers_ray._exaserve_bundle_index_patch = True
+    _init_workers_ray._exaserve_worker_runtime_env_patch = True
     executor_cls._init_workers_ray = _init_workers_ray
-    _patch_log("Applied vLLM Ray bundle index ordering patch")
+    _patch_log("Applied vLLM Ray-worker pre-interpreter runtime_env patch")
 
 
-_patch_vllm_ray_executor_bundle_indices()
+def _patch_vllm_ray_worker_identity() -> None:
+    """Expose vLLM's stable worker world rank before model-runner import.
+
+    The Ray accelerator id is selected by the scheduler and can change after a
+    worker restart.  ``rpc_rank`` is vLLM's logical topology identity.  vLLM
+    may rerank workers after placement, so both construction and ``adjust_rank``
+    update the process-local value consumed by the attestation watcher.
+    """
+    try:
+        from vllm.v1.executor.ray_utils import RayWorkerWrapper
+    except Exception:
+        return
+
+    original_init = RayWorkerWrapper.__init__
+    if getattr(original_init, "_exaserve_worker_identity_patch", False):
+        return
+    original_adjust_rank = RayWorkerWrapper.adjust_rank
+
+    def _init(self, *args, **kwargs):
+        rank = kwargs.get("rpc_rank")
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+            raise RuntimeError(f"vLLM Ray worker supplied invalid rpc_rank {rank!r}")
+        os.environ["EXASERVE_ENGINE_WORKER_GLOBAL_RANK"] = str(rank)
+        return original_init(self, *args, **kwargs)
+
+    def _adjust_rank(self, rank_mapping):
+        result = original_adjust_rank(self, rank_mapping)
+        rank = getattr(self, "rpc_rank", None)
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+            raise RuntimeError(f"vLLM Ray worker resolved invalid rpc_rank {rank!r}")
+        os.environ["EXASERVE_ENGINE_WORKER_GLOBAL_RANK"] = str(rank)
+        return result
+
+    _init._exaserve_worker_identity_patch = True
+    _adjust_rank._exaserve_worker_identity_patch = True
+    RayWorkerWrapper.__init__ = _init
+    RayWorkerWrapper.adjust_rank = _adjust_rank
+    _patch_log("Applied vLLM Ray-worker logical identity adapter")
+
+
+_EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN = None
+
+
+def _exaserve_multiproc_worker_main(*args, **kwargs):
+    """Bind a spawned vLLM multiprocessing worker before model imports."""
+    rank = kwargs.get("rank")
+    if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+        raise RuntimeError(f"vLLM worker supplied invalid global rank {rank!r}")
+    os.environ["EXASERVE_ENGINE_WORKER_KIND"] = "multiproc"
+    os.environ["EXASERVE_ENGINE_WORKER_GLOBAL_RANK"] = str(rank)
+    os.environ["EXASERVE_COMPAT_ROLE"] = "engine_worker"
+    original = _EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN
+    if original is None:
+        raise RuntimeError("vLLM multiprocess worker adapter was not initialized")
+    return original(*args, **kwargs)
+
+
+_exaserve_multiproc_worker_main._exaserve_worker_identity_patch = True
+
+
+def _patch_vllm_multiproc_worker_identity() -> None:
+    """Pass vLLM's pinned worker rank into the self-attestation watcher.
+
+    A multiprocessing child does not have a Ray actor/resource identity. The
+    executor's explicit ``rank`` argument is therefore the authoritative
+    mapping to the ordered device set inherited from its EngineCore.
+    """
+    try:
+        import vllm.v1.executor.multiproc_executor as multiproc_executor
+    except Exception:
+        return
+
+    worker_cls = multiproc_executor.WorkerProc
+    worker_main = worker_cls.worker_main
+    if getattr(worker_main, "_exaserve_worker_identity_patch", False):
+        return
+    global _EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN
+    _EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN = worker_main
+    worker_cls.worker_main = staticmethod(_exaserve_multiproc_worker_main)
+    _patch_log("Applied vLLM multiprocessing worker identity adapter")
 
 
 def _patch_vllm_ray_executor_channel_type() -> None:
@@ -1145,21 +804,15 @@ def _patch_vllm_ray_executor_channel_type() -> None:
         self._init_workers_ray(placement_group)
 
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-        self.uses_sampler = (
-            self.vllm_config.model_config.runner_type != "pooling"
-            and (
-                self.vllm_config.ec_transfer_config is None
-                or not self.vllm_config.ec_transfer_config.is_ec_producer
-            )
+        self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
+            self.vllm_config.ec_transfer_config is None
+            or not self.vllm_config.ec_transfer_config.is_ec_producer
         )
         self.scheduler_output = None
 
     _init_executor._exaserve_xpu_channel_patch = True
     executor_cls._init_executor = _init_executor
     _patch_log("Applied vLLM Ray executor channel override patch")
-
-
-_patch_vllm_ray_executor_channel_type()
 
 
 def _patch_vllm_ray_executor_uncompiled_pp() -> None:
@@ -1221,9 +874,6 @@ def _patch_vllm_ray_executor_uncompiled_pp() -> None:
     _patch_log("Applied vLLM uncompiled Ray PP fallback patch")
 
 
-_patch_vllm_ray_executor_uncompiled_pp()
-
-
 def _patch_ray_oneapi_selector() -> None:
     if os.getenv("EXASERVE_VLLM_PATCH_PP_LAYER_FILTER") != "1":
         return
@@ -1239,9 +889,7 @@ def _patch_ray_oneapi_selector() -> None:
         return
 
     def get_current_process_visible_accelerator_ids():
-        oneapi_visible_devices = os.environ.get(
-            manager.get_visible_accelerator_ids_env_var(), None
-        )
+        oneapi_visible_devices = os.environ.get(manager.get_visible_accelerator_ids_env_var(), None)
         if oneapi_visible_devices in (None, "", "NoDevFiles"):
             if os.getenv("RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR") == "1":
                 local_ids = _local_accelerator_id_list(manager)
@@ -1269,8 +917,7 @@ def _patch_ray_oneapi_selector() -> None:
         local_ids = _local_accelerator_id_list(manager)
         if local_ids:
             _patch_log(
-                "ONEAPI_DEVICE_SELECTOR is generic; "
-                f"using local accelerator IDs {local_ids}"
+                f"ONEAPI_DEVICE_SELECTOR is generic; using local accelerator IDs {local_ids}"
             )
             return local_ids
 
@@ -1281,9 +928,6 @@ def _patch_ray_oneapi_selector() -> None:
         get_current_process_visible_accelerator_ids
     )
     _patch_log("Applied Ray ONEAPI selector patch")
-
-
-_patch_ray_oneapi_selector()
 
 
 def _patch_ray_accelerator_context() -> None:
@@ -1326,9 +970,7 @@ def _patch_ray_accelerator_context() -> None:
                 accelerator_manager.get_current_process_visible_accelerator_ids() or []
             )
             visible_numeric_ids = _parse_numeric_ids(accelerator_visible_list)
-            local_numeric_ids = _parse_numeric_ids(
-                _local_accelerator_id_list(accelerator_manager)
-            )
+            local_numeric_ids = _parse_numeric_ids(_local_accelerator_id_list(accelerator_manager))
 
             for accelerator_id in accelerator_ids:
                 resolved_device_id = None
@@ -1398,22 +1040,79 @@ def _patch_ray_accelerator_context() -> None:
         else:
             device_ids.append(0)
 
-        return [
-            torch.device(f"{self._torch_module_name}:{device_id}")
-            for device_id in device_ids
-        ]
+        return [torch.device(f"{self._torch_module_name}:{device_id}") for device_id in device_ids]
 
     get_accelerator_devices._exaserve_generic_selector_patch = True
     AcceleratorContext.get_accelerator_devices = get_accelerator_devices
     _patch_log("Applied Ray accelerator context patch")
 
 
-_patch_ray_accelerator_context()
+def _patch_ray_serve_start_timeout(module=None) -> None:
+    """Apply the one Ray Serve constant with no supported configuration API.
+
+    Proxy health/ready checks use Ray's environment controls, and replica
+    checks use public deployment options.  Only ``HTTP_PROXY_TIMEOUT`` still
+    needs a pinned compatibility hook on Ray 2.53.
+    """
+    raw = os.getenv("EXASERVE_RAY_SERVE_START_PROXY_TIMEOUT_S")
+    if raw is None:
+        return
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError("EXASERVE_RAY_SERVE_START_PROXY_TIMEOUT_S must be numeric") from exc
+    if value <= 0:
+        raise RuntimeError("EXASERVE_RAY_SERVE_START_PROXY_TIMEOUT_S must be positive")
+    if module is None:
+        module = sys.modules.get("ray.serve._private.constants")
+    if module is None:
+        return
+    module.HTTP_PROXY_TIMEOUT = value
+    module._exaserve_serve_start_timeout_patch = True
+    _patch_log(f"Applied Ray Serve startup timeout: {value}s")
+
+
+def _install_ray_serve_timeout_import_hook() -> None:
+    module = sys.modules.get("ray.serve._private.constants")
+    if module is not None:
+        _patch_ray_serve_start_timeout(module)
+        return
+
+    import importlib.abc
+    import importlib.machinery
+
+    class _RayServeTimeoutLoader(importlib.abc.Loader):
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def create_module(self, spec):
+            creator = getattr(self.wrapped, "create_module", None)
+            return creator(spec) if creator is not None else None
+
+        def exec_module(self, module):
+            self.wrapped.exec_module(module)
+            _patch_ray_serve_start_timeout(module)
+
+    class _RayServeTimeoutFinder(importlib.abc.MetaPathFinder):
+        _exaserve_ray_serve_timeout_finder = True
+
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname != "ray.serve._private.constants":
+                return None
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+            if spec is None or spec.loader is None:
+                return spec
+            spec.loader = _RayServeTimeoutLoader(spec.loader)
+            return spec
+
+    if not any(
+        getattr(finder, "_exaserve_ray_serve_timeout_finder", False) for finder in sys.meta_path
+    ):
+        sys.meta_path.insert(0, _RayServeTimeoutFinder())
 
 
 # WP3 delete-first (ADR-003 decision 1, 2026-08-05): three dead patches
 # removed — SC-D1 wrap_as_future timeout, SC-D2 stale Serve constants
-# (values disagreed with the live SV-01 set), SC-D3 ProxyActor profiling
-# hook (superseded by the overlay's in-file instrumentation). Their call
-# sites had been commented out since perf-inst-dev; restore from commit
-# 2f32633 if ever needed.
+# (values disagreed with the live RS-01 profile), and SC-D3 ProxyActor
+# profiling. The file-replacement overlay and its instrumentation were also
+# retired; current diagnostics use ExaServe-owned collectors and traces.

@@ -2,23 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
 
 import pytest
 
 from exaserve import capabilities as caps
-
-
-@dataclass
-class _Model:
-    model_id: str = "m"
-    pipeline_parallel_size: int = 1
-    num_replicas: int | None = None
-
-
-@dataclass
-class _Config:
-    model_configs: list
 
 
 def test_every_capability_states_what_enables_it_and_what_happens_without_it():
@@ -29,29 +17,6 @@ def test_every_capability_states_what_enables_it_and_what_happens_without_it():
             assert capability.summary
 
 
-def test_multi_replica_pp_is_refused_without_the_shard_aware_path(monkeypatch):
-    """pp>1 with replicas>1 works through shard-aware placement and nowhere else."""
-    monkeypatch.delenv("EXASERVE_PP_SHARD_AWARE", raising=False)
-    config = _Config([_Model(pipeline_parallel_size=2, num_replicas=4)])
-    with pytest.raises(caps.CapabilityUnavailable) as excinfo:
-        caps.validate_deployment(config, log=lambda *_: None)
-    assert "pp_multi_replica" in str(excinfo.value)
-    assert "EXASERVE_PP_SHARD_AWARE" in str(excinfo.value)
-
-
-def test_multi_replica_pp_is_allowed_when_the_capability_is_enabled(monkeypatch):
-    monkeypatch.setenv("EXASERVE_PP_SHARD_AWARE", "1")
-    config = _Config([_Model(pipeline_parallel_size=2, num_replicas=4)])
-    report = caps.validate_deployment(config, log=lambda *_: None)
-    assert report["pp_multi_replica"] is True
-
-
-def test_single_replica_pp_needs_no_capability(monkeypatch):
-    monkeypatch.delenv("EXASERVE_PP_SHARD_AWARE", raising=False)
-    config = _Config([_Model(pipeline_parallel_size=4, num_replicas=1)])
-    caps.validate_deployment(config, log=lambda *_: None)   # must not raise
-
-
 def test_an_answer_changing_fallback_refuses_rather_than_substituting(monkeypatch):
     """A plain-text prompt is not the format the model was tuned on."""
     monkeypatch.delenv("EXASERVE_ALLOW_CHAT_TEMPLATE_FALLBACK", raising=False)
@@ -59,7 +24,13 @@ def test_an_answer_changing_fallback_refuses_rather_than_substituting(monkeypatc
         caps.degrade_or_refuse("chat_template_fallback", "model m")
     message = str(excinfo.value)
     assert "not comparable" in message or "NOT the" in message
-    assert "EXASERVE_ALLOW_CHAT_TEMPLATE_FALLBACK" in message
+    assert "chat_template" in message
+
+
+def test_an_inherited_environment_cannot_enable_answer_changing_fallback(monkeypatch):
+    monkeypatch.setenv("EXASERVE_ALLOW_CHAT_TEMPLATE_FALLBACK", "1")
+    with pytest.raises(caps.CapabilityUnavailable):
+        caps.degrade_or_refuse("chat_template_fallback", "model m")
 
 
 def test_a_performance_only_capability_degrades_loudly(monkeypatch):
@@ -67,8 +38,7 @@ def test_a_performance_only_capability_degrades_loudly(monkeypatch):
     monkeypatch.delenv("RAYON_NUM_THREADS", raising=False)
     monkeypatch.delenv("TOKENIZERS_PARALLELISM", raising=False)
     said = []
-    assert caps.degrade_or_refuse("thread_oversubscription_guard",
-                                  log=said.append) is False
+    assert caps.degrade_or_refuse("thread_oversubscription_guard", log=said.append) is False
     assert said and "DEGRADED" in said[0]
     assert "RAYON_NUM_THREADS" in said[0]
 
@@ -87,8 +57,60 @@ def test_an_undeclared_capability_is_an_error():
 def test_the_engine_gates_the_chat_template_fallback():
     from importlib import resources
 
-    source = (resources.files("exaserve") / "engines" / "vllm.py").read_text()
-    assert "degrade_or_refuse" in source, "the fallback still substitutes silently"
+    for backend in ("vllm.py", "sglang.py"):
+        source = (resources.files("exaserve") / "engines" / backend).read_text()
+        assert "degrade_or_refuse" in source, f"{backend} still substitutes silently"
+
+
+def test_sglang_refuses_an_implicit_answer_changing_prompt_fallback(monkeypatch):
+    from exaserve.engines.sglang import SGLangEngine
+
+    class MissingTemplateTokenizer:
+        def apply_chat_template(self, *args, **kwargs):
+            raise ValueError("tokenizer chat_template is not set")
+
+    monkeypatch.setenv("EXASERVE_ALLOW_CHAT_TEMPLATE_FALLBACK", "1")
+    engine = SGLangEngine()
+    engine.model_id = "model-a"
+    engine.tokenizer = MissingTemplateTokenizer()
+    with pytest.raises(caps.CapabilityUnavailable, match="chat_template_fallback"):
+        engine.build_chat_prompt([{"role": "user", "content": "hi"}])
+
+
+def test_sglang_forwards_explicit_chat_template_and_kwargs():
+    from exaserve.engines.sglang import SGLangEngine
+
+    class RecordingTokenizer:
+        def __init__(self):
+            self.kwargs = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.kwargs = kwargs
+            return "rendered"
+
+    engine = SGLangEngine()
+    engine.tokenizer = RecordingTokenizer()
+    rendered = engine.build_chat_prompt(
+        [{"role": "user", "content": "hi"}],
+        chat_template="{{ messages }}",
+        chat_template_kwargs={"tools": ["calculator"]},
+    )
+    assert rendered == "rendered"
+    assert engine.tokenizer.kwargs["chat_template"] == "{{ messages }}"
+    assert engine.tokenizer.kwargs["tools"] == ["calculator"]
+
+
+def test_sglang_does_not_disguise_unrelated_tokenizer_failures():
+    from exaserve.engines.sglang import SGLangEngine
+
+    class BrokenTokenizer:
+        def apply_chat_template(self, *args, **kwargs):
+            raise RuntimeError("tokenizer corrupted")
+
+    engine = SGLangEngine()
+    engine.tokenizer = BrokenTokenizer()
+    with pytest.raises(RuntimeError, match="corrupted"):
+        engine.build_chat_prompt([{"role": "user", "content": "hi"}])
 
 
 def test_the_deploy_path_validates_capabilities():
@@ -97,7 +119,8 @@ def test_the_deploy_path_validates_capabilities():
     source = (resources.files("exaserve") / "server.py").read_text()
     assert "validate_deployment as _validate_capabilities" in source
     assert "capabilities=_capability_report" in source, (
-        "the capability report is not recorded with the run")
+        "the capability report is not recorded with the run"
+    )
 
 
 def test_fake_streaming_cannot_enter_a_real_streaming_comparison():
@@ -110,29 +133,10 @@ def test_fake_streaming_cannot_enter_a_real_streaming_comparison():
     caps.require_streaming_comparison("litellm", streaming=False)
 
 
-def test_an_unvalidated_engine_is_refused_unless_acknowledged(monkeypatch):
-    """TD-SGLANG: the SGLang path has no current smoke evidence here."""
-    monkeypatch.setenv("EXASERVE_ENGINE", "sglang")
-    monkeypatch.delenv("EXASERVE_ALLOW_UNVALIDATED_ENGINE", raising=False)
-    config = _Config([_Model()])
-    with pytest.raises(caps.CapabilityUnavailable, match="sglang_engine"):
-        caps.validate_deployment(config, log=lambda *_: None)
-    monkeypatch.setenv("EXASERVE_ALLOW_UNVALIDATED_ENGINE", "1")
-    caps.validate_deployment(config, log=lambda *_: None)
+def test_aurora_xpu_isolation_never_introduces_oneapi_selector(monkeypatch):
+    from exaserve.vendors.xpu import XPUVendor
 
-
-def test_an_unvalidated_vendor_is_refused_unless_acknowledged(monkeypatch):
-    """TD-SLURM-AMD: ROCm/CUDA exist in code but have no validation runs."""
-    monkeypatch.setenv("EXASERVE_VENDOR", "rocm")
-    monkeypatch.delenv("EXASERVE_ALLOW_UNVALIDATED_VENDOR", raising=False)
-    config = _Config([_Model()])
-    with pytest.raises(caps.CapabilityUnavailable, match="non_xpu_vendor"):
-        caps.validate_deployment(config, log=lambda *_: None)
-    monkeypatch.setenv("EXASERVE_ALLOW_UNVALIDATED_VENDOR", "1")
-    caps.validate_deployment(config, log=lambda *_: None)
-
-
-def test_the_default_xpu_vllm_path_needs_no_acknowledgement(monkeypatch):
-    monkeypatch.delenv("EXASERVE_ENGINE", raising=False)
-    monkeypatch.delenv("EXASERVE_VENDOR", raising=False)
-    caps.validate_deployment(_Config([_Model()]), log=lambda *_: None)
+    monkeypatch.setenv("ONEAPI_DEVICE_SELECTOR", "ambient-invalid-selector")
+    XPUVendor().isolate_devices([3], engine_name="sglang")
+    assert "ONEAPI_DEVICE_SELECTOR" not in os.environ
+    assert os.environ["ZE_AFFINITY_MASK"] == "3"

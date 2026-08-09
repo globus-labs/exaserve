@@ -10,16 +10,23 @@ an endpoint for a deployment that is not READY.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from clientlab.targets import exaserve_target
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import build_allocation_binding
+from exaserve.plan.io import write_allocation_binding
 from exaserve.site import default_site_profile
 from exaserve.state.status import DeploymentState
+from exaserve.state.receipts import ReceiptManifest, write_receipt_manifest
 from exaserve.status_api import (
     DeploymentNotReady,
+    InvalidDeploymentStatus,
     DeploymentStatusPublisher,
+    StatusPublicationError,
+    load_status_allocation_binding,
     read_deployment_status,
     require_ready_endpoint,
 )
@@ -27,34 +34,123 @@ from exaserve.status_api import (
 
 def _plan(num_nodes: int = 2):
     return compile_deployment_plan(
-        {"num_nodes": num_nodes, "num_gpus_per_node": 12, "validation_mode": True,
-         "models": [{"model_id": "m", "tensor_parallel_size": 1,
-                     "max_model_len": 128, "size": 8}]},
-        site=default_site_profile(), deployment_id="d1")
+        {
+            "num_nodes": num_nodes,
+            "num_gpus_per_node": 12,
+            "validation_mode": True,
+            "models": [
+                {"model_id": "m", "tensor_parallel_size": 1, "max_model_len": 128, "size": 8}
+            ],
+        },
+        site=default_site_profile(),
+        deployment_id="d1",
+    )
 
 
 def _binding(plan, generation=3):
     return build_allocation_binding(
-        plan=plan, generation=generation, scheduler_allocation_id="job1",
-        nodes=[f"n{i}" for i in range(plan.num_nodes)])
+        plan=plan,
+        generation=generation,
+        scheduler_allocation_id="job1",
+        nodes=[f"n{i}" for i in range(plan.num_nodes)],
+    )
 
 
 def _publisher(tmp_path, generation=3):
     plan = _plan()
     binding = _binding(plan, generation)
-    pub = DeploymentStatusPublisher(str(tmp_path), plan=plan, binding=binding,
-                                    generation=generation, log=lambda *_: None)
+    pub = DeploymentStatusPublisher(
+        str(tmp_path), plan=plan, binding=binding, generation=generation, log=lambda *_: None
+    )
     pub.initialize()
     return pub, plan, binding
 
 
 def _walk_to_ready(pub, endpoint="http://h:8000"):
-    pub.advance_through(DeploymentState.STAGING, DeploymentState.CLUSTER_STARTING,
-                        DeploymentState.DEPLOYING, reason_code="X")
-    pub.advance(DeploymentState.VALIDATING, reason_code="X",
-                advertised_endpoint=endpoint)
-    pub.advance(DeploymentState.READY, reason_code="READY",
-                advertised_endpoint=endpoint)
+    pub.advance_through(
+        DeploymentState.STAGING,
+        DeploymentState.CLUSTER_STARTING,
+        DeploymentState.DEPLOYING,
+        reason_code="X",
+    )
+    pub.advance(DeploymentState.VALIDATING, reason_code="X", advertised_endpoint=endpoint)
+    path, digest = _empty_receipt_manifest(pub)
+    snapshot, model_map = _ready_snapshot(pub, path, digest, endpoint)
+    pub.advance(
+        DeploymentState.READY,
+        reason_code="READY",
+        advertised_endpoint=endpoint,
+        receipt_hashes=[],
+        readiness_snapshot=snapshot,
+        model_map=model_map,
+        capability_map={},
+    )
+
+
+def _empty_receipt_manifest(pub):
+    manifest = ReceiptManifest(
+        schema_version=1,
+        deployment_id=pub.plan.deployment_id,
+        generation=pub.generation,
+        deployment_plan_hash=pub.plan.deployment_plan_hash,
+        allocation_binding_hash=pub.binding.allocation_binding_hash,
+        receipt_hashes=(),
+        receipts=(),
+    ).finalize()
+    path = __import__("os").path.join(
+        __import__("os").path.dirname(pub.path),
+        "compatibility_receipts",
+        f"{manifest.manifest_hash}.json",
+    )
+    write_receipt_manifest(path, manifest)
+    return path, manifest.manifest_hash
+
+
+def _ready_snapshot(pub, receipt_path, receipt_hash, endpoint="http://h:8000"):
+    nodes = [
+        {
+            "node_id": f"id-{rank}",
+            "node_name": node,
+            "node_address": f"10.0.0.{rank + 1}",
+            "alive": True,
+            "cpu": float(pub.plan.node_cpus),
+            "gpu": float(pub.plan.num_gpus_per_node),
+        }
+        for rank, node in pub.binding.rank_to_node
+    ]
+    proxies = [{"node_id": item["node_id"], "status": "HEALTHY"} for item in nodes]
+    model_map = {
+        model.model_id: {
+            "route_name": model.route_name,
+            "expected_replicas": model.num_replicas,
+            "observed_replicas": model.num_replicas,
+            "observed_target": model.num_replicas,
+        }
+        for model in pub.plan.models
+    }
+    snapshot = {
+        "ready": True,
+        "phase": "READY",
+        "blockers": [],
+        "satisfied": ["test predicate"],
+        "advertised_endpoint": endpoint,
+        "generation": pub.generation,
+        "deployment_plan_hash": pub.plan.deployment_plan_hash,
+        "allocation_binding_hash": pub.binding.allocation_binding_hash,
+        "missing_identities": [],
+        "unhealthy_identities": [],
+        "receipt_hashes": [],
+        "model_map": model_map,
+        "capability_map": {},
+        "nodes": nodes,
+        "proxies": proxies,
+        "observed_at": time.time(),
+        "receipt_manifest_path": receipt_path,
+        "receipt_manifest_hash": receipt_hash,
+        # Publisher overwrites this with its authoritative lease.
+        "lease_expires_at": time.time() + 60,
+    }
+    return snapshot, model_map
 
 
 # -- writer ---------------------------------------------------------------
@@ -68,7 +164,8 @@ def test_publisher_walks_the_real_lifecycle(tmp_path):
 
 def test_an_illegal_transition_is_refused_not_written(tmp_path):
     pub, _, _ = _publisher(tmp_path)
-    assert pub.advance(DeploymentState.READY, reason_code="X") is None
+    with pytest.raises(StatusPublicationError, match="PLANNED -> READY"):
+        pub.advance(DeploymentState.READY, reason_code="X")
     assert read_deployment_status(str(tmp_path)).state == "PLANNED"
 
 
@@ -76,17 +173,47 @@ def test_a_second_publisher_does_not_take_over_the_record(tmp_path):
     """Two generations writing one file is how a stale READY survives."""
     pub, plan, binding = _publisher(tmp_path)
     _walk_to_ready(pub)
-    intruder = DeploymentStatusPublisher(str(tmp_path), plan=plan, binding=binding,
-                                         generation=9, log=lambda *_: None)
-    assert intruder.initialize() is None
-    assert intruder.advance(DeploymentState.FAILED, reason_code="X") is None
+    intruder = DeploymentStatusPublisher(
+        str(tmp_path), plan=plan, binding=binding, generation=9, log=lambda *_: None
+    )
+    with pytest.raises(StatusPublicationError, match="initialize"):
+        intruder.initialize()
     assert read_deployment_status(str(tmp_path)).ready
+
+
+def test_ready_transition_carries_the_readiness_evidence_atomically(tmp_path):
+    pub, _, _ = _publisher(tmp_path)
+    pub.advance_through(
+        DeploymentState.STAGING,
+        DeploymentState.CLUSTER_STARTING,
+        DeploymentState.DEPLOYING,
+        DeploymentState.VALIDATING,
+        reason_code="X",
+    )
+    receipt_path, receipt_hash = _empty_receipt_manifest(pub)
+    snapshot, model_map = _ready_snapshot(pub, receipt_path, receipt_hash, "http://h:8000")
+    pub.advance(
+        DeploymentState.READY,
+        reason_code="READY",
+        advertised_endpoint="http://h:8000",
+        readiness_snapshot=snapshot,
+        model_map=model_map,
+        capability_map={},
+        receipt_hashes=[],
+    )
+    status = read_deployment_status(str(tmp_path))
+    assert status.ready
+    assert status.readiness_snapshot["ready"] is True
+    assert status.model_map["m"]["observed_replicas"] == pub.plan.models[0].num_replicas
+    assert status.receipt_hashes == ()
+    assert status.receipt_manifest_hash == receipt_hash
 
 
 def test_failure_is_published_with_its_first_cause(tmp_path):
     pub, _, _ = _publisher(tmp_path)
-    pub.advance(DeploymentState.FAILED, reason_code="FIRST_CAUSE",
-                detail="the gateway never started")
+    pub.advance(
+        DeploymentState.FAILED, reason_code="FIRST_CAUSE", detail="the gateway never started"
+    )
     status = read_deployment_status(str(tmp_path))
     assert status.terminal and status.detail == "the gateway never started"
 
@@ -96,7 +223,36 @@ def test_provenance_carries_the_generation_and_hashes(tmp_path):
     status = read_deployment_status(str(tmp_path))
     assert status.generation == 3
     assert status.deployment_plan_hash == plan.deployment_plan_hash
+    assert status.site_profile_hash == plan.site_profile_hash
     assert status.allocation_binding_hash == binding.allocation_binding_hash
+    assert status.num_nodes == plan.num_nodes
+
+
+def test_status_loader_verifies_the_separate_allocation_binding(tmp_path):
+    _, _, binding = _publisher(tmp_path)
+    write_allocation_binding(str(tmp_path / "allocation_binding.json"), binding)
+    status = read_deployment_status(str(tmp_path))
+
+    assert load_status_allocation_binding(str(tmp_path), status) == binding
+
+
+def test_status_loader_rejects_a_binding_from_another_generation(tmp_path):
+    _, plan, _ = _publisher(tmp_path)
+    other = _binding(plan, generation=4)
+    write_allocation_binding(str(tmp_path / "allocation_binding.json"), other)
+
+    with pytest.raises(InvalidDeploymentStatus, match="identity disagrees"):
+        load_status_allocation_binding(str(tmp_path), read_deployment_status(str(tmp_path)))
+
+
+def test_status_loader_rejects_a_symlinked_binding(tmp_path):
+    _, _, binding = _publisher(tmp_path)
+    target = tmp_path / "real_binding.json"
+    write_allocation_binding(str(target), binding)
+    (tmp_path / "allocation_binding.json").symlink_to(target)
+
+    with pytest.raises(InvalidDeploymentStatus, match="regular, non-symlink"):
+        load_status_allocation_binding(str(tmp_path), read_deployment_status(str(tmp_path)))
 
 
 # -- reader ---------------------------------------------------------------
@@ -108,8 +264,12 @@ def test_no_record_is_not_an_endpoint(tmp_path):
 
 def test_a_deploying_deployment_yields_no_endpoint(tmp_path):
     pub, _, _ = _publisher(tmp_path)
-    pub.advance_through(DeploymentState.STAGING, DeploymentState.CLUSTER_STARTING,
-                        DeploymentState.DEPLOYING, reason_code="X")
+    pub.advance_through(
+        DeploymentState.STAGING,
+        DeploymentState.CLUSTER_STARTING,
+        DeploymentState.DEPLOYING,
+        reason_code="X",
+    )
     with pytest.raises(DeploymentNotReady, match="DEPLOYING"):
         require_ready_endpoint(str(tmp_path))
 
@@ -121,16 +281,100 @@ def test_a_stale_generation_is_rejected_by_the_reader(tmp_path):
         require_ready_endpoint(str(tmp_path), expected_generation=4)
     with pytest.raises(DeploymentNotReady, match="!="):
         require_ready_endpoint(str(tmp_path), expected_plan_hash="f" * 64)
-    assert require_ready_endpoint(
-        str(tmp_path), expected_generation=3,
-        expected_plan_hash=plan.deployment_plan_hash) == "http://h:8000"
+    assert (
+        require_ready_endpoint(
+            str(tmp_path), expected_generation=3, expected_plan_hash=plan.deployment_plan_hash
+        )
+        == "http://h:8000"
+    )
 
 
-def test_ready_without_an_endpoint_is_not_usable(tmp_path):
+def test_ready_without_an_endpoint_is_refused_by_the_writer(tmp_path):
     pub, _, _ = _publisher(tmp_path)
-    _walk_to_ready(pub, endpoint="")
-    with pytest.raises(DeploymentNotReady, match="published no endpoint"):
+    pub.advance_through(
+        DeploymentState.STAGING,
+        DeploymentState.CLUSTER_STARTING,
+        DeploymentState.DEPLOYING,
+        DeploymentState.VALIDATING,
+        reason_code="X",
+    )
+    with pytest.raises(StatusPublicationError, match="non-empty advertised endpoint"):
+        pub.advance(DeploymentState.READY, reason_code="READY", advertised_endpoint="")
+
+
+def test_ready_without_a_receipt_manifest_is_refused(tmp_path):
+    pub, _, _ = _publisher(tmp_path)
+    pub.advance_through(
+        DeploymentState.STAGING,
+        DeploymentState.CLUSTER_STARTING,
+        DeploymentState.DEPLOYING,
+        DeploymentState.VALIDATING,
+        reason_code="X",
+    )
+    with pytest.raises(StatusPublicationError, match="receipt manifest"):
+        pub.advance(DeploymentState.READY, reason_code="READY", advertised_endpoint="http://h:8000")
+
+
+def test_tampered_ready_receipt_manifest_fails_closed(tmp_path):
+    pub, _, _ = _publisher(tmp_path)
+    _walk_to_ready(pub)
+    status = read_deployment_status(str(tmp_path))
+    with open(status.receipt_manifest_path, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    from exaserve.status_api import InvalidDeploymentStatus
+
+    with pytest.raises(InvalidDeploymentStatus, match="receipt manifest"):
+        read_deployment_status(str(tmp_path))
+
+
+def test_ready_evidence_expires_and_refresh_is_cas_published(tmp_path, monkeypatch):
+    pub, _, _ = _publisher(tmp_path)
+    _walk_to_ready(pub)
+    status = read_deployment_status(str(tmp_path))
+    revision = status.revision
+    expires = status.readiness_snapshot["lease_expires_at"]
+
+    pub.refresh_ready(
+        readiness_snapshot=status.readiness_snapshot,
+        model_map=status.model_map,
+        capability_map=status.capability_map,
+        receipt_hashes=list(status.receipt_hashes),
+    )
+    refreshed = read_deployment_status(str(tmp_path))
+    assert refreshed.revision == revision + 1
+    assert refreshed.readiness_snapshot["lease_expires_at"] >= expires
+
+    import exaserve.status_api as api
+
+    monkeypatch.setattr(
+        api.time, "time", lambda: refreshed.readiness_snapshot["lease_expires_at"] + 1
+    )
+    assert read_deployment_status(str(tmp_path)).ready is False
+    with pytest.raises(DeploymentNotReady, match="lease expired"):
         require_ready_endpoint(str(tmp_path))
+
+
+def test_ready_heartbeats_do_not_grow_transition_history_without_bound(tmp_path):
+    pub, _, _ = _publisher(tmp_path)
+    _walk_to_ready(pub)
+    status = read_deployment_status(str(tmp_path))
+    before = pub.store.load()
+    assert before is not None
+    history_length = len(before.history)
+
+    for _ in range(25):
+        pub.refresh_ready(
+            readiness_snapshot=status.readiness_snapshot,
+            model_map=status.model_map,
+            capability_map=status.capability_map,
+            receipt_hashes=list(status.receipt_hashes),
+        )
+
+    after = pub.store.load()
+    assert after is not None
+    assert after.revision == before.revision + 25
+    assert len(after.history) == history_length
+    assert after.reason_code == "READINESS_HEARTBEAT"
 
 
 # -- ClientLab consumer ---------------------------------------------------
@@ -139,11 +383,10 @@ def test_clientlab_resolves_only_a_ready_deployment(tmp_path):
     with pytest.raises(exaserve_target.DeploymentTargetError):
         exaserve_target.resolve(str(tmp_path))
     _walk_to_ready(pub)
-    target = exaserve_target.resolve(
-        str(tmp_path), expected_plan_hash=plan.deployment_plan_hash)
+    target = exaserve_target.resolve(str(tmp_path), expected_plan_hash=plan.deployment_plan_hash)
     assert target.base_url == "http://h:8000"
     assert target.generation == 3
-    assert target.is_validation_only          # this plan is DIRECT_VALIDATION
+    assert target.is_validation_only  # this plan is DIRECT_VALIDATION
 
 
 def test_clientlab_stops_waiting_on_a_terminal_deployment(tmp_path):
@@ -151,6 +394,24 @@ def test_clientlab_stops_waiting_on_a_terminal_deployment(tmp_path):
     pub.advance(DeploymentState.FAILED, reason_code="FIRST_CAUSE", detail="boom")
     with pytest.raises(exaserve_target.DeploymentTargetError, match="FAILED"):
         exaserve_target.wait_until_ready(str(tmp_path), timeout_s=30.0, poll_s=0.01)
+
+
+def test_clientlab_ignores_a_terminal_record_from_another_generation(tmp_path):
+    pub, _, _ = _publisher(tmp_path)
+    pub.advance(DeploymentState.FAILED, reason_code="FIRST_CAUSE", detail="old run")
+    with pytest.raises(exaserve_target.DeploymentTargetError, match="stale identity") as caught:
+        exaserve_target.wait_until_ready(
+            str(tmp_path),
+            expected_generation=4,
+            timeout_s=0.04,
+            poll_s=0.01,
+        )
+    assert "reached FAILED" not in str(caught.value)
+
+
+def test_clientlab_wait_rejects_nonfinite_polling_policy(tmp_path):
+    with pytest.raises(ValueError, match="poll_s"):
+        exaserve_target.wait_until_ready(str(tmp_path), timeout_s=1.0, poll_s=float("nan"))
 
 
 def test_clientlab_wait_times_out_with_the_last_state(tmp_path):
@@ -165,8 +426,15 @@ def test_clientlab_does_not_monitor_processes_or_grep_logs():
     import inspect
 
     source = inspect.getsource(exaserve_target)
-    for forbidden in ("subprocess", "Popen", "psutil", "pgrep", "CLUSTER FULLY READY",
-                      "readiness.json", "launch.log"):
+    for forbidden in (
+        "subprocess",
+        "Popen",
+        "psutil",
+        "pgrep",
+        "CLUSTER FULLY READY",
+        "readiness.json",
+        "launch.log",
+    ):
         assert forbidden not in source, f"{forbidden} reintroduces a private view"
 
 
@@ -184,49 +452,105 @@ def test_clientlab_has_no_deployment_plan_compiler_of_its_own():
 
 
 # -- readiness inputs derived from the child's evidence --------------------
-def test_a_single_model_matches_the_default_serve_application():
-    """Serve does not name applications after model ids.
-
-    A single-model deployment is just `default`, so matching on the model id
-    found nothing and every model resolved to a zero replica target -- which
-    reads as "the deployment is empty" for a deployment that is fully up.
-    """
-    from exaserve.launcher import _application_for
+def test_a_single_model_matches_the_default_serve_application(tmp_path):
+    """Every bound replica application contributes to model evidence."""
+    from exaserve.composition import CompositionRoot
 
     plan = _plan()
     model = plan.models[0]
-    apps = {"default": {"running": 24, "target": 24, "route_prefix": "/",
-                        "status": "RUNNING"}}
-    assert _application_for(model, apps, plan.models)["running"] == 24
+    apps = {
+        f"{model.route_name}_r{index}": {
+            "running": 1,
+            "target": 1,
+            "route_prefix": f"/{model.route_name}_r{index}",
+            "status": "RUNNING",
+        }
+        for index in range(model.num_replicas)
+    }
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path))
+    assert root.application_for_model(model, apps)["running"] == 24
 
 
-def test_multi_model_matches_by_route_not_by_luck():
-    from exaserve.launcher import _application_for
+def test_multi_model_matches_by_route_not_by_luck(tmp_path):
+    from exaserve.composition import CompositionRoot
 
     plan = compile_deployment_plan(
-        {"num_nodes": 2, "num_gpus_per_node": 12, "validation_mode": True,
-         "models": [{"model_id": "org/alpha", "tensor_parallel_size": 1,
-                     "max_model_len": 128, "size": 8},
-                    {"model_id": "org/beta", "tensor_parallel_size": 1,
-                     "max_model_len": 128, "size": 8}]},
-        site=default_site_profile(), deployment_id="d1")
-    apps = {
-        plan.models[0].route_name: {"running": 2, "target": 2,
-                                    "route_prefix": f"/{plan.models[0].route_name}",
-                                    "status": "RUNNING"},
-        plan.models[1].route_name: {"running": 3, "target": 3,
-                                    "route_prefix": f"/{plan.models[1].route_name}",
-                                    "status": "RUNNING"},
-    }
-    assert _application_for(plan.models[0], apps, plan.models)["running"] == 2
-    assert _application_for(plan.models[1], apps, plan.models)["running"] == 3
+        {
+            "num_nodes": 2,
+            "num_gpus_per_node": 12,
+            "validation_mode": True,
+            "models": [
+                {
+                    "model_id": "org/alpha",
+                    "tensor_parallel_size": 1,
+                    "num_replicas": 2,
+                    "max_model_len": 128,
+                    "size": 8,
+                },
+                {
+                    "model_id": "org/beta",
+                    "tensor_parallel_size": 1,
+                    "num_replicas": 3,
+                    "max_model_len": 128,
+                    "size": 8,
+                },
+            ],
+        },
+        site=default_site_profile(),
+        deployment_id="d1",
+    )
+    apps = {}
+    for model in plan.models:
+        for index in range(model.num_replicas):
+            apps[f"{model.route_name}_r{index}"] = {
+                "running": 1,
+                "target": 1,
+                "route_prefix": f"/{model.route_name}_r{index}",
+                "status": "RUNNING",
+            }
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path))
+    assert root.application_for_model(plan.models[0], apps)["running"] == 2
+    assert root.application_for_model(plan.models[1], apps)["running"] == 3
 
 
-def test_no_matching_application_is_none_not_a_guess():
-    from exaserve.launcher import _application_for
+def test_no_matching_application_is_none_not_a_guess(tmp_path):
+    from exaserve.composition import CompositionRoot
 
     plan = _plan()
-    assert _application_for(plan.models[0], {}, plan.models) is None
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path))
+    assert root.application_for_model(plan.models[0], {}) is None
+
+
+def test_single_replica_application_matching_never_uses_model_substrings(tmp_path):
+    from exaserve.composition import CompositionRoot
+
+    plan = compile_deployment_plan(
+        {
+            "num_nodes": 1,
+            "validation_mode": True,
+            "models": [
+                {
+                    "model_id": "org/alpha",
+                    "tensor_parallel_size": 1,
+                    "num_replicas": 1,
+                    "max_model_len": 128,
+                    "size": 8,
+                }
+            ],
+        },
+        site=default_site_profile(),
+        deployment_id="d1",
+    )
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path))
+    misleading = {
+        "old-org/alpha-copy": {
+            "running": 1,
+            "target": 1,
+            "status": "RUNNING",
+        }
+    }
+
+    assert root.application_for_model(plan.models[0], misleading) is None
 
 
 def test_the_root_exports_its_own_binding_hash(tmp_path, monkeypatch):
@@ -242,11 +566,9 @@ def test_the_root_exports_its_own_binding_hash(tmp_path, monkeypatch):
 
     monkeypatch.delenv("EXASERVE_ALLOCATION_BINDING_HASH", raising=False)
     plan = _plan()
-    root = CompositionRoot(plan=plan, generation=3, run_dir=str(tmp_path),
-                           log=lambda *_: None)
+    root = CompositionRoot(plan=plan, generation=3, run_dir=str(tmp_path), log=lambda *_: None)
     binding = root.bind_allocation([f"n{i}" for i in range(plan.num_nodes)], "job1")
-    assert os.environ["EXASERVE_ALLOCATION_BINDING_HASH"] == \
-        binding.allocation_binding_hash
+    assert os.environ["EXASERVE_ALLOCATION_BINDING_HASH"] == binding.allocation_binding_hash
 
 
 def test_a_requested_shutdown_is_not_published_as_a_failure(tmp_path, monkeypatch):
@@ -259,13 +581,19 @@ def test_a_requested_shutdown_is_not_published_as_a_failure(tmp_path, monkeypatc
 
     assert _is_requested_shutdown("supervisor: SHUTDOWN_REQUESTED (exit=None) signal 15")
     assert not _is_requested_shutdown("ray: UNEXPECTED_EXIT (exit=1)")
+    assert not _is_requested_shutdown("gateway: UNEXPECTED_EXIT (exit=-15) SIGTERM")
 
     plan = _plan()
-    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path),
-                           log=lambda *_: None)
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path), log=lambda *_: None)
     root.bind_allocation([f"n{i}" for i in range(plan.num_nodes)], "job1")
-    root.fail("supervisor: SHUTDOWN_REQUESTED (exit=None) signal 15")
+    root.supervisor.request_shutdown("signal 15")
+    root.fail(str(root.supervisor.first_cause))
     assert read_deployment_status(str(tmp_path)).state == "PLANNED"
 
-    root.fail("ray: UNEXPECTED_EXIT (exit=1) rank 0 component exited unexpectedly")
-    assert read_deployment_status(str(tmp_path)).state == "FAILED"
+    failure_dir = tmp_path / "failure"
+    failure_root = CompositionRoot(
+        plan=plan, generation=2, run_dir=str(failure_dir), log=lambda *_: None
+    )
+    failure_root.bind_allocation([f"n{i}" for i in range(plan.num_nodes)], "job1")
+    failure_root.fail("ray: UNEXPECTED_EXIT (exit=1) rank 0 component exited unexpectedly")
+    assert read_deployment_status(str(failure_dir)).state == "FAILED"

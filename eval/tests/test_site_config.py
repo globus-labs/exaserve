@@ -1,13 +1,9 @@
 import os
-import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from unittest import mock
 
-
-REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
 
 import eval.site_config as site_config
 
@@ -45,20 +41,60 @@ class SiteConfigTests(unittest.TestCase):
 
     def test_default_paths_follow_user_and_home(self) -> None:
         with tempfile.TemporaryDirectory() as temp_home:
-            with patched_site_env(USER="alice", HOME=temp_home):
+            with (
+                patched_site_env(USER="ignored-ambient-user", HOME=temp_home),
+                mock.patch.object(site_config, "local_account_name", return_value="alice"),
+            ):
                 cfg = site_config.get_site_config()
 
         self.assertEqual(cfg.user_data_root, "/lus/flare/projects/AuroraGPT/alice/data")
         self.assertEqual(cfg.model_storage_path, "/lus/flare/projects/AuroraGPT/alice/models")
-        self.assertEqual(cfg.input_trace_path, "/lus/flare/projects/AuroraGPT/alice/data/input_traces/AzureLLMInferenceTrace_code_1week.csv")
-        self.assertEqual(cfg.input_prompt_path, "/lus/flare/projects/AuroraGPT/alice/data/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json")
-        self.assertEqual(cfg.experiments_root, "/lus/flare/projects/AuroraGPT/alice/data/experiments")
+        self.assertEqual(
+            cfg.input_trace_path,
+            "/lus/flare/projects/AuroraGPT/alice/data/input_traces/AzureLLMInferenceTrace_code_1week.csv",
+        )
+        self.assertEqual(
+            cfg.input_prompt_path,
+            "/lus/flare/projects/AuroraGPT/alice/data/input_traces/ShareGPT_V3_unfiltered_cleaned_split_no_imsorry.json",
+        )
+        self.assertEqual(
+            cfg.experiments_root, "/lus/flare/projects/AuroraGPT/alice/data/experiments"
+        )
         self.assertEqual(cfg.litellm_python_path, f"{temp_home}/agpt/venv/litellm/bin/python3")
         self.assertEqual(cfg.snapshot_dir, f"{temp_home}/agpt/data/snapshots")
         self.assertEqual(cfg.bench_results_dir, f"{temp_home}/agpt/data/bench_results")
+        self.assertEqual(cfg.sglang_python_path, "")
+        self.assertEqual(
+            site_config.get_runs_root(),
+            site_config.Path("/lus/flare/projects/AuroraGPT/alice/data/experiments/runs"),
+        )
+
+    def test_relative_site_paths_are_rejected(self) -> None:
+        with patched_site_env(EXASERVE_PROJECT_ROOT="relative/project"):
+            with self.assertRaisesRegex(ValueError, "project_root must be an absolute path"):
+                site_config.get_site_config()
+
+    def test_explicit_storage_roots_do_not_require_an_account_lookup(self) -> None:
+        with (
+            patched_site_env(
+                EXASERVE_USER_DATA_ROOT="/data/explicit",
+                EXASERVE_MODEL_STORAGE_PATH="/models/explicit",
+            ),
+            mock.patch.object(
+                site_config,
+                "local_account_name",
+                side_effect=RuntimeError("no passwd entry"),
+            ),
+        ):
+            cfg = site_config.get_site_config()
+        self.assertEqual(cfg.user_data_root, "/data/explicit")
+        self.assertEqual(cfg.model_storage_path, "/models/explicit")
 
     def test_local_override_applies_before_env(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_home, tempfile.NamedTemporaryFile("w", suffix=".py") as handle:
+        with (
+            tempfile.TemporaryDirectory() as temp_home,
+            tempfile.NamedTemporaryFile("w", suffix=".py") as handle,
+        ):
             handle.write(
                 "SITE_OVERRIDES = {\n"
                 "    'user_data_root': '/tmp/team/data',\n"
@@ -82,7 +118,10 @@ class SiteConfigTests(unittest.TestCase):
         self.assertEqual(cfg.num_gpus_per_node, 16)
 
     def test_env_override_wins_over_local_override(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_home, tempfile.NamedTemporaryFile("w", suffix=".py") as handle:
+        with (
+            tempfile.TemporaryDirectory() as temp_home,
+            tempfile.NamedTemporaryFile("w", suffix=".py") as handle,
+        ):
             handle.write("SITE_OVERRIDES = {'model_storage_path': '/tmp/local/models'}\n")
             handle.flush()
 
@@ -100,7 +139,9 @@ class SiteConfigTests(unittest.TestCase):
 
     def test_cache_reset_is_required_after_env_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_home:
-            with patched_site_env(USER="alice", HOME=temp_home, EXASERVE_MODEL_STORAGE_PATH="/tmp/first"):
+            with patched_site_env(
+                USER="alice", HOME=temp_home, EXASERVE_MODEL_STORAGE_PATH="/tmp/first"
+            ):
                 first = site_config.get_site_config()
                 os.environ["EXASERVE_MODEL_STORAGE_PATH"] = "/tmp/second"
                 cached = site_config.get_site_config()
@@ -110,6 +151,7 @@ class SiteConfigTests(unittest.TestCase):
         self.assertEqual(first.model_storage_path, "/tmp/first")
         self.assertEqual(cached.model_storage_path, "/tmp/first")
         self.assertEqual(updated.model_storage_path, "/tmp/second")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,8 @@
 from html import escape
 from pathlib import Path
 
+from clientlab.utils import atomic_write_text
+
 
 def render_report_html(study_manifest, points, envelope, plot_paths):
     study_name = escape(study_manifest["study"]["name"])
@@ -30,7 +32,10 @@ def render_report_html(study_manifest, points, envelope, plot_paths):
         '<div class="meta">Suite: <code>%s</code> | Execution mode: <code>%s</code> | Point count: <code>%d</code></div>'
         % (suite, mode, len(points)),
         '<div class="card"><h2>Operating Envelope</h2><p>Max stable RPS: <code>%.2f</code><br/>Safe active budget estimate: <code>%s</code></p>'
-        % (float(envelope.get("max_stable_rps", 0.0)), escape(str(envelope.get("safe_active_budget", 0)))),
+        % (
+            float(envelope.get("max_stable_rps", 0.0)),
+            escape(str(envelope.get("safe_active_budget", 0))),
+        ),
     ]
     for note in envelope.get("notes", []):
         parts.append("<p>%s</p>" % escape(str(note)))
@@ -39,10 +44,15 @@ def render_report_html(study_manifest, points, envelope, plot_paths):
     parts.append("<h2>Plots</h2>")
     for name in sorted(plot_paths):
         rel = Path(plot_paths[name]).name
-        parts.append('<div class="card"><h3>%s</h3><img src="plots/%s" alt="%s" /></div>' % (escape(name.replace("_", " ").title()), escape(rel), escape(name)))
+        parts.append(
+            '<div class="card"><h3>%s</h3><img src="plots/%s" alt="%s" /></div>'
+            % (escape(name.replace("_", " ").title()), escape(rel), escape(name))
+        )
 
     parts.append("<h2>Point Summaries</h2>")
-    parts.append("<table><thead><tr><th>Point</th><th>Requested RPS</th><th>Achieved RPS</th><th>Diagnosis</th><th>Queue Fraction</th><th>Safe Active Budget</th></tr></thead><tbody>")
+    parts.append(
+        "<table><thead><tr><th>Point</th><th>Requested RPS</th><th>Achieved RPS</th><th>Diagnosis</th><th>Queue Fraction</th><th>Safe Active Budget</th></tr></thead><tbody>"
+    )
     for point in points:
         summary = point.get("summary", {})
         parts.append(
@@ -64,4 +74,4 @@ def render_report_html(study_manifest, points, envelope, plot_paths):
 def write_html_report(path, content):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    atomic_write_text(target, content)

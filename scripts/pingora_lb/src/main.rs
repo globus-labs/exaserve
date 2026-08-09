@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use clap::Parser;
 use pingora::prelude::*;
+use pingora::server::configuration::ServerConf;
 use pingora::services::background::background_service;
 use pingora_load_balancing::{
     health_check::TcpHealthCheck,
@@ -25,6 +26,9 @@ struct Cli {
     /// Path to the YAML config produced by exaserve.proxy.pingora_proxy.
     #[arg(short, long)]
     config: String,
+    /// Parse and validate the supplied config, then exit without binding.
+    #[arg(long)]
+    check_config: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,11 +125,54 @@ fn main() {
     if cfg.upstreams.is_empty() {
         panic!("config has no upstreams");
     }
+    if cfg.threads > 4096 {
+        panic!("threads must be in [0, 4096]");
+    }
+    if cfg.connect_timeout_ms == 0 || cfg.connect_timeout_ms > 3_600_000 {
+        panic!("connect_timeout_ms must be in [1, 3600000]");
+    }
+    if cfg.request_timeout_ms > 86_400_000 {
+        panic!("request_timeout_ms must be in [0, 86400000]");
+    }
+    if cfg.health_check_interval_s > 3600 {
+        panic!("health_check_interval_s must be in [0, 3600]");
+    }
+    if !matches!(cfg.lb_method.as_str(), "round_robin" | "least_request") {
+        panic!("unsupported lb_method: {}", cfg.lb_method);
+    }
+    if cfg.listen.parse::<std::net::SocketAddr>().is_err() {
+        panic!("invalid listen address: {}", cfg.listen);
+    }
+    for upstream in &cfg.upstreams {
+        if upstream.parse::<std::net::SocketAddr>().is_err()
+            && !upstream.rsplit_once(':').is_some_and(|(host, port)| {
+                !host.is_empty() && port.parse::<u16>().is_ok()
+            })
+        {
+            panic!("invalid upstream address: {}", upstream);
+        }
+    }
+    if cli.check_config {
+        log::info!("configuration valid: {}", cli.config);
+        return;
+    }
 
     // Build LB + HC; both need to live in the Pingora server.
     let mut opt = Opt::default();
     opt.daemon = false;
-    let mut server = Server::new(Some(opt)).expect("server init");
+    let worker_threads = if cfg.threads == 0 {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+    } else {
+        cfg.threads
+    };
+    let server_conf = ServerConf {
+        daemon: false,
+        threads: worker_threads,
+        ..ServerConf::default()
+    };
+    let mut server = Server::new_with_opt_and_conf(Some(opt), server_conf);
     server.bootstrap();
 
     let hc_interval = if cfg.health_check_interval_s == 0 {
@@ -176,25 +223,13 @@ fn main() {
     let mut proxy = pingora::proxy::http_proxy_service(&server.configuration, ctx);
     proxy.add_tcp(&cfg.listen);
 
-    if cfg.threads > 0 {
-        // Pingora's worker count comes from the global configuration; we
-        // pass threads via the ServerConf builder when constructed from
-        // YAML. For simplicity, log + ignore here -- the default uses all
-        // cores, which is what we want for benchmark runs anyway.
-        log::warn!(
-            "config requested {} worker threads, but this binary uses Pingora's \
-             default thread pool sizing (all cores). Set OMP_NUM_THREADS or \
-             taskset externally if needed.",
-            cfg.threads
-        );
-    }
-
     server.add_service(proxy);
     log::info!(
-        "pingora_lb listening on {} | upstreams={} | lb={} | connect_to={}ms req_to={}ms",
+        "pingora_lb listening on {} | upstreams={} | lb={} | threads={} | connect_to={}ms req_to={}ms",
         cfg.listen,
         cfg.upstreams.len(),
         cfg.lb_method,
+        worker_threads,
         cfg.connect_timeout_ms,
         cfg.request_timeout_ms,
     );

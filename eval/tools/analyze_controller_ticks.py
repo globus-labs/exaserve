@@ -15,10 +15,13 @@ Usage: analyze_controller_ticks.py <run_dir1> [<run_dir2> ...]
 from __future__ import annotations
 
 import argparse
-import json
-import sys
 from pathlib import Path
 from statistics import mean, median
+
+try:
+    from .analysis_io import read_jsonl_objects
+except ImportError:  # Direct ``python eval/tools/analyze_controller_ticks.py`` execution.
+    from analysis_io import read_jsonl_objects
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -52,12 +55,7 @@ def summarize(run_dir: Path) -> dict:
     # Should be exactly one file (single controller)
     all_ticks = []
     for tf in tick_files:
-        with tf.open() as f:
-            for line in f:
-                try:
-                    all_ticks.append(json.loads(line))
-                except Exception:
-                    pass
+        all_ticks.extend(read_jsonl_objects(tf))
 
     if not all_ticks:
         return {"run_dir": str(run_dir), "scale": run_dir.name, "n_ticks": 0}
@@ -87,7 +85,9 @@ def summarize(run_dir: Path) -> dict:
         "n_ticks": len(all_ticks),
         "first_tick_t": all_ticks[0]["t"],
         "last_tick_t": all_ticks[-1]["t"] + all_ticks[-1]["total_s"],
-        "wall_clock_span_s": round(all_ticks[-1]["t"] + all_ticks[-1]["total_s"] - all_ticks[0]["t"], 2),
+        "wall_clock_span_s": round(
+            all_ticks[-1]["t"] + all_ticks[-1]["total_s"] - all_ticks[0]["t"], 2
+        ),
         "total_time_in_ticks_s": round(sum(totals), 2),
         "tick_total": {
             "mean_ms": round(1000 * mean(totals), 2),

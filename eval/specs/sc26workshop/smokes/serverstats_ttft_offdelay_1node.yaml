@@ -27,6 +27,7 @@ workload:
   arrival: fixed
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1
@@ -58,7 +59,7 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
           http_no_delay: false
 scheduler:
   type: pbs

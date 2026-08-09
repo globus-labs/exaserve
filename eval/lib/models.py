@@ -20,7 +20,7 @@ Hierarchy (from spec YAML to execution):
 
   TraceArtifact             <- content-addressed trace file on disk
   RunBundle                 <- directory layout for a materialized run
-  RunPlan                   <- full snapshot written to run.yaml (self-contained)
+  RunMaterialization        <- paths/provenance around canonical RunPlan artifact
   ReplayRequest             <- single request row loaded by replay_client.py
 """
 
@@ -66,26 +66,6 @@ class ModelSpec:
     enable_log_requests: bool = True
     max_num_seqs: int | None = None
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ModelSpec":
-        return cls(
-            model_id=str(data["model_id"]),
-            tensor_parallel_size=int(data.get("tensor_parallel_size", 1)),
-            max_model_len=int(data.get("max_model_len", 4096)),
-            size=int(data.get("size", 8)),
-            pipeline_parallel_size=int(data.get("pipeline_parallel_size", 1)),
-            num_replicas=(
-                None if data.get("num_replicas") is None else int(data["num_replicas"])
-            ),
-            num_cpus_per_replica=int(data.get("num_cpus_per_replica", 4)),
-            gpu_memory_utilization=float(data.get("gpu_memory_utilization", 0.90)),
-            enforce_eager=bool(data.get("enforce_eager", True)),
-            enable_log_requests=bool(data.get("enable_log_requests", True)),
-            max_num_seqs=(
-                None if data.get("max_num_seqs") is None else int(data["max_num_seqs"])
-            ),
-        )
-
 
 @dataclass
 class TraceSpec:
@@ -122,6 +102,10 @@ class DeploymentSpec:
     replica_max_ongoing_requests: int = 64
     num_gpus_per_node: int = 0
     collect_stats: bool = False
+    # Explicit qualification escape from the evidence-backed production
+    # ceiling. This remains hash-bearing in the canonical DeploymentPlan and
+    # cannot expand the candidate qualification target.
+    validation_mode: bool = False
     # Inference engine backend: "vllm" (default) or "sglang". Drop-in — the whole
     # pipeline (staging, Ray Serve, HAProxy, replay client, metrics) is identical;
     # only the per-replica engine differs. "sglang" routes the serving stack to a
@@ -148,29 +132,6 @@ class SaturationSpec:
     step_up_increment: int = 0
     stream: bool = False
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SaturationSpec":
-        if not data:
-            return cls()
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            search_mode=str(data.get("search_mode", "binary")),
-            initial_rate=int(data.get("initial_rate", 100)),
-            max_rate=int(data.get("max_rate", 0)),
-            step_duration_s=float(data.get("step_duration_s", 10.0)),
-            warmup_duration_s=float(data.get("warmup_duration_s", 3.0)),
-            cooldown_pause_s=float(data.get("cooldown_pause_s", 2.0)),
-            tolerance=float(data.get("tolerance", 0.05)),
-            max_error_rate=float(data.get("max_error_rate", 0.01)),
-            plateau_ratio=float(data.get("plateau_ratio", 0.95)),
-            max_p99_ttft=float(data.get("max_p99_ttft", 0.0)),
-            verify=bool(data.get("verify", True)),
-            step_up_start=int(data.get("step_up_start", 0)),
-            step_up_end=int(data.get("step_up_end", 0)),
-            step_up_increment=int(data.get("step_up_increment", 0)),
-            stream=bool(data.get("stream", False)),
-        )
-
 
 @dataclass
 class ClientSpec:
@@ -186,7 +147,7 @@ class ClientSpec:
     warmup_duration_s: float = 0.0
     sum_only: bool = False
     stream: bool = False
-    startup_only: bool = False  # If True, exit after CLUSTER FULLY READY (skip replay)
+    startup_only: bool = False  # If True, exit after canonical READY (skip replay)
     # How a dest=direct rank picks its target node(s):
     #   local  — its OWN node only. This is what "direct" means: no routing
     #            layer, no cross-node hop. THE DEFAULT.
@@ -196,6 +157,14 @@ class ClientSpec:
     #            *different experiment*, kept only for studying that effect.
     #   paired — exactly one remote node (permutation): one peer, still remote.
     direct_dispatch: str = "local"
+    direct_pair_shift: int = 1
+    request_timeout_s: float = 3600.0
+    drain_wait_timeout_s: float = 3780.0
+    shard_timeout_s: float = 600.0
+    direct_target_ready_timeout_s: float = 300.0
+    direct_target_probe_timeout_s: float = 2.0
+    direct_target_interval_s: float = 5.0
+    direct_target_max_workers: int = 64
     # Ablation: replay once per entry against the SAME bring-up, each arm's
     # results landing in results/<arm>/. Overrides direct_dispatch per arm.
     dispatch_topologies: list[str] = field(default_factory=list)
@@ -266,7 +235,16 @@ class RunBundle:
 
 
 @dataclass
-class RunPlan:
+class RunMaterialization:
+    """Execution-location metadata around the shared semantic RunPlan.
+
+    This is deliberately not another plan.  ``semantic_plan_path`` is the sole
+    hash-bearing run contract; this object names materialized files, logs, and
+    location references that do not alter deployment identity.  Semantic
+    properties below are projections of the loaded canonical RunPlan and are
+    intentionally omitted from ``run.yaml``.
+    """
+
     run_id: str
     run_group_id: str
     created_at: str
@@ -276,16 +254,177 @@ class RunPlan:
     spec_name: str
     variant_name: str
     axis_values: dict[str, Any]
-    backend_name: str
-    backend_args: dict[str, Any]
     trace_artifact: TraceArtifact
     runtime_manifest_path: str
-    deployment: DeploymentSpec
-    client: ClientSpec
-    scheduler: SchedulerSpec
-    workload: WorkloadSpec
-    trace: TraceSpec
+    semantic_plan_path: str
+    deployment_plan_path: str
+    site_profile_path: str
+    run_semantic_hash: str
+    deployment_plan_hash: str
+    source_snapshot_hash: str
+    input_prompt_path: str = ""
+    input_trace_path: str = ""
     spec_path: str = ""
+    semantic_plan: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.semantic_plan is None:
+            raise ValueError("RunMaterialization requires its canonical RunPlan")
+        if self.semantic_plan.run_semantic_hash != self.run_semantic_hash:
+            raise ValueError("materialization hash disagrees with canonical RunPlan")
+
+    @staticmethod
+    def _thaw(value: Any) -> Any:
+        if isinstance(value, tuple):
+            if all(
+                isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+                for item in value
+            ):
+                return {item[0]: RunMaterialization._thaw(item[1]) for item in value}
+            return [RunMaterialization._thaw(item) for item in value]
+        return value
+
+    @property
+    def backend_name(self) -> str:
+        return self.semantic_plan.backend.name
+
+    @property
+    def backend_args(self) -> dict[str, Any]:
+        return self._thaw(self.semantic_plan.backend.options)
+
+    @property
+    def deployment(self) -> DeploymentSpec:
+        plan = self.semantic_plan.deployment
+        return DeploymentSpec(
+            num_nodes=plan.num_nodes,
+            models=[
+                ModelSpec(
+                    model_id=model.model_id,
+                    tensor_parallel_size=model.tensor_parallel_size,
+                    max_model_len=model.max_model_len,
+                    size=model.size_b,
+                    pipeline_parallel_size=model.pipeline_parallel_size,
+                    num_replicas=model.num_replicas,
+                    num_cpus_per_replica=model.num_cpus_per_replica,
+                    gpu_memory_utilization=model.gpu_memory_utilization,
+                    enforce_eager=model.enforce_eager,
+                    enable_log_requests=model.enable_log_requests,
+                    max_num_seqs=model.max_num_seqs,
+                )
+                for model in plan.models
+            ],
+            model_storage_path=plan.model_storage_path,
+            local_stage_path=plan.local_stage_path,
+            replica_max_ongoing_requests=plan.replica_max_ongoing_requests,
+            num_gpus_per_node=plan.num_gpus_per_node,
+            collect_stats=plan.collect_stats,
+            validation_mode=plan.validation_mode,
+            engine=plan.engine,
+        )
+
+    @property
+    def client(self) -> ClientSpec:
+        policy = self.semantic_plan.client
+        saturation = SaturationSpec(
+            **{
+                name: getattr(policy.saturation, name)
+                for name in SaturationSpec.__dataclass_fields__
+            }
+        )
+        return ClientSpec(
+            num_runs=policy.num_runs,
+            include_tp=policy.include_tp,
+            early_stop=policy.early_stop,
+            dest=policy.destination,
+            num_nodes=policy.nodes,
+            num_go_procs=policy.processes,
+            num_go_workers=policy.workers,
+            go_concurrency=policy.concurrency,
+            warmup_rps=policy.warmup_rps,
+            warmup_duration_s=policy.warmup_duration_s,
+            sum_only=policy.sum_only,
+            stream=policy.streaming,
+            startup_only=policy.startup_only,
+            direct_dispatch=policy.dispatch_topology,
+            direct_pair_shift=policy.direct_pair_shift,
+            request_timeout_s=policy.request_timeout_s,
+            drain_wait_timeout_s=policy.drain_wait_timeout_s,
+            shard_timeout_s=policy.shard_timeout_s,
+            direct_target_ready_timeout_s=policy.direct_target_ready_timeout_s,
+            direct_target_probe_timeout_s=policy.direct_target_probe_timeout_s,
+            direct_target_interval_s=policy.direct_target_interval_s,
+            direct_target_max_workers=policy.direct_target_max_workers,
+            dispatch_topologies=list(policy.dispatch_topologies),
+            saturation=saturation,
+        )
+
+    @property
+    def scheduler(self) -> SchedulerSpec:
+        policy = self._thaw(self.semantic_plan.scheduler.policy)
+        return SchedulerSpec(
+            type=self.semantic_plan.scheduler.type,
+            nodes=self.semantic_plan.scheduler.nodes,
+            queue=self.semantic_plan.scheduler.queue,
+            walltime=self.semantic_plan.scheduler.walltime,
+            project=self.semantic_plan.scheduler.account,
+            filesystems=":".join(self.semantic_plan.scheduler.filesystem_refs),
+            keep_output=str(policy.get("keep_output", "")),
+            mail_user=str(policy.get("mail_user", "")),
+            mail_events=str(policy.get("mail_events", "")),
+        )
+
+    @property
+    def workload(self) -> WorkloadSpec:
+        policy = self.semantic_plan.workload
+        return WorkloadSpec(
+            duration=policy.duration_s,
+            input_len=policy.input_len,
+            output_len=policy.output_len,
+            rate_per_node=policy.rate_per_node,
+            speedup=policy.speedup,
+            sampling_strategy=policy.sampling_strategy,
+            generation_mode=policy.generation_mode,
+            arrival=policy.arrival,
+            seed=policy.seed,
+            modes=dict(policy.modes),
+        )
+
+    @property
+    def trace(self) -> TraceSpec:
+        policy = self.semantic_plan.trace
+        return TraceSpec(
+            kind=policy.kind,
+            input_prompt_path=self.input_prompt_path,
+            input_trace_path=self.input_trace_path,
+            tokenizer_builder=(
+                "" if policy.tokenizer_builder_ref == "default" else policy.tokenizer_builder_ref
+            ),
+        )
+
+    def to_materialization_dict(self) -> dict[str, Any]:
+        """Return only location/provenance fields for the mutable wrapper."""
+        return {
+            "run_id": self.run_id,
+            "run_group_id": self.run_group_id,
+            "created_at": self.created_at,
+            "repo_root": self.repo_root,
+            "snapshot_root": self.snapshot_root,
+            "bundle": self.bundle,
+            "spec_name": self.spec_name,
+            "variant_name": self.variant_name,
+            "axis_values": self.axis_values,
+            "trace_artifact": self.trace_artifact,
+            "runtime_manifest_path": self.runtime_manifest_path,
+            "semantic_plan_path": self.semantic_plan_path,
+            "deployment_plan_path": self.deployment_plan_path,
+            "site_profile_path": self.site_profile_path,
+            "run_semantic_hash": self.run_semantic_hash,
+            "deployment_plan_hash": self.deployment_plan_hash,
+            "source_snapshot_hash": self.source_snapshot_hash,
+            "input_prompt_path": self.input_prompt_path,
+            "input_trace_path": self.input_trace_path,
+            "spec_path": self.spec_path,
+        }
 
 
 @dataclass

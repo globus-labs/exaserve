@@ -21,6 +21,7 @@ from statistics import mean, median
 
 # Import the parser from the sibling module
 sys.path.insert(0, str(Path(__file__).parent))
+from analysis_io import read_json_object  # noqa: E402
 from parse_gcs_event_stats import parse as parse_gcs, Row  # noqa: E402
 
 
@@ -75,11 +76,7 @@ def analyze_proxies(log_dir: Path) -> dict:
     inst_dir = log_dir / "instrumentation"
     profiles = []
     for p in inst_dir.glob("*/proxy_init_*.json"):
-        try:
-            with p.open() as f:
-                profiles.append(json.load(f))
-        except Exception:
-            pass
+        profiles.append(read_json_object(p))
 
     if not profiles:
         return {"count": 0}
@@ -125,7 +122,7 @@ def analyze_controller(log_dir: Path) -> dict:
     replica_didnt_respond = 0
     replicas_started = 0
     for ctrl in ctrl_logs:
-        text = ctrl.read_text(errors="ignore")
+        text = ctrl.read_text(encoding="utf-8")
         unhealthy_proxy += text.count("failed the health check")
         unhealthy_replica += text.count("marking it unhealthy")
         proxy_didnt_respond += text.count("Didn't receive health check response for proxy")
@@ -175,8 +172,11 @@ def print_comparison(results: list[dict]) -> None:
 
     print("\n=== Stage timing (scaling_trace phases) ===")
     phase_keys = [
-        "ray_init", "serve.start", "serve.run.deploy_apps",
-        "serve.run.wait_proxies", "stage3.total",
+        "ray_init",
+        "serve.start",
+        "serve.run.deploy_apps",
+        "serve.run.wait_proxies",
+        "stage3.total",
     ]
     for ph in phase_keys:
         vals = [r["trace"].get("phases", {}).get(ph, "-") for r in results]
@@ -184,14 +184,35 @@ def print_comparison(results: list[dict]) -> None:
 
     print("\n=== Proxy init duration (seconds, across all collected proxies) ===")
     for stat in ("mean", "p95", "p99", "max"):
-        row(f"duration_s.{stat}", [r["proxies"].get("duration_s", {}).get(stat, "-") for r in results])
-    row("proxies collected", [f"{r['proxies'].get('count', 0)}/{scales[i].replace('-nodes','')}" for i, r in enumerate(results)])
+        row(
+            f"duration_s.{stat}",
+            [r["proxies"].get("duration_s", {}).get(stat, "-") for r in results],
+        )
+    row(
+        "proxies collected",
+        [
+            f"{r['proxies'].get('count', 0)}/{scales[i].replace('-nodes', '')}"
+            for i, r in enumerate(results)
+        ],
+    )
 
     print("\n=== Controller health-check events ===")
-    row("proxy failed-health-check (× kill)", [r["controller"].get("proxy_failed_health_check", "-") for r in results])
-    row("proxy 'didn't receive response'", [r["controller"].get("proxy_didnt_receive_response", "-") for r in results])
-    row("replica 'didn't receive response'", [r["controller"].get("replica_didnt_receive_response", "-") for r in results])
-    row("replicas started successfully", [r["controller"].get("replicas_started_successfully", "-") for r in results])
+    row(
+        "proxy failed-health-check (× kill)",
+        [r["controller"].get("proxy_failed_health_check", "-") for r in results],
+    )
+    row(
+        "proxy 'didn't receive response'",
+        [r["controller"].get("proxy_didnt_receive_response", "-") for r in results],
+    )
+    row(
+        "replica 'didn't receive response'",
+        [r["controller"].get("replica_didnt_receive_response", "-") for r in results],
+    )
+    row(
+        "replicas started successfully",
+        [r["controller"].get("replicas_started_successfully", "-") for r in results],
+    )
 
     print("\n=== GCS event stats — peak queueing (ms) ===")
     methods_of_interest = [

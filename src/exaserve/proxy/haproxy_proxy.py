@@ -4,36 +4,40 @@ HAProxy backend implementation.
 Generates an haproxy.cfg that balances across Ray Serve HTTP proxies, then
 launches the haproxy binary.
 
-HAProxy is a pure load balancer -- it has no OpenAI awareness.
-Use it as a performance baseline or when you only need L7 TCP/HTTP routing
-without API key management, usage tracking, or model-aware routing.
-
-If you need those features, use LiteLLMProxy instead.
+HAProxy is the sole first-release production gateway for the trusted internal
+Aurora envelope. It is a pure load balancer: ExaServe supplies lifecycle,
+route/canary validation, body bounds, and a read-only loopback stats surface;
+it does not provide public-Internet authentication, TLS termination, API-key
+management, usage tracking, or JSON-body model routing.
 
 haproxy must be installed and on PATH.
 """
 
-import os
-import signal
-import socket
-import subprocess
-import time
+import hashlib
+import ipaddress
+import re
 from pathlib import Path
 from textwrap import dedent
 
-from .base import BackendEndpoint, ProxyBackend
+from .base import BackendEndpoint, ProxyBackend, reject_unknown_options
 
 
 def _strict_opt_bool(value: object, path: str) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, str) and value.strip().lower() in {"true", "false", "1", "0", "yes", "no"}:
-        return value.strip().lower() in {"true", "1", "yes"}
     raise ValueError(f"{path}: expected a boolean, got {value!r}")
 
 
+def _strict_opt_int(value: object, path: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{path}: expected an integer, got {value!r}")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{path}: expected {minimum}..{maximum}, got {value}")
+    return value
+
+
 class HAProxyProxy(ProxyBackend):
-    """Manages an HAProxy process as the request router."""
+    """Render the HAProxy artifact consumed by the composition root."""
 
     def generate_config(
         self,
@@ -54,7 +58,9 @@ class HAProxyProxy(ProxyBackend):
             check_rise (int):    Consecutive successes to mark backend up. Default: 2.
             stats_port (int):    HAProxy stats page port. Default: 9999.
                                  Set to 0 to disable stats.
-            maxconn (int):       Max concurrent connections. Default: 50000.
+            maxconn (int):       Max concurrent connections. Default: 8000,
+                                 which fits Aurora's 16384-descriptor hard limit
+                                 through the currently qualified 64-node tier.
 
         Note: HAProxy uses one backend *per unique model_id*. Nodes serving the
         same model are grouped together. If all backends serve the same model (the
@@ -62,34 +68,96 @@ class HAProxyProxy(ProxyBackend):
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        reject_unknown_options(
+            options,
+            {
+                "abortonclose",
+                "balance",
+                "bind_target",
+                "check_fall",
+                "check_interval",
+                "check_rise",
+                "http_no_delay",
+                "listen_port",
+                "maxconn",
+                "nbthread",
+                "request_body_limit_bytes",
+                "stats_admin",
+                "stats_auth",
+                "stats_bind",
+                "stats_port",
+            },
+            "haproxy",
+        )
 
         balance = options.get("balance", "leastconn")
-        check_interval = int(options.get("check_interval", 5000))
-        check_fall = int(options.get("check_fall", 3))
-        check_rise = int(options.get("check_rise", 2))
-        stats_port = int(options.get("stats_port", 9999))
-        maxconn = int(options.get("maxconn", 50000))
-        http_no_delay = _strict_opt_bool(options.get("http_no_delay", True),
-                                         "proxy.options.http_no_delay")
+        if balance not in {"leastconn", "roundrobin", "random"}:
+            raise ValueError("proxy.options.balance is unsupported")
+        check_interval = _strict_opt_int(
+            options.get("check_interval", 5000),
+            "proxy.options.check_interval",
+            minimum=100,
+            maximum=300000,
+        )
+        check_fall = _strict_opt_int(
+            options.get("check_fall", 3), "proxy.options.check_fall", minimum=1, maximum=100
+        )
+        check_rise = _strict_opt_int(
+            options.get("check_rise", 2), "proxy.options.check_rise", minimum=1, maximum=100
+        )
+        stats_port = _strict_opt_int(
+            options.get("stats_port", 9999), "proxy.options.stats_port", minimum=0, maximum=65535
+        )
+        maxconn = _strict_opt_int(
+            options.get("maxconn", 8000), "proxy.options.maxconn", minimum=1, maximum=10_000_000
+        )
+        request_body_limit_bytes = _strict_opt_int(
+            options.get("request_body_limit_bytes", 16 << 20),
+            "proxy.options.request_body_limit_bytes",
+            minimum=1,
+            maximum=1 << 40,
+        )
+        http_no_delay = _strict_opt_bool(
+            options.get("http_no_delay", True), "proxy.options.http_no_delay"
+        )
         # `option abortonclose` propagates a client close to the backend even
         # while the response is pending (zero bytes sent). Without it a wedged
         # stream is only reaped by `timeout server` (330s) and the engine keeps
         # decoding the abandoned request. Off by default to keep configs
         # byte-identical to prior runs; enable for saturation probing, where
         # zombie decodes deflate the measured ceiling.
-        abortonclose = _strict_opt_bool(options.get("abortonclose", False),
-                                        "proxy.options.abortonclose")
+        abortonclose = _strict_opt_bool(
+            options.get("abortonclose", False), "proxy.options.abortonclose"
+        )
         # HAProxy parallelism = threads (modern HAProxy is threaded, not multi-proc).
         # 0/unset -> omit nbthread (HAProxy auto-detects = bound CPUs). Set
         # options.nbthread (alias: num_workers) to pin more accept/processing threads
         # — relevant to the 256n connection-bound streaming case.
-        nbthread = int(options.get("nbthread", options.get("num_workers", 0)) or 0)
+        nbthread = _strict_opt_int(
+            options.get("nbthread", 0), "proxy.options.nbthread", minimum=0, maximum=4096
+        )
+        default_port = _strict_opt_int(
+            options.get("listen_port", 4001), "proxy.options.listen_port", minimum=1, maximum=65535
+        )
+        bind_target = options.get("bind_target", f"*:{default_port}")
+        if not isinstance(bind_target, str):
+            raise ValueError("proxy.options.bind_target is invalid")
+        port_match = re.fullmatch(r"\*:([1-9][0-9]{0,4})", bind_target)
+        fd_match = re.fullmatch(r"fd@([0-9]+)", bind_target)
+        if not port_match and not fd_match:
+            raise ValueError("proxy.options.bind_target is invalid")
+        if port_match and int(port_match.group(1)) > 65535:
+            raise ValueError("proxy.options.bind_target port is out of range")
 
         # Group endpoints by model_id so each model gets its own backend section
         from collections import defaultdict
+
         by_model: dict[str, list[BackendEndpoint]] = defaultdict(list)
         for ep in backends:
+            _validate_endpoint(ep)
             by_model[ep.model_id].append(ep)
+        if not by_model:
+            raise ValueError("HAProxy requires at least one backend endpoint")
 
         lines: list[str] = []
 
@@ -104,7 +172,8 @@ class HAProxyProxy(ProxyBackend):
         no_delay = "\n                option http-no-delay" if http_no_delay else ""
         abort_line = "\n                option abortonclose" if abortonclose else ""
         nbthread_line = f"\n                nbthread {nbthread}" if nbthread > 0 else ""
-        lines.append(dedent(f"""\
+        lines.append(
+            dedent(f"""\
             global
                 maxconn {maxconn}{nbthread_line}
                 log stdout format raw local0 info
@@ -117,7 +186,8 @@ class HAProxyProxy(ProxyBackend):
                 option http-server-close
                 option forwardfor
                 log global
-            """))
+            """)
+        )
 
         # --- frontend ---
         # A single frontend receives all incoming OpenAI API requests.
@@ -127,45 +197,75 @@ class HAProxyProxy(ProxyBackend):
         if len(by_model) == 1:
             model_id = next(iter(by_model))
             safe_name = _safe_backend_name(model_id)
-            lines.append(dedent(f"""\
+            lines.append(
+                dedent(f"""\
                 frontend openai_api
-                    bind *:{{PORT}}
+                    bind {bind_target}
+                    acl body_method method POST PUT PATCH
+                    acl has_length req.hdr(content-length) -m found
+                    acl chunked_body req.hdr(transfer-encoding) -m sub chunked
+                    acl body_too_large req.hdr_val(content-length) gt {request_body_limit_bytes}
+                    http-request return status 413 content-type text/plain string "Chunked request bodies are unsupported" if body_method chunked_body
+                    http-request return status 411 content-type text/plain string "Length Required" if body_method !has_length
+                    http-request return status 413 content-type text/plain string "Request body too large" if body_method body_too_large
                     default_backend {safe_name}
-                """))
+                """)
+            )
         else:
+            fallback_backend = "exaserve_unknown_route"
+            used_backend_names = {_safe_backend_name(model_id) for model_id in by_model}
+            while fallback_backend in used_backend_names:
+                fallback_backend += "_"
             lines.append("frontend openai_api")
-            lines.append("    bind *:{PORT}")
+            lines.append(f"    bind {bind_target}")
+            lines.append("    acl body_method method POST PUT PATCH")
+            lines.append("    acl has_length req.hdr(content-length) -m found")
+            lines.append("    acl chunked_body req.hdr(transfer-encoding) -m sub chunked")
+            lines.append(
+                f"    acl body_too_large req.hdr_val(content-length) gt {request_body_limit_bytes}"
+            )
+            lines.append(
+                "    http-request return status 413 content-type text/plain "
+                'string "Chunked request bodies are unsupported" '
+                "if body_method chunked_body"
+            )
+            lines.append(
+                "    http-request return status 411 content-type text/plain "
+                'string "Length Required" if body_method !has_length'
+            )
+            lines.append(
+                "    http-request return status 413 content-type text/plain "
+                'string "Request body too large" if body_method body_too_large'
+            )
             for model_id, eps in by_model.items():
                 safe_name = _safe_backend_name(model_id)
                 path_prefix = _shared_path_prefix(eps)
                 acl_name = f"is_{safe_name}"
-                lines.append(f"    acl {acl_name} path_beg {path_prefix} {path_prefix}/")
+                lines.append(f"    acl {acl_name} path {path_prefix}")
+                lines.append(f"    acl {acl_name} path_beg {path_prefix}/")
                 lines.append(f"    use_backend {safe_name} if {acl_name}")
-            lines.append(
-                '    http-request return status 404 content-type text/plain '
-                'lf-string "missing or unknown model route prefix\\n"'
-            )
+            # HTTP request rules are evaluated before use_backend rules even
+            # when written after them.  An unconditional fallback return here
+            # therefore rejected *every* multi-model request.  Route unmatched
+            # traffic to an explicit terminal backend instead.
+            lines.append(f"    default_backend {fallback_backend}")
             lines.append("")
+            lines.extend(
+                [
+                    f"backend {fallback_backend}",
+                    "    http-request return status 404 content-type text/plain "
+                    'lf-string "missing or unknown model route prefix\\n"',
+                    "",
+                ]
+            )
 
         # --- backend section(s) ---
         if len(by_model) == 1:
             model_id, eps = next(iter(by_model.items()))
             safe_name = _safe_backend_name(model_id)
             path_prefix = _shared_path_prefix(eps)
-            lines.append(_render_backend(
-                name=safe_name,
-                endpoints=eps,
-                path_prefix=path_prefix,
-                balance=balance,
-                check_interval=check_interval,
-                check_fall=check_fall,
-                check_rise=check_rise,
-            ))
-        else:
-            for model_id, eps in by_model.items():
-                safe_name = _safe_backend_name(model_id)
-                path_prefix = _shared_path_prefix(eps)
-                lines.append(_render_backend(
+            lines.append(
+                _render_backend(
                     name=safe_name,
                     endpoints=eps,
                     path_prefix=path_prefix,
@@ -173,7 +273,23 @@ class HAProxyProxy(ProxyBackend):
                     check_interval=check_interval,
                     check_fall=check_fall,
                     check_rise=check_rise,
-                ))
+                )
+            )
+        else:
+            for model_id, eps in by_model.items():
+                safe_name = _safe_backend_name(model_id)
+                path_prefix = _shared_path_prefix(eps)
+                lines.append(
+                    _render_backend(
+                        name=safe_name,
+                        endpoints=eps,
+                        path_prefix=path_prefix,
+                        balance=balance,
+                        check_interval=check_interval,
+                        check_fall=check_fall,
+                        check_rise=check_rise,
+                    )
+                )
 
         # --- optional stats page ---
         # PR-010: `stats admin if TRUE` on a wildcard bind let ANY reachable
@@ -181,15 +297,29 @@ class HAProxyProxy(ProxyBackend):
         # read-only page bound to loopback; admin and external binds are
         # explicit opt-ins and admin then REQUIRES auth.
         if stats_port > 0:
-            stats_bind = str(options.get("stats_bind", "127.0.0.1"))
-            stats_admin = _strict_opt_bool(options.get("stats_admin", False),
-                                           "proxy.options.stats_admin")
+            stats_bind = options.get("stats_bind", "127.0.0.1")
+            if not isinstance(stats_bind, str):
+                raise ValueError("proxy.options.stats_bind must be an IP address")
+            try:
+                ipaddress.ip_address(stats_bind)
+            except ValueError as exc:
+                raise ValueError("proxy.options.stats_bind must be an IP address") from exc
+            stats_admin = _strict_opt_bool(
+                options.get("stats_admin", False), "proxy.options.stats_admin"
+            )
             stats_auth = options.get("stats_auth")  # "user:password"
+            if stats_auth is not None and (
+                not isinstance(stats_auth, str)
+                or ":" not in stats_auth
+                or any(char in stats_auth for char in "\r\n")
+            ):
+                raise ValueError("proxy.options.stats_auth must be a single-line user:password")
             if stats_admin and not stats_auth:
                 raise ValueError(
                     "proxy.options.stats_admin requires proxy.options.stats_auth "
                     "(user:password); refusing to emit an unauthenticated "
-                    "HAProxy admin socket (PR-010)")
+                    "HAProxy admin socket (PR-010)"
+                )
             stats_lines = [
                 "listen stats",
                 f"    bind {stats_bind}:{stats_port}",
@@ -203,12 +333,12 @@ class HAProxyProxy(ProxyBackend):
                 stats_lines.append("    stats admin if TRUE")
             lines.append("\n".join(stats_lines) + "\n")
 
-        # Resolve {PORT} placeholder (frontend used it above)
         config_text = "\n".join(lines)
 
         config_path = output_dir / "haproxy.cfg"
-        with open(config_path, "w") as f:
-            f.write(config_text)
+        from ..state.atomic import atomic_create_or_verify_text
+
+        atomic_create_or_verify_text(config_path, config_text)
 
         total_servers = sum(len(eps) for eps in by_model.values())
         print(
@@ -217,204 +347,75 @@ class HAProxyProxy(ProxyBackend):
         )
         return config_path
 
-    def start(self, config_path: Path, host: str, port: int, **kwargs) -> tuple[subprocess.Popen, int]:
-        """
-        Launch haproxy with the generated config.
-
-        The {PORT} placeholder in the config is resolved here by re-writing
-        the config with the actual port before launching.
-
-        Returns (proc, port) to satisfy the ProxyBackend interface.
-        """
-        # Patch the port placeholder in the config file
-        text = config_path.read_text()
-        text = text.replace("{PORT}", str(port))
-        config_path.write_text(text)
-
-        # PR-024: validate the generated config with HAProxy's own parser
-        # BEFORE launching, so a malformed/injected config is a clear preflight
-        # error rather than a mysterious process death at readiness time.
-        check = subprocess.run(
-            ["haproxy", "-c", "-f", str(config_path)],
-            capture_output=True, text=True,
-        )
-        if check.returncode != 0:
-            raise RuntimeError(
-                f"[HAProxyProxy] generated config failed `haproxy -c` "
-                f"validation:\n{check.stderr.strip() or check.stdout.strip()}"
-            )
-        print("[HAProxyProxy] config validated (haproxy -c)", flush=True)
-
-        cmd = ["haproxy", "-f", str(config_path)]
-        print(f"[HAProxyProxy] Starting: {' '.join(cmd)}", flush=True)
-        proc = subprocess.Popen(cmd)
-        print(f"[HAProxyProxy] Process started (pid={proc.pid}, port={port})", flush=True)
-        self._start_diag_sampler(proc.pid, config_path.parent)
-        return proc, port
-
-    def _start_diag_sampler(self, haproxy_pid: int, out_dir: Path) -> None:
-        """Spawn a lightweight head-node sampler (opt out: EXASERVE_HAPROXY_DIAG=0).
-
-        Every 3s while HAProxy is alive, append the TCP/socket + process counters
-        that disambiguate why new connections get ECONNREFUSED under load:
-          - TcpExtListenOverflows / ListenDrops / TCPReqQFullDoCookies: accept-queue
-            overflow (HAProxy too CPU-busy to accept()) -> the classic ECONNREFUSED.
-          - /proc/net/sockstat 'tw' + TCPTimeWait: TIME_WAIT / ephemeral-port churn
-            from option http-server-close closing millions of short connections.
-          - haproxy %cpu: is the proxy pegged at one core?
-        Written to <proxy_out>/haproxy_diag.log so it is gathered with the run.
-        """
-        if os.environ.get("EXASERVE_HAPROXY_DIAG", "1") == "0":
-            return
-        diag_path = out_dir / "haproxy_diag.log"
-        # 5s interval (vs 3s) keeps the sampler's own fork footprint small on a
-        # resource-stressed head node — Aurora kills/refuses procs with EAGAIN
-        # ("resource temporarily unavailable") under nproc/thread/fd/mem pressure,
-        # and we don't want the sampler to be a contributor or a victim.
-        script = (
-            'echo "[diag] sampling haproxy pid={pid} every 5s -> $0"; '
-            # one-time: the LIMITS that EAGAIN-kills hit, + HAProxy soft limits.
-            'echo "[limits] threads-max=$(cat /proc/sys/kernel/threads-max 2>/dev/null)'
-            ' pid_max=$(cat /proc/sys/kernel/pid_max 2>/dev/null)'
-            ' file-max=$(cat /proc/sys/fs/file-max 2>/dev/null)"; '
-            'grep -iE "Max processes|Max open files" /proc/{pid}/limits 2>/dev/null'
-            '  | sed "s/^/[limits] haproxy /"; '
-            'while kill -0 {pid} 2>/dev/null; do '
-            '  echo "=== ts=$(date +%s) ==="; '
-            '  ps -o pid=,%cpu=,%mem=,rss=,nlwp= -p {pid} 2>/dev/null '
-            '    | sed "s/^/haproxy_proc: /"; '
-            '  grep -E "TCP:|sockets:" /proc/net/sockstat 2>/dev/null; '
-            '  nstat -as 2>/dev/null | grep -iE '
-            '"ListenOverflow|ListenDrop|ReqQFull|BacklogDrop|Syncookie|TimeWaitOverflow|RetransSegs|TCPAbort"; '
-            '  ss -s 2>/dev/null | head -2; '
-            # NIC-level drops/errors via sysfs (no privileges, unlike ethtool -S on HSN).
-            '  for IF in $(ls /sys/class/net | grep -E "hsn"); do echo -n "nic $IF: "; '
-            '    for k in rx_dropped tx_dropped rx_errors rx_missed_errors rx_fifo_errors rx_over_errors; do '
-            '      echo -n "$k=$(cat /sys/class/net/$IF/statistics/$k 2>/dev/null) "; done; echo; done; '
-            # RESOURCE-EXHAUSTION evidence (the EAGAIN-kill hypothesis): node memory,
-            # system-wide threads/procs vs limit, open-fd vs limit, HAProxy fd count.
-            '  echo "res: $(awk \'/^MemAvailable|^MemFree/{print $1$2}\' /proc/meminfo 2>/dev/null | tr \'\\n\' \' \')'
-            'loadavg=$(cut -d\' \' -f1-3,4 /proc/loadavg 2>/dev/null) '
-            'sys_threads=$(cat /proc/sys/kernel/threads-max 2>/dev/null)/used=$(ls /proc 2>/dev/null | grep -c \'^[0-9]\') '
-            'file_nr=$(cat /proc/sys/fs/file-nr 2>/dev/null) '
-            'ha_fds=$(ls /proc/{pid}/fd 2>/dev/null | wc -l)"; '
-            # CANARY: try a trivial fork; if it returns EAGAIN, log it — direct proof
-            # the node is refusing new procs ("resource temporarily unavailable").
-            '  ( /bin/true ) 2>/tmp/.diag_fork_$$ || echo "FORK-CANARY-FAILED: $(cat /tmp/.diag_fork_$$ 2>/dev/null)"; '
-            '  sleep 5; '
-            'done; '
-            'echo "[diag] haproxy pid {pid} gone at ts=$(date +%s)"; '
-            # smoking gun on death: OOM-killer / kill evidence from the kernel ring buffer.
-            'echo "[diag] dmesg tail (OOM/kill evidence, may be empty w/o priv):"; '
-            'dmesg -T 2>/dev/null | tail -25 | grep -iE "oom|kill|haproxy|memory|fork|cannot" | sed "s/^/[dmesg] /" || true'
-        ).replace("{pid}", str(haproxy_pid))  # NOT .format(): the script has literal awk {…} braces
-        try:
-            with open(diag_path, "a") as fh:
-                subprocess.Popen(
-                    ["bash", "-c", script, str(diag_path)],
-                    stdout=fh, stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            print(f"[HAProxyProxy] Diag sampler -> {diag_path}", flush=True)
-        except Exception as exc:  # diagnostics must never break the run
-            print(f"[HAProxyProxy] Diag sampler failed to start: {exc}", flush=True)
-
-    def health_check(
-        self,
-        host: str,
-        port: int,
-        timeout: float = 30.0,
-        process: subprocess.Popen | None = None,
-    ) -> bool:
-        """
-        Poll TCP connect to host:port until it accepts connections or timeout.
-
-        Returns False immediately if the proxy process has already exited.
-        """
-        check_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
-        deadline = time.monotonic() + timeout
-        attempt = 0
-        while time.monotonic() < deadline:
-            if process is not None and process.poll() is not None:
-                print(
-                    f"[HAProxyProxy] Process {self._describe_exit(process.returncode)} "
-                    f"before becoming healthy.",
-                    flush=True,
-                )
-                return False
-
-            attempt += 1
-            try:
-                with socket.create_connection((check_host, port), timeout=2):
-                    print(
-                        f"[HAProxyProxy] Healthy after {attempt} attempt(s) "
-                        f"(port {port})",
-                        flush=True,
-                    )
-                    return True
-            except OSError:
-                pass
-            time.sleep(1)
-
-        print(
-            f"[HAProxyProxy] Health check timed out after {timeout}s",
-            flush=True,
-        )
-        return False
-
-    @staticmethod
-    def _describe_exit(rc) -> str:
-        """Human-readable cause from a Popen returncode. A negative code means the
-        OS killed the proxy with that signal -- the smoking gun for the 256n death:
-        SIGKILL=OOM-killer/external resource kill ('resource temporarily unavailable'),
-        SIGSEGV=crash. A non-negative code means HAProxy exited on its own."""
-        if rc is None:
-            return "still running"
-        if rc < 0:
-            try:
-                name = signal.Signals(-rc).name
-            except (ValueError, AttributeError):
-                name = f"signal {-rc}"
-            hint = {
-                signal.SIGKILL: " (OOM-killer or external/resource kill, e.g. EAGAIN 'resource temporarily unavailable')",
-                signal.SIGSEGV: " (segfault/crash)",
-                signal.SIGABRT: " (abort -- fatal internal error)",
-                signal.SIGBUS: " (bus error)",
-            }.get(-rc, "")
-            return f"KILLED BY {name}{hint} (returncode={rc})"
-        return f"exited with code {rc}" + (" (clean)" if rc == 0 else " (self-terminated/error)")
-
-    def stop(self, process: subprocess.Popen) -> None:
-        """Send SIGTERM for graceful drain, then SIGKILL after 15s."""
-        rc = process.poll()
-        if rc is not None:
-            # The proxy already exited BEFORE teardown -> it died DURING the run.
-            # Log HOW (the signal is the smoking gun). This used to return silently,
-            # which is exactly why every 256n proxy death had no recorded cause.
-            print(
-                f"[HAProxyProxy] *** PROXY DIED DURING RUN: pid={process.pid} "
-                f"{self._describe_exit(rc)} ***",
-                flush=True,
-            )
-            return
-        print(f"[HAProxyProxy] Stopping proxy (pid={process.pid})", flush=True)
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            print("[HAProxyProxy] SIGTERM timed out, sending SIGKILL", flush=True)
-            process.kill()
-            process.wait()
-        print("[HAProxyProxy] Proxy stopped.", flush=True)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _safe_backend_name(model_id: str) -> str:
-    """Convert a model_id to an HAProxy-safe identifier (no slashes or dots)."""
-    return model_id.replace("/", "_").replace(".", "_").replace("-", "_")
+    """Return a bounded, collision-resistant HAProxy identifier.
+
+    Character replacement alone maps distinct valid model IDs such as ``a/b``
+    and ``a-b`` to the same backend name.  A short content hash preserves exact
+    identity while the bounded stem keeps generated tokens within HAProxy's
+    practical identifier limits.
+    """
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", model_id).strip("_") or "backend"
+    digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:12]
+    return f"{stem[:48]}_{digest}"
+
+
+def required_nofile(maxconn: int, backend_servers: int) -> int:
+    """Conservative descriptor budget for a generated HAProxy process.
+
+    HAProxy needs roughly two descriptors per client connection plus listeners,
+    health-check sockets, peers, and internal pipes.  The fixed reserve is
+    intentionally above the value reported by HAProxy 3.1 for the qualified
+    config. Runtime verifies this against RLIMIT_NOFILE before launch.
+    """
+    if isinstance(maxconn, bool) or not isinstance(maxconn, int) or maxconn < 1:
+        raise ValueError("HAProxy maxconn must be a positive integer")
+    if (
+        isinstance(backend_servers, bool)
+        or not isinstance(backend_servers, int)
+        or backend_servers < 1
+    ):
+        raise ValueError("HAProxy backend server count must be positive")
+    return 2 * maxconn + backend_servers + 256
+
+
+def _validate_endpoint(endpoint: BackendEndpoint) -> None:
+    host = endpoint.host
+    if (
+        not isinstance(host, str)
+        or len(host) > 253
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host)
+        or ".." in host
+    ):
+        raise ValueError(f"unsafe HAProxy backend host {host!r}")
+    if (
+        isinstance(endpoint.port, bool)
+        or not isinstance(endpoint.port, int)
+        or not 1 <= endpoint.port <= 65535
+    ):
+        raise ValueError(f"invalid HAProxy backend port {endpoint.port!r}")
+    if (
+        not isinstance(endpoint.model_id, str)
+        or not endpoint.model_id
+        or len(endpoint.model_id) > 1024
+        or any(ord(char) < 32 for char in endpoint.model_id)
+    ):
+        raise ValueError("HAProxy backend model_id must be non-empty")
+    if endpoint.path_prefix and not re.fullmatch(r"/[A-Za-z0-9_-]+", endpoint.path_prefix):
+        raise ValueError(f"unsafe HAProxy route prefix {endpoint.path_prefix!r}")
+    if (
+        isinstance(endpoint.replica_routes, bool)
+        or not isinstance(endpoint.replica_routes, int)
+        or endpoint.replica_routes < 0
+        or endpoint.replica_routes > 1_000_000
+    ):
+        raise ValueError(f"invalid HAProxy replica-route count {endpoint.replica_routes!r}")
 
 
 def _render_backend(
@@ -428,27 +429,38 @@ def _render_backend(
 ) -> str:
     """Render a single HAProxy backend section.
 
-    Shard-aware PP (endpoints[].shard_replicas > 0): the model is served as N
+    Bound replica routes (endpoints[].replica_routes > 0): the model is served as N
     node-pinned single-replica deployments at routes <path_prefix>_r{0..N-1}.
     Every node's Ray Serve proxy can route any replica route, so we keep the
     node servers for TCP spread and pick a replica per request by REWRITING the
     path to /<path_prefix>_r{rand}<orig-path>. Random selection (rand(N)) is
     statistically even and avoids a shared round-robin counter under concurrency.
     """
-    shard_n = endpoints[0].shard_replicas if endpoints else 0
+    replica_n = endpoints[0].replica_routes if endpoints else 0
+    if any(endpoint.replica_routes != replica_n for endpoint in endpoints):
+        raise ValueError(f"inconsistent replica-route counts for backend {name!r}")
     lines = [
         f"backend {name}",
         f"    balance {balance}",
     ]
-    if shard_n > 0:
-        # Shard-aware PP: the model is served as N node-pinned single-replica apps
+    if replica_n > 0:
+        # Every canonical replica is a node-pinned, single-replica application
         # at <path_prefix>_r{0..N-1}. Pick a replica per request (rand, even and
         # lock-free) and rewrite the path to its route; any node's Serve proxy then
         # routes it to that replica.
         lines += [
-            f"    http-request set-var(txn.ridx) rand({shard_n})",
-            f"    http-request set-path {path_prefix}_r%[var(txn.ridx)]%[path]",
+            f"    http-request set-var(txn.ridx) rand({replica_n})",
         ]
+        if path_prefix:
+            escaped = re.escape(path_prefix)
+            lines.append(
+                f"    http-request replace-path ^{escaped}(/.*)?$ "
+                f"{path_prefix}_r%[var(txn.ridx)]\\1"
+            )
+            lines.append(
+                f"    http-request set-path {path_prefix}_r%[var(txn.ridx)]%[path] "
+                f"unless {{ path_beg {path_prefix}_r }}"
+            )
     # Health-check the Ray Serve proxy's OWN liveness (/-/healthz) in ALL cases,
     # never a model route. /-/healthz is answered locally by each node's proxy
     # (router-ready / not-draining), independent of any replica's load, so a slow

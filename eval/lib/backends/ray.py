@@ -1,45 +1,42 @@
 """Ray backend adapter.
 
-This adapter bridges the new eval control plane with the existing serving
-infrastructure (src/exaserve/resources/launch_cluster.sh, src/driver.py, src/exaserve_serve.py).
+This adapter bridges the eval control plane to the canonical packaged ExaServe
+composition root.
 
 Key responsibilities:
-  - build_runtime_manifest: translates the eval-layer RunPlan into an
-    EvalManifest YAML that launch_cluster.sh and replay_client.py expect.
-    This is the bridge between the two config schemas.
-  - launch: starts `bash src/exaserve/resources/launch_cluster.sh <manifest>` as a child
-    process group, monitored by ProcessMonitor for the readiness marker.
+  - build_runtime_manifest: materializes replay settings bound by hash to the
+    already-compiled RunPlan and its exact DeploymentPlan/trace artifacts.
+  - launch: starts the Python composition root as a child process group; diagnostics are
+    tailed while readiness is read only from canonical DeploymentStatus.
   - runtime_env: selects the shell env used for the Ray/vLLM stack and sets
-    launcher exports such as EXASERVE_NULL_COMPUTE. Ray cluster settings such as
-    head_ip, port, and node_cpus live in the runtime manifest, which is the
-    single source of truth for driver.py. LiteLLM itself is launched as a
-    separate subprocess via proxy_config.python_path, so the backend should
-    stay on the Aurora frameworks env by default.
+    launcher exports such as EXASERVE_NULL_COMPUTE. Compiled plan artifacts are
+    the runtime source of truth; this adapter does not reinterpret them.
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import time
 from dataclasses import asdict
 
-from exaserve.schemas import DeploymentConfig, ModelConfig, ProxyConfig
 from eval.site_config import get_site_config
+from exaserve.exception_notes import add_exception_note
 
 from ..manifest import (
     EvalManifest,
     ReplayClientConfig,
-    RayClusterConfig,
     TraceGeneratorConfig,
     WeakScalingConfig,
 )
 
-from ..models import RunPlan
+from ..models import RunMaterialization
 from .base import (
     BackendAdapter,
     BackendRunContext,
     LaunchedBackend,
-    ProcessMonitor,
+    BackendProcessHandle,
     RuntimeEnvSpec,
     terminate_process_tree,
 )
@@ -63,7 +60,9 @@ def _sanitize_pythonpath(value: str) -> str:
         entry = raw_entry.strip()
         if not entry:
             continue
-        if "/site-packages" in entry and any(marker in entry for marker in _VENV_SITE_PACKAGES_MARKERS):
+        if "/site-packages" in entry and any(
+            marker in entry for marker in _VENV_SITE_PACKAGES_MARKERS
+        ):
             continue
         entries.append(entry)
     return os.pathsep.join(entries)
@@ -89,40 +88,33 @@ def _sanitize_launch_env(env: dict[str, str]) -> dict[str, str]:
 
 class RayBackendAdapter(BackendAdapter):
     name = "ray"
-    ready_marker = "[Driver] ALL SERVICES READY"
     ready_timeout_s = 7200.0
 
-    def validate(self, run_plan: RunPlan) -> None:
+    def validate(self, run_plan: RunMaterialization) -> None:
         if run_plan.scheduler.type != "pbs":
             raise ValueError("ray backend currently requires scheduler.type == 'pbs'")
         if run_plan.client.dest == "proxy":
             proxy_cfg = self._proxy_settings(run_plan)
             if proxy_cfg.get("type", "none") == "none":
                 raise ValueError("client.dest=proxy requires backend.args.ray.proxy.type != 'none'")
+        elif run_plan.client.dest == "direct" and len(run_plan.deployment.models) != 1:
+            raise ValueError("client.dest=direct requires exactly one deployment model")
         launch_cfg = self._launch_settings(run_plan)
         if "ray_node_cpus" in launch_cfg:
-            try:
-                ray_node_cpus = int(launch_cfg["ray_node_cpus"])
-            except (TypeError, ValueError) as exc:
-                raise ValueError("backend.args.ray.launch.ray_node_cpus must be an integer") from exc
+            ray_node_cpus = launch_cfg["ray_node_cpus"]
+            if isinstance(ray_node_cpus, bool) or not isinstance(ray_node_cpus, int):
+                raise ValueError("backend.args.ray.launch.ray_node_cpus must be an integer")
             if ray_node_cpus < 1:
                 raise ValueError("backend.args.ray.launch.ray_node_cpus must be >= 1")
         if "ray_head_port" in launch_cfg:
-            try:
-                ray_head_port = int(launch_cfg["ray_head_port"])
-            except (TypeError, ValueError) as exc:
-                raise ValueError("backend.args.ray.launch.ray_head_port must be an integer") from exc
+            ray_head_port = launch_cfg["ray_head_port"]
+            if isinstance(ray_head_port, bool) or not isinstance(ray_head_port, int):
+                raise ValueError("backend.args.ray.launch.ray_head_port must be an integer")
             if ray_head_port < 1:
                 raise ValueError("backend.args.ray.launch.ray_head_port must be >= 1")
 
-    def build_runtime_manifest(self, run_plan: RunPlan) -> str:
-        proxy_settings = self._proxy_settings(run_plan)
-        launch_settings = self._launch_settings(run_plan)
+    def build_runtime_manifest(self, run_plan: RunMaterialization) -> str:
         trace_config = self._build_trace_config(run_plan)
-        model_configs = [
-            ModelConfig.from_model_spec(model)
-            for model in run_plan.deployment.models
-        ]
         manifest = EvalManifest(
             pbs_result_dir=run_plan.bundle.results_dir,
             pbs_stdout_dir=run_plan.bundle.pbs_stdout_dir,
@@ -148,84 +140,42 @@ class RayBackendAdapter(BackendAdapter):
                 warmup_duration_s=run_plan.client.warmup_duration_s,
                 sum_only=run_plan.client.sum_only,
                 stream=run_plan.client.stream,
-                saturation=asdict(run_plan.client.saturation) if hasattr(run_plan.client, "saturation") else {},
+                direct_dispatch=run_plan.client.direct_dispatch,
+                dispatch_topologies=list(run_plan.client.dispatch_topologies),
+                direct_pair_shift=run_plan.client.direct_pair_shift,
+                request_timeout_s=run_plan.client.request_timeout_s,
+                drain_wait_timeout_s=run_plan.client.drain_wait_timeout_s,
+                shard_timeout_s=run_plan.client.shard_timeout_s,
+                direct_target_ready_timeout_s=(run_plan.client.direct_target_ready_timeout_s),
+                direct_target_probe_timeout_s=(run_plan.client.direct_target_probe_timeout_s),
+                direct_target_interval_s=run_plan.client.direct_target_interval_s,
+                direct_target_max_workers=run_plan.client.direct_target_max_workers,
+                saturation=asdict(run_plan.client.saturation)
+                if hasattr(run_plan.client, "saturation")
+                else {},
             ),
             job_seed=run_plan.workload.seed,
-            model_deployment_config=DeploymentConfig(
-                num_nodes=run_plan.deployment.num_nodes,
-                model_configs=model_configs,
-                model_storage_path=run_plan.deployment.model_storage_path,
-                local_stage_path=run_plan.deployment.local_stage_path,
-                deployment_name=(
-                    f"{run_plan.spec_name}_{run_plan.run_group_id}_{run_plan.run_id}"
-                ),
-                replica_max_ongoing_requests=run_plan.deployment.replica_max_ongoing_requests,
-                num_gpus_per_node=run_plan.deployment.num_gpus_per_node,
-                collect_stats=getattr(run_plan.deployment, "collect_stats", False),
-            ),
-            ray_cluster_config=RayClusterConfig(
-                port=int(launch_settings.get("ray_head_port", 6379)),
-                node_cpus=int(launch_settings.get("ray_node_cpus", 8)),
-            ),
-            proxy_config=ProxyConfig(
-                type=str(proxy_settings.get("type", "none")),
-                port=int(proxy_settings.get("port", 4001)),
-                backend_port=int(proxy_settings.get("backend_port", 8000)),
-                python_path=str(
-                    proxy_settings.get("python_path", get_site_config().litellm_python_path)
-                ),
-                num_workers=int(proxy_settings.get("num_workers", 1)),
-                options=dict(proxy_settings.get("options", {})),
-            ),
+            deployment_plan_path=run_plan.deployment_plan_path,
+            deployment_plan_hash=run_plan.deployment_plan_hash,
+            run_plan_path=run_plan.semantic_plan_path,
+            run_semantic_hash=run_plan.run_semantic_hash,
+            trace_content_hash=run_plan.semantic_plan.trace.trace_content_hash or "",
         )
         manifest.save_yaml(run_plan.runtime_manifest_path)
         return run_plan.runtime_manifest_path
 
-    def runtime_env(self, run_plan: RunPlan) -> RuntimeEnvSpec:
+    def runtime_env(self, run_plan: RunMaterialization) -> RuntimeEnvSpec:
         launch_settings = self._launch_settings(run_plan)
-        env_script = str(launch_settings.get("env_script", "")).strip()
+        env_script = launch_settings.get("env_script", "")
+        if not isinstance(env_script, str):
+            raise ValueError("backend.args.ray.launch.env_script must be text")
+        env_script = env_script.strip()
         if not env_script:
             cfg = get_site_config()
             env_script = cfg.env_script_aurora
-        exports = {}
-        if bool(launch_settings.get("null_compute", False)):
-            exports["EXASERVE_NULL_COMPUTE"] = "1"
-        if bool(launch_settings.get("instrumentation", False)):
-            # Stages the Ray Serve overlay probes (GetActorInfo counts, per-proxy
-            # ray.get_actor timing) read by launch_cluster.sh. Needed for EXP SET 3.
-            exports["EXASERVE_INSTRUMENTATION"] = "1"
-        if bool(launch_settings.get("clean_stage", False)):
-            # Wipe node-local artifacts before staging so Phase-2 MPI weight
-            # broadcast is re-done and timed every run (resources/cleanup_run.sh).
-            exports["EXASERVE_CLEAN_STAGE"] = "1"
-        # Engine backend selection (deployment.engine). "sglang" routes deploy_model
-        # to SGLangWorker (EXASERVE_ENGINE) and the whole serving stack to the SGLang
-        # venv (EXASERVE_PYTHON_EXEC, honored by launch_cluster.sh). Default "vllm" is a
-        # no-op so existing specs are unchanged.
-        engine = str(getattr(run_plan.deployment, "engine", "vllm") or "vllm").lower()
-        if engine == "sglang":
-            exports["EXASERVE_ENGINE"] = "sglang"
-            sglang_py = str(getattr(get_site_config(), "sglang_python_path", "")).strip()
-            if sglang_py:
-                exports["EXASERVE_PYTHON_EXEC"] = sglang_py
-        return RuntimeEnvSpec(env_script=env_script, exports=exports)
-
-    def job_env_exports(self, run_plan: RunPlan) -> dict[str, str]:
-        exports: dict[str, str] = {}
-        # Shard-aware PP must be signalled to the WHOLE job, not just the launch
-        # subprocess: the server keys its per-stage staging + node-pinned
-        # per-replica deploy off EXASERVE_PP_SHARD_AWARE, and discover_targets keys
-        # per-replica direct routing off it. Derive from the deployment
-        # (pp>1 AND num_replicas>1) — the exact condition server.py gates on — so
-        # shard-aware multi-replica PP specs are self-contained (no hand-edited
-        # job.pbs). Single-replica or PP=1 deployments are unaffected.
-        if any(
-            int(getattr(m, "pipeline_parallel_size", 1) or 1) > 1
-            and int(getattr(m, "num_replicas", 0) or 0) > 1
-            for m in run_plan.deployment.models
-        ):
-            exports["EXASERVE_PP_SHARD_AWARE"] = "1"
-        return exports
+        # Plan semantics are projected by exaserve.plan.runtime_environment in
+        # the launcher. The eval adapter contributes no competing ambient flags.
+        return RuntimeEnvSpec(env_script=env_script, exports={})
 
     def launch(self, run_ctx: BackendRunContext) -> LaunchedBackend:
         run_plan = run_ctx.run_plan
@@ -241,12 +191,24 @@ class RayBackendAdapter(BackendAdapter):
             + os.pathsep
             + env.get("PYTHONPATH", "")
         )
-        env["EXASERVE_RUN_LOG_ROOT"] = os.path.join(run_plan.bundle.logs_dir, "backend")
-        # The launcher lives inside the package's resources/ data dir as of v0.1.0.
-        launch_script = os.path.join(
-            run_plan.repo_root, "src", "exaserve", "resources", "launch_cluster.sh"
+        deployment_run_dir = os.path.join(run_plan.bundle.logs_dir, "backend", "deployment")
+        env["EXASERVE_RUN_LOG_DIR"] = deployment_run_dir
+        generation = time.time_ns()
+        env.update(
+            {
+                "EXASERVE_GENERATION": str(generation),
+                "EXASERVE_RUN_ID": run_plan.run_id,
+                "EXASERVE_RUN_SEMANTIC_HASH": run_plan.run_semantic_hash,
+                "EXASERVE_SOURCE_SNAPSHOT_HASH": run_plan.source_snapshot_hash,
+                "EXASERVE_SITE_PROFILE_PATH": run_plan.site_profile_path,
+                "EXASERVE_RUN_PLAN_PATH": run_plan.semantic_plan_path,
+                "EXASERVE_OUTPUT_LOCATIONS": run_plan.bundle.results_dir,
+            }
         )
-        cmd = ["bash", launch_script, run_plan.runtime_manifest_path]
+        # The batch environment is already prepared by the scheduler template;
+        # invoke the Python composition root directly. The shell adapter remains
+        # only for manual allocation entry, not as a hidden lifecycle layer.
+        cmd = [sys.executable, "-u", "-m", "exaserve.launcher", run_plan.deployment_plan_path]
         process = subprocess.Popen(
             cmd,
             cwd=run_plan.repo_root,
@@ -257,22 +219,24 @@ class RayBackendAdapter(BackendAdapter):
             bufsize=1,
             start_new_session=True,
         )
-        monitor = ProcessMonitor(
+        monitor = BackendProcessHandle(
             process=process,
             log_path=os.path.join(run_plan.bundle.logs_dir, "backend", "service.log"),
-            ready_marker=self.ready_marker,
-            readiness_dir=env["EXASERVE_RUN_LOG_ROOT"],
+            status_dir=deployment_run_dir,
+            expected_generation=generation,
+            expected_plan_hash=run_plan.deployment_plan_hash,
         ).start()
+        gateway = run_plan.semantic_plan.deployment.gateway
+        backend_port = (
+            gateway.backend_port
+            if gateway is not None
+            else run_plan.semantic_plan.deployment.exposure.serve_port
+        )
         return LaunchedBackend(
             monitor=monitor,
             metadata={
-                "proxy_port_file": os.path.join(
-                    os.path.dirname(run_plan.runtime_manifest_path),
-                    "proxy_out",
-                    "proxy_port",
-                ),
-                "backend_port": int(self._proxy_settings(run_plan).get("backend_port", 8000)),
-                "proxy_port": int(self._proxy_settings(run_plan).get("port", 4001)),
+                "deployment_status_dir": deployment_run_dir,
+                "backend_port": backend_port,
             },
         )
 
@@ -285,7 +249,7 @@ class RayBackendAdapter(BackendAdapter):
             raise RuntimeError(
                 f"Ray backend exited before becoming ready (exit code {process.returncode}).\n{tail}"
             )
-        raise TimeoutError("Timed out waiting for Ray backend readiness marker")
+        raise TimeoutError("Timed out waiting for canonical deployment readiness")
 
     def discover_targets(
         self,
@@ -293,68 +257,84 @@ class RayBackendAdapter(BackendAdapter):
         launched: LaunchedBackend,
     ) -> list[str]:
         run_plan = run_ctx.run_plan
-        if run_plan.client.dest == "direct":
-            backend_port = int(launched.metadata.get("backend_port", 8000))
-            # Prefer the per-node Ray IPs the server wrote (NodeManagerAddress):
-            # the PBS .hsn. FQDN resolves to an address whose :8000 returns 503,
-            # while the Ray-bound IP serves /health. Fall back to PBS hostnames.
-            nodes: list[str] = []
-            ips_path = os.path.join(
-                os.path.dirname(run_plan.runtime_manifest_path), "ray_node_ips.txt"
-            )
-            if os.path.isfile(ips_path):
-                with open(ips_path, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        ip = line.strip()
-                        if ip and ip not in nodes:
-                            nodes.append(ip)
-            if not nodes:
-                nodefile = os.environ.get("EXASERVE_NODEFILE") or os.environ.get("PBS_NODEFILE")
-                if not nodefile or not os.path.isfile(nodefile):
-                    raise RuntimeError("EXASERVE_NODEFILE (or PBS_NODEFILE) is required for direct-mode Ray execution")
-                with open(nodefile, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        node = line.strip()
-                        if node and node not in nodes:
-                            nodes.append(node)
-            # Shard-aware PP has no root route: each replica is a node-pinned app
-            # at /<route>_r{i}, normally reached via the proxy's set-path rewrite.
-            # Direct mode bypasses the proxy, so address each replica explicitly.
-            shard_urls = _shard_aware_direct_urls(run_plan, nodes, backend_port)
-            if shard_urls is not None:
-                return shard_urls
-            return [f"http://{node}:{backend_port}" for node in nodes]
+        from exaserve.status_api import read_deployment_status
 
-        port_file = str(launched.metadata["proxy_port_file"])
-        port = int(launched.metadata.get("proxy_port", 4001))
-        if os.path.isfile(port_file):
-            with open(port_file, "r", encoding="utf-8") as handle:
-                try:
-                    port = int(handle.read().strip())
-                except ValueError:
-                    pass
-        # Use the head node hostname so client ranks on other nodes can reach
-        # the proxy (0.0.0.0 only works on the head node itself).
-        nodefile = os.environ.get("EXASERVE_NODEFILE") or os.environ.get("PBS_NODEFILE")
-        head_host = "0.0.0.0"
-        if nodefile and os.path.isfile(nodefile):
-            with open(nodefile, "r", encoding="utf-8") as handle:
-                first = handle.readline().strip()
-                if first:
-                    head_host = first
-        return [f"http://{head_host}:{port}"]
+        status = read_deployment_status(launched.monitor.status_dir)
+        if status is None or not status.ready:
+            raise RuntimeError("target discovery requires the current canonical READY status")
+        if run_plan.client.dest == "direct":
+            backend_port = launched.metadata.get("backend_port")
+            if isinstance(backend_port, bool) or not isinstance(backend_port, int):
+                raise RuntimeError("launched backend metadata lacks an integer backend_port")
+            from exaserve.plan.io import (
+                load_deployment_plan,
+            )
+            from exaserve.plan.contracts import same_node
+            from exaserve.status_api import load_status_allocation_binding
+
+            binding = load_status_allocation_binding(launched.monitor.status_dir, status)
+            plan = load_deployment_plan(run_plan.deployment_plan_path)
+            if (
+                binding.allocation_binding_hash != status.allocation_binding_hash
+                or plan.deployment_plan_hash != status.deployment_plan_hash
+            ):
+                raise RuntimeError("target discovery artifacts disagree with READY status")
+            observed_nodes = status.readiness_snapshot.get("nodes", [])
+            if not isinstance(observed_nodes, list):
+                raise RuntimeError("READY node evidence must be a list")
+            addresses_by_rank: dict[int, str] = {}
+            for rank, planned_node in binding.rank_to_node:
+                matches = [
+                    item
+                    for item in observed_nodes
+                    if isinstance(item, dict)
+                    and item.get("alive") is True
+                    and isinstance(item.get("node_name"), str)
+                    and same_node(item["node_name"], planned_node)
+                ]
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"READY node evidence maps rank {rank} to {len(matches)} addresses"
+                    )
+                address = matches[0].get("node_address")
+                if not isinstance(address, str) or not address:
+                    raise RuntimeError(f"READY node evidence for rank {rank} lacks an address")
+                addresses_by_rank[rank] = address
+            replica_urls = _canonical_direct_replica_urls(plan, addresses_by_rank, backend_port)
+            if replica_urls is not None:
+                return replica_urls
+            return [f"http://{addresses_by_rank[rank]}:{backend_port}" for rank in binding.ranks()]
+
+        return [status.advertised_endpoint]
 
     def stop(self, run_ctx: BackendRunContext, launched: LaunchedBackend) -> None:
-        terminate_process_tree(launched.monitor.process)
-        launched.monitor.close()
+        failures: list[BaseException] = []
+        cleanup_deadline = time.monotonic() + 20.0
+        try:
+            terminate_process_tree(
+                launched.monitor.process,
+                process_group=launched.monitor.process_group,
+                deadline=cleanup_deadline,
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        try:
+            launched.monitor.close(deadline=cleanup_deadline)
+        except BaseException as exc:
+            failures.append(exc)
+        if failures:
+            primary = RuntimeError(f"Ray backend cleanup failed: {failures[0]}")
+            for secondary in failures[1:]:
+                add_exception_note(primary, f"additional cleanup failure: {secondary}")
+            raise primary from failures[0]
 
-    def _proxy_settings(self, run_plan: RunPlan) -> dict:
+    def _proxy_settings(self, run_plan: RunMaterialization) -> dict:
         return dict(run_plan.backend_args.get("proxy", {}))
 
-    def _launch_settings(self, run_plan: RunPlan) -> dict:
+    def _launch_settings(self, run_plan: RunMaterialization) -> dict:
         return dict(run_plan.backend_args.get("launch", {}))
 
-    def _build_trace_config(self, run_plan: RunPlan):
+    def _build_trace_config(self, run_plan: RunMaterialization):
         if run_plan.trace.kind == "weak_scaling":
             return WeakScalingConfig(
                 input_prompt_path=run_plan.trace.input_prompt_path,
@@ -377,53 +357,27 @@ class RayBackendAdapter(BackendAdapter):
         )
 
 
-def _shard_aware_direct_urls(
-    run_plan: RunPlan, node_ips: list[str], backend_port: int
+def _canonical_direct_replica_urls(
+    plan, addresses_by_rank: dict[int, str], backend_port: int
 ) -> list[str] | None:
-    """Per-replica direct URLs for shard-aware PP, or None if not applicable.
-
-    Shard-aware PP (EXASERVE_PP_SHARD_AWARE=1, pp>1, num_replicas>1) serves each
-    replica as a node-pinned single-replica app at route /<route>_r{i}; there is
-    no root route (see driver.py / server.ordered_pp_nodes). The HAProxy proxy
-    normally reaches them by rewriting the path to /<route>_r{rand}. Direct mode
-    bypasses the proxy, so the client must address each replica explicitly.
-
-    Node-assignment contract (server.ordered_pp_nodes + pp_stage.assign_pp_nodes):
-    replica i's stage-0 node is (alive Ray GPU IPs sorted by ip string)[i*pp].
-    ray_node_ips.txt holds that same IP set (NodeManagerAddress) but unsorted, so
-    we sort here to reproduce the deployment's ordering exactly. Even if the
-    ordering were off, Ray Serve routes /<route>_r{i} to replica i from any node's
-    HTTP proxy, so requests still succeed (only node-locality would be lost).
-    """
-    if os.environ.get("EXASERVE_PP_SHARD_AWARE", "0") != "1":
-        return None
-    models = list(run_plan.deployment.models)
+    """Derive bound replica routes from canonical ranks, never IP sorting."""
+    models = list(plan.models)
     if len(models) != 1:
-        return None  # per-replica direct addressing is only defined for one model
-    mc = models[0]
-    pp = int(getattr(mc, "pipeline_parallel_size", 1) or 1)
-    n_rep = int(getattr(mc, "num_replicas", 0) or 0)
-    if pp <= 1 or n_rep <= 1:
+        return None  # one replay target set cannot represent multiple model routes
+    model = models[0]
+    n_rep = model.num_replicas
+    if n_rep <= 1:
         return None
-    need = n_rep * pp
-    if len(node_ips) < need:
-        raise RuntimeError(
-            f"shard-aware direct: need {need} nodes ({n_rep} replicas x PP={pp}) "
-            f"but only {len(node_ips)} Ray node IP(s) available"
-        )
-    ordered = sorted(node_ips)  # match ordered_pp_nodes(): lexicographic ip sort
-    try:
-        from exaserve.model_paths import get_model_route_name
-    except ImportError:  # pragma: no cover - snapshot import fallback
-        from src.exaserve.model_paths import get_model_route_name
-    route = get_model_route_name(mc.model_id)
+    route = model.route_name
     urls = [
-        f"http://{ordered[i * pp]}:{backend_port}/{route}_r{i}"
-        for i in range(n_rep)
+        f"http://{addresses_by_rank[replica.planned_ranks[0]]}:"
+        f"{backend_port}/{route}_r{replica.replica_index}"
+        for replica in model.replicas
     ]
     print(
-        f"[RayBackend] shard-aware direct mode: {n_rep} per-replica URLs "
-        f"(PP={pp}, proxy bypassed) -> stage-0 node of each replica.",
+        f"[RayBackend] canonical direct mode: {n_rep} bound replica URLs "
+        f"(TP={model.tensor_parallel_size}, PP={model.pipeline_parallel_size}, "
+        "gateway bypassed) -> primary node of each replica.",
         flush=True,
     )
     return urls

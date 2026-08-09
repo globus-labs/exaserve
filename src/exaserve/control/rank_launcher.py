@@ -20,51 +20,89 @@ matching stdout.
 
 from __future__ import annotations
 
-import os
 import shlex
+from types import MappingProxyType
 from typing import Optional, Sequence
 
 from .supervisor import ManagedComponent
-
-# The launch prefix is a site adapter concern (PBS/PALS uses mpiexec, Cray Slurm
-# has no mpiexec and uses srun). It is passed in already resolved rather than
-# re-detected here, so there is exactly one place that decides it.
-MPILAUNCH_ENV = "EXASERVE_MPILAUNCH"
 
 
 class RankLaunchError(RuntimeError):
     pass
 
 
-def resolve_launch_prefix(node_count: int, *, scheduler: str = "pbs",
-                          override: Optional[str] = None) -> list[str]:
-    """One task per node. `override` (or EXASERVE_MPILAUNCH) wins verbatim."""
-    override = override if override is not None else os.environ.get(MPILAUNCH_ENV)
-    if override:
-        return shlex.split(override)
-    if node_count < 1:
+def resolve_launch_prefix(
+    node_count: int, *, scheduler: str = "pbs", override: Optional[str] = None
+) -> list[str]:
+    """One task per node; an explicit caller override is validation-only."""
+    if isinstance(node_count, bool) or not isinstance(node_count, int) or node_count < 1:
         raise RankLaunchError(f"node_count must be >= 1, got {node_count}")
+    if not isinstance(scheduler, str) or not scheduler:
+        raise RankLaunchError("scheduler must be non-empty text")
+    if override is not None:
+        if not isinstance(override, str) or not override:
+            raise RankLaunchError("launch override must be null or non-empty text")
+        parsed = shlex.split(override)
+        if not parsed:
+            raise RankLaunchError("launch override produced an empty argument vector")
+        return parsed
     if scheduler == "slurm":
-        return ["srun", f"--nodes={node_count}", "--ntasks-per-node=1",
-                "--cpu-bind=none"]
+        return ["srun", f"--nodes={node_count}", "--ntasks-per-node=1", "--cpu-bind=none"]
     return ["mpiexec", "-n", str(node_count), "-ppn", "1", "--cpu-bind", "none"]
 
 
 class RankLauncher:
     """One MPI/srun launch of the per-rank entry point, as an owned component."""
 
-    def __init__(self, *, node_count: int, rank_argv: Sequence[str],
-                 scheduler: str = "pbs", launch_prefix: Optional[Sequence[str]] = None,
-                 env: Optional[dict] = None, cwd: Optional[str] = None,
-                 stdout=None, component_id: str = "rank_launcher") -> None:
-        if node_count < 1:
+    def __init__(
+        self,
+        *,
+        node_count: int,
+        rank_argv: Sequence[str],
+        scheduler: str = "pbs",
+        launch_prefix: Optional[Sequence[str]] = None,
+        env: Optional[dict] = None,
+        cwd: Optional[str] = None,
+        stdout=None,
+        component_id: str = "rank_launcher",
+    ) -> None:
+        if isinstance(node_count, bool) or not isinstance(node_count, int) or node_count < 1:
             raise RankLaunchError(f"node_count must be >= 1, got {node_count}")
-        if not rank_argv:
-            raise RankLaunchError("rank_argv must not be empty")
-        self.node_count = int(node_count)
-        self.rank_argv = list(rank_argv)
-        self.launch_prefix = list(launch_prefix) if launch_prefix else \
-            resolve_launch_prefix(node_count, scheduler=scheduler)
+        if isinstance(rank_argv, (str, bytes)):
+            raise RankLaunchError("rank_argv must be an argument vector")
+        rank_items = tuple(rank_argv)
+        if not rank_items or any(
+            not isinstance(item, str) or not item or "\x00" in item for item in rank_items
+        ):
+            raise RankLaunchError("rank_argv must contain non-empty string arguments")
+        if launch_prefix is not None:
+            if isinstance(launch_prefix, (str, bytes)):
+                raise RankLaunchError("launch_prefix must be an argument vector")
+            prefix_items = tuple(launch_prefix)
+            if not prefix_items or any(
+                not isinstance(item, str) or not item or "\x00" in item for item in prefix_items
+            ):
+                raise RankLaunchError("launch_prefix must contain non-empty string arguments")
+        else:
+            prefix_items = tuple(resolve_launch_prefix(node_count, scheduler=scheduler))
+        if env is not None:
+            if not isinstance(env, dict) or any(
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                or "\x00" in key
+                or "\x00" in value
+                for key, value in env.items()
+            ):
+                raise RankLaunchError("rank environment must be a string mapping without NUL")
+            env = MappingProxyType(dict(env))
+        if cwd is not None and (not isinstance(cwd, str) or not cwd):
+            raise RankLaunchError("rank cwd must be null or non-empty text")
+        if not isinstance(component_id, str) or not component_id:
+            raise RankLaunchError("rank launcher component_id must be non-empty text")
+        self.node_count = node_count
+        self.rank_argv = list(rank_items)
+        self.launch_prefix = list(prefix_items)
         self.env = env
         self.cwd = cwd
         self.stdout = stdout

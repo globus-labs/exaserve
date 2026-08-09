@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Compare HAProxy and direct mode weak-scaling on the same plot."""
+
 import json
-import os
 import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-RUNS_ROOT = "/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs"
+from eval.site_config import get_runs_root
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUNS_ROOT = get_runs_root()
 
 SPECS = {
     "HAProxy (1 LB on head)": "weakscaling_haproxy_short_v3",
@@ -23,11 +27,11 @@ def load_one(spec_name: str) -> list[tuple[int, float, float, float]]:
     """Return list of (nodes, rps, p50_ms, errors) from a spec's run group."""
     rows = []
     for n in NODE_COUNTS:
-        d = Path(RUNS_ROOT) / spec_name / RUN_GROUP / f"{n}-nodes"
-        results = sorted(d.glob("results/result*.json"))
-        if not results:
+        d = RUNS_ROOT / spec_name / RUN_GROUP / f"{n}-nodes"
+        result_path = d / "results" / "result0.json"
+        if not result_path.is_file():
             continue
-        with open(results[-1]) as f:
+        with open(result_path) as f:
             data = json.load(f)
         overall = data.get("overall", {})
         rps = float(overall.get("rps", 0))
@@ -60,10 +64,24 @@ def main() -> int:
         print(f"  {label}: {len(rows)} points")
         for n, r, p, e in rows:
             print(f"    {n:4d} nodes  rps={r:8.1f}  p50={p:6.1f}ms  errors={e}")
-        ax_rps.plot(nodes, rps, marker=markers[label], color=colors[label],
-                    label=label, linewidth=2, markersize=8)
-        ax_lat.plot(nodes, p50, marker=markers[label], color=colors[label],
-                    label=label, linewidth=2, markersize=8)
+        ax_rps.plot(
+            nodes,
+            rps,
+            marker=markers[label],
+            color=colors[label],
+            label=label,
+            linewidth=2,
+            markersize=8,
+        )
+        ax_lat.plot(
+            nodes,
+            p50,
+            marker=markers[label],
+            color=colors[label],
+            label=label,
+            linewidth=2,
+            markersize=8,
+        )
 
     # Ideal linear scaling reference (based on 1-node RPS)
     base_rps = None
@@ -75,9 +93,15 @@ def main() -> int:
     if base_rps:
         ideal_x = NODE_COUNTS
         ideal_y = [base_rps * n for n in ideal_x]
-        ax_rps.plot(ideal_x, ideal_y, "--", color="gray",
-                    label=f"Ideal linear (= {base_rps:.0f} RPS × N)",
-                    linewidth=1.5, alpha=0.7)
+        ax_rps.plot(
+            ideal_x,
+            ideal_y,
+            "--",
+            color="gray",
+            label=f"Ideal linear (= {base_rps:.0f} RPS × N)",
+            linewidth=1.5,
+            alpha=0.7,
+        )
 
     ax_rps.set_xscale("log", base=2)
     ax_rps.set_yscale("log")
@@ -100,11 +124,16 @@ def main() -> int:
 
     fig.suptitle(
         "HAProxy vs Direct Dispatch — Aurora Weak-Scaling v3 (run1)",
-        fontsize=14, fontweight="bold",
+        fontsize=14,
+        fontweight="bold",
     )
     fig.tight_layout()
 
-    out = sys.argv[1] if len(sys.argv) > 1 else "/home/wenyiw/exaserve/findings/weakscaling_haproxy_vs_direct_v3.png"
+    out = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else str(REPO_ROOT / "findings/weakscaling_haproxy_vs_direct_v3.png")
+    )
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print(f"\nSaved: {out}")
     return 0

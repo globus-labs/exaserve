@@ -48,6 +48,7 @@ deployment:
 client:
   num_runs: 2                # run0 warmup (discard) + run1 measured, as in the sweep
   dest: direct
+  direct_dispatch: mesh      # PP exposes 96 replica routes across 192 deployment nodes
   stream: true
   num_go_procs: 8
   num_go_workers: 4

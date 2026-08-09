@@ -1,115 +1,99 @@
-# ExaServe Supported Configuration & Scale Matrix
+# ExaServe configuration and scale matrix
 
-**Status:** provisional. Scale tiers below record FEASIBILITY SMOKE on the
-legacy path, not WP12 qualification — see audit IMP-H08. This file is
-the single place that states what is *claimed as supported* versus *validated*
-versus *explicitly not a production claim* (PR-033 / AC-SCALE-01). It is
-derived from `decisions/ADR-000-production-envelope.md` and updated as WP12
-gates pass.
+**Status date:** 2026-08-09
 
-A configuration is **supported** only if it has passed its required
-validation tier. A passing lower tier never implies a higher tier.
-P00 is currently reopened under the strengthened S01-S03 proofs; none of the
-rows below converts that partial evidence into a closed architecture gate.
+**Candidate:** final42
 
-## Software versions (measured, WP3)
+**Formal release state:** `TECHNICAL_PASS_SCOPE_PENDING`
 
-| Component | Version | Notes |
+This is the current-facing matrix. “Qualified candidate” means the exact
+immutable artifact passed that cell; it is not a published support promise
+until ADR-000 receives product-owner scope approval. A lower tier never implies
+a higher tier or a different dependency/profile dimension.
+
+## Exact software profile
+
+| Component | Selected identity | Qualification note |
 |---|---|---|
-| Python | 3.12.12 | Aurora frameworks 2025.3.1 |
-| Ray | 2.53.0 (commit 0de2118) | overlay + patches pinned to this; `setup_overlay.sh` refuses a mismatch |
-| vLLM | 0.15.0 | as bundled in frameworks 2025.3.1 |
-| transformers | 4.57.6 | |
-| torch | 2.10.0a0 (XPU) | |
-| SGLang | venv-only | not in the base frameworks python |
+| ExaServe | 0.4.0 wheel SHA `5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3` | final42 immutable candidate |
+| Aurora frameworks | 2025.3.1 | qualification environment |
+| Python | 3.12.12 | packaged and hardware gates |
+| Ray | 2.53.0, commit `0de2118` | exact base hashes; generated overlay; installed files untouched |
+| vLLM | 0.15.0+xpu | real EngineCore/worker receipts at one and two nodes |
+| transformers | 4.57.6 | selected environment |
+| torch | 2.10.0a0 XPU | selected environment |
+| HAProxy | executable identity recorded per run | owned and native-config validated |
 
-## Support dimensions
+Candidate-bound hashes:
 
-| Dimension | First-release target (not yet a support claim) | Gated / experimental | Explicitly not proposed |
+- site profile: `4814429547fd4397014819a0f8b5c6ec8f7d77c889eaf844d27935b39a0a6e26`;
+- compatibility profile: `c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3`;
+- compatibility manifest: `cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259`.
+
+Any dependency or identity change is a new profile and reopens affected cells.
+
+## Dimension matrix
+
+| Dimension | Qualified candidate | Validation-only / unqualified | Rejected or unsupported |
 |---|---|---|---|
-| Scheduler/site | Aurora PBS | Slurm (offsite gate owed) | — |
-| Accelerator | Intel XPU (PVC, 12 tiles/node) | CUDA, ROCm (offsite gates owed) | — |
-| Engine | vLLM | SGLang (smoke gate owed) | — |
-| Gateway implementation | HAProxy | LiteLLM/Envoy/NGINX/Pingora = **validation/benchmark only**; N/A only with explicit validation-direct exposure | — |
-| Exposure | HAProxy-proxied inference on trusted allocation/internal network; management endpoints local | direct Serve endpoint = **validation only** | public Internet or direct production exposure |
-| Request mode | non-streaming | streaming (capability + scale gate owed) | — |
+| Site/scheduler | ALCF Aurora with native PBS | PSI/J rendering/interface tests | Native Slurm production use |
+| Accelerator | Intel PVC XPU, 12 tiles/node | — | CUDA and ROCm until offsite qualification |
+| Engine | vLLM | null engine for lifecycle faults | SGLang in the selected profile |
+| Gateway | HAProxy | LiteLLM, Envoy, NGINX, Pingora adapters | Unowned/unprofiled gateways |
+| Exposure | `PROXIED_INTERNAL` on trusted allocation network | `DIRECT_VALIDATION` | public Internet/direct Serve production exposure |
+| API/mode | OpenAI-compatible non-streaming completion | streaming/chat/mixed experiments | fake streaming represented as per-token streaming |
+| Model topology | TP=1/PP=1 at one node; one PP=2 replica across two nodes | explicitly gated combinations | topology outside the canonical capability set |
+| Scale | one and two physical nodes | proposed 4/16/64 ladder | >2 as a current support claim; 128/256 historical only |
 
-## Scale tiers (node count)
+The selected production envelope is
+`aurora-xpu-vllm-haproxy-completion-non_streaming-candidate64`. It records
+`supported_max_nodes=2`, `qualification_target_nodes=64`,
+`qualification_target_approved=false`, and `validation_mode=false`. Normal
+production plan compilation rejects unmatched dimensions or more than two
+nodes. Explicit validation mode may create experiment-only plans but cannot
+satisfy production qualification.
 
-The technically selected candidate is `qualification_target = 64`, pending the
-explicit product-owner scope approval required by ADR-000 and the plan. The
-plan's
-`ScaleEnvelope` enforces this: a plan may not exceed `supported_max` without a
-validation-mode plan, and may never exceed `qualification_target` without
-user/product-owner approval.
+## Scale tiers
 
-| Tier | Status | Evidence |
-|---|---|---|
-| 1 node | early-spike evidence only; clean packaged final-architecture qualification owed | P00 S03; P04 battery |
-| 2 nodes | early-spike evidence only; final ownership/gateway/control negative matrix owed | P00 S01/S02/S03; P04 battery (2026-08-06) |
-| 4 nodes | qualification owed | no final-architecture gate yet |
-| 16 nodes | **feasibility smoke only** (0 err, 21.53 rps/node, 344 agg) — NOT a WP12 qualification: legacy path, `proxy_config: none`, no predeclared provenance (audit IMP-H08) | scaling-smoke n16 |
-| 64 nodes | **feasibility smoke only** (0 err, 21.47 rps/node flat vs 16n, 1374 agg) — NOT a WP12 qualification (audit IMP-H08); production-gateway + target-architecture qualification still owed | scaling-smoke n64 (job 8737093) |
-| 128 / 256 nodes | outside the current 64-node technical proposal; final release disposition pending explicit product-owner scope approval, with no current support claim | historical `findings/` data only |
+| Physical nodes | final42 status | Evidence / next requirement |
+|---:|---|---|
+| 1 | **QUALIFIED CANDIDATE** — null and real XPU plus proxy toggle pair | `final42-null-1n-20260809-a1`, `final42-real-1n-20260809-a1`, proxy on/off results |
+| 2 | **QUALIFIED CANDIDATE** — null fault matrix, real PP=2, supervisor faults | `final42-null-2n-20260809-a1`, `final42-real-2n-20260809-a1`, supervisor q2 result |
+| 4 | **NOT RUN FOR FINAL42** | owner authorization and a new predeclared gate are required |
+| 16 | **NOT QUALIFIED** | only after the approved envelope includes this tier |
+| 64 | **PROPOSED, UNAPPROVED, NOT QUALIFIED** | owner approval plus exact-candidate 4/16/64 ladder |
+| 128 / 256 | **NO SUPPORT CLAIM** | historical research context; explicit envelope expansion required |
 
-## Known scale constraints (architectural, not tuning)
+## Qualification semantics
 
-- Ray GCS / ServeController is single-threaded; measured O(N²) proxy/actor
-  handle traffic drives the `wait_proxies` cliff at ≥64n (KI-A3/A4). Mitigated
-  by compatibility-profile knobs (`RAY_gcs_server_num_threads`, health
-  thresholds) at the ≤64n envelope; a sharded control plane is out of scope
-  for this program and would be re-scoped (ADR-000).
-- Single head-node gateway is the ingress ceiling at large N; non-streaming
-  HAProxy measured healthy at 27.1k RPS/256n (corrected, KI-B1), streaming has
-  a distinct network-concentration limit + a rare unexplained process death
-  (KI-B2) — streaming stays unclaimed.
-- Static engine ports are best-effort (KI-A2); race-safe port ownership is the
-  WP7 target.
+One/two-node qualification proves:
 
-## Readiness semantics (ADR-002)
+- exact scheduler membership and authenticated per-rank sessions;
+- exact source-staging and compatibility receipt sets;
+- planned Ray resources, Serve applications/replicas, and engine instances;
+- owned HAProxy identity, native configuration, route canary, and toggle arms;
+- false-READY prevention for port collision and partial proxy state;
+- revocation and exact first-cause classification after owned process loss; and
+- bounded reverse-order cleanup with zero exact-generation survivors.
 
-The cutover target fails closed using immutable compiled plan/SiteProfile
-deadlines and the complete §3.2.1 predicate. Environment variables such as
-`EXASERVE_ALLOW_DEGRADED_GPUS`, `EXASERVE_ALLOW_DEGRADED_PROXIES`, and
-`EXASERVE_PROXY_READY_DEADLINE_S` are legacy migration controls, are not part of
-the supported contract, and must be removed at WP13; they cannot override final
-READY. Any future degraded mode must be a typed plan mode with explicit
-capabilities and support evidence. Serve app-RUNNING remains necessary but not
-sufficient (the early proof measured a 2.0s RUNNING→serving gap and roughly
-120s replica-death blindness at two nodes).
+The real two-node cell binds PP stages to two physical hosts. The supervisor
+campaign kills the attested Ray head child and worker supervisor without name
+matching and validates one FAILED terminal record for each.
 
-## Evidence classes for compatibility receipts (added 2026-08-06)
+## Residual constraints
 
-A receipt is not just "present" — it carries an evidence class, and the two are
-not interchangeable:
+- Ray's driver may emit GCS/task retry errors for up to its configured
+  120-second reconnect timeout after catastrophic head/worker loss. Cleanup is
+  bounded, but recovery is not advertised as instantaneous.
+- Optional Ray metrics-exporter availability is not a readiness input.
+- Historical controller-pressure, actor-handle, proxy-cliff, shared-filesystem,
+  and streaming-failure data remain reasons to require the unrun scale ladder.
+- The no-delay on/off pair is a correctness/confound-control gate, not a
+  throughput equivalence or large-scale performance claim.
 
-| Attestation | Who signs | Evidence | Used for |
-|---|---|---|---|
-| `self` | managed code in the target process/actor | required manifest entries proved by in-process semantic postconditions | supervisor and affected Serve actors/replicas/spawned engines |
-| `supervisor` | the owning supervisor, for one individually identified unmodified external daemon | executable/argv/prepared-environment hashes, process identity, version probe, and only manifest entries explicitly not targeted to that role | unmodified Ray or gateway daemons when the resolved profile requires no in-process patch there |
+## Revisit condition
 
-An owner cannot claim that an in-process patch took effect inside an unmodified
-daemon. If the resolved profile targets a patch or capability to that role,
-`not provable` cannot satisfy readiness: use a version/profile-specific semantic
-probe or make the combination unsupported. `NOT_REQUIRED` is valid only when
-the canonical manifest explicitly excludes that patch from the role. The
-readiness snapshot records each attestation type and exact receipt identity.
-
-**EN-01 closed (2026-08-06).** The vLLM `EngineCore` now self-reports: the
-generated `sitecustomize` shim writes a receipt from inside the engine process
-and the owning replica forwards it, so `engine` is a `self` attestation
-whenever the shim runs. Owner attestation is not a fallback for a required
-engine self-report; a missing engine receipt blocks readiness.
-
-The receipt describes what that process actually received. PP engines prove
-each required patch with in-process sentinels. Non-PP engines deliberately
-never receive the vLLM/PP patches: the compiler resolves the PP gate off, and
-the manifest makes those entries not required for that process. Their v2 result
-is `NOT_REQUIRED`, never `APPLIED`. A PP engine targeted by those entries but
-missing the import/postcondition reports `FAILED` and is rejected.
-
-A patch is only required where its gate requests it: `PatchSpec.env_gate`
-scopes the required set to what `EXASERVE_VLLM_PATCH_PP_LAYER_FILTER` (and
-future typed plan gates) resolve at compile time. Merely failing to import a
-target module does not make a targeted patch optional; it is `FAILED` unless the
-resolved manifest had already classified it `NOT_REQUIRED` for that role.
+First record an owner decision selecting the release ceiling. Then declare and
+execute the exact final42 scale cells authorized by that decision. Any later
+expansion—streaming, public exposure, another gateway/engine/vendor/scheduler,
+or 128/256 nodes—requires a new profile, evidence plan, and candidate review.

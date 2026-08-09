@@ -17,17 +17,15 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 
 def utc_timestamp() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def ensure_dir(path: str | Path) -> str:
-    path_str = os.path.abspath(os.fspath(path))
-    os.makedirs(path_str, exist_ok=True)
-    return path_str
+    from exaserve.state.atomic import ensure_owned_directory
+
+    return ensure_owned_directory(path)
 
 
 def slugify(value: Any) -> str:
@@ -42,10 +40,15 @@ def deep_copy(value: Any) -> Any:
 
 
 def dataclass_to_dict(value: Any) -> Any:
+    materializer = getattr(value, "to_materialization_dict", None)
+    if callable(materializer):
+        value = materializer()
     if is_dataclass(value):
         value = asdict(value)
     if isinstance(value, dict):
-        return {str(k): dataclass_to_dict(v) for k, v in value.items()}
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("serialized mappings must have string keys")
+        return {key: dataclass_to_dict(nested) for key, nested in value.items()}
     if isinstance(value, list):
         return [dataclass_to_dict(v) for v in value]
     if isinstance(value, tuple):
@@ -59,7 +62,9 @@ def canonical_data(value: Any) -> Any:
     if is_dataclass(value):
         value = asdict(value)
     if isinstance(value, dict):
-        return {str(k): canonical_data(value[k]) for k in sorted(value)}
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("canonical mappings must have string keys")
+        return {key: canonical_data(value[key]) for key in sorted(value)}
     if isinstance(value, list):
         return [canonical_data(v) for v in value]
     if isinstance(value, tuple):
@@ -70,16 +75,16 @@ def canonical_data(value: Any) -> Any:
 
 
 def stable_hash(value: Any, length: int = 12) -> str:
-    payload = json.dumps(canonical_data(value), sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        canonical_data(value), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:length]
 
 
 def load_yaml_file(path: str | Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict):
-        raise TypeError(f"Expected YAML mapping at {path}, got {type(data).__name__}")
-    return data
+    from exaserve.yaml_support import load_yaml_mapping
+
+    return load_yaml_mapping(path)
 
 
 def dump_yaml_file(path: str | Path, data: Any) -> None:
@@ -89,7 +94,7 @@ def dump_yaml_file(path: str | Path, data: Any) -> None:
 
     parent = os.path.dirname(os.path.abspath(os.fspath(path)))
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        ensure_dir(parent)
     atomic_write_yaml(path, dataclass_to_dict(data))
 
 
@@ -98,7 +103,7 @@ def dump_json_file(path: str | Path, data: Any) -> None:
 
     parent = os.path.dirname(os.path.abspath(os.fspath(path)))
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        ensure_dir(parent)
     atomic_write_json(path, dataclass_to_dict(data))
 
 
@@ -116,9 +121,15 @@ def resolve_path(raw_path: str | None, *, base_dir: str | None = None) -> str | 
 def dotted_get(data: Any, dotted_path: str) -> Any:
     current = data
     for part in dotted_path.split("."):
-        if not hasattr(current, part):
+        if part.isdigit() and isinstance(current, (list, tuple)):
+            index = int(part)
+            if index >= len(current):
+                raise KeyError(f"Unknown field path: {dotted_path}")
+            current = current[index]
+        elif hasattr(current, part):
+            current = getattr(current, part)
+        else:
             raise KeyError(f"Unknown field path: {dotted_path}")
-        current = getattr(current, part)
     return current
 
 
@@ -147,16 +158,49 @@ def format_template(template: str, values: dict[str, Any]) -> str:
 
 
 def result_is_complete(result_data: dict) -> tuple[bool, str]:
-    """PR-019: a result is complete iff its distributed gather collected every
-    expected rank shard. Results predating the meta.gather field are treated
-    as complete (unknown), so historical plots still load. Returns
-    (complete, reason)."""
-    gather = (result_data.get("meta") or {}).get("gather")
-    if not gather:
-        return True, "no gather metadata (legacy result)"
-    if gather.get("complete", True):
-        return True, "complete"
-    return False, (
-        f"incomplete gather: collected {gather.get('collected_ranks')}/"
-        f"{gather.get('expected_ranks')} ranks, missing {gather.get('missing_ranks')}"
-    )
+    """Validate exact per-repeat distributed result completeness.
+
+    Historical/count-only output is intentionally not upgraded to success.
+    Analysis of a production result must be bound to the same shard evidence
+    that made the run's ``ResultManifest`` complete.
+    """
+    if not isinstance(result_data, dict):
+        return False, "result is not an object"
+    meta = result_data.get("meta")
+    if not isinstance(meta, dict):
+        return False, "result lacks structured meta"
+    completed_runs = meta.get("completed_runs")
+    gathers = meta.get("gather_by_run")
+    per_run = result_data.get("per_run")
+    if (
+        isinstance(completed_runs, bool)
+        or not isinstance(completed_runs, int)
+        or completed_runs < 1
+    ):
+        return False, "meta.completed_runs must be a positive integer"
+    if not isinstance(gathers, list) or len(gathers) != completed_runs:
+        return False, "gather_by_run does not cover every completed run"
+    if not isinstance(per_run, list) or len(per_run) != completed_runs:
+        return False, "per_run does not cover every completed run"
+    for run_index, gather in enumerate(gathers):
+        if not isinstance(gather, dict) or gather.get("complete") is not True:
+            return False, f"run {run_index} gather is absent or incomplete"
+        expected = gather.get("expected_ranks")
+        collected = gather.get("collected_ranks")
+        missing = gather.get("missing_ranks")
+        shards = gather.get("shards")
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+            return False, f"run {run_index} expected_ranks is invalid"
+        exact_ranks = list(range(expected))
+        if collected != exact_ranks or missing != []:
+            return False, (
+                f"run {run_index} rank set is incomplete: "
+                f"collected={collected}, expected={exact_ranks}, missing={missing}"
+            )
+        if (
+            not isinstance(shards, list)
+            or len(shards) != expected
+            or sorted(item.get("rank") for item in shards if isinstance(item, dict)) != exact_ranks
+        ):
+            return False, f"run {run_index} shard evidence is incomplete"
+    return True, "complete"

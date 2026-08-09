@@ -20,6 +20,8 @@ Design constraints enforced here (normative, plan §3.1–§3.2):
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
@@ -28,6 +30,7 @@ SCHEMA_VERSION = 1
 
 # Bound every control message (plan §3.2 "strict maximum message size").
 MAX_MESSAGE_BYTES = 1 << 20  # 1 MiB
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ContractError(ValueError):
@@ -56,7 +59,7 @@ class EnvelopeKind(str, Enum):
     COMMAND = "COMMAND"
     COMMAND_RESULT = "COMMAND_RESULT"
     SNAPSHOT = "SNAPSHOT"
-    RECEIPT = "RECEIPT"          # one exact v2 compatibility receipt
+    RECEIPT = "RECEIPT"  # one exact v2 compatibility receipt
     HEARTBEAT = "HEARTBEAT"
     GOODBYE = "GOODBYE"
 
@@ -120,7 +123,11 @@ def validate_observation(data: dict[str, Any]) -> ComponentObservation:
 
     if not isinstance(data, dict):
         raise ContractError(RejectReason.MALFORMED.value)
-    if data.get("schema_version") != SCHEMA_VERSION:
+    if (
+        isinstance(data.get("schema_version"), bool)
+        or not isinstance(data.get("schema_version"), int)
+        or data.get("schema_version") != SCHEMA_VERSION
+    ):
         raise ContractError(RejectReason.UNKNOWN_SCHEMA.value)
     try:
         obs = ComponentObservation(**data)
@@ -129,23 +136,106 @@ def validate_observation(data: dict[str, Any]) -> ComponentObservation:
 
     try:
         scope = OwnerScope(obs.owner_scope)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ContractError(f"{RejectReason.MALFORMED.value}: owner_scope") from exc
     try:
         ComponentState(obs.state)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ContractError(f"{RejectReason.MALFORMED.value}: state") from exc
 
     # plan §3.1: schema rejects every other owner_scope/owner_rank combination
     if scope is OwnerScope.GLOBAL and obs.owner_rank is not None:
         raise ContractError(f"{RejectReason.MALFORMED.value}: GLOBAL owner_rank must be null")
     if scope is OwnerScope.RANK and (
-        not isinstance(obs.owner_rank, int) or obs.owner_rank < 0
+        isinstance(obs.owner_rank, bool)
+        or not isinstance(obs.owner_rank, int)
+        or obs.owner_rank < 0
     ):
         raise ContractError(f"{RejectReason.MALFORMED.value}: RANK needs owner_rank >= 0")
-    if obs.sequence < 0 or obs.generation < 0:
-        raise ContractError(f"{RejectReason.MALFORMED.value}: negative counter")
+    for name in (
+        "deployment_id",
+        "plan_hash",
+        "component_id",
+        "instance_id",
+        "role",
+        "node_id",
+    ):
+        if not isinstance(getattr(obs, name), str) or not getattr(obs, name):
+            raise ContractError(f"{RejectReason.MALFORMED.value}: {name}")
+    for name in ("sequence", "generation"):
+        value = getattr(obs, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ContractError(f"{RejectReason.MALFORMED.value}: {name}")
+    if (
+        isinstance(obs.observed_at, bool)
+        or not isinstance(obs.observed_at, (int, float))
+        or not math.isfinite(float(obs.observed_at))
+        or obs.observed_at < 0
+    ):
+        raise ContractError(f"{RejectReason.MALFORMED.value}: observed_at")
+    for name in ("model_id", "replica_id", "reason_code", "detail"):
+        value = getattr(obs, name)
+        if value is not None and not isinstance(value, str):
+            raise ContractError(f"{RejectReason.MALFORMED.value}: {name}")
+    if obs.compatibility_receipt_hash is not None and (
+        not isinstance(obs.compatibility_receipt_hash, str)
+        or not _SHA256_RE.fullmatch(obs.compatibility_receipt_hash)
+    ):
+        raise ContractError(f"{RejectReason.MALFORMED.value}: compatibility_receipt_hash")
     return obs
+
+
+def _validate_json_value(value: Any, path: str = "payload") -> None:
+    """Reject values that canonical JSON would coerce or serialize ambiguously."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ContractError(f"{RejectReason.MALFORMED.value}: {path} is non-finite")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ContractError(f"{RejectReason.MALFORMED.value}: {path} has a non-string key")
+            _validate_json_value(item, f"{path}.{key}")
+        return
+    raise ContractError(f"{RejectReason.MALFORMED.value}: {path} contains {type(value).__name__}")
+
+
+def _validate_envelope(env: Envelope) -> None:
+    if isinstance(env.v, bool) or not isinstance(env.v, int) or env.v != SCHEMA_VERSION:
+        raise ContractError(RejectReason.UNKNOWN_SCHEMA.value)
+    try:
+        EnvelopeKind(env.kind)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(RejectReason.UNKNOWN_KIND.value) from exc
+    for name in ("deployment_id", "plan_hash", "sender_node"):
+        if not isinstance(getattr(env, name), str) or not getattr(env, name):
+            raise ContractError(f"{RejectReason.MALFORMED.value}: {name}")
+    for name, minimum in (("generation", 0), ("sender_rank", -1), ("seq", 0)):
+        value = getattr(env, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ContractError(f"{RejectReason.MALFORMED.value}: {name}")
+    if not isinstance(env.payload, dict):
+        raise ContractError(f"{RejectReason.MALFORMED.value}: payload")
+    _validate_json_value(env.payload)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant {value}")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -168,7 +258,10 @@ class Envelope:
 
 def encode_envelope(env: Envelope) -> bytes:
     """Canonical JSON bytes (sorted keys, compact separators)."""
-    body = json.dumps(env.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+    _validate_envelope(env)
+    body = json.dumps(
+        env.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
     if len(body) > MAX_MESSAGE_BYTES:
         raise ContractError(RejectReason.OVERSIZED.value)
     return body
@@ -178,19 +271,18 @@ def decode_envelope(body: bytes) -> Envelope:
     if len(body) > MAX_MESSAGE_BYTES:
         raise ContractError(RejectReason.OVERSIZED.value)
     try:
-        data = json.loads(body.decode())
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        data = json.loads(
+            body.decode(),
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ContractError(RejectReason.MALFORMED.value) from exc
     if not isinstance(data, dict):
         raise ContractError(RejectReason.MALFORMED.value)
-    if data.get("v") != SCHEMA_VERSION:
-        raise ContractError(RejectReason.UNKNOWN_SCHEMA.value)
     try:
         env = Envelope(**data)
     except TypeError as exc:
         raise ContractError(f"{RejectReason.MALFORMED.value}: {exc}") from exc
-    try:
-        EnvelopeKind(env.kind)
-    except ValueError as exc:
-        raise ContractError(RejectReason.UNKNOWN_KIND.value) from exc
+    _validate_envelope(env)
     return env

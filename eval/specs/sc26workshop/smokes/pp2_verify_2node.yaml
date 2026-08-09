@@ -26,6 +26,7 @@ workload:
   rate_per_node: 5.0
   generation_mode: deterministic
 deployment:
+  validation_mode: true
   # Fresh stage path so both lease nodes start "missing" and bcast uniformly
   # (avoids the mixed-cache refusal from reusing a 1-node-warmed lease).
   local_stage_path: /tmp/hf_home_pp2verify
@@ -60,8 +61,8 @@ backend:
         num_workers: 1
         options:
           balance: leastconn
-          maxconn: 100000
+          maxconn: 8000
 scheduler:
   type: pbs
-  queue: debug
+  queue: capacity
   walltime: 01:00:00
