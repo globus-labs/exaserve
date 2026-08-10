@@ -29,6 +29,12 @@ from exaserve.state.status import (
 )
 
 
+def test_pytest_collection_excludes_operator_and_release_scratch_trees():
+    config = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'testpaths = ["tests", "eval/tests", "clientlab/tests"]' in config
+    assert 'norecursedirs = [".git", "artifacts", "build", "dist", "tmp"]' in config
+
+
 # ---------------- IMP-B05: model completion marker ---------------------------
 
 

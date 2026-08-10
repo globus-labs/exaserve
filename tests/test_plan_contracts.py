@@ -310,6 +310,14 @@ def test_a_declared_gateway_cannot_claim_direct_exposure():
         )
 
 
+def test_direct_construction_rechecks_gateway_and_envelope_dimensions():
+    plan = compile_deployment_plan(_raw(), site=_site(), deployment_id="d")
+    with pytest.raises(PlanError, match="without a gateway requires DIRECT_VALIDATION"):
+        replace(plan, gateway=None)
+    with pytest.raises(PlanError, match="deployment.site_id disagrees"):
+        replace(plan, scale_envelope=replace(plan.scale_envelope, site_id="other-site"))
+
+
 def test_a_non_first_release_gateway_needs_validation_mode():
     with pytest.raises(PlanError, match="not a first-release production"):
         compile_deployment_plan(

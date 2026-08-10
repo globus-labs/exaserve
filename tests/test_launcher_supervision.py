@@ -303,6 +303,25 @@ def test_component_exit_classification_and_cleanup_budget_have_one_owner():
     assert "root.shutdown(drain_s=plan.control.watchdog_cleanup_deadline_s)" in run_source
 
 
+def test_readiness_monitor_reason_code_reaches_the_supervisor_unchanged():
+    from types import SimpleNamespace
+
+    from exaserve.control.supervisor import FirstCause, RuntimeSupervisor
+
+    supervisor = RuntimeSupervisor()
+    root = SimpleNamespace(
+        head_channel=SimpleNamespace(poll=lambda: None),
+        monitor_readiness=lambda: FirstCause(
+            "gateway", "GATEWAY_FAILURE", "gateway process exited after READY"
+        ),
+        supervisor=supervisor,
+    )
+    assert launcher._deployment_done_or_failed(root)
+    assert supervisor.first_cause is not None
+    assert supervisor.first_cause.component_id == "gateway"
+    assert supervisor.first_cause.reason_code == "GATEWAY_FAILURE"
+
+
 def test_readiness_failure_is_a_typed_composition_error():
     """An unsatisfied predicate must abort, not serve unrecorded."""
     import inspect

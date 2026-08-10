@@ -1,4 +1,4 @@
-# Final audit — final42 production-hardening candidate
+# Final audit — final43 production-hardening candidate
 
 **Audit date:** 2026-08-09
 
@@ -40,15 +40,16 @@ not a return to a subprocess-driven control architecture.
 
 | Artifact | SHA-256 |
 |---|---|
-| wheel | `5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3` |
-| sdist | `af1f9d75a6a6168806ef128df55bbfb1f4f29db84e4594146c6f0fa35d64eb7b` |
-| artifact manifest | `0bc6f132a167bd5e0e8df2d6651b68217cee0d27a6359358bb5bec09a1d987e6` |
+| wheel | `1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2` |
+| sdist | `94d9b10a0f47603a3c847ec55cdd74f154d42b08bb9124fef1d730da4defcee6` |
+| artifact manifest | `0c8fcf3025fb3dff9b6ea4aa22c325ddef33bf5ddc06068379fee04456033cc8` |
+| candidate review | `763dfdf04e72ef6b42a35277d362c275e64dcd66b477457e87c5235045638c6d` |
 | site profile | `4814429547fd4397014819a0f8b5c6ec8f7d77c889eaf844d27935b39a0a6e26` |
 | compatibility profile | `c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3` |
 | compatibility manifest | `cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259` |
 
-The immutable release is `artifacts/hardening/release-20260809-final42`.
-`artifacts/hardening/final42-candidate-review.json` binds the exact artifact,
+The immutable release is `artifacts/hardening/release-20260809-final43`.
+`artifacts/hardening/final43-candidate-review.json` binds the exact artifact,
 package receipt/log hashes, campaign plan hashes, result and cleanup hashes,
 expected scenarios, and unresolved dispositions. The verifier also compares
 every installed bootstrap package member byte-for-byte with the wheel.
@@ -62,9 +63,11 @@ cause, malformed proxy metrics/workload identities, or cleanup survivors.
 
 ### Package and source
 
-- final working-tree source suite: **1216 passed**;
-- exact installed-wheel pytest: **1207 passed, 9 skipped**;
-- exact installed-wheel mypy: **no issues found**;
+- final working-tree source suite: **1224 passed**;
+- exact installed-wheel pytest: **1215 passed, 9 skipped**;
+- exact installed-wheel mypy over the typed contract core
+  (`plan/contracts.py`, `control/contracts.py`, `telemetry.py`, and
+  `state/results.py`, with imports skipped): **no issues found**;
 - Ruff formatting, lint, and security rules: pass;
 - Python compileall: pass;
 - Go formatting, vet, and tests: pass; and
@@ -72,30 +75,35 @@ cause, malformed proxy metrics/workload identities, or cleanup survivors.
 
 Evidence:
 
-- `artifacts/hardening/final42-final-source-gate-20260809-a3/pytest.log`;
-- `artifacts/hardening/final42-packaged-gate-20260809-a4/`;
-- `artifacts/hardening/final42-final-static-gate-20260809-a2/`; and
-- `artifacts/hardening/release-20260809-final42/artifact_manifest.json`.
+- `artifacts/hardening/final43-final-source-gate-20260809-a1/pytest.log`;
+- `artifacts/hardening/final43-packaged-gate-20260809-a1/`;
+- `artifacts/hardening/final43-final-static-gate-20260809-a1/`; and
+- `artifacts/hardening/release-20260809-final43/artifact_manifest.json`.
 
-The first packaged-gate attempt (`a1`) exposed a real qualification-harness
-bug: derived paths depended on the caller's current directory. That evidence is
-retained as failed/partial history. The harness was anchored to the repository,
-the supervisor campaign was re-predeclared with the new harness hash, and only
-the current passing `a4` package receipt and q2 supervisor result are
-adjudicated. The final replay includes the generic adjudicator's additional
-bootstrap, repository-bound manifest, and immutable cleanup-evidence tests.
+The final43 package gate ran from a clean installation of the exact wheel and
+its receipt is included in the candidate review. The final replay also includes
+the generic adjudicator's bootstrap, repository-bound manifest, and immutable
+cleanup-evidence checks.
 
 ### Aurora campaigns
 
+Every campaign below used `validation_mode=true`: the selected SiteProfile is
+not allowed to cross the production execution boundary until its limits are
+evidence-backed and the release envelope is approved. These were still
+HAProxy/`PROXIED_INTERNAL` runs over the same serving, readiness, receipt, fault,
+and cleanup code. Validation mode only permits a non-native explicit allocation
+identity and records `production_qualified=false` in gateway evidence; the
+positive production-qualification branch remains unexercised on hardware.
+
 | Nodes | Engine/topology | Gate | Result |
 |---:|---|---|---|
-| 1 | null | `FQ-FINAL42-1N-NULL-XPU-20260809` | PASS |
-| 1 | real vLLM/XPU TP=1/PP=1 | `FQ-FINAL42-1N-REAL-XPU-20260809` | PASS |
-| 2 | null, two planned replicas | `FQ-FINAL42-2N-NULL-XPU-20260809` | PASS |
-| 2 | real vLLM/XPU PP=2 across two hosts | `FQ-FINAL42-2N-REAL-XPU-20260809` | PASS |
-| 1 | real, HAProxy no-delay on | `FQ-FINAL42-PROXY-NODELAY-ON-1N-20260809` | PASS |
-| 1 | real, HAProxy no-delay off | `FQ-FINAL42-PROXY-NODELAY-OFF-1N-20260809` | PASS |
-| 2 | strict supervisor/watchdog faults | `FQ-FINAL42-SUPERVISOR-WATCHDOG-V3Q2-2N-20260809` | PASS |
+| 1 | null | `FQ-FINAL43-1N-NULL-XPU-20260809` | PASS |
+| 1 | real vLLM/XPU TP=1/PP=1 | `FQ-FINAL43-1N-REAL-XPU-20260809` | PASS |
+| 2 | null, two planned replicas | `FQ-FINAL43-2N-NULL-XPU-20260809` | PASS |
+| 2 | real vLLM/XPU PP=2 across two hosts | `FQ-FINAL43-2N-REAL-XPU-20260809` | PASS |
+| 1 | real, HAProxy no-delay on | `FQ-FINAL43-PROXY-NODELAY-ON-1N-20260809` | PASS |
+| 1 | real, HAProxy no-delay off | `FQ-FINAL43-PROXY-NODELAY-OFF-1N-20260809` | PASS |
+| 2 | strict supervisor/watchdog faults | `FQ-FINAL43-SUPERVISOR-WATCHDOG-V3Q2-2N-20260809` | PASS |
 
 The two-node null campaign proves normal drain, gateway death, authenticated
 worker-Ray loss, duplicate gateway-port fail-before-READY, and partial worker
@@ -117,7 +125,7 @@ reports with no matched processes, signals, or survivors.
 ## 4. Production bugs corrected in this final pass
 
 The last source audit found classes not covered by the earlier completion
-claim and fixed them before final42:
+claim and fixed them before final43:
 
 - readiness/control identities now reject booleans, coercion, unplanned routes,
   stale generations, conflicting duplicates, unissued command waits, and
@@ -132,7 +140,10 @@ claim and fixed them before final42:
 - explicit deployment IDs are byte-exact through observability contracts;
 - empty or malformed exception messages retain a deterministic first cause;
 - supervisor and deployment cleanup preserve primary and secondary failures;
-  and
+- persisted plans rederive gateway/exposure and exact compatibility-receipt
+  invariants on load rather than trusting compiler-only checks;
+- readiness-monitor failures preserve their typed first cause while owned
+  gateway death remains classified by the process supervisor; and
 - the candidate adjudicator now verifies the current candidate and strict
   supervisor evidence instead of silently remaining hardcoded to final35.
 
@@ -150,23 +161,23 @@ metrics contracts passed.
 
 Unproven dimensions are:
 
-1. any final42 run above two nodes;
+1. any final43 run above two nodes;
 2. the unapproved proposed 64-node release ceiling and its 4/16/64 ladder;
 3. native Slurm plus CUDA/ROCm;
 4. streaming, public exposure, and non-HAProxy production gateways; and
 5. SGLang under the selected Aurora profile.
 
 Historical 4/16/64/128/256-node runs and earlier candidates are regression
-context only and cannot qualify final42.
+context only and cannot qualify final43.
 
 ## 6. Ledger and release decision
 
-The canonical ledger contains **80 FIXED / 8 IN_PROGRESS / 1
+The canonical ledger contains **89 FIXED / 8 IN_PROGRESS / 1
 EXTERNAL_BLOCKER / 3 OUT_OF_PRODUCTION_SCOPE** records. There are no implicit
 waivers, self-approved limits, or unresolved locally actionable code findings
 within the qualified dimensions.
 
-Do not label final42 generally production-ready. It is the immutable,
+Do not label final43 generally production-ready. It is the immutable,
 technically qualified one/two-node candidate. A product owner must approve the
 release envelope, authorize the corresponding immutable scale campaign, and
 accept its receipts before a broader production release verdict can be issued.

@@ -38,6 +38,7 @@ from typing import Callable, Optional
 from .exception_notes import add_exception_note
 from .control.supervisor import (
     BoundedOutputCapture,
+    FirstCause,
     ManagedComponent,
     RuntimeSupervisor,
 )
@@ -1816,19 +1817,7 @@ class CompositionRoot:
             return False, f"no completion: {str(payload)[:120]}"
         return True, choices[0]["text"][:60]
 
-    def observe_gateway(self) -> None:
-        """Post-READY: a dead gateway is terminal, an unhealthy one revokes."""
-        if self.plan.gateway is None or self.readiness is None:
-            return
-        alive = self.gateway_alive()
-        if alive is False:
-            self._record_gateway_evidence(
-                health_ok=False, detail="gateway process exited after READY", failure=True
-            )
-            self.readiness.revoke("gateway process exited", gateway_dead=True)
-            self.fail("gateway process exited after READY")
-
-    def monitor_readiness(self) -> Optional[str]:
+    def monitor_readiness(self) -> Optional[FirstCause]:
         """Re-evaluate the live predicate and enforce post-READY recovery.
 
         Evidence expiry, replica/route loss, gateway health, and advertised-
@@ -1843,8 +1832,7 @@ class CompositionRoot:
             if observer_failure:
                 reason = f"deployment observation protocol failed: {observer_failure}"
                 self.readiness.fail(reason)
-                self.fail(reason)
-                return reason
+                return FirstCause("readiness", "DEPLOYMENT_OBSERVATION_FAILED", reason)
         now = time.monotonic()
         interval = float(self.plan.readiness.validation_interval_s)
         if now - self._last_live_validation < interval:
@@ -1857,8 +1845,7 @@ class CompositionRoot:
                 reason = "gateway process exited after READY"
                 self._record_gateway_evidence(health_ok=False, detail=reason, failure=True)
                 self.readiness.revoke(reason, gateway_dead=True)
-                self.fail(reason)
-                return reason
+                return FirstCause("gateway", "GATEWAY_FAILURE", reason)
             healthy = self.gateway_health_check(timeout_s=min(5.0, interval))
             self.readiness.set_gateway(alive=alive, healthy=healthy)
 
@@ -1914,8 +1901,7 @@ class CompositionRoot:
         if now - self._validation_loss_started >= recovery_s:
             terminal = f"readiness did not recover within {recovery_s:.1f}s: {reason}"
             self.readiness.fail(terminal)
-            self.fail(terminal)
-            return terminal
+            return FirstCause("readiness", "READINESS_RECOVERY_EXPIRED", terminal)
         return None
 
     def publish_ready(self, verdict) -> None:

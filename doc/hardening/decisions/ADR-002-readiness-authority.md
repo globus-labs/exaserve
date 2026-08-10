@@ -1,6 +1,6 @@
 # ADR-002: Readiness authority
 
-**Status:** SELECTED AND PROVEN FOR FINAL42 AT ONE AND TWO NODES (2026-08-09).
+**Status:** SELECTED AND PROVEN FOR FINAL43 AT ONE AND TWO NODES (2026-08-09).
 Scale qualification and the product envelope remain separate in ADR-000.
 
 ## Decision
@@ -33,25 +33,25 @@ policy rather than leaving a latched success.
   retention, deduplication, atomic publication, and revocation. Principal tests:
   `tests/test_plan_readiness.py`, `tests/test_readiness_coordinator.py`,
   `tests/test_serve_readiness.py`, and `tests/test_no_readiness_marker_consumers.py`.
-- Final42 one-node null and real-engine cells reach READY only after an HAProxy
+- Final43 one-node null and real-engine cells reach READY only after an HAProxy
   completion canary and exact receipt equality, then classify owned gateway
   death and exit nonzero.
-- Final42 two-node null deliberately withholds a worker proxy and proves the
+- Final43 two-node null deliberately withholds a worker proxy and proves the
   deployment never reaches READY. It also kills an owned worker after READY and
   preserves the typed first cause through cleanup.
-- Final42 two-node real PP=2 records the EngineCore and both stage-worker self
+- Final43 two-node real PP=2 records the EngineCore and both stage-worker self
   receipts from two physical hosts before the HAProxy canary can satisfy READY.
 
 Hardware evidence:
 
-- `artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json`;
-- `artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json`;
-- `artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json`;
-- `artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json`;
-- `artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json`.
+- `artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json`;
+- `artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json`;
+- `artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json`;
+- `artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json`;
+- `artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json`.
 
 All four name wheel
-`5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`.
+`1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2`.
 
 ## Dependency limitations retained from the feasibility ladder
 

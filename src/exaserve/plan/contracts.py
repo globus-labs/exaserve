@@ -474,6 +474,17 @@ class ScaleEnvelope:
                 kind.value for kind in GatewayKind
             }:
                 raise PlanError(f"scale_envelope.gateway_kind {self.gateway_kind!r} is invalid")
+        if self.gateway_kind is None:
+            if self.exposure_mode != ExposureMode.DIRECT_VALIDATION.value:
+                raise PlanError(
+                    "scale_envelope without a gateway requires DIRECT_VALIDATION exposure"
+                )
+            if not self.validation_mode:
+                raise PlanError("DIRECT_VALIDATION scale envelope requires validation_mode")
+        elif self.exposure_mode != ExposureMode.PROXIED_INTERNAL.value:
+            raise PlanError("managed gateway scale envelope requires PROXIED_INTERNAL exposure")
+        elif not self.validation_mode and self.gateway_kind != GatewayKind.HAPROXY.value:
+            raise PlanError("production scale envelope requires the HAProxy gateway")
         for name in (
             "min_nodes",
             "supported_max_nodes",
@@ -922,6 +933,111 @@ class RuntimePolicy:
             raise PlanError("runtime.stats_push_period_s must be finite and positive")
 
 
+def build_receipt_requirements(
+    *,
+    num_nodes: int,
+    models: tuple[ModelPlan, ...],
+    gateway: Optional[GatewayPlan],
+    include_engine_processes: bool = True,
+) -> tuple[ReceiptRequirement, ...]:
+    """Enumerate the exact evidence slots implied by a deployment contract.
+
+    This derivation belongs beside :class:`DeploymentPlan`, not only in the
+    one-way compiler. Persisted plans are loaded directly by the production
+    composition root, so their claimed receipt set must be re-derived and
+    compared before a self-consistent artifact hash is accepted.
+    """
+
+    requirements: list[ReceiptRequirement] = [
+        ReceiptRequirement(
+            receipt_requirement_id="global/supervisor",
+            role="supervisor",
+            component_slot="supervisor",
+            owner_scope="GLOBAL",
+        )
+    ]
+    if gateway is not None:
+        requirements.append(
+            ReceiptRequirement(
+                receipt_requirement_id=f"global/gateway/{gateway.kind}",
+                role="gateway",
+                component_slot=f"gateway/{gateway.kind}",
+                owner_scope="GLOBAL",
+                attestation_type="SUPERVISOR",
+            )
+        )
+    for rank in range(num_nodes):
+        role = "ray_head" if rank == 0 else "ray_worker"
+        requirements.extend(
+            (
+                ReceiptRequirement(
+                    receipt_requirement_id=f"rank{rank}/{role}",
+                    role=role,
+                    component_slot="ray",
+                    owner_scope="RANK",
+                    planned_rank=rank,
+                    placement=f"rank:{rank}",
+                ),
+                ReceiptRequirement(
+                    receipt_requirement_id=f"rank{rank}/node_supervisor",
+                    role="node_supervisor",
+                    component_slot="node_supervisor",
+                    owner_scope="RANK",
+                    planned_rank=rank,
+                    placement=f"rank:{rank}",
+                ),
+            )
+        )
+    for model in models:
+        for replica in model.replicas:
+            owner = replica.planned_ranks[0]
+            base = f"model/{model.route_name}/replica/{replica.replica_index}"
+            requirements.append(
+                ReceiptRequirement(
+                    receipt_requirement_id=base,
+                    role="replica",
+                    component_slot=replica.replica_id,
+                    owner_scope="RANK",
+                    planned_rank=owner,
+                    placement=f"rank:{owner}",
+                )
+            )
+            if not include_engine_processes:
+                continue
+            requirements.append(
+                ReceiptRequirement(
+                    receipt_requirement_id=f"{base}/engine/core",
+                    role="engine_core",
+                    component_slot=f"{replica.replica_id}/engine/core",
+                    owner_scope="RANK",
+                    planned_rank=owner,
+                    placement=f"rank:{owner}",
+                )
+            )
+            # A one-device/one-stage UniProcExecutor runs the model runner
+            # inside EngineCore. Larger topologies have one worker per device.
+            worker_count = sum(len(ids) for ids in replica.planned_device_ids)
+            if worker_count <= 1:
+                continue
+            for stage, worker_rank in enumerate(replica.planned_ranks):
+                for device_id in replica.planned_device_ids[stage]:
+                    requirements.append(
+                        ReceiptRequirement(
+                            receipt_requirement_id=(
+                                f"{base}/engine/worker/stage{stage}/device{device_id}"
+                            ),
+                            role="engine_worker",
+                            component_slot=(
+                                f"{replica.replica_id}/engine/worker/stage{stage}/device{device_id}"
+                            ),
+                            owner_scope="RANK",
+                            planned_rank=worker_rank,
+                            placement=f"rank:{worker_rank}/device:{device_id}",
+                        )
+                    )
+    return tuple(requirements)
+
+
 @dataclass(frozen=True)
 class DeploymentPlan:
     """WHAT is served and HOW. No allocation hostnames, no queue/account."""
@@ -978,6 +1094,8 @@ class DeploymentPlan:
             )
         object.__setattr__(self, "models", models)
         object.__setattr__(self, "receipt_requirements", requirements)
+        require_bool(self.collect_stats, "deployment.collect_stats")
+        require_bool(self.validation_mode, "deployment.validation_mode")
         for name in (
             "deployment_id",
             "site_profile_id",
@@ -1009,11 +1127,47 @@ class DeploymentPlan:
             raise PlanError("deployment.models must be non-empty")
         if len(self.receipt_requirements) != len(self.requirement_keys()):
             raise PlanError("deployment.receipt_requirements contains duplicate slots")
+        if self.gateway is None:
+            if self.exposure.mode != ExposureMode.DIRECT_VALIDATION.value:
+                raise PlanError("deployment without a gateway requires DIRECT_VALIDATION exposure")
+            if not self.validation_mode:
+                raise PlanError("DIRECT_VALIDATION deployment requires validation_mode")
+        elif self.exposure.mode != ExposureMode.PROXIED_INTERNAL.value:
+            raise PlanError("managed deployment gateway requires PROXIED_INTERNAL exposure")
+        elif not self.validation_mode and self.gateway.kind != GatewayKind.HAPROXY.value:
+            raise PlanError("production deployment requires the HAProxy gateway")
+
+        envelope_dimensions = {
+            "site_id": self.site_profile_id,
+            "vendor": self.vendor,
+            "engine": self.engine,
+            "compatibility_profile_ref": self.compatibility_profile_hash,
+            "gateway_kind": None if self.gateway is None else self.gateway.kind,
+            "exposure_mode": self.exposure.mode,
+        }
+        for name, expected in envelope_dimensions.items():
+            if getattr(self.scale_envelope, name) != expected:
+                raise PlanError(
+                    f"deployment.{name} disagrees with scale_envelope.{name}: "
+                    f"{expected!r} != {getattr(self.scale_envelope, name)!r}"
+                )
         self.scale_envelope.check_nodes(self.num_nodes)
         if self.scale_envelope.validation_mode != self.validation_mode:
             raise PlanError("deployment.validation_mode disagrees with scale envelope")
-        require_bool(self.collect_stats, "deployment.collect_stats")
-        require_bool(self.validation_mode, "deployment.validation_mode")
+        expected_requirements = build_receipt_requirements(
+            num_nodes=self.num_nodes,
+            models=self.models,
+            gateway=self.gateway,
+            include_engine_processes=not self.runtime.null_compute,
+        )
+        if self.receipt_requirements != expected_requirements:
+            expected_ids = {item.receipt_requirement_id for item in expected_requirements}
+            observed_ids = set(self.requirement_keys())
+            raise PlanError(
+                "deployment.receipt_requirements disagrees with derived runtime topology: "
+                f"missing={sorted(expected_ids - observed_ids)}, "
+                f"unexpected={sorted(observed_ids - expected_ids)}"
+            )
         for name in ("site_profile_hash", "compatibility_profile_hash", "manifest_hash"):
             require_sha256(getattr(self, name), f"deployment.{name}")
         require_sha256(

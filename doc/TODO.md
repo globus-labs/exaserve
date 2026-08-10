@@ -1,16 +1,16 @@
 # ExaServe backlog and research TODOs
 
-**Reconciled:** 2026-08-09 against final35.
+**Reconciled:** 2026-08-09 against final43.
 
 **Role:** non-normative backlog. The execution plan defines architecture and
 `hardening/FINDINGS.yaml` defines disposition; this file cannot waive a gate.
 
 ## Release-gating actions
 
-1. Product owner: authorize one additional four-node final35 attempt.
+1. Product owner: authorize one additional four-node final43 attempt.
 2. Product owner: approve the proposed 64-node first-release ceiling or select
    a different ceiling in ADR-000.
-3. After those decisions, predeclare and run only the matching final35 ladder.
+3. After those decisions, predeclare and run only the matching final43 ladder.
    A 64-node choice requires 4, 16, and 64 nodes with the same immutable wheel.
 4. Update ADR-000, the compatibility matrix, ledger, and release verdict from
    those exact receipts. Do not substitute legacy or earlier-candidate runs.
@@ -24,7 +24,7 @@ evidence rather than an unresolved two-node code defect:
 |---|---|
 | `PR-033` | Owner-approved envelope and exact-candidate qualification at its boundary. |
 | `KI-A1` | Only if Envoy/streaming/256 nodes enters scope: reproduce with owned failure evidence. |
-| `KI-A3` | Measure final35 Ray/GCS/controller behavior at the approved boundary. |
+| `KI-A3` | Measure final43 Ray/GCS/controller behavior at the approved boundary. |
 | `KI-A7` | Measure residual shared-environment imports at the approved scale. |
 | `KI-B2` | Only if streaming enters scope: capture the rare HAProxy death's real cause. |
 | `KI-D2` | Prove native distribution and every activation receipt at the approved boundary. |
@@ -62,12 +62,12 @@ claim.
 - Explore distributed/sharded ingress if an approved envelope exceeds the
   measured single-head HAProxy boundary.
 - Evaluate a sharded control-plane alternative only if the approved scale and
-  final35 measurements show Ray's upstream controller is the limiting factor.
+  final43 measurements show Ray's upstream controller is the limiting factor.
 - Update SC26 paper framing and figures separately from the release claims.
 
 ## Completed hardening items retained for context
 
-The following former TODOs are closed in final35 and should not be reopened by
+The following former TODOs are closed in final43 and should not be reopened by
 stale prose:
 
 - hermetic/package CI, typing, linting, security, and failure-path tests;

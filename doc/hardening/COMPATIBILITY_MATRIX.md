@@ -2,7 +2,7 @@
 
 **Status date:** 2026-08-09
 
-**Candidate:** final42
+**Candidate:** final43
 
 **Formal release state:** `TECHNICAL_PASS_SCOPE_PENDING`
 
@@ -15,7 +15,7 @@ a higher tier or a different dependency/profile dimension.
 
 | Component | Selected identity | Qualification note |
 |---|---|---|
-| ExaServe | 0.4.0 wheel SHA `5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3` | final42 immutable candidate |
+| ExaServe | 0.4.0 wheel SHA `1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2` | final43 immutable candidate |
 | Aurora frameworks | 2025.3.1 | qualification environment |
 | Python | 3.12.12 | packaged and hardware gates |
 | Ray | 2.53.0, commit `0de2118` | exact base hashes; generated overlay; installed files untouched |
@@ -55,11 +55,11 @@ satisfy production qualification.
 
 ## Scale tiers
 
-| Physical nodes | final42 status | Evidence / next requirement |
+| Physical nodes | final43 status | Evidence / next requirement |
 |---:|---|---|
-| 1 | **QUALIFIED CANDIDATE** — null and real XPU plus proxy toggle pair | `final42-null-1n-20260809-a1`, `final42-real-1n-20260809-a1`, proxy on/off results |
-| 2 | **QUALIFIED CANDIDATE** — null fault matrix, real PP=2, supervisor faults | `final42-null-2n-20260809-a1`, `final42-real-2n-20260809-a1`, supervisor q2 result |
-| 4 | **NOT RUN FOR FINAL42** | owner authorization and a new predeclared gate are required |
+| 1 | **QUALIFIED CANDIDATE** — null and real XPU plus proxy toggle pair | `final43-null-1n-20260809-a1`, `final43-real-1n-20260809-a1`, proxy on/off results |
+| 2 | **QUALIFIED CANDIDATE** — null fault matrix, real PP=2, supervisor faults | `final43-null-2n-20260809-a1`, `final43-real-2n-20260809-a1`, supervisor q2 result |
+| 4 | **NOT RUN FOR FINAL43** | owner authorization and a new predeclared gate are required |
 | 16 | **NOT QUALIFIED** | only after the approved envelope includes this tier |
 | 64 | **PROPOSED, UNAPPROVED, NOT QUALIFIED** | owner approval plus exact-candidate 4/16/64 ladder |
 | 128 / 256 | **NO SUPPORT CLAIM** | historical research context; explicit envelope expansion required |
@@ -94,6 +94,6 @@ matching and validates one FAILED terminal record for each.
 ## Revisit condition
 
 First record an owner decision selecting the release ceiling. Then declare and
-execute the exact final42 scale cells authorized by that decision. Any later
+execute the exact final43 scale cells authorized by that decision. Any later
 expansion—streaming, public exposure, another gateway/engine/vendor/scheduler,
 or 128/256 nodes—requires a new profile, evidence plan, and candidate review.

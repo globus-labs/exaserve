@@ -52,14 +52,19 @@ wheel supplies the Python control plane plus the source for its small native MPI
 broadcast helper. HAProxy must be available on `PATH`; the repository includes
 `scripts/build_haproxy.sh` as an operator setup helper.
 
-## Candidate quickstart
+## Candidate inspection and eventual submission
 
 > A candidate is not a production release until the status document names its
 > exact wheel and every required approval and qualification gate. Before that
 > point, normal production submission fails closed; only authorized,
 > predeclared work may set `validation_mode: true`.
 
-Copy the canonical HAProxy example and change the shared model path:
+The current default SiteProfile intentionally has no approved, evidence-backed
+production envelope, so submitting the canonical HAProxy example currently
+fails with `production execution is not qualified`. That is a release gate, not
+a setup error. After `doc/hardening/STATUS.md` records the required measurements
+and approval, copy the canonical HAProxy example and change the shared model
+path:
 
 ```bash
 cp examples/config.haproxy.yaml my_config.yaml
@@ -75,13 +80,14 @@ generation publishes canonical `READY`, its compiled advertised endpoint. It
 does not infer readiness from PBS `RUNNING`, a listening proxy, a log line, or a
 newest file.
 
-For one through sixteen nodes the topology policy defaults to Aurora's
-`capacity` queue and `01:00:00`; 17–255 maps to the candidate
-`debug-scaling` tier, and 256+ maps to `prod`. The current default SiteProfile
-rejects deployments above its candidate maximum, and production plans above the
-evidence-backed maximum require explicit validation mode. Queue and walltime can
-be overridden by CLI arguments or `EXASERVE_DEFAULT_QUEUE` /
-`EXASERVE_DEFAULT_WALLTIME` when an operator has a specific allocation policy.
+For plans admitted by the current SiteProfile, the topology policy defaults to
+Aurora's `capacity` queue and `01:00:00` through sixteen nodes and to
+`debug-scaling` from 17 through the 64-node candidate ceiling. Normal
+production plans above the evidence-backed two-node maximum are rejected; the
+default profile rejects every plan above 64 before scheduler rendering. Queue
+and walltime can be overridden by CLI arguments or
+`EXASERVE_DEFAULT_QUEUE` / `EXASERVE_DEFAULT_WALLTIME` only within an approved
+or explicitly authorized validation envelope.
 
 The submission protocol is idempotent. A durable `SUBMITTING` intent prevents a
 blind retry when scheduler acceptance is ambiguous; use `--new-generation`
@@ -90,7 +96,7 @@ only when deliberately creating a new deployment generation.
 Useful commands:
 
 ```bash
-# Render artifacts and the exact PBS job without submitting.
+# For an authorized validation or qualified production config, render without submitting.
 exaserve-serve-submit my_config.yaml --dry-run --log-dir ./submit-preview
 
 # Resolve an already submitted job; add --wait to poll canonical status.
@@ -157,8 +163,10 @@ launch.
 
 See [`examples/config.reference.yaml`](examples/config.reference.yaml) for the
 complete schema. [`examples/config.direct.yaml`](examples/config.direct.yaml)
-is explicitly `DIRECT_VALIDATION`; LiteLLM, NGINX, Envoy, and Pingora examples
-are qualification/benchmark inputs, not production exposure claims.
+is explicitly `DIRECT_VALIDATION`, and `config.litellm.yaml` is a
+validation-only alternate-gateway example. NGINX, Envoy, and Pingora adapters
+exist for future qualification/benchmark work, but no shipped example or
+production exposure claim currently advertises them.
 
 ## Readiness and compatibility
 

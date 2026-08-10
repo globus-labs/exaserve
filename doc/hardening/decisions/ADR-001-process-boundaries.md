@@ -1,6 +1,6 @@
 # ADR-001: Process boundaries, ownership, and control transport
 
-**Status:** SELECTED AND PROVEN FOR FINAL42 AT ONE AND TWO NODES (2026-08-09).
+**Status:** SELECTED AND PROVEN FOR FINAL43 AT ONE AND TWO NODES (2026-08-09).
 The four-node candidate run awaits explicit authorization; the product decision
 and larger scale ladder remain in ADR-000.
 
@@ -58,25 +58,26 @@ no readiness or lifecycle decision depends on log text.
 
 ## Acceptance evidence
 
-- The final42 clean installed-package gate ran outside the source tree:
-  **1207 passed, 9 skipped**, with mypy clean. Evidence:
-  `artifacts/hardening/final42-packaged-gate-20260809-a4/`.
-- The final42 two-node null gate proves real rank registration/START, exact
+- The final43 clean installed-package gate ran outside the source tree:
+  **1215 passed, 9 skipped**, with the four-module typed contract core mypy
+  clean and imports skipped. Evidence:
+  `artifacts/hardening/final43-packaged-gate-20260809-a1/`.
+- The final43 two-node null gate proves real rank registration/START, exact
   two-rank sessions/receipts, typed worker failure and nonzero global exit,
   duplicate-port fail-before-launch, partial-worker non-readiness, operator
   drain, gateway death, first-cause preservation, and bounded exact cleanup.
   Evidence:
-  `artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json`.
-- The final42 two-node real vLLM/XPU PP=2 gate proves the same ownership tree
+  `artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json`.
+- The final43 two-node real vLLM/XPU PP=2 gate proves the same ownership tree
   with an EngineCore and two workers across two physical hosts, a real canary,
   drain, gateway death, and cleanup. Evidence:
-  `artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json`.
+  `artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json`.
 - The strict supervisor gate kills the exact rank-zero Ray child and rank-one
   supervisor, preserves authenticated first cause, and proves zero survivors:
-  `artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json`.
+  `artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json`.
 
 All three artifacts name wheel
-`5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`;
+`1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2`;
 no historical candidate is reused as its qualification.
 
 ## Rejected alternatives

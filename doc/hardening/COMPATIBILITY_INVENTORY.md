@@ -76,14 +76,15 @@ The following are plan/site configuration rather than compatibility patches:
   `artifacts/hardening/compatibility-overlay-20260809-r5/result.json`
   (`64c1fdec…`), PASS for deployment, Ray head, replica, EngineCore, and
   engine worker, including a generic-worker-to-replica role transition.
-- Final42 package gate:
-  `artifacts/hardening/final42-packaged-gate-20260809-a4/`, **1207 passed, 9
-  skipped**, mypy clean, exact wheel
-  `5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`.
-- Final42 real pinned-stack hardware receipts:
-  `artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json`
+- Final43 package gate:
+  `artifacts/hardening/final43-packaged-gate-20260809-a1/`, **1215 passed, 9
+  skipped**, four-module typed contract core mypy clean with imports skipped,
+  exact wheel
+  `1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2`.
+- Final43 real pinned-stack hardware receipts:
+  `artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json`
   and
-  `artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json`.
+  `artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json`.
   The two-node PP=2 cell records one EngineCore and two engine workers across
   the two planned physical hosts.
 

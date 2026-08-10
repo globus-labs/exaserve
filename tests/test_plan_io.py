@@ -8,7 +8,12 @@ from dataclasses import asdict
 import pytest
 
 from exaserve.plan.compiler import compile_deployment_plan
-from exaserve.plan.contracts import PlanError, SiteProfile, build_allocation_binding
+from exaserve.plan.contracts import (
+    PlanError,
+    SiteProfile,
+    build_allocation_binding,
+    canonical_hash,
+)
 from exaserve.plan.io import (
     allocation_binding_from_dict,
     deployment_plan_from_dict,
@@ -70,8 +75,28 @@ def _plan():
     )
 
 
+def _proxied_plan():
+    return compile_deployment_plan(
+        {
+            "num_nodes": 1,
+            "num_gpus_per_node": 4,
+            "models": [{"model_id": "org/model", "max_model_len": 128, "size": 8}],
+            "gateway": {"kind": "haproxy", "port": 4001},
+        },
+        site=_site(),
+        deployment_id="proxied",
+    )
+
+
 def _json_artifact(value):
     return json.loads(json.dumps(asdict(value)))
+
+
+def _rehash_plan_payload(payload):
+    canonical = dict(payload)
+    canonical.pop("deployment_plan_hash", None)
+    payload["deployment_plan_hash"] = canonical_hash(canonical)
+    return payload
 
 
 def test_plan_artifact_round_trips_with_the_same_identity(tmp_path):
@@ -288,6 +313,23 @@ def test_plan_artifact_recomputes_the_hash_after_rehydration():
     payload["models"][0]["max_model_len"] += 1
     with pytest.raises(PlanError, match="hash mismatch"):
         deployment_plan_from_dict(payload)
+
+
+def test_rehashed_plan_cannot_bypass_gateway_exposure_contract():
+    payload = _json_artifact(_proxied_plan())
+    payload["gateway"] = None
+    _rehash_plan_payload(payload)
+    with pytest.raises(PlanError, match="without a gateway requires DIRECT_VALIDATION"):
+        deployment_plan_from_dict(payload)
+
+
+def test_rehashed_plan_cannot_weaken_the_exact_receipt_set():
+    payload = _json_artifact(_plan())
+    removed = payload["receipt_requirements"].pop()
+    _rehash_plan_payload(payload)
+    with pytest.raises(PlanError, match="receipt_requirements disagrees.*missing") as caught:
+        deployment_plan_from_dict(payload)
+    assert removed["receipt_requirement_id"] in str(caught.value)
 
 
 @pytest.mark.parametrize(

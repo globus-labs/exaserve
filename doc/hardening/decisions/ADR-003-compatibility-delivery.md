@@ -1,6 +1,6 @@
 # ADR-003: Compatibility delivery across process lifecycles
 
-**Status:** SELECTED AND PROVEN FOR FINAL42 AT ONE AND TWO NODES (2026-08-09).
+**Status:** SELECTED AND PROVEN FOR FINAL43 AT ONE AND TWO NODES (2026-08-09).
 The exact candidate's four-node attempt awaits explicit authorization; scale
 qualification and the ADR-000 envelope decision remain separate gates.
 
@@ -52,8 +52,8 @@ an actor `runtime_env` after spawning a generic worker interpreter.
 Those identities are feasibility evidence and are superseded by any later
 source change; final qualification records the frozen candidate identities.
 
-Final42 freezes the selected mechanism in wheel
-`5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`
+Final43 freezes the selected mechanism in wheel
+`1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2`
 with compatibility profile
 `c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3`,
 compatibility manifest
@@ -61,11 +61,11 @@ compatibility manifest
 and site profile
 `4814429547fd4397014819a0f8b5c6ec8f7d77c889eaf844d27935b39a0a6e26`.
 The clean installed-package gate is
-`artifacts/hardening/final42-packaged-gate-20260809-a4/`. Real vLLM/XPU
+`artifacts/hardening/final43-packaged-gate-20260809-a1/`. Real vLLM/XPU
 qualification passed at one node in
-`artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json`
+`artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json`
 and at two nodes/PP=2 in
-`artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json`.
+`artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json`.
 The latter contains one EngineCore receipt and two engine-worker receipts from
 the two planned physical hosts. These receipts, not the earlier feasibility
 hashes, are the release-candidate proof.

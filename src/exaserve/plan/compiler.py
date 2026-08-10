@@ -27,7 +27,6 @@ from .contracts import (
     ModelPlan,
     PlanError,
     ReadinessLimits,
-    ReceiptRequirement,
     ReplicaPlan,
     RuntimePolicy,
     RunPlan,
@@ -36,6 +35,7 @@ from .contracts import (
     SiteProfile,
     TracePolicy,
     WorkloadPolicy,
+    build_receipt_requirements,
     deep_freeze,
 )
 
@@ -848,106 +848,6 @@ def _select_envelope(
             f"{compatibility_profile_ref!r}"
         )
     return candidate
-
-
-def build_receipt_requirements(
-    *,
-    num_nodes: int,
-    models: tuple[ModelPlan, ...],
-    gateway: Optional[GatewayPlan],
-    include_engine_processes: bool = True,
-) -> tuple[ReceiptRequirement, ...]:
-    """Enumerate exact slots for processes/actors that actually exist."""
-    requirements: list[ReceiptRequirement] = [
-        ReceiptRequirement(
-            receipt_requirement_id="global/supervisor",
-            role="supervisor",
-            component_slot="supervisor",
-            owner_scope="GLOBAL",
-        )
-    ]
-    if gateway is not None:
-        requirements.append(
-            ReceiptRequirement(
-                receipt_requirement_id=f"global/gateway/{gateway.kind}",
-                role="gateway",
-                component_slot=f"gateway/{gateway.kind}",
-                owner_scope="GLOBAL",
-                attestation_type="SUPERVISOR",
-            )
-        )
-    for rank in range(num_nodes):
-        role = "ray_head" if rank == 0 else "ray_worker"
-        requirements.extend(
-            (
-                ReceiptRequirement(
-                    receipt_requirement_id=f"rank{rank}/{role}",
-                    role=role,
-                    component_slot="ray",
-                    owner_scope="RANK",
-                    planned_rank=rank,
-                    placement=f"rank:{rank}",
-                ),
-                ReceiptRequirement(
-                    receipt_requirement_id=f"rank{rank}/node_supervisor",
-                    role="node_supervisor",
-                    component_slot="node_supervisor",
-                    owner_scope="RANK",
-                    planned_rank=rank,
-                    placement=f"rank:{rank}",
-                ),
-            )
-        )
-    for model in models:
-        for replica in model.replicas:
-            owner = replica.planned_ranks[0]
-            base = f"model/{model.route_name}/replica/{replica.replica_index}"
-            requirements.append(
-                ReceiptRequirement(
-                    receipt_requirement_id=base,
-                    role="replica",
-                    component_slot=replica.replica_id,
-                    owner_scope="RANK",
-                    planned_rank=owner,
-                    placement=f"rank:{owner}",
-                )
-            )
-            if include_engine_processes:
-                requirements.append(
-                    ReceiptRequirement(
-                        receipt_requirement_id=f"{base}/engine/core",
-                        role="engine_core",
-                        component_slot=f"{replica.replica_id}/engine/core",
-                        owner_scope="RANK",
-                        planned_rank=owner,
-                        placement=f"rank:{owner}",
-                    )
-                )
-                # vLLM's one-device/one-stage UniProcExecutor runs its model
-                # runner inside EngineCore, so there is no second process to
-                # attest.  Every larger topology has one GPU worker process or
-                # Ray actor per planned device and therefore gets an exact
-                # worker slot.
-                worker_count = sum(len(ids) for ids in replica.planned_device_ids)
-                if worker_count > 1:
-                    for stage, worker_rank in enumerate(replica.planned_ranks):
-                        for device_id in replica.planned_device_ids[stage]:
-                            requirements.append(
-                                ReceiptRequirement(
-                                    receipt_requirement_id=(
-                                        f"{base}/engine/worker/stage{stage}/device{device_id}"
-                                    ),
-                                    role="engine_worker",
-                                    component_slot=(
-                                        f"{replica.replica_id}/engine/worker/"
-                                        f"stage{stage}/device{device_id}"
-                                    ),
-                                    owner_scope="RANK",
-                                    planned_rank=worker_rank,
-                                    placement=f"rank:{worker_rank}/device:{device_id}",
-                                )
-                            )
-    return tuple(requirements)
 
 
 def _normalize_input(

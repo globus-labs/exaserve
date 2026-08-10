@@ -815,13 +815,20 @@ def test_a_dead_gateway_after_ready_is_terminal(tmp_path):
         if root.gateway_alive() is False:
             break
         time.sleep(0.1)
-    root.observe_gateway()
+    from exaserve.launcher import _deployment_done_or_failed
+
+    root.head_channel = SimpleNamespace(poll=lambda: None)
+    assert _deployment_done_or_failed(root)
     assert root.readiness.phase == "FAILED"
-    assert root.first_cause and "gateway" in root.first_cause
+    assert root.supervisor.first_cause is not None
+    assert root.supervisor.first_cause.component_id == "gateway"
+    assert root.supervisor.first_cause.reason_code == "GATEWAY_FAILURE"
+    assert "gateway process exited" in root.supervisor.first_cause.detail
     evidence = json.loads((tmp_path / "gateway_failure.json").read_text())
     assert evidence["classification"] == "process_dead"
     assert evidence["exit_code"] == 0
     assert evidence["signal"] is None
+    root.head_channel = None
     root.shutdown(drain_s=5)
 
 

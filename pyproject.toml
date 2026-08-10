@@ -77,6 +77,10 @@ namespaces = true
 # by default; the WP11 randomized CI job re-enables ordering explicitly with
 # `-o addopts=""` and records the printed pytest-randomly seed.
 addopts = "-p no:randomly"
+testpaths = ["tests", "eval/tests", "clientlab/tests"]
+# The installed-wheel gate passes the repository root explicitly, so testpaths
+# alone cannot prevent recursion into an operator-created nested checkout.
+norecursedirs = [".git", "artifacts", "build", "dist", "tmp"]
 
 [tool.ruff]
 # Lint the first-party surfaces. The generated compatibility bootstrap is

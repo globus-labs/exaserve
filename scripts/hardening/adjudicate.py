@@ -24,7 +24,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 LEDGER = ROOT / "doc/hardening/FINDINGS.yaml"
-DEFAULT_REVIEW = ROOT / "artifacts/hardening/final42-candidate-review.json"
 
 CANONICAL_FIELDS = (
     "id",

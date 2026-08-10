@@ -172,6 +172,26 @@ def _validate_runtime_scheduler(plan, site_profile) -> None:
         )
 
 
+def _deployment_done_or_failed(root) -> bool:
+    """Classify typed non-process failures for the supervisor loop."""
+
+    channel_failure = root.head_channel.poll()
+    if channel_failure:
+        root.supervisor.record_cause("control", "CONTROL_FAILURE", channel_failure)
+        return True
+    readiness_failure = root.monitor_readiness()
+    if readiness_failure is not None:
+        root.supervisor.record_cause(
+            readiness_failure.component_id,
+            readiness_failure.reason_code,
+            readiness_failure.detail,
+            readiness_failure.exit_code,
+        )
+        return True
+    # Process termination is owned and classified by RuntimeSupervisor.poll_once().
+    return False
+
+
 def _prepare_scheduler_environment() -> str:
     """Perform the former shell adapter's allocation preflight in Python."""
     explicit = os.environ.get("EXASERVE_SCHEDULER", "").strip().lower()
@@ -360,28 +380,7 @@ def run(config_path: str) -> int:
         # exercised even on a PROXIED_INTERNAL plan.
         _drive_readiness(root, prepared_gateway_argv=prepared_gateway_argv)
 
-        def deployment_done_or_failed() -> bool:
-            channel_failure = root.head_channel.poll()
-            if channel_failure:
-                root.supervisor.record_cause("control", "CONTROL_FAILURE", channel_failure)
-                return True
-            readiness_failure = root.monitor_readiness()
-            if readiness_failure:
-                root.supervisor.record_cause(
-                    "readiness", "READINESS_RECOVERY_EXPIRED", readiness_failure
-                )
-                return True
-            if root.first_cause is not None:
-                root.supervisor.record_cause("gateway", "GATEWAY_FAILURE", root.first_cause)
-                return True
-            # Component termination is owned by RuntimeSupervisor.poll_once().
-            # Raw-polling here created a boundary race: the predicate could
-            # observe rank_launcher exit after poll_once() but before the next
-            # loop, return success, and enter shutdown without publishing the
-            # fatal component cause. Let the next supervisor poll classify it.
-            return False
-
-        cause = root.supervisor.supervise(until=deployment_done_or_failed)
+        cause = root.supervisor.supervise(until=lambda: _deployment_done_or_failed(root))
         # ``until`` is allowed to stop supervision normally, so the generic
         # supervisor returns ``None`` when its predicate becomes true.  This
         # launcher's predicate, however, becomes true only after recording a

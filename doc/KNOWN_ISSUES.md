@@ -1,12 +1,12 @@
 # Known issues and empirical failure log
 
-**Reconciled:** 2026-08-09 against final35.
+**Reconciled:** 2026-08-09 against final43.
 
 **Role:** historical/empirical evidence. `hardening/FINDINGS.yaml` is the
 authoritative disposition ledger; this file cannot close or waive a release
 gate.
 
-The final35 candidate is qualified at one and two Aurora nodes. Historical
+The final43 candidate is qualified at one and two Aurora nodes. Historical
 128/256-node observations below remain useful diagnostic evidence, but they do
 not qualify the new architecture or establish a support envelope.
 
@@ -17,7 +17,7 @@ not qualify the new architecture or establish a support envelope.
 Three historical Envoy streaming attempts reported zero request success after
 an EngineCore port collision, unhealthy replicas, a Serve controller failure,
 a false-ready marker, and later connection refusal. Envoy itself had initially
-been healthy. Final35 fixes port ownership, false readiness, process ownership,
+been healthy. Final43 fixes port ownership, false readiness, process ownership,
 and failure evidence for the qualified HAProxy path, but Envoy/streaming/256
 nodes is not an approved release dimension and has not been reproduced with the
 new control plane. Ledger: `KI-A1`, `IN_PROGRESS`.
@@ -27,14 +27,14 @@ new control plane. Ledger: `KI-A1`, `IN_PROGRESS`.
 Historical 256-node runs showed roughly quadratic proxy/actor-handle work and a
 single-controller bottleneck. ExaServe's final readiness processing is indexed,
 bounded, and does not fleet-poll, but it cannot remove or claim to solve
-upstream Ray behavior. Measure the exact final35 candidate at the approved
+upstream Ray behavior. Measure the exact final43 candidate at the approved
 boundary tier before setting a larger supported maximum. Refs:
 `findings/gcs_contention_quantitative.md` and
 `findings/proxyactor_death_cascade_256n.md`. Ledger: `KI-A3`, `IN_PROGRESS`.
 
 ### A7 / D2. Residual source-import and MPI activation cost — scale proof missing
 
-Final35 transactionally inventories and stages one source tree, generated
+Final43 transactionally inventories and stages one source tree, generated
 overlay, and bootstrap, then requires a receipt from every planned rank. The
 two-node gates prove both ranks activated identical bytes. Residual imports
 from the shared environment and native broadcast behavior still need
@@ -48,16 +48,16 @@ packet/retransmission storm (up to about 6.75 million retransmits and about
 195,000 established connections). A rarer run ended in total HAProxy death and
 connection refusal; its causal signal was not captured. Do not conflate the
 common degraded network regime with the rare process death. Streaming is not a
-final35 production claim. Refs:
+final43 production claim. Refs:
 `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md`. Ledger: `KI-B2`,
 `IN_PROGRESS`.
 
-## Resolved mechanisms in final35
+## Resolved mechanisms in final43
 
 ### A2. Static port races — resolved
 
 Ports are generation-owned through descriptor/lease contracts. An address
-collision fails before the component counts toward readiness. The final35
+collision fails before the component counts toward readiness. The final43
 two-node null gate deliberately holds the HAProxy port and proves
 fail-before-launch behavior.
 
@@ -88,7 +88,7 @@ shutdown path. Dead per-replica file-writing behavior is not reachable.
 The historical corrected result is about 27.1k requests/s at 256 nodes with
 about 0.04% errors and an explicitly bounded client topology. It replaced the
 confounded result in which one client per node hammered a single proxy. This is
-regression context, not final35 scale qualification and not evidence about
+regression context, not final43 scale qualification and not evidence about
 streaming. Refs: `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md` and
 `findings/weakscaling_short_v3_progress.md`.
 
@@ -144,13 +144,13 @@ activation/receipt semantics.
 ### D4. Pipeline-parallel topology/private API — resolved for selected profile
 
 PP topology is a plan capability with explicit node-pinned stage ownership.
-Final35 proves one real PP=2 replica across two physical hosts and exact
+Final43 proves one real PP=2 replica across two physical hosts and exact
 EngineCore/worker receipts. Unsupported multi-replica/non-shard combinations
 fail plan capability checks rather than proceeding with ambiguous placement.
 
 ## Current release blockers
 
-- one additional four-node final35 attempt needs explicit authorization and a
+- one additional four-node final43 attempt needs explicit authorization and a
   predeclared candidate-bound gate;
 - ADR-000's proposed 64-node ceiling needs a product-owner decision; and
 - if 64 is selected, exact-candidate 4/16/64 qualification remains required.

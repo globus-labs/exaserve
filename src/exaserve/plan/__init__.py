@@ -4,7 +4,7 @@ All objects come from :mod:`exaserve.plan.contracts`; all interpretation comes
 from :mod:`exaserve.plan.compiler`. There is no secondary schema namespace.
 """
 
-from .compiler import build_receipt_requirements, compile_deployment_plan, compile_run_plan  # noqa: F401
+from .compiler import compile_deployment_plan, compile_run_plan  # noqa: F401
 from .contracts import (  # noqa: F401
     SCHEMA_VERSION,
     AllocationBinding,
@@ -33,6 +33,7 @@ from .contracts import (  # noqa: F401
     TracePolicy,
     WorkloadPolicy,
     build_allocation_binding,
+    build_receipt_requirements,
     canonical_hash,
 )
 

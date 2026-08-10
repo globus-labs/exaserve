@@ -3,11 +3,11 @@ meta:
   baseline_revision: 005891e
   baseline_doc: doc/hardening/BASELINE.md
   adjudicated: '2026-08-09'
-  candidate: final42
-  wheel_sha256: 5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3
+  candidate: final43
+  wheel_sha256: 1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2
   scope_state: TECHNICAL_PASS_SCOPE_PENDING
-  review_manifest: artifacts/hardening/final42-candidate-review.json
-  review_manifest_sha256: ebee0b769aab49b400048a3a8e237cfe391ae37e833bb6784fe332e015947229
+  review_manifest: artifacts/hardening/final43-candidate-review.json
+  review_manifest_sha256: 763dfdf04e72ef6b42a35277d362c275e64dcd66b477457e87c5235045638c6d
 findings:
 - id: PR-001
   source: audit
@@ -21,7 +21,7 @@ findings:
   acceptance_tests:
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Fatal child/driver errors produce nonzero scheduler-visible
+  decision: 'Verified on the final43 production path: Fatal child/driver errors produce nonzero scheduler-visible
     exit'
   evidence:
   - tests/test_supervisor.py
@@ -31,12 +31,12 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -50,19 +50,19 @@ findings:
   acceptance_tests:
   - AC-COMP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Ray resources and vendor env derive from validated
+  decision: 'Verified on the final43 production path: Ray resources and vendor env derive from validated
     config, never hardcoded'
   evidence:
   - tests/test_generated_overlay.py
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -78,7 +78,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Source config is immutable; runtime state lives
+  decision: 'Verified on the final43 production path: Source config is immutable; runtime state lives
     in run-scoped artifacts'
   evidence:
   - tests/test_plan_contracts.py
@@ -87,9 +87,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -103,18 +103,18 @@ findings:
   acceptance_tests:
   - AC-DIST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Native staging failures cannot report success; no
+  decision: 'Verified on the final43 production path: Native staging failures cannot report success; no
     shell-string construction'
   evidence:
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -128,18 +128,18 @@ findings:
   acceptance_tests:
   - AC-DIST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Model cache completeness is manifest-based and staging
+  decision: 'Verified on the final43 production path: Model cache completeness is manifest-based and staging
     is transactional'
   evidence:
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -153,7 +153,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Config coercion is strict; unknown keys and invalid
+  decision: 'Verified on the final43 production path: Config coercion is strict; unknown keys and invalid
     values are rejected'
   evidence:
   - tests/test_plan_contracts.py
@@ -162,9 +162,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -179,7 +179,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Derived model identities (storage/route) are collision-checked'
+  decision: 'Verified on the final43 production path: Derived model identities (storage/route) are collision-checked'
   evidence:
   - tests/test_plan_contracts.py
   - tests/test_plan_io.py
@@ -187,9 +187,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -205,24 +205,24 @@ findings:
   - AC-RDY-01
   - AC-RDY-02
   status: FIXED
-  decision: 'Verified on the final42 production path: Readiness is fail-closed, deadline-bounded, and
+  decision: 'Verified on the final43 production path: Readiness is fail-closed, deadline-bounded, and
     predicate-based'
   evidence:
   - tests/test_plan_readiness.py
   - tests/test_readiness_coordinator.py
   - tests/test_serve_readiness.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   - tests/test_control_channel.py
   - tests/test_control_channel_wiring.py
   - tests/test_session_protocol.py
   - tests/test_status_store.py
   - tests/test_bounded_collectors.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -237,7 +237,7 @@ findings:
   acceptance_tests:
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Every essential child is supervised for the deployment
+  decision: 'Verified on the final43 production path: Every essential child is supervised for the deployment
     lifetime'
   evidence:
   - tests/test_supervisor.py
@@ -247,12 +247,12 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -269,7 +269,7 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Exposure model is explicit; admin surfaces are not
+  decision: 'Verified on the final43 production path: Exposure model is explicit; admin surfaces are not
     open by default'
   evidence:
   - tests/test_proxy_qualification_harness.py
@@ -277,15 +277,15 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -299,7 +299,7 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Request validation returns typed 4xx; model field
+  decision: 'Verified on the final43 production path: Request validation returns typed 4xx; model field
     honored or rejected'
   evidence:
   - tests/test_observability.py
@@ -307,9 +307,9 @@ findings:
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -324,7 +324,7 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Ports are owned (bind-to-zero/lease); advertised
+  decision: 'Verified on the final43 production path: Ports are owned (bind-to-zero/lease); advertised
     URLs are verified bound URLs'
   evidence:
   - tests/test_proxy_qualification_harness.py
@@ -332,15 +332,15 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -354,7 +354,7 @@ findings:
   acceptance_tests:
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Submission is idempotent with durable job identity
+  decision: 'Verified on the final43 production path: Submission is idempotent with durable job identity
     and atomic leases'
   evidence:
   - tests/test_supervisor.py
@@ -364,12 +364,12 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -383,7 +383,7 @@ findings:
   acceptance_tests:
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Scheduler observation failures fail closed and are
+  decision: 'Verified on the final43 production path: Scheduler observation failures fail closed and are
     distinguishable'
   evidence:
   - tests/test_supervisor.py
@@ -393,12 +393,12 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -412,7 +412,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Job scripts render with validated, quoted fields;
+  decision: 'Verified on the final43 production path: Job scripts render with validated, quoted fields;
     no directive injection'
   evidence:
   - tests/test_plan_contracts.py
@@ -421,9 +421,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -437,7 +437,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Spec expressions are AST-restricted, never eval()'
+  decision: 'Verified on the final43 production path: Spec expressions are AST-restricted, never eval()'
   evidence:
   - tests/test_plan_contracts.py
   - tests/test_plan_io.py
@@ -445,9 +445,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -462,7 +462,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Trace identity covers every content-affecting input;
+  decision: 'Verified on the final43 production path: Trace identity covers every content-affecting input;
     writes atomic'
   evidence:
   - tests/test_plan_contracts.py
@@ -471,9 +471,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -488,7 +488,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Run-group IDs allocate atomically; structured writes
+  decision: 'Verified on the final43 production path: Run-group IDs allocate atomically; structured writes
     are atomic'
   evidence:
   - tests/test_plan_contracts.py
@@ -497,9 +497,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -514,7 +514,7 @@ findings:
   acceptance_tests:
   - AC-STAT-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Partial distributed results cannot be reported successful;
+  decision: 'Verified on the final43 production path: Partial distributed results cannot be reported successful;
     numeric result ordering'
   evidence:
   - tests/test_result_manifest.py
@@ -522,11 +522,11 @@ findings:
   - tests/test_status_store.py
   - eval/tests/test_manifest_contract.py
   - eval/tests/test_process_supervision.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -541,7 +541,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Every dispatch arm and the full resource plan validate
+  decision: 'Verified on the final43 production path: Every dispatch arm and the full resource plan validate
     before submission'
   evidence:
   - tests/test_plan_contracts.py
@@ -550,9 +550,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -567,7 +567,7 @@ findings:
   acceptance_tests:
   - AC-STAT-01
   status: FIXED
-  decision: 'Verified on the final42 production path: One typed stats schema; missing required stats fail
+  decision: 'Verified on the final43 production path: One typed stats schema; missing required stats fail
     the run'
   evidence:
   - tests/test_result_manifest.py
@@ -575,11 +575,11 @@ findings:
   - tests/test_status_store.py
   - eval/tests/test_manifest_contract.py
   - eval/tests/test_process_supervision.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -593,19 +593,19 @@ findings:
   acceptance_tests:
   - AC-COMP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Every public engine setting reaches the backend
+  decision: 'Verified on the final43 production path: Every public engine setting reaches the backend
     (typed mapping test)'
   evidence:
   - tests/test_generated_overlay.py
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -619,19 +619,19 @@ findings:
   acceptance_tests:
   - AC-RDY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Declared models are required by default; placement
+  decision: 'Verified on the final43 production path: Declared models are required by default; placement
     shortfall fails deployment'
   evidence:
   - tests/test_plan_readiness.py
   - tests/test_readiness_coordinator.py
   - tests/test_serve_readiness.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -646,7 +646,7 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Proxy configs are validated (native validator) with
+  decision: 'Verified on the final43 production path: Proxy configs are validated (native validator) with
     strict inputs'
   evidence:
   - tests/test_proxy_qualification_harness.py
@@ -654,15 +654,15 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -677,22 +677,22 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Benchmark-only gateways are marked and capability-gated'
+  decision: 'Verified on the final43 production path: Benchmark-only gateways are marked and capability-gated'
   evidence:
   - tests/test_proxy_qualification_harness.py
   - tests/test_gateway_evidence.py
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -709,19 +709,19 @@ findings:
   acceptance_tests:
   - AC-COMP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Private-API use is capability-checked behind one
+  decision: 'Verified on the final43 production path: Private-API use is capability-checked behind one
     verified compatibility profile'
   evidence:
   - tests/test_generated_overlay.py
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -737,7 +737,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: One scheduler abstraction; documented default is
+  decision: 'Verified on the final43 production path: One scheduler abstraction; documented default is
     installed and consistent'
   evidence:
   - tests/test_plan_contracts.py
@@ -746,9 +746,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -763,7 +763,7 @@ findings:
   acceptance_tests:
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: SIGTERM/SIGINT drain gracefully with bounded forced
+  decision: 'Verified on the final43 production path: SIGTERM/SIGINT drain gracefully with bounded forced
     cleanup'
   evidence:
   - tests/test_supervisor.py
@@ -773,12 +773,12 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -793,17 +793,17 @@ findings:
   acceptance_tests:
   - AC-TEL-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Telemetry actors are deployment-scoped with cleanup
+  decision: 'Verified on the final43 production path: Telemetry actors are deployment-scoped with cleanup
     and bounded load'
   evidence:
   - tests/test_telemetry_contract.py
   - tests/test_bounded_collectors.py
   - tests/test_composition_root.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -818,7 +818,7 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: ClientLab applies schema defaults before analysis;
+  decision: 'Verified on the final43 production path: ClientLab applies schema defaults before analysis;
     no os.system SSH'
   evidence:
   - tests/test_observability.py
@@ -826,9 +826,9 @@ findings:
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -844,19 +844,19 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Hermetic, release-gating test suite + CI'
+  decision: 'Verified on the final43 production path: Hermetic, release-gating test suite + CI'
   evidence:
   - .github/workflows/ci.yml
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -871,7 +871,7 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: One ExaServe-owned operational metrics/ID-propagation
+  decision: 'Verified on the final43 production path: One ExaServe-owned operational metrics/ID-propagation
     contract'
   evidence:
   - tests/test_observability.py
@@ -879,9 +879,9 @@ findings:
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -900,11 +900,11 @@ findings:
   evidence:
   - doc/hardening/decisions/ADR-000-production-envelope.md
   - doc/hardening/COMPATIBILITY_MATRIX.md
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -921,7 +921,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Snapshot provenance is explicit; dirty-tree runs
+  decision: 'Verified on the final43 production path: Snapshot provenance is explicit; dirty-tree runs
     need acknowledgement'
   evidence:
   - tests/test_plan_contracts.py
@@ -930,9 +930,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -948,7 +948,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: All structured result/metadata writes are atomic'
+  decision: 'Verified on the final43 production path: All structured result/metadata writes are atomic'
   evidence:
   - tests/test_plan_contracts.py
   - tests/test_plan_io.py
@@ -956,9 +956,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -979,12 +979,12 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -1001,7 +1001,7 @@ findings:
   acceptance_tests:
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: No static port races (owned ports/leases)'
+  decision: 'Verified on the final43 production path: No static port races (owned ports/leases)'
   evidence:
   - tests/test_supervisor.py
   - tests/test_composition_root.py
@@ -1010,12 +1010,12 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1033,11 +1033,11 @@ findings:
   evidence:
   - doc/hardening/decisions/ADR-000-production-envelope.md
   - doc/hardening/COMPATIBILITY_MATRIX.md
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -1054,7 +1054,7 @@ findings:
   acceptance_tests:
   - AC-RDY-02
   status: FIXED
-  decision: 'Verified on the final42 production path: wait_proxies cliff handled by readiness design (no
+  decision: 'Verified on the final43 production path: wait_proxies cliff handled by readiness design (no
     fleet polling)'
   evidence:
   - tests/test_control_channel.py
@@ -1065,12 +1065,12 @@ findings:
   - tests/test_readiness_coordinator.py
   - tests/test_serve_readiness.py
   - tests/test_bounded_collectors.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1084,19 +1084,19 @@ findings:
   acceptance_tests:
   - AC-COMP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: RAYON/tokenizer guards are profile capabilities,
+  decision: 'Verified on the final43 production path: RAYON/tokenizer guards are profile capabilities,
     not ambient shell defaults'
   evidence:
   - tests/test_generated_overlay.py
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1110,17 +1110,17 @@ findings:
   acceptance_tests:
   - AC-TEL-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Scaling-trace collectors bounded/owned (superseded-A6
+  decision: 'Verified on the final43 production path: Scaling-trace collectors bounded/owned (superseded-A6
     debt)'
   evidence:
   - tests/test_telemetry_contract.py
   - tests/test_bounded_collectors.py
   - tests/test_composition_root.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1139,9 +1139,9 @@ findings:
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -1158,7 +1158,7 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Corrected 27.1k non-stream HAProxy result preserved
+  decision: 'Verified on the final43 production path: Corrected 27.1k non-stream HAProxy result preserved
     as regression evidence'
   evidence:
   - tests/test_proxy_qualification_harness.py
@@ -1166,15 +1166,15 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1195,12 +1195,12 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -1217,16 +1217,16 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Fake streaming never enters real-streaming comparisons'
+  decision: 'Verified on the final43 production path: Fake streaming never enters real-streaming comparisons'
   evidence:
   - tests/test_observability.py
   - tests/test_request_validation.py
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1240,7 +1240,7 @@ findings:
   acceptance_tests:
   - AC-STAT-01
   status: FIXED
-  decision: 'Verified on the final42 production path: collect_stats produces typed output or fails the
+  decision: 'Verified on the final43 production path: collect_stats produces typed output or fails the
     run (with PR-021)'
   evidence:
   - tests/test_result_manifest.py
@@ -1248,11 +1248,11 @@ findings:
   - tests/test_status_store.py
   - eval/tests/test_manifest_contract.py
   - eval/tests/test_process_supervision.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1266,7 +1266,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Snapshot provenance explicit (with PR-034)'
+  decision: 'Verified on the final43 production path: Snapshot provenance explicit (with PR-034)'
   evidence:
   - tests/test_plan_contracts.py
   - tests/test_plan_io.py
@@ -1274,9 +1274,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1290,18 +1290,18 @@ findings:
   acceptance_tests:
   - AC-DIST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Trailing-byte tolerance kept until atomic writes
+  decision: 'Verified on the final43 production path: Trailing-byte tolerance kept until atomic writes
     land; then re-evaluated'
   evidence:
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1315,7 +1315,7 @@ findings:
   acceptance_tests:
   - AC-STAT-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Shard-based gather retained; silent partials become
+  decision: 'Verified on the final43 production path: Shard-based gather retained; silent partials become
     failures (with PR-019)'
   evidence:
   - tests/test_result_manifest.py
@@ -1323,11 +1323,11 @@ findings:
   - tests/test_status_store.py
   - eval/tests/test_manifest_contract.py
   - eval/tests/test_process_supervision.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1341,7 +1341,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: client.num_nodes topology explicit in plans; footgun
+  decision: 'Verified on the final43 production path: client.num_nodes topology explicit in plans; footgun
     rejected by validation'
   evidence:
   - tests/test_plan_contracts.py
@@ -1350,9 +1350,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1366,7 +1366,7 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: TTFT/TBT attainment separated in analysis (interpretation
+  decision: 'Verified on the final43 production path: TTFT/TBT attainment separated in analysis (interpretation
     note)'
   evidence:
   - tests/test_observability.py
@@ -1374,9 +1374,9 @@ findings:
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1390,19 +1390,19 @@ findings:
   acceptance_tests:
   - AC-RDY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Readiness false-positive class eliminated (with
+  decision: 'Verified on the final43 production path: Readiness false-positive class eliminated (with
     PR-008)'
   evidence:
   - tests/test_plan_readiness.py
   - tests/test_readiness_coordinator.py
   - tests/test_serve_readiness.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1421,9 +1421,9 @@ findings:
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -1440,16 +1440,16 @@ findings:
   acceptance_tests:
   - AC-INST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Legacy proxy-profiling hook absent or unreachable
+  decision: 'Verified on the final43 production path: Legacy proxy-profiling hook absent or unreachable
     (docs say disabled; verify)'
   evidence:
   - tests/test_audit_regressions.py
   - tests/test_generated_overlay.py
   - tests/test_no_readiness_marker_consumers.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1463,16 +1463,16 @@ findings:
   acceptance_tests:
   - AC-PP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: PP constraints expressed as capabilities (with AC-PP-01)'
+  decision: 'Verified on the final43 production path: PP constraints expressed as capabilities (with AC-PP-01)'
   evidence:
   - tests/test_pp_staging.py
   - tests/test_plan_contracts.py
   - tests/test_vllm_support.py
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1486,22 +1486,22 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Historical record only (resolved http-no-delay confound)'
+  decision: 'Verified on the final43 production path: Historical record only (resolved http-no-delay confound)'
   evidence:
   - tests/test_proxy_qualification_harness.py
   - tests/test_gateway_evidence.py
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1515,19 +1515,19 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Release-gating suite/CI (same as PR-031)'
+  decision: 'Verified on the final43 production path: Release-gating suite/CI (same as PR-031)'
   evidence:
   - .github/workflows/ci.yml
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1541,7 +1541,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Null-compute token counting uses real tokenization
+  decision: 'Verified on the final43 production path: Null-compute token counting uses real tokenization
     or is labeled'
   evidence:
   - tests/test_plan_contracts.py
@@ -1550,9 +1550,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1566,22 +1566,22 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Port allocation robust (same as PR-012/KI-A2)'
+  decision: 'Verified on the final43 production path: Port allocation robust (same as PR-012/KI-A2)'
   evidence:
   - tests/test_proxy_qualification_harness.py
   - tests/test_gateway_evidence.py
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1600,10 +1600,10 @@ findings:
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Use the production implementation without this optional feature.
-  residual_risk: None for the declared final42 path; the optional feature is unqualified.
+  residual_risk: None for the declared final43 path; the optional feature is unqualified.
   support_impact: The optional capability is not advertised or supported.
   owner: codex
   approval: null
@@ -1619,22 +1619,22 @@ findings:
   - AC-COMP-01
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Chat-template fallback is loud and capability-gated'
+  decision: 'Verified on the final43 production path: Chat-template fallback is loud and capability-gated'
   evidence:
   - tests/test_generated_overlay.py
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   - tests/test_observability.py
   - tests/test_request_validation.py
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1648,16 +1648,16 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Request-ID propagation (same as PR-032/AC-OBS-01)'
+  decision: 'Verified on the final43 production path: Request-ID propagation (same as PR-032/AC-OBS-01)'
   evidence:
   - tests/test_observability.py
   - tests/test_request_validation.py
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1671,16 +1671,16 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: /metrics operational endpoint'
+  decision: 'Verified on the final43 production path: /metrics operational endpoint'
   evidence:
   - tests/test_observability.py
   - tests/test_request_validation.py
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1696,7 +1696,7 @@ findings:
   decision: Proxy-layer request caching is optional and is not an advertised production capability.
   evidence: []
   fallback: Use the production implementation without this optional feature.
-  residual_risk: None for the declared final42 path; the optional feature is unqualified.
+  residual_risk: None for the declared final43 path; the optional feature is unqualified.
   support_impact: The optional capability is not advertised or supported.
   owner: codex
   approval: null
@@ -1711,7 +1711,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Site constants centralized in SiteProfile'
+  decision: 'Verified on the final43 production path: Site constants centralized in SiteProfile'
   evidence:
   - tests/test_plan_contracts.py
   - tests/test_plan_io.py
@@ -1719,9 +1719,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1735,19 +1735,19 @@ findings:
   acceptance_tests:
   - AC-COMP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Compatibility patching versioned/verified (same
+  decision: 'Verified on the final43 production path: Compatibility patching versioned/verified (same
     as PR-026)'
   evidence:
   - tests/test_generated_overlay.py
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1761,16 +1761,16 @@ findings:
   acceptance_tests:
   - AC-PP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Multi-replica PP as explicit capability (AC-PP-01)'
+  decision: 'Verified on the final43 production path: Multi-replica PP as explicit capability (AC-PP-01)'
   evidence:
   - tests/test_pp_staging.py
   - tests/test_plan_contracts.py
   - tests/test_vllm_support.py
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1789,9 +1789,9 @@ findings:
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -1808,15 +1808,15 @@ findings:
   acceptance_tests:
   - AC-INST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Legacy proxy-profiling decision (KI-D3/AC-INST-01)'
+  decision: 'Verified on the final43 production path: Legacy proxy-profiling decision (KI-D3/AC-INST-01)'
   evidence:
   - tests/test_audit_regressions.py
   - tests/test_generated_overlay.py
   - tests/test_no_readiness_marker_consumers.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1830,18 +1830,18 @@ findings:
   acceptance_tests:
   - AC-COMP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: SGLang path smoke-validated or gated'
+  decision: 'Verified on the final43 production path: SGLang path smoke-validated or gated'
   evidence:
   - tests/test_generated_overlay.py
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1861,8 +1861,8 @@ findings:
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Reject the offsite scheduler/vendor combination from this release profile.
   residual_risk: Portable interfaces are tested, but native offsite behavior is unproven.
   support_impact: Slurm with CUDA or ROCm is not a supported production profile.
@@ -1879,7 +1879,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: PSI/J declared as dependency-when-selected; head_node
+  decision: 'Verified on the final43 production path: PSI/J declared as dependency-when-selected; head_node
     gaps closed'
   evidence:
   - tests/test_plan_contracts.py
@@ -1888,9 +1888,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1904,19 +1904,19 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Reference-card/docx regen prerequisites documented'
+  decision: 'Verified on the final43 production path: Reference-card/docx regen prerequisites documented'
   evidence:
   - .github/workflows/ci.yml
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1932,7 +1932,7 @@ findings:
   decision: The C++ client is a paper-only experiment and not the production replay client.
   evidence: []
   fallback: Use the production implementation without this optional feature.
-  residual_risk: None for the declared final42 path; the optional feature is unqualified.
+  residual_risk: None for the declared final43 path; the optional feature is unqualified.
   support_impact: The optional capability is not advertised or supported.
   owner: codex
   approval: null
@@ -1947,20 +1947,20 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"unit tests are hermetic (no live HF across forkserver
+  decision: 'Verified on the final43 production path: \"unit tests are hermetic (no live HF across forkserver
     workers)\"'
   evidence:
   - .github/workflows/ci.yml
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -1974,19 +1974,19 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"child processes inherit the source-layout contract\"'
+  decision: 'Verified on the final43 production path: \"child processes inherit the source-layout contract\"'
   evidence:
   - .github/workflows/ci.yml
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2000,16 +2000,16 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"ClientLab analysis applies schema defaults\"'
+  decision: 'Verified on the final43 production path: \"ClientLab analysis applies schema defaults\"'
   evidence:
   - tests/test_observability.py
   - tests/test_request_validation.py
   - clientlab/tests/test_runtime_smoke.py
   - clientlab/tests/test_spec_and_analysis.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2023,7 +2023,7 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"HAProxy health-check tests match the intended
+  decision: 'Verified on the final43 production path: \"HAProxy health-check tests match the intended
     /-/healthz design\"'
   evidence:
   - tests/test_proxy_qualification_harness.py
@@ -2031,15 +2031,15 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2053,7 +2053,7 @@ findings:
   acceptance_tests:
   - AC-PROXY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"HAProxy multi-model health-check tests match the
+  decision: 'Verified on the final43 production path: \"HAProxy multi-model health-check tests match the
     intended design\"'
   evidence:
   - tests/test_proxy_qualification_harness.py
@@ -2061,15 +2061,15 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2083,7 +2083,7 @@ findings:
   acceptance_tests:
   - AC-PLAN-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"submit tests pin both the PSI/J default and the
+  decision: 'Verified on the final43 production path: \"submit tests pin both the PSI/J default and the
     PBS renderer\"'
   evidence:
   - tests/test_plan_contracts.py
@@ -2092,9 +2092,9 @@ findings:
   - eval/tests/test_shared_plan_identity.py
   - eval/tests/test_eval_control_plane.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2108,19 +2108,19 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"no test depends on an undeclared host executable\"'
+  decision: 'Verified on the final43 production path: \"no test depends on an undeclared host executable\"'
   evidence:
   - .github/workflows/ci.yml
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2134,19 +2134,19 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: \"every test subtree is independently collectible\"'
+  decision: 'Verified on the final43 production path: \"every test subtree is independently collectible\"'
   evidence:
   - .github/workflows/ci.yml
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2165,7 +2165,7 @@ findings:
   acceptance_tests:
   - AC-CTL-01
   status: FIXED
-  decision: 'Verified on the final42 production path: A rank becomes established only after its authenticated
+  decision: 'Verified on the final43 production path: A rank becomes established only after its authenticated
     complete snapshot, exact supervisor receipt, and matching SNAPSHOT_ACCEPTED command/result round trip;
     START waits for every rank'
   evidence:
@@ -2173,12 +2173,12 @@ findings:
   - tests/test_control_channel_wiring.py
   - tests/test_session_protocol.py
   - tests/test_status_store.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2199,7 +2199,7 @@ findings:
   - AC-CTL-01
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Established rank sessions heartbeat, reconnect through
+  decision: 'Verified on the final43 production path: Established rank sessions heartbeat, reconnect through
     a bounded replacement snapshot, distinguish expected GOODBYE, and clean local children after global-supervisor
     lease loss without exposing the channel secret'
   evidence:
@@ -2207,8 +2207,8 @@ findings:
   - tests/test_control_channel_wiring.py
   - tests/test_session_protocol.py
   - tests/test_status_store.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   - tests/test_supervisor.py
   - tests/test_composition_root.py
   - tests/test_rank_topology.py
@@ -2216,9 +2216,9 @@ findings:
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2237,7 +2237,7 @@ findings:
   - AC-PROXY-01
   - AC-RDY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: A PROXIED_INTERNAL plan renders and validates a
+  decision: 'Verified on the final43 production path: A PROXIED_INTERNAL plan renders and validates a
     generation-bound HAProxy configuration, starts the globally owned process, and proves real health
     and advertised-endpoint canaries before READY'
   evidence:
@@ -2246,20 +2246,20 @@ findings:
   - tests/test_haproxy_proxy.py
   - tests/test_exposure_model.py
   - tests/test_port_ownership.py
-  - artifacts/hardening/final42-proxy-experiment-plan.json
-  - artifacts/hardening/final42-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-experiment-plan.json
+  - artifacts/hardening/final43-proxy-nodelay-on-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-proxy-nodelay-off-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   - tests/test_plan_readiness.py
   - tests/test_readiness_coordinator.py
   - tests/test_serve_readiness.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2279,7 +2279,7 @@ findings:
   - AC-SUP-01
   - AC-DIST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: One outer RuntimeSupervisor owns staging, distribution,
+  decision: 'Verified on the final43 production path: One outer RuntimeSupervisor owns staging, distribution,
     phased Ray startup, DeploymentManager, gateway, readiness, collection, and bounded cleanup; Bash and
     rank zero own no deployment lifecycle'
   evidence:
@@ -2290,16 +2290,16 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   - tests/test_model_staging.py
   - tests/test_source_staging.py
   - tests/test_pp_staging.py
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2316,7 +2316,7 @@ findings:
   acceptance_tests:
   - AC-COMP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Exact compatibility receipt equality covers every
+  decision: 'Verified on the final43 production path: Exact compatibility receipt equality covers every
     required current supervisor, daemon, Serve actor, replica, and spawned engine instance with complete
     plan/profile/manifest/binding identity'
   evidence:
@@ -2324,12 +2324,12 @@ findings:
   - tests/test_compat_activation.py
   - tests/test_receipt_chain.py
   - doc/hardening/decisions/ADR-003-compatibility-delivery.md
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2360,11 +2360,11 @@ findings:
   - eval/tests/test_eval_control_plane.py
   - doc/hardening/decisions/ADR-000-production-envelope.md
   - doc/hardening/COMPATIBILITY_MATRIX.md
-  - artifacts/hardening/final42-null-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-1n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
-  fallback: Reject the unqualified scale or combination; support only the exact final42 dimensions demonstrated
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Reject the unqualified scale or combination; support only the exact final43 dimensions demonstrated
     at one and two Aurora nodes.
   residual_risk: Behavior at an unapproved or unmeasured scale remains unknown.
   support_impact: No support claim above two Aurora nodes or for the named unqualified dimension.
@@ -2390,7 +2390,7 @@ findings:
   - AC-PLAN-01
   - AC-RDY-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Eval and ClientLab consume the same immutable DeploymentPlan
+  decision: 'Verified on the final43 production path: Eval and ClientLab consume the same immutable DeploymentPlan
     and generation-bound DeploymentStatus API, with no mutable parallel RunPlan, raw endpoint path, newest-file
     search, or stdout readiness fallback'
   evidence:
@@ -2402,13 +2402,13 @@ findings:
   - tests/test_plan_readiness.py
   - tests/test_readiness_coordinator.py
   - tests/test_serve_readiness.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2429,25 +2429,25 @@ findings:
   - AC-RDY-01
   - AC-RDY-02
   status: FIXED
-  decision: 'Verified on the final42 production path: READY is a continuously evaluated generation-bound
+  decision: 'Verified on the final43 production path: READY is a continuously evaluated generation-bound
     projection over exact resources, components, replicas, engines, routes, receipts, gateway/direct endpoint,
     canaries, and freshness, with fail-closed status publication'
   evidence:
   - tests/test_plan_readiness.py
   - tests/test_readiness_coordinator.py
   - tests/test_serve_readiness.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-real-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
   - tests/test_control_channel.py
   - tests/test_control_channel_wiring.py
   - tests/test_session_protocol.py
   - tests/test_status_store.py
   - tests/test_bounded_collectors.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2465,7 +2465,7 @@ findings:
   acceptance_tests:
   - AC-SUP-01
   status: FIXED
-  decision: 'Verified on the final42 production path: Component startup is transactional and reverse cleanup
+  decision: 'Verified on the final43 production path: Component startup is transactional and reverse cleanup
     uses one absolute deadline; residual process groups are a typed failure and STOPPED is published only
     after verified reaping'
   evidence:
@@ -2476,12 +2476,12 @@ findings:
   - tests/test_finite_process.py
   - tests/test_process_ownership.py
   - tests/test_engine_shutdown.py
-  - artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
-  - artifacts/hardening/final42-null-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-null-2n-20260809-a1/qualification/result.json
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
@@ -2499,7 +2499,7 @@ findings:
   acceptance_tests:
   - AC-TST-01
   status: FIXED
-  decision: 'Verified on the final42 production path: The findings ledger fails closed on an empty or
+  decision: 'Verified on the final43 production path: The findings ledger fails closed on an empty or
     non-exact record set, invalid disposition/approval, invented acceptance ID, and missing or nonexistent
     closure evidence'
   evidence:
@@ -2507,13 +2507,231 @@ findings:
   - tests/test_packaging.py
   - tests/test_findings_validator.py
   - tests/test_adjudicator_evidence.py
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/receipt.json
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/pytest.log
-  - artifacts/hardening/final42-packaged-gate-20260809-a4/mypy.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/receipt.json
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final42 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
+  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
     dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final42 dimensions.
+  support_impact: No remaining defect within the exact qualified final43 dimensions.
   owner: codex
   approval: null
   revisit_condition: Implementation, pinned profile, or declared support dimensions change.
+- id: CA-01
+  source: 2026-08-09 Claude independent audit
+  severity: medium-high
+  invariant: Final source and static receipts cover the exact tree named by the completion claim
+  primary_work_package: WP11
+  affected_regions:
+  - doc/hardening/STATUS.md
+  - doc/hardening/FINAL_AUDIT.md
+  - artifacts/hardening/final43-candidate-review.json
+  acceptance_tests:
+  - AC-TST-01
+  status: FIXED
+  decision: Source changes required a new immutable candidate; final43 was rebuilt, fully replayed on Aurora,
+    and followed by fresh source and static gates over the completed review tree.
+  evidence:
+  - artifacts/hardening/final43-candidate-review.json
+  - artifacts/hardening/final43-final-source-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-final-static-gate-20260809-a1/receipt.txt
+  fallback: Reject receipts produced before the last relevant tree change and create a new candidate identity.
+  residual_risk: A later source, test, gate, or validator edit invalidates these final receipts and reopens this finding.
+  support_impact: No stale receipt remains in the final43 completion claim.
+  owner: codex
+  approval: null
+  revisit_condition: Any release-relevant tree byte changes after either final43 gate.
+- id: CA-02
+  source: 2026-08-09 Claude independent audit
+  severity: medium
+  invariant: Current status, Known Issues, TODO, audit, and README text identify the exact candidate and implemented interfaces
+  primary_work_package: WP13
+  affected_regions:
+  - README.md
+  - doc/KNOWN_ISSUES.md
+  - doc/TODO.md
+  - doc/hardening/STATUS.md
+  - doc/hardening/FINAL_AUDIT.md
+  acceptance_tests:
+  - AC-TST-01
+  status: FIXED
+  decision: Candidate references were reconciled to final43, validation-mode qualification is disclosed, and the README examples now match the implemented commands, limits, and shipped gateway configuration.
+  evidence:
+  - README.md
+  - doc/KNOWN_ISSUES.md
+  - doc/TODO.md
+  - doc/hardening/STATUS.md
+  - doc/hardening/FINAL_AUDIT.md
+  fallback: Treat candidate-specific operational prose as stale whenever it disagrees with the candidate review.
+  residual_risk: Historical documents intentionally retain earlier candidate names and must not be read as current status.
+  support_impact: Current operator-facing documents no longer direct users to a superseded ladder or unavailable interface.
+  owner: codex
+  approval: null
+  revisit_condition: Candidate identity, supported commands, or shipped configuration changes.
+- id: CA-03
+  source: 2026-08-09 Claude independent audit
+  severity: medium
+  invariant: Gateway, exposure, validation, and scale-envelope cross-invariants hold on construction and persisted-plan load
+  primary_work_package: WP1
+  affected_regions:
+  - src/exaserve/plan/contracts.py
+  - src/exaserve/plan/compiler.py
+  - tests/test_plan_contracts.py
+  - tests/test_plan_io.py
+  acceptance_tests:
+  - AC-PLAN-01
+  status: FIXED
+  decision: Canonical dataclass contracts now enforce the same gateway and exposure matrix used by the compiler, so direct construction and rehashed persisted plans reject drift before readiness evaluation.
+  evidence:
+  - src/exaserve/plan/contracts.py
+  - tests/test_plan_contracts.py
+  - tests/test_plan_io.py
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  fallback: Reject a plan whose nested scale envelope does not exactly agree with its deployment fields.
+  residual_risk: New cross-field compiler rules must also be placed in the canonical construction contract.
+  support_impact: The production load path no longer relies on compiler-only enforcement for this invariant.
+  owner: codex
+  approval: null
+  revisit_condition: Gateway kinds, exposure modes, or scale-envelope fields change.
+- id: CA-04
+  source: 2026-08-09 Claude independent audit
+  severity: medium
+  invariant: Qualification claims distinguish validation-mode path coverage from an approved positive production-envelope execution
+  primary_work_package: WP12
+  affected_regions:
+  - doc/hardening/STATUS.md
+  - doc/hardening/FINAL_AUDIT.md
+  - scripts/hardening/config.final-real.haproxy.2n.yaml
+  acceptance_tests:
+  - AC-SCALE-01
+  status: FIXED
+  decision: Status and final-audit claims now state that every final43 campaign used validation mode, identify the limited runtime differences, and leave the positive production-qualification branch explicitly unclaimed.
+  evidence:
+  - doc/hardening/STATUS.md
+  - doc/hardening/FINAL_AUDIT.md
+  - artifacts/hardening/final43-experiment-plan.json
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Block production execution until an approved and measured SiteProfile satisfies the qualification contract.
+  residual_risk: The positive production-qualification branch remains outside the hardware evidence until scope approval and scale measurements exist.
+  support_impact: The technical pass is path qualification at one and two nodes, not a general production authorization.
+  owner: codex
+  approval: null
+  revisit_condition: A SiteProfile obtains approved production limits and its positive branch is exercised.
+- id: CA-05
+  source: 2026-08-09 Claude independent audit
+  severity: low
+  invariant: Type-checking claims name the exact checked surface and configuration
+  primary_work_package: WP11
+  affected_regions:
+  - scripts/hardening/run_packaged_gate.sh
+  - doc/hardening/STATUS.md
+  - doc/hardening/FINAL_AUDIT.md
+  acceptance_tests:
+  - AC-TST-01
+  status: FIXED
+  decision: Documentation now describes the installed-wheel mypy result as the four-module typed contract core with imports skipped, rather than implying repository-wide coverage.
+  evidence:
+  - scripts/hardening/run_packaged_gate.sh
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/mypy.log
+  - doc/hardening/FINAL_AUDIT.md
+  fallback: Report narrow static checks by their exact target list and options.
+  residual_risk: Most runtime modules remain outside mypy until a broader typing migration is funded.
+  support_impact: The passing mypy claim is precise and no longer overstates coverage.
+  owner: codex
+  approval: null
+  revisit_condition: The mypy target list or import-following policy changes.
+- id: CA-06
+  source: 2026-08-09 Claude independent audit
+  severity: low
+  invariant: Repository-root pytest collection is deterministic and excludes generated scratch trees
+  primary_work_package: WP11
+  affected_regions:
+  - pyproject.toml
+  - tests/test_audit_regressions.py
+  acceptance_tests:
+  - AC-TST-01
+  status: FIXED
+  decision: Pytest now declares all three canonical test roots and excludes build, artifact, and scratch directories; the configuration regression and explicit-root final gate prove nested scratch checkouts are ignored.
+  evidence:
+  - pyproject.toml
+  - tests/test_audit_regressions.py
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  fallback: Run only the three canonical test roots if third-party tooling ignores repository pytest configuration.
+  residual_risk: A future generated directory must be added to norecursedirs if it can contain collectable Python tests.
+  support_impact: Scratch copies below the repository root no longer break the release-gate collection command.
+  owner: codex
+  approval: null
+  revisit_condition: Test roots or in-repository build/scratch locations change.
+- id: CA-07A
+  source: 2026-08-09 Claude independent audit
+  severity: low
+  invariant: The composition root exposes only production lifecycle operations
+  primary_work_package: WP4
+  affected_regions:
+  - src/exaserve/composition.py
+  - tests/test_composition_root.py
+  acceptance_tests:
+  - AC-SUP-01
+  status: FIXED
+  decision: The duplicate test-only observe_gateway method was removed and tests exercise the production gateway observation path.
+  evidence:
+  - src/exaserve/composition.py
+  - tests/test_composition_root.py
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  fallback: Test gateway state through the same observation API used by the launcher.
+  residual_risk: Test helpers can drift if added to production classes without an explicit operational use.
+  support_impact: No duplicate gateway-observation surface remains in the production composition root.
+  owner: codex
+  approval: null
+  revisit_condition: A second gateway-observation entry point is introduced.
+- id: CA-07B
+  source: 2026-08-09 Claude independent audit
+  severity: low
+  invariant: Readiness-monitor failures preserve their typed first cause while owned process death remains an unexpected-exit cause
+  primary_work_package: WP10
+  affected_regions:
+  - src/exaserve/composition.py
+  - src/exaserve/launcher.py
+  - tests/test_launcher_supervision.py
+  acceptance_tests:
+  - AC-OBS-01
+  - AC-STAT-01
+  status: FIXED
+  decision: The monitor now returns a typed FirstCause for observation failure, gateway-health failure, or recovery expiry and the launcher preserves it; hardware confirms owned HAProxy death is found earlier by process supervision as UNEXPECTED_EXIT.
+  evidence:
+  - src/exaserve/composition.py
+  - src/exaserve/launcher.py
+  - tests/test_launcher_supervision.py
+  - artifacts/hardening/final43-null-1n-20260809-a1/qualification/result.json
+  - artifacts/hardening/final43-supervisor-watchdog-v3q2-2n-20260809-a1/qualification/result.json
+  fallback: Preserve the first typed owner-level failure and attach later monitor or cleanup errors as secondary notes.
+  residual_risk: Dependency reconnect noise may continue until Ray's bounded timeout after the owner-level cause is persisted.
+  support_impact: Status retains actionable monitor causes without weakening exact owned-process classification.
+  owner: codex
+  approval: null
+  revisit_condition: Monitor ownership, supervisor polling order, or FirstCause taxonomy changes.
+- id: CA-09
+  source: 2026-08-09 Codex audit of Claude findings
+  severity: high
+  invariant: Persisted plans cannot remove or weaken exact compatibility receipt requirements even when rehashed
+  primary_work_package: WP3
+  affected_regions:
+  - src/exaserve/plan/contracts.py
+  - src/exaserve/plan/compiler.py
+  - tests/test_plan_io.py
+  acceptance_tests:
+  - AC-RDY-01
+  - AC-PLAN-01
+  status: FIXED
+  decision: DeploymentPlan construction now deterministically rederives the complete receipt requirement tuple from topology, models, gateway, and engine mode and rejects any mismatch on direct construction or load.
+  evidence:
+  - src/exaserve/plan/contracts.py
+  - tests/test_plan_io.py
+  - artifacts/hardening/final43-packaged-gate-20260809-a1/pytest.log
+  - artifacts/hardening/final43-real-2n-20260809-a1/qualification/result.json
+  fallback: Reject rather than normalize a persisted plan whose receipt requirements differ from the canonical derivation.
+  residual_risk: New compatibility receipt roles must be added to the canonical derivation and its negative load tests together.
+  support_impact: A rehashed artifact cannot turn exact receipt readiness into a vacuous zero-of-zero condition.
+  owner: codex
+  approval: null
+  revisit_condition: Receipt roles, topology derivation, or null-engine semantics change.

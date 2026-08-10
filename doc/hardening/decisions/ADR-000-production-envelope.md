@@ -1,7 +1,7 @@
 # ADR-000: Initial production envelope and scale topology
 
 **Status:** TECHNICALLY SELECTED, AWAITING EXPLICIT PRODUCT-OWNER SCOPE
-APPROVAL. Last reconciled 2026-08-09. Final42 passes the clean package and
+APPROVAL. Last reconciled 2026-08-09. Final43 passes the clean package and
 one-/two-node final-architecture gates. The release state is
 `TECHNICAL_PASS_SCOPE_PENDING`; the evidence-derived maximum is two nodes.
 
@@ -23,17 +23,17 @@ historical scale result may qualify this exact candidate.
 
 The 64-node target is a proposal, not an approval.
 
-## Exact final42 evidence
+## Exact final43 evidence
 
 Wheel
-`5346c7ab858b056448702b207b76350ac2ee134a65fa45ea67779039d41362e3`
+`1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2`
 passed the clean installed-package gate and these Aurora cells:
 
 | Tier | Exact-candidate result |
 |---:|---|
 | 1 node | null lifecycle/failure PASS; real XPU PASS; proxy no-delay on/off PASS |
 | 2 nodes | null negative/fault matrix PASS; real PP=2 PASS; supervisor head/worker fault PASS |
-| 4 nodes | not run for final42; authorization and a new predeclared row required |
+| 4 nodes | not run for final43; authorization and a new predeclared row required |
 | 16 / 64 nodes | not qualified; run only after an owner selects this envelope |
 
 The compiled envelope records `supported_max_nodes=2`,
@@ -58,7 +58,7 @@ context. It does not require a Ray fork in the qualified one/two-node path, nor
 does it prove that the upstream limits are solved at 64 nodes. Those behaviors
 must be remeasured at the approved boundary.
 
-The final42 supervisor campaign also shows that, after catastrophic head or
+The final43 supervisor campaign also shows that, after catastrophic head or
 worker loss, the pinned Ray driver may retry failed GCS/task notifications until
 its 120-second reconnect timeout. ExaServe preserves first cause and bounded
 cleanup, but does not claim instantaneous recovery.
@@ -72,7 +72,7 @@ readiness, failure, and scale decision.
 
 If 64 nodes is approved:
 
-1. predeclare immutable final42 gates for 4, 16, and 64 nodes;
+1. predeclare immutable final43 gates for 4, 16, and 64 nodes;
 2. use the same HAProxy/non-streaming profile and declared client topology;
 3. compare the 64-node result to a matched HAProxy baseline, not historical
    direct-routing data;
