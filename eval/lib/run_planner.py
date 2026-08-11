@@ -320,10 +320,29 @@ def _build_go_client(snapshot_root: str) -> dict[str, str]:
     if version_result.returncode != 0 or not re.fullmatch(r"go\d+\.\d+(?:\.\d+)?", version):
         detail = version_result.stderr.strip() or version_result.stdout.strip()
         raise RuntimeError(f"Go toolchain identity is invalid: {detail[:200]}")
+    # The replay client is stdlib-only and is published as part of the
+    # content-addressed source snapshot.  An ambient CGO-enabled build invokes
+    # the host linker and gives otherwise identical builds different Go build
+    # IDs.  That made recovery of a snapshot from the same commit change its
+    # semantic identity.  Pin a static build, omit ambient VCS metadata, and
+    # suppress the non-semantic build ID so reconstruction is byte-for-byte
+    # reproducible on the qualified toolchain.
+    build_env = os.environ.copy()
+    build_env["CGO_ENABLED"] = "0"
     result = run_finite(
-        [go, "build", "-trimpath", "-o", os.path.join("bin", "go_dispatch"), "."],
+        [
+            go,
+            "build",
+            "-trimpath",
+            "-buildvcs=false",
+            "-ldflags=-buildid=",
+            "-o",
+            os.path.join("bin", "go_dispatch"),
+            ".",
+        ],
         timeout_s=600.0,
         cwd=go_client_dir,
+        env=build_env,
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()

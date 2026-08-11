@@ -17,6 +17,7 @@ from eval.lib.matrix import expand_matrix
 from eval.lib.models import VariantSpec
 from eval.lib.run_executor import execute_run
 from eval.lib.run_planner import (
+    _build_go_client,
     _extract_git_archive,
     load_run_plan,
     materialize_run_bundles,
@@ -133,6 +134,48 @@ def _init_git_repo(path: Path, *, tracked_contents: str = "committed\n") -> Path
         stderr=subprocess.PIPE,
     )
     return path
+
+
+def test_snapshot_go_client_build_is_static_and_reproducible(tmp_path, monkeypatch):
+    go_client = tmp_path / "eval" / "go_client"
+    go_client.mkdir(parents=True)
+    fake_go = str(tmp_path / "bin" / "go")
+    calls = []
+
+    def fake_run_finite(argv, *, timeout_s, cwd=None, env=None, **kwargs):
+        del timeout_s, kwargs
+        calls.append((list(argv), cwd, None if env is None else dict(env)))
+        if argv[1:] == ["env", "GOVERSION"]:
+            return subprocess.CompletedProcess(argv, 0, "go1.25.3\n", "")
+        binary = Path(cwd) / "bin" / "go_dispatch"
+        binary.parent.mkdir()
+        binary.write_bytes(b"deterministic-static-client")
+        binary.chmod(0o755)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    import exaserve.control.finite_process as finite_process
+    import eval.lib.run_planner as run_planner
+
+    monkeypatch.setattr(run_planner.shutil, "which", lambda name: fake_go if name == "go" else None)
+    monkeypatch.setattr(finite_process, "run_finite", fake_run_finite)
+
+    identity = _build_go_client(str(tmp_path))
+
+    assert identity["go_version"] == "go1.25.3"
+    assert re.fullmatch(r"[0-9a-f]{64}", identity["go_dispatch_sha256"])
+    argv, cwd, env = calls[1]
+    assert argv == [
+        fake_go,
+        "build",
+        "-trimpath",
+        "-buildvcs=false",
+        "-ldflags=-buildid=",
+        "-o",
+        os.path.join("bin", "go_dispatch"),
+        ".",
+    ]
+    assert cwd == str(go_client)
+    assert env is not None and env["CGO_ENABLED"] == "0"
 
 
 def _write_plot_result(path: Path, *, pbs_job_name: str = "weak_scaling_run0_1_nodes") -> None:
