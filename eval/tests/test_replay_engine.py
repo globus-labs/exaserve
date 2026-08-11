@@ -6,6 +6,7 @@ os.environ.setdefault("MPI4PY_RC_INITIALIZE", "0")
 
 from eval.lib.replay_engine import (
     TraceRequest,
+    _probe_direct_target,
     _summarize_run_results,
     _wait_for_direct_targets,
 )
@@ -91,3 +92,32 @@ def test_direct_target_wait_surfaces_an_unexpected_probe_failure(monkeypatch):
             interval_s=0.01,
             max_workers=1,
         )
+
+
+def test_direct_target_probe_disables_ambient_http_proxies(monkeypatch):
+    observed = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class Opener:
+        def open(self, url, *, timeout):
+            observed["request"] = (url, timeout)
+            return Response()
+
+    def build_opener(handler):
+        observed["proxies"] = handler.proxies
+        return Opener()
+
+    monkeypatch.setattr("eval.lib.replay_engine.urllib.request.build_opener", build_opener)
+    assert _probe_direct_target("http://10.0.0.1:8000/model_r0", ["/health"], 2.0)
+    assert observed == {
+        "proxies": {},
+        "request": ("http://10.0.0.1:8000/model_r0/health", 2.0),
+    }
