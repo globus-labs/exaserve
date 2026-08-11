@@ -35,6 +35,36 @@ class ProfileMismatch(RuntimeError):
     """The running environment does not match the declared profile."""
 
 
+class _SourceTreeDistribution:
+    """Distribution view for an immutable ExaServe source snapshot.
+
+    Evaluation jobs deliberately import ExaServe from a content-addressed
+    source snapshot.  Such a tree has package bytes and a canonical version,
+    but no installed ``.dist-info`` directory.  Treating that supported
+    deployment form as "not installed" made the compatibility gate reject the
+    very artifact it was meant to verify.  This adapter supplies only the two
+    pieces the verifier needs; all referenced files remain containment-checked
+    and SHA-256 verified below.
+    """
+
+    version = EXASERVE_VERSION
+
+    def __init__(self) -> None:
+        self._root = Path(__file__).resolve().parents[2]
+
+    def locate_file(self, relative: str) -> Path:
+        return self._root / relative
+
+
+def _distribution(distribution_name: str):
+    try:
+        return metadata.distribution(distribution_name)
+    except metadata.PackageNotFoundError:
+        if distribution_name == "exaserve":
+            return _SourceTreeDistribution()
+        raise
+
+
 @dataclass(frozen=True)
 class PatchSpec:
     """One manifest entry (plan WP3.10 field list)."""
@@ -263,7 +293,7 @@ class CompatibilityProfile:
                 raise ProfileMismatch(f"could not read {label}: {exc}") from exc
 
         try:
-            exaserve_dist = metadata.distribution("exaserve")
+            exaserve_dist = _distribution("exaserve")
         except metadata.PackageNotFoundError as exc:
             raise ProfileMismatch("required distribution 'exaserve' is not installed") from exc
 
@@ -289,7 +319,7 @@ class CompatibilityProfile:
             )
             if target_key not in checked_targets:
                 try:
-                    distribution = metadata.distribution(patch.target_distribution)
+                    distribution = _distribution(patch.target_distribution)
                 except metadata.PackageNotFoundError as exc:
                     raise ProfileMismatch(
                         f"required distribution {patch.target_distribution!r} is not installed"

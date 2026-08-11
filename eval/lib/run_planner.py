@@ -62,6 +62,12 @@ _MP_CONTEXT = multiprocessing.get_context("forkserver")
 _DEFAULT_MAX_WORKERS = 8
 _DEFAULT_MATERIALIZATION_TIMEOUT_S = 3600.0
 _RUN_GROUP_RE = re.compile(r"^run(\d+)$")
+# v2 snapshots created before the job boundary disabled bytecode writes may
+# contain interpreter-generated __pycache__ entries.  Preserve those trees as
+# evidence and publish clean materializations under a new location tag.  The
+# snapshot metadata and semantic hash policy remain schema v2 because the
+# archived source/tool bytes and their meaning are unchanged.
+_SNAPSHOT_LOCATION_TAG = "v2b"
 
 
 def scheduler_run_identity(
@@ -444,7 +450,7 @@ def _validate_repo_snapshot(snapshot_root: str, expected_commit: str | None = No
 
 def _ensure_repo_snapshot(repo_root: str, commit_sha: str) -> str:
     snapshot_parent = ensure_dir(get_site_config().snapshot_dir)
-    snapshot_root = os.path.join(snapshot_parent, f"{commit_sha}-v2")
+    snapshot_root = os.path.join(snapshot_parent, f"{commit_sha}-{_SNAPSHOT_LOCATION_TAG}")
     metadata_path = os.path.join(snapshot_root, "snapshot_meta.json")
     if os.path.lexists(metadata_path):
         _validate_repo_snapshot(snapshot_root, commit_sha)
@@ -1313,6 +1319,7 @@ def _materialize_variant(
             cwd=run_plan.repo_root,
             source_env_script=Path(runtime_env.env_script),
             pythonpath=(Path(run_plan.repo_root), Path(run_plan.repo_root) / "src"),
+            environment_unset=tuple(site_profile.environment_unset),
             command_argv=("python3", "-m", "eval.cli", "run", "execute", bundle.run_yaml_path),
             environment=job_exports,
             gpus_per_node=getattr(run_plan.deployment, "num_gpus_per_node", None),

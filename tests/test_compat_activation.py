@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -264,6 +265,40 @@ def test_installed_source_verification_rejects_byte_and_version_drift(monkeypatc
     distributions["test"].version = "2"
     with pytest.raises(ProfileMismatch, match="version"):
         profile.verify_installed_sources()
+
+
+def test_source_snapshot_verifies_without_installed_exaserve_metadata(monkeypatch, tmp_path):
+    from exaserve.compat import profile as profile_module
+
+    target_root = tmp_path / "target"
+    target = target_root / "pkg" / "target.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"qualified target\n")
+    artifact = Path(profile_module.__file__).resolve().parents[1] / "_sitecustomize.py"
+
+    class Distribution:
+        version = "1"
+
+        def locate_file(self, relative):
+            return target_root / relative
+
+    def distribution(name):
+        if name == "exaserve":
+            raise profile_module.metadata.PackageNotFoundError(name)
+        if name == "test":
+            return Distribution()
+        raise profile_module.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(profile_module.metadata, "distribution", distribution)
+    artifact_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    patch = replace(
+        _patch("P1", "pkg.target", "upstream-fix", ("replica",), "sitecustomize", "cap"),
+        target_file="pkg/target.py",
+        target_source_hash=hashlib.sha256(target.read_bytes()).hexdigest(),
+        patch_artifact_hash=artifact_hash,
+        delivery_artifact_hash=artifact_hash,
+    )
+    _profile(patches=(patch,)).verify_installed_sources()
 
 
 def test_default_manifest_has_every_required_wp3_identity_field():

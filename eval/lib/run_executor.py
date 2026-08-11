@@ -194,14 +194,27 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
                         deployment_plan_hash=(deployment_status.deployment_plan_hash),
                         allocation_binding_hash=(deployment_status.allocation_binding_hash),
                     )
-                    stats = collect_server_stats(
-                        run_plan.bundle.results_dir,
-                        identity=stats_identity,
-                        expected_replicas=expected_replicas,
-                        ray_address=ray_address_from_status(
-                            status_dir, status=deployment_status, plan=run_plan.deployment
-                        ),
-                    )
+                    import ray as stats_ray_client
+
+                    owns_stats_connection = not stats_ray_client.is_initialized()
+                    try:
+                        stats = collect_server_stats(
+                            run_plan.bundle.results_dir,
+                            identity=stats_identity,
+                            expected_replicas=expected_replicas,
+                            ray_address=ray_address_from_status(
+                                status_dir,
+                                status=deployment_status,
+                                plan=run_plan.semantic_plan.deployment,
+                            ),
+                        )
+                    finally:
+                        # collect_server_stats may initialize a driver in this
+                        # executor.  Close only that connection before the
+                        # serving owner drains GCS; otherwise Ray's background
+                        # client terminates the executor before manifest commit.
+                        if owns_stats_connection and stats_ray_client.is_initialized():
+                            stats_ray_client.shutdown()
                     if stats.get("error"):
                         raise RuntimeError(str(stats["error"]))
                     replica_count = stats.get("replica_count")
@@ -938,23 +951,58 @@ def _per_run_incomplete_reason(summary, run_index: int) -> str:
 
 
 def _capture_deployment_evidence(run_plan, launched) -> dict[str, str]:
-    """Freeze and verify the READY revision, receipts, and provenance."""
+    """Freeze and verify a recovered READY revision, receipts, and provenance.
+
+    Continuous readiness deliberately revokes READY while a transient failure
+    is inside its resolved recovery window.  A saturated replay can end during
+    that VALIDATING interval even though the deployment recovers immediately
+    once load drains.  Result publication must wait for that same bounded
+    policy outcome instead of racing one status read; terminal state or expiry
+    still fails closed.
+    """
     from exaserve.evidence import capture_ready_evidence
     from exaserve.status_api import read_deployment_status
 
     status_dir = launched.monitor.status_dir
     if not isinstance(status_dir, str) or not status_dir:
         raise RuntimeError("launched backend has no typed deployment status path")
-    status = read_deployment_status(status_dir) if status_dir else None
-    if status is None or not status.ready:
-        raise RuntimeError("deployment lost canonical READY before result commit")
-    return capture_ready_evidence(
-        status_dir=status_dir,
-        destination_dir=run_plan.bundle.results_dir,
-        expected_generation=status.generation,
-        expected_plan_hash=run_plan.deployment_plan_hash,
-        expected_run_semantic_hash=run_plan.run_semantic_hash,
-    )
+    readiness = run_plan.semantic_plan.deployment.readiness
+    recovery_s = float(readiness.recovery_deadline_s)
+    poll_s = min(1.0, float(readiness.validation_interval_s))
+    deadline = time.monotonic() + recovery_s
+    last_state = "UNAVAILABLE"
+    last_detail = "deployment status unavailable"
+    while True:
+        status = read_deployment_status(status_dir)
+        if status is not None:
+            last_state = status.state
+            last_detail = status.detail or status.reason_code or "no status detail"
+            if status.ready:
+                return capture_ready_evidence(
+                    status_dir=status_dir,
+                    destination_dir=run_plan.bundle.results_dir,
+                    expected_generation=status.generation,
+                    expected_plan_hash=run_plan.deployment_plan_hash,
+                    expected_run_semantic_hash=run_plan.run_semantic_hash,
+                )
+            if status.terminal:
+                raise RuntimeError(
+                    "deployment became terminal before result commit: "
+                    f"state={last_state}, detail={last_detail}"
+                )
+        process = launched.monitor.process
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(
+                "deployment exited before READY evidence commit: "
+                f"exit={process.returncode}, last_state={last_state}, detail={last_detail}"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                "deployment did not recover canonical READY before result commit within "
+                f"{recovery_s:g}s: state={last_state}, detail={last_detail}"
+            )
+        time.sleep(min(poll_s, remaining))
 
 
 def _publish_result_manifest(run_plan, *, entries: dict[str, str], expected_ids, reasons):

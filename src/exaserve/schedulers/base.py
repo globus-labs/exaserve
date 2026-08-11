@@ -57,6 +57,7 @@ class JobSpec:
     bootstrap_script: str = ""
     source_env_script: Optional[Path] = None
     pythonpath: tuple[Path, ...] = ()
+    environment_unset: tuple[str, ...] = ()
     filesystems: Optional[str] = None
     keep_flag: Optional[str] = None
     gpus_per_node: Optional[int] = None
@@ -117,6 +118,13 @@ class JobSpec:
             not isinstance(path, (str, Path)) for path in self.pythonpath
         ):
             raise ValueError("JobSpec.pythonpath must be a tuple of paths")
+        if not isinstance(self.environment_unset, tuple) or any(
+            not isinstance(name, str) or not _SAFE_ENV_NAME.fullmatch(name)
+            for name in self.environment_unset
+        ):
+            raise ValueError("JobSpec.environment_unset must be a tuple of environment names")
+        if len(self.environment_unset) != len(set(self.environment_unset)):
+            raise ValueError("JobSpec.environment_unset must not contain duplicates")
         if not isinstance(self.bootstrap_script, str):
             raise ValueError("JobSpec.bootstrap_script must be text")
         if not isinstance(self.exclusive, bool):
@@ -324,9 +332,17 @@ class SchedulerBackend(ABC):
 
     def _body(self, spec: JobSpec) -> str:
         lines = [
-            "set -euo pipefail",
+            # Site bootstrap (notably Lmod on Aurora) is not nounset-clean and
+            # may inspect shell-family variables that are legitimately absent.
+            # Keep exit/pipe failures strict, then enable nounset immediately
+            # after the trusted site initialization boundary.
+            "set -eo pipefail",
             "unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX "
-            "CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M",
+            "CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M PYTHONPYCACHEPREFIX",
+            # A run imports its source snapshot before the snapshot validator
+            # executes.  Bytecode writes would otherwise mutate that supposedly
+            # immutable tree and make its first import fail its own inventory.
+            "export PYTHONDONTWRITEBYTECODE=1",
         ]
         if spec.bootstrap_script:
             lines.append(spec.bootstrap_script.rstrip("\n"))
@@ -339,6 +355,9 @@ class SchedulerBackend(ABC):
             lines.append('export PYTHONPATH="$_ES_PYTHONPATH"')
         if spec.source_env_script is not None:
             lines.append(f"source {shlex.quote(str(spec.source_env_script))}")
+        for key in spec.environment_unset:
+            lines.append(f"unset {key}")
+        lines.append("set -u")
         for key, value in sorted(spec.environment.items()):
             lines.append(f"export {key}={shlex.quote(str(value))}")
         command = " ".join(shlex.quote(str(arg)) for arg in spec.command_argv)

@@ -261,6 +261,7 @@ def _new_prepared_submission(
         command_argv=(sys.executable, "-u", "-m", "exaserve.launcher", str(plan_path)),
         cwd=cfg_path.parent,
         environment=environment,
+        environment_unset=tuple(site_profile.environment_unset),
         bootstrap_script=_DEFAULT_ENV_SETUP,
         num_nodes=plan.num_nodes,
         walltime=walltime,
