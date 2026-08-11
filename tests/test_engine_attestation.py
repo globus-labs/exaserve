@@ -331,6 +331,29 @@ def test_bound_serve_actor_rebinds_rank_local_receipt_socket(monkeypatch):
     )
 
 
+def test_native_serve_actor_does_not_inherit_the_head_receipt_socket(monkeypatch):
+    from exaserve.actor_runtime import build_actor_runtime_env
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    monkeypatch.setenv("EXASERVE_RECEIPT_RANK", "0")
+    monkeypatch.setenv("EXASERVE_RECEIPT_SOCKET", "/tmp/rank-zero.sock")
+
+    env_vars = build_actor_runtime_env(dynamic_receipt_owner=True)["env_vars"]
+
+    assert "EXASERVE_RECEIPT_RANK" not in env_vars
+    assert "EXASERVE_RECEIPT_SOCKET" not in env_vars
+
+
+def test_dynamic_and_declared_receipt_ownership_are_mutually_exclusive(monkeypatch):
+    from exaserve.actor_runtime import build_actor_runtime_env
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    with pytest.raises(ValueError, match="cannot also declare"):
+        build_actor_runtime_env(receipt_owner_rank=0, dynamic_receipt_owner=True)
+
+
 @pytest.mark.parametrize(
     "field",
     [

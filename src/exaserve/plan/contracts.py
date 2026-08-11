@@ -181,6 +181,9 @@ class GatewayKind(str, Enum):
 class ExposureMode(str, Enum):
     PROXIED_INTERNAL = "PROXIED_INTERNAL"  # production: via the gateway
     DIRECT_VALIDATION = "DIRECT_VALIDATION"  # validation/benchmark only
+    # Native Ray Serve's single head-node proxy is a benchmark topology, not a
+    # managed external gateway and not the per-node direct-validation shape.
+    RAY_SERVE_HEAD_ONLY = "RAY_SERVE_HEAD_ONLY"
 
 
 # First-release production gateway (§3.2.1 Q3). Others compile only under
@@ -475,12 +478,16 @@ class ScaleEnvelope:
             }:
                 raise PlanError(f"scale_envelope.gateway_kind {self.gateway_kind!r} is invalid")
         if self.gateway_kind is None:
-            if self.exposure_mode != ExposureMode.DIRECT_VALIDATION.value:
+            if self.exposure_mode not in {
+                ExposureMode.DIRECT_VALIDATION.value,
+                ExposureMode.RAY_SERVE_HEAD_ONLY.value,
+            }:
                 raise PlanError(
-                    "scale_envelope without a gateway requires DIRECT_VALIDATION exposure"
+                    "scale_envelope without a gateway requires DIRECT_VALIDATION or "
+                    "RAY_SERVE_HEAD_ONLY exposure"
                 )
             if not self.validation_mode:
-                raise PlanError("DIRECT_VALIDATION scale envelope requires validation_mode")
+                raise PlanError("gateway-free scale envelope requires validation_mode")
         elif self.exposure_mode != ExposureMode.PROXIED_INTERNAL.value:
             raise PlanError("managed gateway scale envelope requires PROXIED_INTERNAL exposure")
         elif not self.validation_mode and self.gateway_kind != GatewayKind.HAPROXY.value:
@@ -1125,13 +1132,27 @@ class DeploymentPlan:
             raise PlanError("deployment.ray_port must be in 1..65535")
         if not self.models:
             raise PlanError("deployment.models must be non-empty")
+        if self.uses_head_only_serve_proxy():
+            if len(self.models) != 1:
+                raise PlanError("RAY_SERVE_HEAD_ONLY supports exactly one model")
+            if self.models[0].pipeline_parallel_size != 1:
+                raise PlanError(
+                    "RAY_SERVE_HEAD_ONLY supports tensor-parallel replicas only; "
+                    "pipeline stage placement requires canonical per-replica applications"
+                )
         if len(self.receipt_requirements) != len(self.requirement_keys()):
             raise PlanError("deployment.receipt_requirements contains duplicate slots")
         if self.gateway is None:
-            if self.exposure.mode != ExposureMode.DIRECT_VALIDATION.value:
-                raise PlanError("deployment without a gateway requires DIRECT_VALIDATION exposure")
+            if self.exposure.mode not in {
+                ExposureMode.DIRECT_VALIDATION.value,
+                ExposureMode.RAY_SERVE_HEAD_ONLY.value,
+            }:
+                raise PlanError(
+                    "deployment without a gateway requires DIRECT_VALIDATION or "
+                    "RAY_SERVE_HEAD_ONLY exposure"
+                )
             if not self.validation_mode:
-                raise PlanError("DIRECT_VALIDATION deployment requires validation_mode")
+                raise PlanError("gateway-free deployment requires validation_mode")
         elif self.exposure.mode != ExposureMode.PROXIED_INTERNAL.value:
             raise PlanError("managed deployment gateway requires PROXIED_INTERNAL exposure")
         elif not self.validation_mode and self.gateway.kind != GatewayKind.HAPROXY.value:
@@ -1248,6 +1269,9 @@ class DeploymentPlan:
 
     def is_production_exposure(self) -> bool:
         return self.exposure.mode == ExposureMode.PROXIED_INTERNAL.value
+
+    def uses_head_only_serve_proxy(self) -> bool:
+        return self.exposure.mode == ExposureMode.RAY_SERVE_HEAD_ONLY.value
 
 
 @dataclass(frozen=True)
@@ -1573,11 +1597,19 @@ class RunPlan:
             or self.workload.client_dest != self.client.destination
         ):
             raise PlanError("run workload client identity disagrees with client policy")
+        if self.client.destination == "proxy" and self.deployment.exposure.mode not in {
+            ExposureMode.PROXIED_INTERNAL.value,
+            ExposureMode.RAY_SERVE_HEAD_ONLY.value,
+        }:
+            raise PlanError(
+                "run proxy destination requires a PROXIED_INTERNAL or "
+                "RAY_SERVE_HEAD_ONLY deployment"
+            )
         if (
-            self.client.destination == "proxy"
-            and self.deployment.exposure.mode != ExposureMode.PROXIED_INTERNAL.value
+            self.deployment.exposure.mode == ExposureMode.RAY_SERVE_HEAD_ONLY.value
+            and self.client.destination != "proxy"
         ):
-            raise PlanError("run proxy destination requires a PROXIED_INTERNAL deployment")
+            raise PlanError("RAY_SERVE_HEAD_ONLY deployment requires run proxy destination")
         active_topologies = self.client.dispatch_topologies or (self.client.dispatch_topology,)
         if (
             self.client.destination == "direct"

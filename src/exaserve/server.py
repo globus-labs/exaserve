@@ -729,15 +729,6 @@ class EngineWorker:
         stats_push_period_s: float = 10.0,
         stats_sample_cap: int = 1500,
     ):
-        # The deployment bootstrap activated only its own Ray Serve adapter.
-        # A replica is a different interpreter and must activate its exact
-        # role before importing an engine backend. Importing this module alone
-        # intentionally has no compatibility mutation side effect.
-        from .compat.activator import CompatibilityActivator
-
-        CompatibilityActivator().activate("replica")
-        from .engines import EngineSpec, NullEngine, get_engine
-
         init_start = time.time()
         pid = os.getpid()
         hostname = socket.gethostname()
@@ -750,6 +741,7 @@ class EngineWorker:
                 gpu_ids.append(int(g))
             except (ValueError, TypeError) as exc:
                 raise RuntimeError(f"Ray returned a non-integer GPU identity {g!r}") from exc
+        gpu_ids.sort()
         device_id = gpu_ids[0] if gpu_ids else 0
 
         # Bind this live actor to exactly one precompiled logical slot before
@@ -759,6 +751,7 @@ class EngineWorker:
             load_allocation_binding,
             load_deployment_plan,
             rank_for_node,
+            resolve_replica_index_for_live_placement,
             resolve_replica_receipt_requirement,
         )
 
@@ -771,6 +764,13 @@ class EngineWorker:
             _models = [item for item in _receipt_plan.models if item.model_id == model_id]
             if len(_models) != 1:
                 raise ValueError(f"model {model_id!r} maps to {len(_models)} canonical model plans")
+            if replica_index == -1:
+                replica_index = resolve_replica_index_for_live_placement(
+                    plan=_receipt_plan,
+                    model_id=model_id,
+                    owner_rank=_owner_rank,
+                    device_ids=tuple(gpu_ids),
+                )
             _replicas = [
                 item for item in _models[0].replicas if item.replica_index == replica_index
             ]
@@ -825,6 +825,13 @@ class EngineWorker:
         os.environ["EXASERVE_RECEIPT_RANK"] = str(_owner_rank)
         os.environ["EXASERVE_RECEIPT_REPLICA_INDEX"] = str(replica_index)
         os.environ["EXASERVE_RECEIPT_REQUIREMENT_ID_REPLICA"] = self._replica_requirement_id
+        from .compat.local_ingress import SOCKET_ENV, socket_path_for
+
+        os.environ[SOCKET_ENV] = socket_path_for(
+            os.environ["EXASERVE_DEPLOYMENT_ID"],
+            int(os.environ["EXASERVE_GENERATION"]),
+            owner_rank=_owner_rank,
+        )
         if self._engine_requirement_id is not None and self._engine_component_id is not None:
             os.environ["EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE"] = self._engine_requirement_id
             os.environ["EXASERVE_RECEIPT_COMPONENT_ID_ENGINE"] = self._engine_component_id
@@ -837,6 +844,15 @@ class EngineWorker:
             os.environ.pop("EXASERVE_RECEIPT_COMPONENT_ID_ENGINE", None)
             os.environ.pop("EXASERVE_RECEIPT_MODEL_ID_ENGINE", None)
             os.environ.pop("EXASERVE_RECEIPT_DEVICE_IDS_ENGINE", None)
+
+        # The deployment bootstrap activated only its own Ray Serve adapter.
+        # A replica is a different interpreter and activates its exact role
+        # only after its rank-local receipt transport is bound, and still
+        # before importing an engine backend.
+        from .compat.activator import CompatibilityActivator
+
+        CompatibilityActivator().activate("replica")
+        from .engines import EngineSpec, NullEngine, get_engine
 
         spec = EngineSpec(
             model_id=model_id,
@@ -1426,7 +1442,8 @@ def deploy_model(
     config: DeploymentPlan,
     *,
     replica_index: int,
-    planned_placement: BoundReplica,
+    planned_placement: Optional[BoundReplica],
+    native_replicas: int = 1,
 ) -> tuple:
     """
     Build a bound VLLMWorker deployment for one model.
@@ -1434,9 +1451,10 @@ def deploy_model(
     Ray Serve options (num_gpus, replicas, max_ongoing_requests, …) are passed
     via .options() so no factory/class-creation indirection is needed.
 
-    Every call builds exactly one logical replica.  The canonical runtime
-    binding supplies its node resources; no runtime planner or Serve-wide
-    replica template is allowed to select a different node.
+    Canonical managed/direct topologies build one exactly placed application
+    per logical replica. Native HeadOnly builds one public Serve deployment;
+    Serve schedules its replicas and each live actor binds its observed
+    rank/device tuple back to one exact canonical slot before engine import.
 
     Returns:
         (deployment, model_id)
@@ -1446,7 +1464,19 @@ def deploy_model(
     null_compute = config.runtime.null_compute
 
     safe_name = model_config.route_name
-    deployment_name_suffix = f"-r{replica_index}"
+    native_head_only = planned_placement is None
+    if native_head_only:
+        if replica_index != -1:
+            raise ValueError("native Serve placement requires replica_index=-1")
+        if (
+            isinstance(native_replicas, bool)
+            or not isinstance(native_replicas, int)
+            or native_replicas < 1
+        ):
+            raise ValueError("native_replicas must be a positive integer")
+    elif native_replicas != 1:
+        raise ValueError("canonical bound placement creates exactly one replica")
+    deployment_name_suffix = "-native" if native_head_only else f"-r{replica_index}"
 
     print(
         f"[ExaServe] Configuring EngineWorker for {model_id}\n"
@@ -1485,7 +1515,10 @@ def deploy_model(
         MULTIPROC_WORKER_PATCH_GATE: "1" if uses_multiproc_workers else "0",
     }
 
+    if native_head_only and model_config.pipeline_parallel_size > 1:
+        raise ValueError("native HeadOnly placement does not support pipeline parallelism")
     if model_config.pipeline_parallel_size > 1:
+        assert planned_placement is not None
         placement_group_bundles, stage_node_ips = build_pp_placement_group_bundles(
             model_config, planned_placement
         )
@@ -1498,11 +1531,19 @@ def deploy_model(
         )
     else:
         actor_num_gpus = model_config.tensor_parallel_size
-        print(
-            f"[ExaServe] Canonical TP replica {replica_index} for {model_id}: "
-            f"node={planned_placement.node_ips[0]}",
-            flush=True,
-        )
+        if native_head_only:
+            print(
+                f"[ExaServe] Native Ray Serve placement for {native_replicas} TP replica(s) "
+                f"of {model_id}; each actor must match one canonical rank/device slot",
+                flush=True,
+            )
+        else:
+            assert planned_placement is not None
+            print(
+                f"[ExaServe] Canonical TP replica {replica_index} for {model_id}: "
+                f"node={planned_placement.node_ips[0]}",
+                flush=True,
+            )
 
     # Engine selection is immutable DeploymentPlan content. The environment
     # carries the same value only for native dependencies and child attestation.
@@ -1510,17 +1551,18 @@ def deploy_model(
 
     deployment_options = dict(
         name=f"EngineWorker-{safe_name}{deployment_name_suffix}",
-        num_replicas=1,
+        num_replicas=native_replicas,
         ray_actor_options={
             "num_gpus": actor_num_gpus,
             "num_cpus": model_config.num_cpus_per_replica,
             "runtime_env": build_actor_runtime_env(
                 extra_env_vars,
-                receipt_owner_rank=planned_placement.owner_rank,
+                receipt_owner_rank=(None if native_head_only else planned_placement.owner_rank),
+                dynamic_receipt_owner=native_head_only,
             ),
             **(
                 {"resources": {planned_placement.node_resource_keys[0]: 0.001}}
-                if placement_group_bundles is None
+                if planned_placement is not None and placement_group_bundles is None
                 else {}
             ),
         },
@@ -1588,6 +1630,27 @@ def deploy_from_canonical_binding(
 
         safe_name = model_config.route_name
         n_rep = model_plan.assigned_replicas
+        if config.uses_head_only_serve_proxy():
+            # Preserve the paper's native Ray Serve baseline: one root-route
+            # deployment with N replicas, so Ray Serve's own HeadOnly proxy
+            # performs request-to-replica balancing. Each actor derives and
+            # proves its canonical slot from its live rank/device assignment.
+            deployment, model_id = deploy_model(
+                model_config,
+                model_path_map,
+                config,
+                replica_index=-1,
+                planned_placement=None,
+                native_replicas=n_rep,
+            )
+            with tracer.phase("serve.run", model_id=model_id, replicas=n_rep):
+                serve.run(deployment, name=safe_name, route_prefix="/")
+            print(
+                f"[ExaServe] ✓ native HeadOnly route http://localhost:8000/v1 "
+                f"(model: {model_id}, replicas={n_rep})",
+                flush=True,
+            )
+            continue
         if n_rep == 1:
             deployment, model_id = deploy_model(
                 model_config,
@@ -1614,7 +1677,7 @@ def deploy_from_canonical_binding(
         # so it cannot express the compiler's per-replica node binding.  Build
         # one single-replica application per logical slot and submit all slots in
         # one public run_many call.  HAProxy rewrites the canonical route to a
-        # replica route; DIRECT_VALIDATION gets an explicit local router below.
+        # replica route; direct validation probes a concrete replica route.
         if not callable(getattr(serve, "run_many", None)) or not hasattr(serve, "RunTarget"):
             raise RuntimeError(
                 "canonical multi-replica deployment requires the SiteProfile "
@@ -1733,12 +1796,15 @@ def main() -> None:
     # un-hashed input to runtime behavior.
     os.environ.update(runtime_environment(canonical_plan))
     config = canonical_plan
-    # Every canonical production/validation topology needs one Serve proxy per
-    # allocation node: HAProxy fans out across them, and direct validation
-    # proves all node targets. The retired ray_serve/HeadOnly config shape is
-    # not a canonical gateway capability.
+    # Managed gateways and direct validation use EveryNode.  The explicit
+    # native-Ray benchmark preserves Ray Serve's HeadOnly topology without
+    # pretending it is a managed external gateway.
     _gateway_kind = canonical_plan.gateway.kind if canonical_plan.gateway is not None else "none"
-    _ray_serve_proxy_location = ProxyLocation.EveryNode
+    _ray_serve_proxy_location = (
+        ProxyLocation.HeadOnly
+        if canonical_plan.uses_head_only_serve_proxy()
+        else ProxyLocation.EveryNode
+    )
     print(
         f"[ExaServe] Loaded canonical plan "
         f"{canonical_plan.deployment_plan_hash[:12]}: {config.deployment_name}",
@@ -1937,7 +2003,8 @@ def main() -> None:
         replica_plan = bind_runtime_deployment(canonical_plan, allocation_binding, planner_nodes)
     print(format_runtime_binding(replica_plan), flush=True)
     with tracer.phase("deploy_from_canonical_plan"):
-        deploy_proxy_anchors(replica_plan)
+        if not canonical_plan.uses_head_only_serve_proxy():
+            deploy_proxy_anchors(replica_plan)
         deploy_from_canonical_binding(config, model_path_map, replica_plan)
 
     _deploy_manager.deploy()

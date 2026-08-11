@@ -1112,7 +1112,7 @@ def _validate_run_state_payload(
             "result_manifest_hash",
         },
         "failed": {"base_urls", "exit_code", "error", "cleanup_error"},
-        "cancelled": {"error"},
+        "cancelled": {"error", "cleanup_error"},
         "invalid": {"last_submit_error", "submit_attempts", "error"},
     }
     if phase not in allowed:

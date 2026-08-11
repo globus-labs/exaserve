@@ -583,12 +583,31 @@ For this first-release envelope, HAProxy is the sole production gateway and
 trusted allocation/internal-network exposure is the sole production exposure.
 `GatewayPlan` and `ExposurePlan` are distinct schemas. `GatewayPlan.kind` names
 an actual managed gateway implementation and has no `none` or `direct` value.
-`ExposurePlan.mode` is one of `PROXIED_INTERNAL`, `DIRECT_VALIDATION`, or a
-future separately gated mode and carries the canonical advertised endpoint and
-security policy. Production requires `GatewayPlan(kind=HAPROXY)` with
-`PROXIED_INTERNAL`. `DIRECT_VALIDATION` requires `gateway: null` and
+`ExposurePlan.mode` is one of `PROXIED_INTERNAL`, `DIRECT_VALIDATION`,
+`RAY_SERVE_HEAD_ONLY`, or a future separately gated mode and carries the
+canonical advertised endpoint and security policy. Production requires
+`GatewayPlan(kind=HAPROXY)` with `PROXIED_INTERNAL`. `DIRECT_VALIDATION` and
+`RAY_SERVE_HEAD_ONLY` both require `gateway: null` and
 `ScaleEnvelope.validation_mode = true`; every other null/mode combination is a
 compile error.
+
+`RAY_SERVE_HEAD_ONLY` is the explicit native-Ray benchmark topology used by
+the paper's Ray Serve proxy baseline. It sets Ray Serve
+`ProxyLocation.HeadOnly`, advertises the head node's Serve listener, requires a
+proxy-directed client, expects exactly the head-node Serve proxy, and does not
+deploy per-node proxy-anchor applications. It deploys one root-route Ray Serve
+application with the plan's complete replica count, so request-to-replica
+selection remains Ray Serve's native behavior rather than an ExaServe router or
+an external rewrite. Each live TP actor must bind its observed allocation rank
+and accelerator-id tuple to exactly one precompiled replica slot before engine
+import and install that rank's authenticated receipt ingress; zero or multiple
+matches are fatal. The first envelope supports exactly one model and no
+pipeline parallelism because a PP ingress actor does not reveal enough evidence
+to prove every stage's planned placement. It is not a `GatewayPlan` kind, is
+not an external managed gateway, and cannot support a production claim.
+`DIRECT_VALIDATION` and every managed-gateway topology retain
+`ProxyLocation.EveryNode`, exact per-node proxy evidence, and the proxy-anchor
+applications needed to make idle allocation nodes host a Serve proxy.
 
 The legacy value `proxy_config.type: none` is not a production gateway. During
 migration the legacy adapter may map it only to explicit
@@ -600,6 +619,11 @@ advertised endpoint and still prove route health, per-model canaries, bind and
 security policy, request limits, and revocation. Claiming direct exposure in a
 future production envelope requires an explicit S00/ADR-000 expansion and its
 own WP7/WP12 evidence.
+
+The eval spelling `backend.args.ray.proxy.type: ray_serve` maps only to the
+`RAY_SERVE_HEAD_ONLY` exposure above. The adapter must not register
+`ray_serve` as a managed gateway or silently reinterpret it as EveryNode
+direct validation.
 
 An absent/unhealthy selected gateway or a canary that bypasses the declared
 endpoint blocks READY. After READY, unexpected gateway-process exit revokes
@@ -613,6 +637,13 @@ nonzero result. `DEGRADED` is not an implicit fallback in this pass. Tests must
 prove these transitions, that rank-owned `GLOBAL` gateway observations are
 rejected, and that no marker, internal Serve health response, or eval routing
 flag advances deployment READY.
+
+Gateway startup is governed by the resolved immutable readiness budget, not a
+universal 30-second constant. The Aurora LiteLLM launcher has measured bind
+times of 51 seconds with one worker and 59 seconds with eight workers; its
+resolved `gateway_start_deadline_s` therefore has a 120-second minimum. Other
+gateway kinds retain the site/profile value. This budget covers bind/startup
+only and does not weaken route or inference-canary deadlines.
 
 **Listener bind, initial registration, reconnect, and deadlines**
 

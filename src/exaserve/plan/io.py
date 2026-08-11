@@ -581,6 +581,46 @@ def resolve_replica_receipt_requirement(
     return requirement_id
 
 
+def resolve_replica_index_for_live_placement(
+    *, plan: DeploymentPlan, model_id: str, owner_rank: int, device_ids: tuple[int, ...]
+) -> int:
+    """Map a Serve-scheduled TP actor to one exact canonical replica slot.
+
+    Native HeadOnly uses one public Ray Serve deployment so Serve itself owns
+    request-to-replica balancing. The actor's allocation rank and accelerator
+    ids are independently observable and together identify its precompiled TP
+    slot. Pipeline-parallel replicas are intentionally excluded because their
+    stage placement cannot be inferred from the ingress actor alone.
+    """
+    if isinstance(owner_rank, bool) or not isinstance(owner_rank, int) or owner_rank < 0:
+        raise PlanError("owner_rank must be a non-negative integer")
+    if (
+        not isinstance(device_ids, tuple)
+        or not device_ids
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in device_ids
+        )
+        or tuple(sorted(set(device_ids))) != device_ids
+    ):
+        raise PlanError("device_ids must be a non-empty sorted tuple of unique integers")
+    model = next((item for item in plan.models if item.model_id == model_id), None)
+    if model is None:
+        raise PlanError(f"model {model_id!r} has no planned receipt topology")
+    if model.pipeline_parallel_size != 1:
+        raise PlanError("live placement resolution supports tensor-parallel replicas only")
+    candidates = [
+        replica
+        for replica in model.replicas
+        if replica.planned_ranks == (owner_rank,) and replica.planned_device_ids == (device_ids,)
+    ]
+    if len(candidates) != 1:
+        raise PlanError(
+            f"model {model_id!r} live placement rank={owner_rank} devices={device_ids} "
+            f"maps to {len(candidates)} canonical replicas"
+        )
+    return candidates[0].replica_index
+
+
 def resolve_engine_worker_receipt_requirement(
     *,
     plan: DeploymentPlan,

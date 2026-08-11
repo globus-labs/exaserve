@@ -505,6 +505,42 @@ def test_startup_only_never_publishes_a_result_manifest_before_cleanup(monkeypat
     assert [state for state, _ in transitions] == ["running", "failed"]
 
 
+def test_keyboard_interrupt_publishes_cancelled_after_cleanup(monkeypatch):
+    from types import SimpleNamespace
+
+    from eval.lib.run_executor import _execute_run_locked
+
+    transitions = []
+    stopped = []
+
+    class Adapter:
+        def launch(self, _ctx):
+            return SimpleNamespace()
+
+        def wait_ready(self, _ctx, _launched):
+            raise KeyboardInterrupt()
+
+        def stop(self, _ctx, launched):
+            stopped.append(launched)
+
+    class Heartbeat:
+        def ensure_held(self):
+            return None
+
+    run_plan = SimpleNamespace(backend_name="mock")
+    monkeypatch.setattr(
+        "eval.lib.run_executor.write_run_state",
+        lambda _plan, state, **data: transitions.append((state, data)),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        _execute_run_locked(run_plan, Adapter(), object(), Heartbeat())
+
+    assert len(stopped) == 1
+    assert [state for state, _ in transitions] == ["running", "cancelled"]
+    assert transitions[-1][1]["error"].startswith("KeyboardInterrupt:")
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

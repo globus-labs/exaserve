@@ -125,6 +125,15 @@ def _gateway_from_backend(backend_args: dict) -> tuple[Optional[dict], bool, Opt
             True,
             {"mode": "DIRECT_VALIDATION", "serve_port": backend_port},
         )
+    if kind == "ray_serve":
+        # Ray Serve's native HeadOnly proxy is itself the benchmark endpoint.
+        # It is neither a managed external gateway nor direct EveryNode
+        # validation, so preserve that topology as its own exposure mode.
+        return (
+            None,
+            True,
+            {"mode": "RAY_SERVE_HEAD_ONLY", "serve_port": backend_port},
+        )
     executable_ref = proxy.get("executable_ref", "")
     if not isinstance(executable_ref, str):
         raise ValueError("backend.args.ray.proxy.executable_ref must be text")

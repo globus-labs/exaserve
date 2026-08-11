@@ -18,6 +18,7 @@ from exaserve.plan.io import (
     allocation_binding_from_dict,
     deployment_plan_from_dict,
     load_deployment_plan,
+    resolve_replica_index_for_live_placement,
     resolve_engine_worker_receipt_requirement,
     resolve_replica_receipt_requirement,
     load_site_profile,
@@ -403,6 +404,27 @@ def test_logical_replica_binding_does_not_depend_on_ray_selected_device_id():
         )
         == "model/org--model/replica/2"
     )
+
+
+def test_live_tp_placement_resolves_one_exact_canonical_replica():
+    plan = _plan()
+    replica = plan.models[0].replicas[2]
+    assert (
+        resolve_replica_index_for_live_placement(
+            plan=plan,
+            model_id="org/model",
+            owner_rank=replica.planned_ranks[0],
+            device_ids=replica.planned_device_ids[0],
+        )
+        == replica.replica_index
+    )
+    with pytest.raises(PlanError, match="maps to 0 canonical replicas"):
+        resolve_replica_index_for_live_placement(
+            plan=plan,
+            model_id="org/model",
+            owner_rank=replica.planned_ranks[0],
+            device_ids=(99, 100),
+        )
 
 
 def test_logical_receipt_binding_rejects_wrong_replica_worker_or_owner_rank():

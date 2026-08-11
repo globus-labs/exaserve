@@ -74,6 +74,7 @@ def build_actor_runtime_env(
     extra_env_vars: Optional[dict[str, str]] = None,
     *,
     receipt_owner_rank: Optional[int] = None,
+    dynamic_receipt_owner: bool = False,
 ) -> dict[str, dict[str, str]]:
     """Project canonical identity and Aurora settings into one Serve actor.
 
@@ -82,7 +83,19 @@ def build_actor_runtime_env(
     an actor placed on another planned rank would make engine receipts
     undeliverable.
     """
+    if type(dynamic_receipt_owner) is not bool:
+        raise TypeError("dynamic_receipt_owner must be a boolean")
+    if dynamic_receipt_owner and receipt_owner_rank is not None:
+        raise ValueError("dynamic receipt ownership cannot also declare receipt_owner_rank")
+
     env_vars = {key: value for key in _INHERITED_ACTOR_ENV if (value := os.environ.get(key))}
+    if dynamic_receipt_owner:
+        # A native multi-replica Serve deployment lets Serve place each actor.
+        # Do not leak the deployment driver's rank-zero socket into those
+        # actors; each replica resolves its actual bound rank before engine
+        # import and installs that rank's authenticated ingress path.
+        env_vars.pop("EXASERVE_RECEIPT_RANK", None)
+        env_vars.pop(SOCKET_ENV, None)
 
     if extra_env_vars:
         if not isinstance(extra_env_vars, dict) or any(

@@ -12,6 +12,8 @@ analog to HAProxy's leastconn).
 envoy must be installed and on PATH (see scripts/install_envoy.sh).
 """
 
+import hashlib
+import json
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -162,12 +164,22 @@ class EnvoyProxy(ProxyBackend):
             for model_id, eps in by_model.items():
                 cluster_name = _safe_name(model_id)
                 path_prefix = _shared_path_prefix(eps)
-                routes.append(
-                    {
-                        "match": {"prefix": f"{path_prefix}/"},
-                        "route": {"cluster": cluster_name, "timeout": f"{request_timeout}s"},
-                    }
+                replica_routes = _replica_route_count(eps, model_id)
+                matchers = (
+                    [{"prefix": f"{path_prefix}_r"}]
+                    if replica_routes
+                    else [{"path": path_prefix}, {"prefix": f"{path_prefix}/"}]
                 )
+                for matcher in matchers:
+                    routes.append(
+                        {
+                            "match": matcher,
+                            "route": {
+                                "cluster": cluster_name,
+                                "timeout": f"{request_timeout}s",
+                            },
+                        }
+                    )
             routes.append(
                 {
                     "match": {"prefix": "/"},
@@ -177,6 +189,32 @@ class EnvoyProxy(ProxyBackend):
                     },
                 }
             )
+
+        http_filters = []
+        replica_rewrite_lua = _replica_rewrite_lua(by_model)
+        if replica_rewrite_lua is not None:
+            # Envoy load-balances across node-local Serve proxies, while this
+            # bounded Lua filter selects one canonical replica application and
+            # rewrites /<model>/v1/... to /<model>_rN/v1/....  Without this,
+            # every multi-replica request reaches an undeployed base route and
+            # returns 404.
+            http_filters.append(
+                {
+                    "name": "envoy.filters.http.lua",
+                    "typed_config": {
+                        "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua",
+                        "default_source_code": {"inline_string": replica_rewrite_lua},
+                    },
+                }
+            )
+        http_filters.append(
+            {
+                "name": "envoy.filters.http.router",
+                "typed_config": {
+                    "@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+                },
+            }
+        )
 
         listener = {
             "name": "listener_main",
@@ -194,6 +232,12 @@ class EnvoyProxy(ProxyBackend):
                             "typed_config": {
                                 "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
                                 "stat_prefix": "ingress_http",
+                                # This benchmark does not consume Envoy's
+                                # internal-request classification. Declare an
+                                # empty policy explicitly so upgrades do not
+                                # silently inherit Envoy's changing RFC1918
+                                # trust default.
+                                "internal_address_config": {},
                                 "stream_idle_timeout": f"{request_timeout}s",
                                 "route_config": {
                                     "name": "local_route",
@@ -205,14 +249,7 @@ class EnvoyProxy(ProxyBackend):
                                         }
                                     ],
                                 },
-                                "http_filters": [
-                                    {
-                                        "name": "envoy.filters.http.router",
-                                        "typed_config": {
-                                            "@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
-                                        },
-                                    }
-                                ],
+                                "http_filters": http_filters,
                             },
                         }
                     ],
@@ -256,7 +293,9 @@ class EnvoyProxy(ProxyBackend):
 
 
 def _safe_name(model_id: str) -> str:
-    return "c_" + model_id.replace("/", "_").replace(".", "_").replace("-", "_")
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", model_id).strip("_") or "backend"
+    digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:12]
+    return f"c_{stem[:48]}_{digest}"
 
 
 def _shared_path_prefix(endpoints: list[BackendEndpoint]) -> str:
@@ -264,3 +303,79 @@ def _shared_path_prefix(endpoints: list[BackendEndpoint]) -> str:
     if len(prefixes) != 1:
         raise ValueError(f"Inconsistent path_prefix values in backend set: {sorted(prefixes)!r}")
     return prefixes.pop()
+
+
+def _replica_route_count(endpoints: list[BackendEndpoint], model_id: str) -> int:
+    counts = {endpoint.replica_routes for endpoint in endpoints}
+    if len(counts) != 1:
+        raise ValueError(f"inconsistent replica-route counts for model {model_id!r}")
+    return counts.pop()
+
+
+def _replica_rewrite_lua(
+    by_model: dict[str, list[BackendEndpoint]],
+) -> str | None:
+    """Render a bounded per-worker round-robin replica-route selector.
+
+    Envoy's endpoint load balancer selects a node proxy, not a Ray Serve
+    application. Canonical multi-replica placement uses one application route
+    per replica, so selecting that route is a separate operation. Each Envoy
+    worker owns its counter; no shared lock or unbounded request state exists.
+    """
+    rules: list[tuple[str, int, bool]] = []
+    single_model = len(by_model) == 1
+    for model_id, endpoints in by_model.items():
+        replica_routes = _replica_route_count(endpoints, model_id)
+        if replica_routes == 0:
+            continue
+        path_prefix = _shared_path_prefix(endpoints)
+        if not path_prefix:
+            raise ValueError(f"replica-routed model {model_id!r} requires a path_prefix")
+        rules.append((path_prefix, replica_routes, single_model))
+    if not rules:
+        return None
+
+    table_rows = "\n".join(
+        "  { prefix = %s, replicas = %d, root = %s },"
+        % (json.dumps(prefix), replicas, "true" if root else "false")
+        for prefix, replicas, root in sorted(rules, key=lambda item: (-len(item[0]), item[0]))
+    )
+    return f"""local routes = {{
+{table_rows}
+}}
+local counters = {{}}
+
+function envoy_on_request(handle)
+  local headers = handle:headers()
+  local path = headers:get(":path")
+  if path == nil then
+    return
+  end
+  local query_at = string.find(path, "?", 1, true)
+  local bare = path
+  local query = ""
+  if query_at ~= nil then
+    bare = string.sub(path, 1, query_at - 1)
+    query = string.sub(path, query_at)
+  end
+  for _, route in ipairs(routes) do
+    local prefix = route.prefix
+    local already_bound = string.sub(bare, 1, string.len(prefix) + 2) == prefix .. "_r"
+    local has_canonical_prefix = bare == prefix or
+      string.sub(bare, 1, string.len(prefix) + 1) == prefix .. "/"
+    if already_bound then
+      return
+    end
+    if route.root or has_canonical_prefix then
+      local next_index = counters[prefix] or 0
+      counters[prefix] = (next_index + 1) % route.replicas
+      local suffix = bare
+      if has_canonical_prefix then
+        suffix = string.sub(bare, string.len(prefix) + 1)
+      end
+      headers:replace(":path", prefix .. "_r" .. next_index .. suffix .. query)
+      return
+    end
+  end
+end
+"""

@@ -79,6 +79,16 @@ def test_eval_proxy_none_becomes_a_declared_validation_exposure():
     assert plan.validation_mode is True
 
 
+def test_eval_ray_serve_becomes_the_native_head_only_benchmark():
+    plan = compile_shared_deployment_plan(
+        _spec(proxy={"type": "ray_serve", "backend_port": 8000}), deployment_id="d"
+    )
+    assert plan.gateway is None
+    assert plan.exposure.mode == "RAY_SERVE_HEAD_ONLY"
+    assert plan.uses_head_only_serve_proxy()
+    assert plan.validation_mode is True
+
+
 def test_eval_explicit_validation_mode_reaches_the_canonical_plan():
     spec = _spec(nodes=4, proxy={"type": "haproxy", "port": 4001})
     spec.deployment.validation_mode = True

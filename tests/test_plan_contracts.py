@@ -294,6 +294,60 @@ def test_direct_exposure_compiles_only_in_explicit_validation_mode():
     assert not plan.is_production_exposure()
 
 
+def test_head_only_is_an_explicit_gateway_free_benchmark_topology():
+    plan = compile_deployment_plan(
+        _raw(
+            gateway=None,
+            validation_mode=True,
+            exposure={"mode": "RAY_SERVE_HEAD_ONLY"},
+        ),
+        site=_site(),
+        deployment_id="ray-native",
+    )
+    assert plan.gateway is None
+    assert plan.uses_head_only_serve_proxy()
+    assert plan.scale_envelope.gateway_kind is None
+    assert plan.scale_envelope.validation_mode is True
+
+
+def test_head_only_rejects_topologies_that_cannot_bind_native_replica_slots():
+    with pytest.raises(PlanError, match="exactly one model"):
+        compile_deployment_plan(
+            _raw(
+                gateway=None,
+                validation_mode=True,
+                exposure={"mode": "RAY_SERVE_HEAD_ONLY"},
+                models=[_raw()["models"][0], {**_raw()["models"][0], "model_id": "other"}],
+            ),
+            site=_site(),
+            deployment_id="ray-native-multimodel",
+        )
+    with pytest.raises(PlanError, match="tensor-parallel replicas only"):
+        compile_deployment_plan(
+            _raw(
+                gateway=None,
+                validation_mode=True,
+                exposure={"mode": "RAY_SERVE_HEAD_ONLY"},
+                models=[{**_raw()["models"][0], "pipeline_parallel_size": 2}],
+            ),
+            site=_site(),
+            deployment_id="ray-native-pp",
+        )
+
+
+def test_litellm_resolves_an_evidence_based_startup_budget_floor():
+    plan = compile_deployment_plan(
+        _raw(
+            gateway={"kind": "litellm", "port": 4001},
+            validation_mode=True,
+            readiness={"gateway_start_deadline_s": 10},
+        ),
+        site=_site(gateway_kinds=("haproxy", "litellm")),
+        deployment_id="litellm-benchmark",
+    )
+    assert plan.readiness.gateway_start_deadline_s == 120.0
+
+
 def test_validation_mode_still_refuses_a_mismatched_exposure_mode():
     with pytest.raises(PlanError, match="DIRECT_VALIDATION"):
         compile_deployment_plan(

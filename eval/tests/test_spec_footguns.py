@@ -88,7 +88,7 @@ def test_every_in_envelope_catalog_cell_compiles_to_the_canonical_run_plan() -> 
     """Only explicitly unsupported/out-of-scope catalog cells may fail closed."""
     spec_root = Path(__file__).parents[1] / "specs"
     failures: list[str] = []
-    rejected = {"site_node_ceiling": 0, "ray_serve_retired": 0, "sglang_gated": 0}
+    rejected = {"site_node_ceiling": 0, "sglang_gated": 0}
     for path in sorted(spec_root.rglob("*.yaml")):
         for variant in expand_matrix(load_experiment_spec(str(path))):
             try:
@@ -101,8 +101,6 @@ def test_every_in_envelope_catalog_cell_compiles_to_the_canonical_run_plan() -> 
                 message = str(exc)
                 if "exceeds site alcf-aurora maximum 64" in message:
                     rejected["site_node_ceiling"] += 1
-                elif "gateway.kind 'ray_serve' is not a managed gateway" in message:
-                    rejected["ray_serve_retired"] += 1
                 elif "engine 'sglang' unsupported by site alcf-aurora" in message:
                     rejected["sglang_gated"] += 1
                 else:
@@ -113,7 +111,6 @@ def test_every_in_envelope_catalog_cell_compiles_to_the_canonical_run_plan() -> 
     assert not failures, "unexpectedly unmaterializable catalog cells:\n" + "\n".join(failures)
     assert rejected == {
         "site_node_ceiling": 111,
-        "ray_serve_retired": 24,
         "sglang_gated": 23,
     }
 

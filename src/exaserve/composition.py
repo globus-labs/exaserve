@@ -1316,7 +1316,7 @@ class CompositionRoot:
         app_items = {
             name: info for name, info in applications.items() if name != "__cluster_snapshot__"
         }
-        if model.num_replicas > 1:
+        if model.num_replicas > 1 and not self.plan.uses_head_only_serve_proxy():
             expected_names = {f"{model.route_name}_r{index}" for index in range(model.num_replicas)}
             members = [info for name, info in app_items.items() if name in expected_names]
             if not members:
@@ -1359,7 +1359,12 @@ class CompositionRoot:
 
             freshness = float(self.plan.readiness.observation_freshness_s)
             proxies = []
-            for rank, planned_node in self.binding.rank_to_node:
+            proxy_ranks = (
+                ((0, dict(self.binding.rank_to_node)[0]),)
+                if self.plan.uses_head_only_serve_proxy()
+                else self.binding.rank_to_node
+            )
+            for rank, planned_node in proxy_ranks:
                 matching_nodes = [
                     node for node in nodes if same_node(node["node_name"], planned_node)
                 ]
@@ -1776,7 +1781,11 @@ class CompositionRoot:
         import urllib.error
         import urllib.request
 
-        if self.plan.gateway is None and model.num_replicas > 1:
+        if (
+            self.plan.gateway is None
+            and model.num_replicas > 1
+            and not self.plan.uses_head_only_serve_proxy()
+        ):
             # DIRECT_VALIDATION has no gateway to select a replica route. Probe
             # a concrete bound application; exact receipt/Serve evidence still
             # covers every sibling. Production clients never see this mode.

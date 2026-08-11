@@ -567,14 +567,18 @@ def _compile_exposure(
         if not validation_mode:
             raise PlanError(
                 "Production exposure requires HAProxy with PROXIED_INTERNAL; "
-                "direct exposure requires validation_mode=true"
+                "gateway-free exposure requires validation_mode=true"
             )
         mode = _string(
             declared_mode, "deployment.exposure.mode", default=ExposureMode.DIRECT_VALIDATION.value
         )
-        if mode != ExposureMode.DIRECT_VALIDATION.value:
+        if mode not in {
+            ExposureMode.DIRECT_VALIDATION.value,
+            ExposureMode.RAY_SERVE_HEAD_ONLY.value,
+        }:
             raise PlanError(
-                "deployment.exposure.mode must be DIRECT_VALIDATION when gateway is null"
+                "deployment.exposure.mode must be DIRECT_VALIDATION or "
+                "RAY_SERVE_HEAD_ONLY when gateway is null"
             )
         exposure = ExposurePlan(
             mode=mode,
@@ -1062,6 +1066,14 @@ def compile_deployment_plan(
             base_readiness[key] = _boolean(value, f"deployment.readiness.{key}")
         else:
             base_readiness[key] = _number(value, f"deployment.readiness.{key}", minimum=0.0000001)
+    # LiteLLM imports and initializes its worker stack before binding. Aurora
+    # measurements for this exact launcher were 51s (one worker) and 59s
+    # (eight workers), so the generic 30s gateway budget is a false failure.
+    # Resolve a kind-specific floor with approximately 2x measured margin.
+    if gateway is not None and gateway.kind == GatewayKind.LITELLM.value:
+        base_readiness["gateway_start_deadline_s"] = max(
+            120.0, float(base_readiness["gateway_start_deadline_s"])
+        )
     readiness = ReadinessLimits(**base_readiness)
 
     plan = DeploymentPlan(

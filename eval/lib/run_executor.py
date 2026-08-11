@@ -299,6 +299,30 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
             heartbeat.ensure_held()
             write_run_state(run_plan, "failed", base_urls=base_urls, exit_code=exit_code)
         return exit_code
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # Operator/scheduler cancellation is a terminal result, not an
+        # unrecorded BaseException that leaves durable state at RUNNING.
+        stop_error = None
+        if launched is not None:
+            try:
+                adapter.stop(ctx, launched)
+            except BaseException as cleanup_exc:
+                stop_error = cleanup_exc
+            launched = None
+        try:
+            heartbeat.ensure_held()
+            payload = {"error": f"{type(exc).__name__}: {str(exc) or 'execution interrupted'}"}
+            if stop_error is not None:
+                payload["cleanup_error"] = str(stop_error)
+            write_run_state(run_plan, "cancelled", **payload)
+        except BaseException as publication_exc:
+            add_exception_note(
+                exc,
+                f"cancelled RunStatus publication also failed: {publication_exc}",
+            )
+        if stop_error is not None:
+            add_exception_note(exc, f"backend cleanup also failed: {stop_error}")
+        raise
     except Exception as exc:
         stop_error = None
         if launched is not None:

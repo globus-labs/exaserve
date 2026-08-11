@@ -92,6 +92,8 @@ def planned_proxy_anchor_names(plan) -> frozenset[str]:
     the exact application predicate; observed applications can never invent or
     remove them.
     """
+    if plan.uses_head_only_serve_proxy():
+        return frozenset()
     return frozenset(f"{PROXY_ANCHOR_APP_PREFIX}{rank}" for rank in range(plan.num_nodes))
 
 
@@ -99,7 +101,9 @@ def planned_application_names(plan) -> frozenset[str]:
     """Return the exact model and infrastructure Serve application set."""
     names: set[str] = set(planned_proxy_anchor_names(plan))
     for model in plan.models:
-        if model.num_replicas > 1:
+        if plan.uses_head_only_serve_proxy():
+            names.add(model.route_name)
+        elif model.num_replicas > 1:
             names.update(f"{model.route_name}_r{index}" for index in range(model.num_replicas))
         elif len(plan.models) == 1:
             # A named root-route application coexists with the internal proxy
@@ -309,6 +313,7 @@ class ReadinessCoordinator:
         for node in alive_nodes:
             nodes_by_name.setdefault(canonical_node_id(node.get("node_name", "")), []).append(node)
         matched_ids: set[str] = set()
+        matched_ids_by_rank: dict[int, str] = {}
         for rank, expected_name in self.binding.rank_to_node:
             matches = nodes_by_name.get(canonical_node_id(expected_name), ())
             if len(matches) != 1:
@@ -319,6 +324,7 @@ class ReadinessCoordinator:
                 continue
             node = matches[0]
             matched_ids.add(str(node["node_id"]))
+            matched_ids_by_rank[rank] = str(node["node_id"])
             cpu, gpu = float(node["cpu"]), float(node["gpu"])
             wanted_cpu = float(self.plan.node_cpus)
             wanted_gpu = float(self.plan.num_gpus_per_node)
@@ -367,19 +373,24 @@ class ReadinessCoordinator:
         if not missing_applications and not unexpected_applications:
             satisfied.append(f"serve applications: {len(expected_applications)} exact")
 
-        # Serve EveryNode proxies must cover exactly the matched Ray node IDs.
+        # EveryNode covers the allocation; native HeadOnly covers rank zero.
         proxies = {str(item["node_id"]): str(item["status"]).upper() for item in self._proxies}
-        for node_id in sorted(matched_ids):
+        expected_proxy_ids = (
+            {matched_ids_by_rank[0]}
+            if self.plan.uses_head_only_serve_proxy() and 0 in matched_ids_by_rank
+            else matched_ids
+        )
+        for node_id in sorted(expected_proxy_ids):
             status = proxies.get(node_id, "MISSING")
             if "HEALTHY" not in status or "UNHEALTHY" in status:
                 blockers.append(f"serve proxy {node_id}: status={status}")
                 (missing if status == "MISSING" else unhealthy).add(f"serve-proxy/{node_id}")
-        unplanned_proxies = sorted(set(proxies) - matched_ids)
+        unplanned_proxies = sorted(set(proxies) - expected_proxy_ids)
         if unplanned_proxies:
             blockers.append(f"serve proxies on unplanned nodes: {unplanned_proxies[:6]}")
             unhealthy.update(f"serve-proxy/unplanned/{item}" for item in unplanned_proxies)
-        if matched_ids and not any(blocker.startswith("serve prox") for blocker in blockers):
-            satisfied.append(f"serve proxies: {len(matched_ids)} healthy")
+        if expected_proxy_ids and not any(blocker.startswith("serve prox") for blocker in blockers):
+            satisfied.append(f"serve proxies: {len(expected_proxy_ids)} healthy")
 
         # 2. Exact receipt set equality against the plan's slots.
         ok, detail = self.receipts.satisfied()

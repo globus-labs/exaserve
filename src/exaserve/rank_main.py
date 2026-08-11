@@ -547,7 +547,11 @@ def run(plan_path: str) -> int:
         serve_port = (
             plan.gateway.backend_port if plan.gateway is not None else plan.exposure.serve_port
         )
-        node.add_probe(serve_proxy_probe(serve_port))
+        # HeadOnly intentionally has no worker-node proxy. Requiring its local
+        # health probe on every rank would make the benchmark topology
+        # permanently unready.
+        if rank == 0 or not plan.uses_head_only_serve_proxy():
+            node.add_probe(serve_proxy_probe(serve_port))
     except Exception as exc:  # no child exists yet; close every registration resource
         node.record_cause("startup", "PREFLIGHT_FAILED", str(exc))
         print(f"[Rank {rank}] pre-child startup failed: {exc}", flush=True)

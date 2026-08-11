@@ -876,3 +876,34 @@ def test_multi_replica_application_evidence_requires_every_sibling(tmp_path):
     incomplete = root.application_for_model(model, applications)
     assert incomplete["_observation_state"] == "STARTING"
     assert incomplete["running"] == model.num_replicas - 1
+
+
+def test_head_only_uses_one_native_multi_replica_application(tmp_path):
+    plan = compile_deployment_plan(
+        {
+            "num_nodes": 1,
+            "validation_mode": True,
+            "exposure": {"mode": "RAY_SERVE_HEAD_ONLY", "serve_port": 8000},
+            "models": [
+                {
+                    "model_id": "a/b",
+                    "tensor_parallel_size": 1,
+                    "num_replicas": 2,
+                    "max_model_len": 4096,
+                    "size": 8,
+                }
+            ],
+        },
+        site=_site(),
+        deployment_id="head-only",
+    )
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path), log=lambda *_: None)
+    model = plan.models[0]
+    application = {
+        "running": 2,
+        "target": 2,
+        "route_prefix": "/",
+        "status": "RUNNING",
+        "_observation_state": "READY",
+    }
+    assert root.application_for_model(model, {model.route_name: application}) is application

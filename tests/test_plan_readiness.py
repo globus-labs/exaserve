@@ -30,7 +30,7 @@ def _site():
     ).finalize()
 
 
-def _plan(nodes=2, gateway=True, replicas=2):
+def _plan(nodes=2, gateway=True, replicas=2, head_only=False):
     raw = {
         "num_nodes": nodes,
         "models": [
@@ -43,7 +43,10 @@ def _plan(nodes=2, gateway=True, replicas=2):
             }
         ],
     }
-    if gateway:
+    if head_only:
+        raw["validation_mode"] = True
+        raw["exposure"] = {"mode": "RAY_SERVE_HEAD_ONLY"}
+    elif gateway:
         raw["gateway"] = {"kind": "haproxy", "port": 4001}
     else:
         raw["validation_mode"] = True
@@ -96,8 +99,10 @@ def _make_ready(r, plan=None, *, advertised_endpoint=True):
         }
         for rank, node in r.binding.rank_to_node
     ]
+    proxy_nodes = nodes[:1] if plan.uses_head_only_serve_proxy() else nodes
     r.set_cluster(
-        nodes=nodes, proxies=[{"node_id": node["node_id"], "status": "HEALTHY"} for node in nodes]
+        nodes=nodes,
+        proxies=[{"node_id": node["node_id"], "status": "HEALTHY"} for node in proxy_nodes],
     )
     for rank in r.binding.ranks():
         r.set_rank_component(rank, True)
@@ -186,6 +191,15 @@ def test_every_planned_rank_has_an_exact_proxy_anchor_application():
         "_exaserve_proxy_anchor_r1",
     }
     assert anchors < planned_application_names(plan)
+
+
+def test_head_only_requires_only_the_head_proxy_and_no_anchor_applications():
+    plan = _plan(nodes=2, head_only=True)
+    assert planned_proxy_anchor_names(plan) == frozenset()
+    readiness = _make_ready(_readiness(plan), plan)
+    verdict = readiness.evaluate()
+    assert verdict.ready, verdict.blockers
+    assert verdict.proxies == ({"node_id": "ray-0", "status": "HEALTHY"},)
 
 
 def test_a_missing_proxy_anchor_application_blocks_readiness():
