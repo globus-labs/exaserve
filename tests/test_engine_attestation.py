@@ -166,20 +166,34 @@ def test_generated_watcher_rejects_a_non_engine_multiprocessing_helper(monkeypat
     assert engine_shim._engine_process_ready("vllm") is True
 
 
-def test_multiproc_bootstrap_records_exact_worker_rank(monkeypatch):
+def test_multiproc_bootstrap_exports_exact_rank_only_during_spawn(monkeypatch):
     from exaserve import _sitecustomize
+    from vllm.v1.executor import multiproc_executor
 
     observed = {}
 
     def original(*args, **kwargs):
-        observed.update(kwargs)
+        observed["kwargs"] = kwargs
+        observed["kind"] = os.environ.get(engine_shim.ENGINE_WORKER_KIND_ENV)
+        observed["rank"] = os.environ.get(engine_shim.ENGINE_WORKER_RANK_ENV)
         return "done"
 
-    monkeypatch.setattr(_sitecustomize, "_EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN", original)
-    assert _sitecustomize._exaserve_multiproc_worker_main(rank=3, local_rank=1) == "done"
-    assert os.environ[engine_shim.ENGINE_WORKER_KIND_ENV] == "multiproc"
-    assert os.environ[engine_shim.ENGINE_WORKER_RANK_ENV] == "3"
-    assert observed == {"rank": 3, "local_rank": 1}
+    worker_cls = multiproc_executor.WorkerProc
+    original_worker_main = worker_cls.worker_main
+    monkeypatch.setattr(worker_cls, "make_worker_process", staticmethod(original))
+    monkeypatch.setenv(engine_shim.ENGINE_WORKER_KIND_ENV, "parent-kind")
+    monkeypatch.delenv(engine_shim.ENGINE_WORKER_RANK_ENV, raising=False)
+
+    _sitecustomize._patch_vllm_multiproc_worker_identity()
+    assert worker_cls.make_worker_process(rank=3, local_rank=1) == "done"
+    assert worker_cls.worker_main is original_worker_main
+    assert observed == {
+        "kwargs": {"rank": 3, "local_rank": 1},
+        "kind": "multiproc",
+        "rank": "3",
+    }
+    assert os.environ[engine_shim.ENGINE_WORKER_KIND_ENV] == "parent-kind"
+    assert engine_shim.ENGINE_WORKER_RANK_ENV not in os.environ
 
 
 def test_worker_receipt_identity_uses_logical_rank_not_physical_gpu(tmp_path, monkeypatch):

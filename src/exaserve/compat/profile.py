@@ -607,7 +607,7 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
         ),
         PatchSpec(
             "EW-02",
-            "vllm.v1.executor.multiproc_executor.WorkerProc.worker_main",
+            "vllm.v1.executor.multiproc_executor.WorkerProc.make_worker_process",
             "vendor-compat",
             ("engine_core",),
             "generated-overlay",
@@ -617,7 +617,7 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
             target_version=resolved_sources["EW-02"][2],
             target_file=resolved_sources["EW-02"][1],
             target_source_hash=resolved_sources["EW-02"][3],
-            affected_symbols=("WorkerProc.worker_main",),
+            affected_symbols=("WorkerProc.make_worker_process",),
             patch_artifact_path="exaserve/_sitecustomize.py",
             patch_artifact_hash=artifact_hash,
             delivery_artifact_path="exaserve/compat/generated_overlay.py",
