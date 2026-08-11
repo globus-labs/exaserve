@@ -137,12 +137,22 @@ def _gateway_from_backend(backend_args: dict) -> tuple[Optional[dict], bool, Opt
     executable_ref = proxy.get("executable_ref", "")
     if not isinstance(executable_ref, str):
         raise ValueError("backend.args.ray.proxy.executable_ref must be text")
-    if not executable_ref and kind == "litellm" and proxy.get("python_path"):
+    if not executable_ref and kind == "litellm":
         from pathlib import Path
+        from eval.site_config import get_site_config
 
-        python_path = proxy["python_path"]
+        # LiteLLM intentionally lives in a separate virtual environment from
+        # Ray/vLLM.  The parent job must retain env_aurora, so an omitted
+        # override resolves through the site-configured LiteLLM interpreter
+        # instead of an unavailable ambient PATH entry.
+        python_path = proxy.get("python_path") or get_site_config().litellm_python_path
         if not isinstance(python_path, str):
             raise ValueError("backend.args.ray.proxy.python_path must be text")
+        if not python_path:
+            raise ValueError(
+                "LiteLLM requires backend.args.ray.proxy.python_path or "
+                "site_config.litellm_python_path"
+            )
         executable_ref = str(Path(python_path).parent / "litellm")
     port = proxy.get("port", 4001)
     workers = proxy.get("num_workers", 1)

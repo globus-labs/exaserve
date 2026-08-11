@@ -871,6 +871,11 @@ def test_ray_adapter_always_uses_exaserve_env(temp_spec, tmp_path, monkeypatch):
     adapter = get_backend_adapter("ray")
     runtime_env = adapter.runtime_env(plans[0])
     assert runtime_env.env_script.endswith("env_aurora")
+    gateway = plans[0].semantic_plan.deployment.gateway
+    assert gateway is not None
+    assert gateway.executable_ref == str(
+        Path(site_config.get_site_config().litellm_python_path).parent / "litellm"
+    )
 
 
 def test_cli_validate_and_submit_all_exact_run_group_dry_run(temp_spec, tmp_path, monkeypatch):
