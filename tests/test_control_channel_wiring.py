@@ -319,6 +319,41 @@ def test_start_polling_preserves_the_cross_thread_failure_cause():
     )
 
 
+def test_pre_start_heartbeat_uses_the_control_lease_not_poll_remainder():
+    import asyncio
+    import time
+
+    class Channel:
+        control_limits = {"lease_timeout_s": 3.0}
+
+        async def receive_command(self, _timeout):
+            return None
+
+        async def heartbeat_round_trip(self, timeout):
+            # The old implementation passed only 25% of the 0.2s command-poll
+            # window here.  A normal 0.1s acknowledgment consequently killed
+            # the rank even though its three-second lease was healthy.
+            assert timeout > 2.0
+            await asyncio.sleep(0.1)
+            return True
+
+    class Loop:
+        def call(self, coroutine, timeout):
+            return asyncio.run(asyncio.wait_for(coroutine, timeout))
+
+    client = RankClient(rank=1)
+    client.connected = True
+    client.established = True
+    client._channel = Channel()
+    client._loop = Loop()
+    client._last_control_ack = time.monotonic()
+
+    assert not client.poll_start(timeout=0.2, expected_operation="START_WORKER")
+    assert client.connected
+    assert client.established
+    assert client.control_failure() is None
+
+
 def test_observation_freshness_rejects_nonfinite_values(head):
     for value in (True, 0, -1, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="finite and positive"):

@@ -118,6 +118,12 @@ class VLLMEngine(EngineBackend):
         port = self._leased_port.port
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(port)
+        # vLLM v1's UniprocExecutor does not consume AsyncEngineArgs.master_port
+        # when it creates its local torch process group; it calls
+        # network_utils.get_open_port() again.  Point that supported allocator
+        # at the same ExaServe-owned lease so concurrent Serve replicas cannot
+        # independently probe and select one ephemeral port.
+        os.environ["VLLM_PORT"] = str(port)
         dist_setup_s = time.monotonic() - t0
         print(
             f"[VLLMEngine pid={pid}] Using distributed master {master_addr}:{port} (PP={pp})",

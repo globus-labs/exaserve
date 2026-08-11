@@ -1015,6 +1015,12 @@ class RankClient:
         self._maintenance_future: Optional[concurrent.futures.Future] = None
         self._control_failure: Optional[str] = None
         self._shutdown_operation: Optional[str] = None
+        # The pre-START loop is the sole command reader until runtime lease
+        # maintenance takes over.  Keep its heartbeat deadline anchored to the
+        # last head acknowledgment, just like the post-START maintenance loop;
+        # deriving it from a short command-poll interval makes healthy ranks
+        # fail under a registration burst at scale.
+        self._last_control_ack: Optional[float] = None
 
     def connect(self, timeout: float = 30.0) -> bool:
         """Authenticate with the head; failure is fail-closed for this rank."""
@@ -1161,6 +1167,7 @@ class RankClient:
             )
             self.established = bool(accepted)
             if self.established:
+                self._last_control_ack = time.monotonic()
                 with self._state_lock:
                     self._snapshot_observations = {
                         (obs.component_id, obs.instance_id): obs for obs in observations
@@ -1290,13 +1297,22 @@ class RankClient:
             return False
         if not payload:
             try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._loop.call(
-                    self._channel.heartbeat_round_trip(remaining),
-                    timeout=_completion_timeout(remaining),
+                lease = float(self.control_limits.get("lease_timeout_s", 0))
+                if not math.isfinite(lease) or lease <= 0:
+                    raise ValueError("resolved control lease timeout is invalid")
+                last_ack = self._last_control_ack
+                if last_ack is None:
+                    raise RuntimeError("initial control acknowledgment is missing")
+                remaining_lease = last_ack + lease - time.monotonic()
+                if remaining_lease <= 0:
+                    raise TimeoutError("pre-start control lease expired")
+                alive = self._loop.call(
+                    self._channel.heartbeat_round_trip(remaining_lease),
+                    timeout=_completion_timeout(remaining_lease),
                 )
+                if not alive:
+                    raise TimeoutError("heartbeat acknowledgment timed out")
+                self._last_control_ack = time.monotonic()
             except Exception as exc:  # noqa: BLE001
                 self.connected = False
                 self.established = False
@@ -1383,7 +1399,7 @@ class RankClient:
         if min(interval, lease, grace) <= 0:
             self._control_failure = "resolved control lease limits are invalid"
             return
-        last_ack = time.monotonic()
+        last_ack = self._last_control_ack or time.monotonic()
         while not self._maintenance_stop.is_set():
             await asyncio.sleep(interval)
             if self._maintenance_stop.is_set():
@@ -1396,6 +1412,7 @@ class RankClient:
                 if not alive:
                     raise TimeoutError("heartbeat acknowledgment timed out")
                 last_ack = time.monotonic()
+                self._last_control_ack = last_ack
                 command = await self._channel.receive_command(0.001)
                 if command is not None and await self._handle_runtime_command(command):
                     return
