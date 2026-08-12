@@ -733,11 +733,58 @@ def test_initial_readiness_waits_for_independent_evidence_streams(tmp_path, monk
     monkeypatch.setattr(root, "gateway_alive", lambda: True)
     monkeypatch.setattr(root, "gateway_health_check", lambda **_kwargs: True)
     monkeypatch.setattr(root, "apply_deployment_evidence", lambda: {})
-    monkeypatch.setattr(root, "canary_advertised_endpoint", lambda _model, **_kwargs: (True, "ok"))
+    canary_timeouts = []
 
-    verdict = root.await_initial_readiness(timeout_s=0.1, poll_s=0.001)
+    def canary(_model, *, timeout_s):
+        canary_timeouts.append(timeout_s)
+        return True, "ok"
+
+    monkeypatch.setattr(root, "canary_advertised_endpoint", canary)
+
+    verdict = root.await_initial_readiness(timeout_s=100, poll_s=0.001)
     assert verdict.ready
     assert readiness.calls == 2, "a transient partial observation was treated as terminal"
+    assert canary_timeouts == [root.plan.readiness.canary_timeout_s] * 2
+
+
+def test_live_canary_uses_its_plan_deadline_and_recovery_starts_after_probe(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+
+    class Unready:
+        phase = "READY"
+
+        def set_gateway(self, **_kwargs):
+            pass
+
+        def set_canary(self, *_args):
+            pass
+
+        def evaluate(self):
+            return SimpleNamespace(ready=False, blockers=("canary failed",))
+
+        def revoke(self, _reason, **_kwargs):
+            self.phase = "VALIDATING"
+
+        def fail(self, _reason):
+            pass
+
+    root.readiness = Unready()
+    monkeypatch.setattr(root, "gateway_alive", lambda: True)
+    monkeypatch.setattr(root, "gateway_health_check", lambda **_kwargs: True)
+    monkeypatch.setattr(root, "apply_deployment_evidence", lambda: {})
+    canary_timeouts = []
+
+    def canary(_model, *, timeout_s):
+        canary_timeouts.append(timeout_s)
+        return False, "timed out"
+
+    monkeypatch.setattr(root, "canary_advertised_endpoint", canary)
+    clock = iter((100.0, 170.0))
+    monkeypatch.setattr("exaserve.composition.time.monotonic", lambda: next(clock))
+
+    assert root.monitor_readiness() is None
+    assert canary_timeouts == [root.plan.readiness.canary_timeout_s]
+    assert root._validation_loss_started == 170.0
 
 
 def test_initial_readiness_has_a_typed_bounded_failure(tmp_path, monkeypatch):

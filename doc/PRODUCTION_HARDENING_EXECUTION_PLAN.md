@@ -640,10 +640,22 @@ flag advances deployment READY.
 
 Gateway startup is governed by the resolved immutable readiness budget, not a
 universal 30-second constant. The Aurora LiteLLM launcher has measured bind
-times of 51 seconds with one worker and 59 seconds with eight workers; its
-resolved `gateway_start_deadline_s` therefore has a 120-second minimum. Other
-gateway kinds retain the site/profile value. This budget covers bind/startup
-only and does not weaken route or inference-canary deadlines.
+times of 51 seconds with one worker and 59 seconds with eight workers. After
+the node-by-replica Cartesian configuration defect was removed, the real
+12-entry/eight-worker paper topology reached READY 27.5 seconds after endpoint
+setup. Its resolved `gateway_start_deadline_s` therefore has a 120-second
+minimum. Other gateway kinds retain the site/profile value. This budget covers
+bind/startup only and does not weaken route or inference-canary deadlines.
+
+The validation cadence and a canary's request deadline are separate plan
+semantics: every initial and live inference canary uses the resolved
+`canary_timeout_s`, bounded by the remaining initial-readiness deadline, and
+never substitutes `validation_interval_s` as an I/O timeout. Recovery begins
+when a failed probe returns, not when it starts. For the Aurora LiteLLM
+validation topology, `recovery_deadline_s` is at least two complete canary
+deadlines. This permits READY to remain revoked through a bounded planned-load
+queue and still fails closed if ingress does not recover; it does not make
+LiteLLM production-qualified.
 
 **Listener bind, initial registration, reconnect, and deadlines**
 

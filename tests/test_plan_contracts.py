@@ -345,7 +345,8 @@ def test_litellm_resolves_an_evidence_based_startup_budget_floor():
         site=_site(gateway_kinds=("haproxy", "litellm")),
         deployment_id="litellm-benchmark",
     )
-    assert plan.readiness.gateway_start_deadline_s == 300.0
+    assert plan.readiness.gateway_start_deadline_s == 120.0
+    assert plan.readiness.recovery_deadline_s == 120.0
 
 
 def test_validation_mode_still_refuses_a_mismatched_exposure_mode():

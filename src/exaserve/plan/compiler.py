@@ -1067,13 +1067,21 @@ def compile_deployment_plan(
         else:
             base_readiness[key] = _number(value, f"deployment.readiness.{key}", minimum=0.0000001)
     # LiteLLM imports and initializes every worker before binding.  The small
-    # probe took 51s (one worker) and 59s (eight workers), while the real
-    # 12-replica/eight-worker paper topology remained alive beyond 120s.  The
-    # generic 30s budget and the former 120s floor are therefore false failures.
-    # Resolve a kind-specific, still-finite five-minute startup boundary.
+    # probe took 51s (one worker) and 59s (eight workers); after removing the
+    # erroneous node-by-replica Cartesian configuration, the real 12-entry,
+    # eight-worker paper topology reached READY 27.5s after endpoint setup.
+    # The generic 30s edge is therefore unsafe while a two-minute boundary is
+    # finite and retains measured headroom.  Its live ingress can also be
+    # intentionally saturated by the paper workload, so allow at least two
+    # complete canary deadlines for post-READY recovery rather than conflating
+    # the five-second polling cadence with request failure.
     if gateway is not None and gateway.kind == GatewayKind.LITELLM.value:
         base_readiness["gateway_start_deadline_s"] = max(
-            300.0, float(base_readiness["gateway_start_deadline_s"])
+            120.0, float(base_readiness["gateway_start_deadline_s"])
+        )
+        base_readiness["recovery_deadline_s"] = max(
+            2.0 * float(base_readiness["canary_timeout_s"]),
+            float(base_readiness["recovery_deadline_s"]),
         )
     readiness = ReadinessLimits(**base_readiness)
 

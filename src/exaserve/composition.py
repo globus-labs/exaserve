@@ -1475,8 +1475,19 @@ class CompositionRoot:
 
             self.apply_deployment_evidence()
             for model in self.plan.models:
+                # The polling cadence controls how often validation starts; it
+                # is not an inference deadline.  In particular, substituting a
+                # five-second poll interval for the resolved canary timeout
+                # makes a healthy but queued gateway fail under planned load.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
                 ok, detail = self.canary_advertised_endpoint(
-                    model, timeout_s=max(1.0, min(10.0, poll_s))
+                    model,
+                    timeout_s=min(
+                        float(self.plan.readiness.canary_timeout_s),
+                        remaining,
+                    ),
                 )
                 self.readiness.set_canary(model.model_id, ok)
                 if not ok:
@@ -1903,12 +1914,17 @@ class CompositionRoot:
         self.apply_deployment_evidence()
         for model in self.plan.models:
             ok, detail = self.canary_advertised_endpoint(
-                model, timeout_s=max(1.0, min(10.0, interval))
+                model,
+                timeout_s=float(self.plan.readiness.canary_timeout_s),
             )
             self.readiness.set_canary(model.model_id, ok)
             if not ok:
                 self._log(f"[Readiness] live canary {model.model_id} failed: {detail}")
 
+        # A timeout becomes evidence only when its probe finishes.  Anchoring
+        # recovery to the pre-probe timestamp silently spends the entire
+        # recovery window while a bounded canary is still in flight.
+        observed_at = time.monotonic()
         verdict = self.readiness.evaluate()
         if verdict.ready:
             if self.readiness.phase == "VALIDATING" and self._validation_loss_started is not None:
@@ -1944,12 +1960,12 @@ class CompositionRoot:
                     capability_map=revoked.capability_map,
                     receipt_hashes=list(revoked.receipt_hashes),
                 )
-            self._validation_loss_started = now
+            self._validation_loss_started = observed_at
         elif self._validation_loss_started is None:
-            self._validation_loss_started = now
+            self._validation_loss_started = observed_at
 
         recovery_s = float(self.plan.readiness.recovery_deadline_s)
-        if now - self._validation_loss_started >= recovery_s:
+        if observed_at - self._validation_loss_started >= recovery_s:
             terminal = f"readiness did not recover within {recovery_s:.1f}s: {reason}"
             self.readiness.fail(terminal)
             return FirstCause("readiness", "READINESS_RECOVERY_EXPIRED", terminal)
