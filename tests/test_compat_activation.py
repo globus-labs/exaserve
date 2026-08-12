@@ -318,6 +318,7 @@ def test_default_manifest_has_every_required_wp3_identity_field():
         "SC-12",
         "RS-01",
         "RS-02",
+        "RS-03",
         "EN-01",
     }
     for patch in p.patches:
@@ -334,7 +335,7 @@ def test_default_manifest_has_every_required_wp3_identity_field():
     # the spawned-engine shim is a REQUIRED engine-role patch (ADR-003)
     assert "EN-01" in p.required_patch_ids("engine_core")
     assert "EN-01" in p.required_patch_ids("engine_worker")
-    assert p.required_patch_ids("deployment") == ("RS-01",)
+    assert p.required_patch_ids("deployment") == ("RS-01", "RS-03")
     assert p.required_patch_ids("ray_head") == ("RS-02",)
     assert p.required_patch_ids("ray_worker") == ("RS-02",)
 
@@ -456,3 +457,47 @@ print('verified')
     result = run_finite([sys.executable, "-c", code], timeout_s=30.0, env=env)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().splitlines()[-1] == "verified"
+
+
+def test_ray_serve_proxy_timeout_does_not_complete_chained_source_future(monkeypatch):
+    import asyncio
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+
+    from exaserve import _sitecustomize
+
+    module = SimpleNamespace(wrap_as_future=lambda _ref, timeout_s=None: timeout_s)
+    _sitecustomize._patch_ray_serve_proxy_future_timeout(module)
+    assert module.wrap_as_future._exaserve_proxy_timeout_patch is True
+
+    class Ref:
+        def __init__(self, future):
+            self._future = future
+
+        def future(self):
+            return self._future
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        loop_errors = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            late_source = Future()
+            timed = module.wrap_as_future(Ref(late_source), timeout_s=0)
+            await asyncio.sleep(0)
+            with pytest.raises(TimeoutError, match="timeout 0s"):
+                await timed
+            late_source.set_result("late")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            timely_source = Future()
+            timely = module.wrap_as_future(Ref(timely_source), timeout_s=1)
+            timely_source.set_result("ready")
+            assert await timely == "ready"
+            assert loop_errors == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    asyncio.run(exercise())

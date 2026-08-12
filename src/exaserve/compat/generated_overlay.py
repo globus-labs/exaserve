@@ -45,6 +45,7 @@ PATCH_CALLS = {
     "EW-03": ("exaserve._sitecustomize", "_patch_vllm_ray_worker_identity"),
     "RS-01": ("exaserve._sitecustomize", "_patch_ray_serve_start_timeout"),
     "RS-02": ("exaserve.ray_start", "_patch_raylet_launch_from_environment"),
+    "RS-03": ("exaserve._sitecustomize", "_patch_ray_serve_proxy_future_timeout"),
 }
 
 

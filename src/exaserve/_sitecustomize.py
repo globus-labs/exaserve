@@ -22,6 +22,7 @@ DECLARED_PATCH_FUNCTIONS = {
     "_patch_ray_oneapi_selector": "SC-11",
     "_patch_ray_accelerator_context": "SC-12",
     "_install_ray_serve_timeout_import_hook": "RS-01",
+    "_patch_ray_serve_proxy_future_timeout": "RS-03",
 }
 
 
@@ -1121,8 +1122,72 @@ def _install_ray_serve_timeout_import_hook() -> None:
         sys.meta_path.insert(0, _RayServeTimeoutFinder())
 
 
-# WP3 delete-first (ADR-003 decision 1, 2026-08-05): three dead patches
-# removed — SC-D1 wrap_as_future timeout, SC-D2 stale Serve constants
-# (values disagreed with the live RS-01 profile), and SC-D3 ProxyActor
-# profiling. The file-replacement overlay and its instrumentation were also
-# retired; current diagnostics use ExaServe-owned collectors and traces.
+def _patch_ray_serve_proxy_future_timeout(module=None) -> None:
+    """Keep Ray's source future separate from its timeout result future.
+
+    Ray 2.53 schedules its timeout exception directly on the asyncio future
+    returned by ``asyncio.wrap_future``.  If the underlying concurrent future
+    completes later, asyncio's chain callback asserts because its destination
+    was already completed by the timeout.  At large Serve scale this occurs in
+    the controller's proxy health checks and can stop deployment progress.
+
+    The exact-hash overlay invokes this adapter only for the pinned Ray source.
+    The source future is allowed to complete normally; callers receive a
+    separate future on which timeout and source completion race safely.
+    """
+    if module is None:
+        module = sys.modules.get("ray.serve._private.proxy_state")
+    if module is None:
+        raise RuntimeError("Ray Serve proxy_state must be loaded before applying RS-03")
+
+    original = getattr(module, "wrap_as_future", None)
+    if not callable(original):
+        raise RuntimeError("Ray Serve proxy_state.wrap_as_future is unavailable")
+    if getattr(original, "_exaserve_proxy_timeout_patch", False):
+        return
+
+    def wrap_as_future_safe(ref, timeout_s=None):
+        loop = asyncio.get_running_loop()
+        source_fut = asyncio.wrap_future(ref.future())
+        if timeout_s is None:
+            return source_fut
+
+        assert timeout_s >= 0, "Timeout value should be non-negative"
+        result_fut = loop.create_future()
+
+        def copy_source(completed) -> None:
+            if completed.cancelled():
+                if not result_fut.done():
+                    result_fut.cancel()
+                return
+            try:
+                value = completed.result()
+            except Exception as exc:
+                # Retrieve a late source exception even after the result has
+                # timed out, but never overwrite an already completed result.
+                if not result_fut.done():
+                    result_fut.set_exception(exc)
+            else:
+                if not result_fut.done():
+                    result_fut.set_result(value)
+
+        def set_timeout() -> None:
+            if not result_fut.done():
+                result_fut.set_exception(
+                    TimeoutError(f"Future cancelled after timeout {timeout_s}s")
+                )
+
+        source_fut.add_done_callback(copy_source)
+        timeout_handler = loop.call_later(max(timeout_s, 0), set_timeout)
+        result_fut.add_done_callback(lambda _completed: timeout_handler.cancel())
+        return result_fut
+
+    wrap_as_future_safe._exaserve_proxy_timeout_patch = True
+    module.wrap_as_future = wrap_as_future_safe
+    _patch_log("Applied Ray Serve proxy timeout future patch")
+
+
+# WP3 delete-first (ADR-003 decision 1, 2026-08-05): stale Serve constants
+# (values disagreed with the live RS-01 profile) and ProxyActor profiling were
+# retired. RS-03 restores the formerly dead timeout repair only after a fresh
+# 64-node qualification reproduced the pinned Ray 2.53 asyncio race.

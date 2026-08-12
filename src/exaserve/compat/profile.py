@@ -491,6 +491,12 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
             "2.53.0",
             "ae09f861986fcda28111f9a3417f27b4c5ad77a34a12ca05e8887a43cd6e6597",
         ),
+        "RS-03": (
+            "ray",
+            "ray/serve/_private/proxy_state.py",
+            "2.53.0",
+            "eb0e30bb8eaf57b4e5ae48787c8654fd8d24ce9211382e81d38097750344ce06",
+        ),
     }
 
     def _patch(
@@ -702,6 +708,26 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
             import_timing="after-profile-verification-before-first-Ray-import",
             semantic_probe="sentinel:RS-02",
             removal_ref="remove-when-Ray-exposes-raylet-fanout-CLI-options",
+        ),
+        PatchSpec(
+            "RS-03",
+            "ray.serve._private.proxy_state.wrap_as_future",
+            "upstream-fix",
+            ("deployment",),
+            "generated-overlay",
+            "serve_proxy_timeout_future_isolation",
+            target_distribution=resolved_sources["RS-03"][0],
+            target_version=resolved_sources["RS-03"][2],
+            target_file=resolved_sources["RS-03"][1],
+            target_source_hash=resolved_sources["RS-03"][3],
+            affected_symbols=("wrap_as_future",),
+            patch_artifact_path="exaserve/_sitecustomize.py",
+            patch_artifact_hash=artifact_hash,
+            delivery_artifact_path="exaserve/compat/generated_overlay.py",
+            delivery_artifact_hash=overlay_artifact_hash,
+            import_timing="before-Ray-Serve-controller-proxy-checks",
+            semantic_probe="sentinel:RS-03",
+            removal_ref="remove-when-Ray-wrap_as_future-does-not-complete-chained-future-on-timeout",
         ),
         PatchSpec(
             "EN-01",

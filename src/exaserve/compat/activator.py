@@ -134,6 +134,14 @@ def _postcondition_sitecustomize(patch_id: str) -> Optional[bool]:
         if module is not None:
             return bool(getattr(module, "_exaserve_serve_start_timeout_patch", False))
         return None
+    if patch_id == "RS-03":
+        import sys
+
+        module = sys.modules.get("ray.serve._private.proxy_state")
+        if module is None:
+            return None
+        target = getattr(module, "wrap_as_future", None)
+        return bool(getattr(target, "_exaserve_proxy_timeout_patch", False))
     spec = _SENTINELS.get(patch_id)
     if spec is None:
         return True  # no in-process sentinel defined (shell/shim delivery)
