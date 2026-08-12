@@ -1149,6 +1149,16 @@ def compile_deployment_plan(
             base_readiness[key] = _boolean(value, f"deployment.readiness.{key}")
         else:
             base_readiness[key] = _number(value, f"deployment.readiness.{key}", minimum=0.0000001)
+    # HeadOnly is deliberately a single-ingress validation topology.  At the
+    # paper's fixed weak-scaling arrival rate its one native Serve proxy can
+    # temporarily stop accepting health/canary connections while already
+    # accepted requests drain.  Keep revoking READY immediately, but allow six
+    # complete canary windows before making that recoverable overload terminal.
+    if exposure.mode == ExposureMode.RAY_SERVE_HEAD_ONLY.value:
+        base_readiness["recovery_deadline_s"] = max(
+            6.0 * float(base_readiness["canary_timeout_s"]),
+            float(base_readiness["recovery_deadline_s"]),
+        )
     # LiteLLM imports and initializes every worker before binding.  The small
     # probe took 51s (one worker) and 59s (eight workers); after removing the
     # erroneous node-by-replica Cartesian configuration, the real 12-entry,

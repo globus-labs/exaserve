@@ -308,6 +308,7 @@ def test_head_only_is_an_explicit_gateway_free_benchmark_topology():
     assert plan.uses_head_only_serve_proxy()
     assert plan.scale_envelope.gateway_kind is None
     assert plan.scale_envelope.validation_mode is True
+    assert plan.readiness.recovery_deadline_s == 360.0
 
 
 def test_head_only_rejects_topologies_that_cannot_bind_native_replica_slots():

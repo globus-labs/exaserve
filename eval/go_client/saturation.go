@@ -249,8 +249,9 @@ func newSaturationFinder(cfg SaturationConfig) *saturationFinder {
 	clients := make([]*http.Client, numSchedulers)
 	for i := 0; i < numSchedulers; i++ {
 		t := &http.Transport{
+			// The request context already bounds dialing via Client.Timeout;
+			// retaining a second 30s clock would change the compiled contract.
 			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 			MaxIdleConns:          perClientIdle,

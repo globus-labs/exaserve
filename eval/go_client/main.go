@@ -308,8 +308,10 @@ func buildPayload(req traceRequest, generationMode string, includeTP bool, strea
 
 func newHTTPClient(idleConnsPerClient int, maxConnsPerHost int, timeoutSec float64) *http.Client {
 	transport := &http.Transport{
+		// http.Client.Timeout is the single compiled request deadline and also
+		// cancels dialing. A second hard-coded dial clock made valid queued
+		// ingress fail at 30s under scaled proxy load.
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		MaxIdleConns:          idleConnsPerClient,
