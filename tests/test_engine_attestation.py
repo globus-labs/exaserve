@@ -549,6 +549,24 @@ def test_watcher_records_and_logs_the_exact_incomplete_patch_set(tmp_path, monke
         assert watcher.stop()
 
 
+def test_watcher_silently_expires_for_a_process_without_an_engine_slot(
+    tmp_path, monkeypatch, capsys
+):
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    monkeypatch.setenv(engine_shim.RECEIPT_DIR_ENV, str(receipts))
+    monkeypatch.setattr(engine_shim, "_build_engine_receipt", lambda **_kwargs: None)
+
+    watcher = engine_shim.start_engine_attestation(
+        patches_imported=True, timeout_s=0.05, poll_s=0.005
+    )
+    time.sleep(0.1)
+
+    assert watcher.stop()
+    assert engine_shim.latest_error(str(receipts)) is None
+    assert "attestation pending" not in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     ("timeout_s", "poll_s"),
     [(0.0, 0.1), (float("nan"), 0.1), (1.0, 0.0), (1.0, float("inf"))],

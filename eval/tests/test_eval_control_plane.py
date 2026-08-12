@@ -858,10 +858,47 @@ def test_reused_snapshot_fails_closed_after_artifact_tampering(temp_spec, tmp_pa
     )
     first = materialize_run_bundles(str(temp_spec), **kwargs)
     snapshot_file = Path(first[0].snapshot_root) / "tracked.txt"
+    snapshot_file.chmod(0o644)
     snapshot_file.write_text("tampered\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="artifact_manifest_hash mismatch"):
         materialize_run_bundles(str(temp_spec), **kwargs)
+
+
+def test_snapshot_permissions_prevent_import_bytecode_mutation(
+    temp_spec, tmp_path, monkeypatch
+):
+    repo_root = _init_git_repo(tmp_path / "repo")
+    (repo_root / "snapshot_probe.py").write_text("VALUE = 7\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "snapshot_probe.py"], cwd=repo_root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add probe"], cwd=repo_root, check=True, capture_output=True
+    )
+    monkeypatch.setenv("EXASERVE_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+    plan = materialize_run_bundles(
+        str(temp_spec),
+        backend_name="mock",
+        experiments_root=str(tmp_path / "runs"),
+        trace_root=str(tmp_path / "traces"),
+        repo_root=str(repo_root),
+    )[0]
+    snapshot_root = Path(plan.snapshot_root)
+
+    assert all(not (path.stat().st_mode & 0o222) for path in (snapshot_root, *snapshot_root.rglob("*")))
+    environment = dict(os.environ)
+    environment.pop("PYTHONDONTWRITEBYTECODE", None)
+    environment.pop("PYTHONPYCACHEPREFIX", None)
+    environment["PYTHONPATH"] = str(snapshot_root)
+    subprocess.run(
+        [sys.executable, "-c", "import snapshot_probe; assert snapshot_probe.VALUE == 7"],
+        env=environment,
+        check=True,
+        capture_output=True,
+    )
+    assert not list(snapshot_root.rglob("__pycache__"))
+    assert not list(snapshot_root.rglob("*.pyc"))
 
 
 def test_dirty_repo_warning_and_snapshot_excludes_uncommitted_content(

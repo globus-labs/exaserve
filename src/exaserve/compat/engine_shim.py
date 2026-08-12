@@ -540,12 +540,14 @@ def start_engine_attestation(
     def _watch() -> None:
         deadline = time.monotonic() + timeout_s
         attempts = 0
+        identified_engine = False
         while not stop_requested.is_set() and time.monotonic() < deadline:
             try:
                 receipt = _build_engine_receipt(
                     patches_imported=patches_imported, engine_kind=engine_kind
                 )
                 if receipt is not None:
+                    identified_engine = True
                     failures = _required_proof_failures(receipt)
                     if not failures:
                         _, delivered = _write_and_deliver(receipt)
@@ -568,7 +570,12 @@ def start_engine_attestation(
                 if attempts & (attempts - 1) == 0:
                     _record_attestation_error(exc, attempts)
             stop_requested.wait(poll_s)
-        if not stop_requested.is_set():
+        # sitecustomize is inherited by multiprocessing helpers such as the
+        # resource tracker.  They never own a planned engine slot, so their
+        # bounded classifier must end silently instead of publishing a false
+        # engine failure.  An identified engine still records exact proof or
+        # delivery failure, while a missing receipt remains a readiness blocker.
+        if not stop_requested.is_set() and identified_engine:
             _record_attestation_error(
                 RuntimeError("engine attestation deadline expired without authoritative delivery"),
                 attempts,

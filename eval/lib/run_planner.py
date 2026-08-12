@@ -62,12 +62,12 @@ _MP_CONTEXT = multiprocessing.get_context("forkserver")
 _DEFAULT_MAX_WORKERS = 8
 _DEFAULT_MATERIALIZATION_TIMEOUT_S = 3600.0
 _RUN_GROUP_RE = re.compile(r"^run(\d+)$")
-# v2 snapshots created before the job boundary disabled bytecode writes may
-# contain interpreter-generated __pycache__ entries.  Preserve those trees as
-# evidence and publish clean materializations under a new location tag.  The
-# snapshot metadata and semantic hash policy remain schema v2 because the
-# archived source/tool bytes and their meaning are unchanged.
-_SNAPSHOT_LOCATION_TAG = "v2b"
+# Older v2 snapshots relied on every caller remembering to disable bytecode
+# writes.  Preserve those trees as evidence and publish permission-sealed
+# materializations under a new location tag.  The metadata and semantic hash
+# remain schema v2 because permissions protect, but do not change, the archived
+# source/tool content.
+_SNAPSHOT_LOCATION_TAG = "v2c"
 
 
 def scheduler_run_identity(
@@ -428,6 +428,33 @@ def _snapshot_inventory(snapshot_root: str) -> dict[str, Any]:
     }
 
 
+def _seal_snapshot_permissions(snapshot_root: str) -> None:
+    """Remove write permission from every published snapshot entry."""
+    root = Path(snapshot_root)
+    paths = sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True)
+    for path in paths:
+        if path.is_symlink():
+            raise RuntimeError(f"repository snapshot contains symlink {path}")
+        if not (path.is_dir() or path.is_file()):
+            raise RuntimeError(f"repository snapshot contains unsupported entry {path}")
+        os.chmod(path, path.stat().st_mode & ~0o222)
+    os.chmod(root, root.stat().st_mode & ~0o222)
+
+
+def _validate_snapshot_permissions(snapshot_root: str) -> None:
+    root = Path(snapshot_root)
+    for path in (root, *root.rglob("*")):
+        if path.stat().st_mode & 0o222:
+            raise RuntimeError(f"snapshot entry remains writable: {path}")
+
+
+def _remove_snapshot_tree(snapshot_root: str) -> None:
+    """Make a private temporary snapshot removable, then discard it."""
+    for directory, _, _ in os.walk(snapshot_root):
+        os.chmod(directory, 0o700)
+    shutil.rmtree(snapshot_root)
+
+
 def _validate_repo_snapshot(snapshot_root: str, expected_commit: str | None = None) -> dict:
     metadata_path = os.path.join(snapshot_root, "snapshot_meta.json")
     from exaserve.state.atomic import strict_json_load_path
@@ -454,6 +481,7 @@ def _validate_repo_snapshot(snapshot_root: str, expected_commit: str | None = No
     for key in ("artifact_manifest_hash", "file_count", "total_bytes"):
         if metadata[key] != observed[key]:
             raise RuntimeError(f"snapshot {key} mismatch at {snapshot_root}")
+    _validate_snapshot_permissions(snapshot_root)
     go_binary = os.path.join(snapshot_root, "eval", "go_client", "bin", "go_dispatch")
     if metadata["go_dispatch_sha256"] == "0" * 64:
         if metadata["go_version"] != "not-present" or os.path.exists(go_binary):
@@ -499,7 +527,7 @@ def _ensure_repo_snapshot(repo_root: str, commit_sha: str) -> str:
         _extract_git_archive(archive_path, temp_root)
     except BaseException as exc:
         try:
-            shutil.rmtree(temp_root)
+            _remove_snapshot_tree(temp_root)
         except FileNotFoundError:
             pass
         except OSError as cleanup_exc:
@@ -531,6 +559,7 @@ def _ensure_repo_snapshot(repo_root: str, commit_sha: str) -> str:
                 **go_identity,
             },
         )
+        _seal_snapshot_permissions(temp_root)
         _validate_repo_snapshot(temp_root, commit_sha)
 
         try:
@@ -541,11 +570,11 @@ def _ensure_repo_snapshot(repo_root: str, commit_sha: str) -> str:
         except OSError as exc:
             if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
                 raise
-            shutil.rmtree(temp_root)
+            _remove_snapshot_tree(temp_root)
             _validate_repo_snapshot(snapshot_root, commit_sha)
     except BaseException as exc:
         try:
-            shutil.rmtree(temp_root)
+            _remove_snapshot_tree(temp_root)
         except FileNotFoundError:
             pass
         except OSError as cleanup_exc:
