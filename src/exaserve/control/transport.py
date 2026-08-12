@@ -1039,6 +1039,17 @@ class ControlListener:
                         )
                         return
                     self._command_results[command_id] = result_record
+                    # A rank is allowed to close as soon as it has sent a
+                    # successful DRAIN/STOP acknowledgement. Authorize that
+                    # GOODBYE in the same listener turn that accepts the ACK,
+                    # before waking a sequential head-side waiter. Otherwise
+                    # a fast rank can close while the head is still waiting on
+                    # an earlier rank and be falsely rejected as unsolicited.
+                    if (
+                        result_payload["operation"] in {"DRAIN", "STOP"}
+                        and result_payload["ok"] is True
+                    ):
+                        self.expect_goodbye(session.rank)
                     self._command_result_events.setdefault(command_id, asyncio.Event()).set()
                     if command_id == session.pending_snapshot_command_id:
                         expected = {
@@ -1361,7 +1372,14 @@ class ControlListener:
 
     def expect_goodbye(self, rank: int) -> None:
         session = self.sessions.get(rank)
-        if session is None or not session.established:
+        if session is None:
+            raise ContractError(f"rank {rank} is not established")
+        # Listener-side ACK handling authorizes shutdown before it wakes the
+        # head's result waiter. The later head-side call is intentionally
+        # idempotent and must not erase an already received GOODBYE.
+        if session.expected_goodbye:
+            return
+        if not session.established:
             raise ContractError(f"rank {rank} is not established")
         session.expected_goodbye = True
         with self._goodbye_lock:

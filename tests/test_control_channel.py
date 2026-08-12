@@ -826,6 +826,46 @@ def test_an_exact_duplicate_command_replays_the_same_cached_result():
     _run(scenario())
 
 
+def test_shutdown_ack_atomically_authorizes_immediate_goodbye():
+    """Fast ranks may close before a sequential head waiter reaches them."""
+
+    async def scenario():
+        received, changes = [], []
+        secret = new_deployment_secret()
+        listener = await _listener(received, changes, expected_ranks=2, secret=secret)
+        channels = [_channel(listener, secret, rank) for rank in range(2)]
+        for channel in channels:
+            await channel.connect_and_register()
+            await _establish(channel)
+        assert await listener.wait_all_established(2)
+
+        assert await listener.broadcast_command("DRAIN", "DRAIN") == 2
+
+        async def acknowledge_and_close(channel):
+            command = await channel.receive_command(2)
+            assert command is not None
+            await channel.send_command_result(
+                command["command_id"],
+                True,
+                operation="DRAIN",
+                status="SUCCEEDED",
+            )
+            await channel.close(expected=True)
+
+        await asyncio.gather(*(acknowledge_and_close(channel) for channel in channels))
+        for rank in range(2):
+            result = await listener.wait_command_result(f"DRAIN:{rank}", 2)
+            assert result is not None and result["ok"] is True
+            # The head-side authorization happens after the rank has already
+            # closed in this test; it must not erase the accepted GOODBYE.
+            listener.expect_goodbye(rank)
+            assert listener.received_goodbye(rank)
+        assert not listener.audit
+        await listener.stop()
+
+    _run(scenario())
+
+
 def test_a_command_id_cannot_be_reused_for_a_different_request():
     async def scenario():
         received, changes = [], []
