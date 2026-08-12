@@ -551,6 +551,29 @@ class ControlListener:
         self._out_seq[rank] = seq
         return seq
 
+    async def _write_session_frame(
+        self, writer: asyncio.StreamWriter, envelope: Envelope
+    ) -> bool:
+        """Write to one rank, treating socket loss as a recoverable disconnect.
+
+        EOF/reset has the same session semantics in either direction.  A read
+        reset was already handled locally, but a reset raised by ``drain()``
+        escaped to the listener-wide handler-failure boundary and made one
+        transient rank loss generation-fatal before reconnect grace applied.
+        Keep callback/contract exceptions visible while containing only
+        transport I/O loss here.
+        """
+        try:
+            await write_frame(
+                writer,
+                self._secret,
+                envelope,
+                max_frame_bytes=self._limits.max_frame_bytes,
+            )
+            return True
+        except (ConnectionError, OSError):
+            return False
+
     def _check_scope(self, env: Envelope) -> str | None:
         if env.deployment_id != self.deployment_id:
             return RejectReason.WRONG_DEPLOYMENT.value
@@ -617,9 +640,8 @@ class ControlListener:
                         )
                         session.registered = False
                         break
-                    await write_frame(
+                    if not await self._write_session_frame(
                         writer,
-                        self._secret,
                         Envelope(
                             v=SCHEMA_VERSION,
                             kind=EnvelopeKind.COMMAND_RESULT.value,
@@ -648,8 +670,8 @@ class ControlListener:
                                 },
                             },
                         ),
-                        max_frame_bytes=self._limits.max_frame_bytes,
-                    )
+                    ):
+                        break
                     self._writers[session.rank] = writer
                     await self._emit_session_change(session.rank, True)
                     continue
@@ -933,9 +955,8 @@ class ControlListener:
                         result = self._on_heartbeat(session.rank)
                         if asyncio.iscoroutine(result):
                             await result
-                    await write_frame(
+                    if not await self._write_session_frame(
                         writer,
-                        self._secret,
                         Envelope(
                             v=SCHEMA_VERSION,
                             kind=EnvelopeKind.HEARTBEAT.value,
@@ -950,8 +971,8 @@ class ControlListener:
                                 "heartbeat_id": env.payload["heartbeat_id"],
                             },
                         ),
-                        max_frame_bytes=self._limits.max_frame_bytes,
-                    )
+                    ):
+                        break
                 elif env.kind == EnvelopeKind.RECEIPT.value:
                     if not session.established:
                         await self._protocol_violation(

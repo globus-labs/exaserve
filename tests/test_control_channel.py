@@ -479,6 +479,45 @@ def test_unexpected_handler_callback_failure_is_observable():
     _run(scenario())
 
 
+def test_heartbeat_response_socket_reset_is_recoverable_session_loss(monkeypatch):
+    async def scenario():
+        received, changes = [], []
+        secret = new_deployment_secret()
+        listener = await _listener(received, changes, secret=secret)
+        channel = _channel(listener, secret, 0)
+        await channel.connect_and_register()
+        await _establish(channel)
+
+        from exaserve.control.contracts import EnvelopeKind
+        from exaserve.control import transport
+        from exaserve.control.transport import SUPERVISOR_RANK
+
+        original_write_frame = transport.write_frame
+
+        async def reset_head_heartbeat(writer, frame_secret, envelope, **kwargs):
+            if (
+                envelope.kind == EnvelopeKind.HEARTBEAT.value
+                and envelope.sender_rank == SUPERVISOR_RANK
+            ):
+                raise ConnectionResetError("injected response reset")
+            return await original_write_frame(writer, frame_secret, envelope, **kwargs)
+
+        monkeypatch.setattr(transport, "write_frame", reset_head_heartbeat)
+        with pytest.raises((ConnectionError, asyncio.IncompleteReadError)):
+            await channel.heartbeat_round_trip(1)
+        for _ in range(50):
+            if (0, False) in changes:
+                break
+            await asyncio.sleep(0.01)
+
+        assert (0, False) in changes
+        assert listener.unexpected_failure() is None
+        assert not listener.is_established(0)
+        await listener.stop()
+
+    _run(scenario())
+
+
 def test_rejections_fail_closed():
     async def scenario():
         received, changes = [], []
