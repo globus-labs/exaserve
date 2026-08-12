@@ -662,7 +662,15 @@ class HeadChannel:
                 rank,
                 expected=expected_goodbye,
             )
-            if self.ledger is not None:
+            # An authorized GOODBYE is the terminal audit event for a rank,
+            # not a lease loss. Readiness is already revoked by the ordered
+            # shutdown transition, and retaining the accepted receipts leaves
+            # exact evidence of what reached READY. Revoking every rank slot
+            # here formerly created an O(receipts) durable write storm after a
+            # clean all-rank drain and could consume the watchdog before the
+            # shutdown report was published. Unexpected disconnects still
+            # fail closed and revoke their rank-owned evidence immediately.
+            if self.ledger is not None and not expected_goodbye:
                 self._submit_durable(lambda: self.ledger.drop_rank(rank))
             with self._state_lock:
                 self._observations_by_rank.pop(rank, None)
@@ -1076,6 +1084,7 @@ class HeadChannel:
                     f"control listener cleanup failed: {type(exc).__name__}: {exc}"
                 )
             executor = getattr(self, "_durable_executor", None)
+            durable_writer_clean = True
             if executor is not None:
                 try:
                     with self._durable_lock:
@@ -1085,13 +1094,21 @@ class HeadChannel:
                         tail.result(timeout=remaining())
                     executor.shutdown(wait=True, cancel_futures=False)
                 except Exception as exc:
+                    durable_writer_clean = False
                     clean = False
                     self.failures.append(
                         f"durable receipt writer cleanup failed: {type(exc).__name__}: {exc}"
                     )
+                    # ThreadPoolExecutor.shutdown(wait=True) has no deadline.
+                    # Once the shared cleanup budget is exhausted, waiting
+                    # here can prevent publication of conservative failure
+                    # evidence. Cancel work that has not started and let the
+                    # outer process owner enforce its bounded reap for an
+                    # already-running write.
+                    executor.shutdown(wait=False, cancel_futures=True)
             try:
                 binding_store = getattr(self.ledger, "binding_store", None)
-                if binding_store is not None:
+                if binding_store is not None and durable_writer_clean:
                     binding_store.flush()
             except Exception as exc:
                 clean = False

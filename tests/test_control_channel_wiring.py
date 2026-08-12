@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -125,6 +128,101 @@ def test_shutdown_accounting_uses_delivered_ranks_after_fast_close():
     assert channel._shutdown_acknowledged_ranks == {0, 1}
     assert channel._listener.authorized == [0, 1]
     assert channel.failures == []
+
+
+@pytest.mark.parametrize("expected_goodbye", [False, True])
+def test_only_unexpected_disconnect_revokes_durable_receipts(expected_goodbye):
+    """A clean GOODBYE preserves READY evidence; lease loss fails closed."""
+
+    class Listener:
+        def received_goodbye(self, rank):
+            assert rank == 1
+            return expected_goodbye
+
+    class Coordinator:
+        def __init__(self):
+            self.calls = []
+
+        def on_disconnect(self, rank, *, expected):
+            self.calls.append((rank, expected))
+
+    class Ledger:
+        binding_store = None
+
+        def __init__(self):
+            self.dropped = []
+
+        def drop_rank(self, rank):
+            self.dropped.append(rank)
+
+    channel = object.__new__(HeadChannel)
+    channel._listener = Listener()
+    channel.sessions_coordinator = Coordinator()
+    channel.ledger = Ledger()
+    channel._state_lock = threading.RLock()
+    channel._observations_by_rank = {1: {("component", "instance"): object()}}
+    channel._observation_arrivals = {(1, "component", "instance"): time.monotonic()}
+    channel._unexpected_disconnects = []
+    channel.disconnected = []
+    channel.failures = []
+
+    channel._on_session_change(1, False)
+
+    assert channel.sessions_coordinator.calls == [(1, expected_goodbye)]
+    assert channel.ledger.dropped == ([] if expected_goodbye else [1])
+    assert channel._observations_by_rank == {}
+    assert channel._observation_arrivals == {}
+    assert channel._unexpected_disconnects == ([] if expected_goodbye else [1])
+
+
+def test_durable_writer_timeout_does_not_turn_stop_into_an_unbounded_join():
+    class Listener:
+        async def stop(self):
+            return None
+
+    class Loop:
+        def __init__(self):
+            self.stopped = False
+
+        def call(self, coroutine, timeout):
+            del timeout
+            import asyncio
+
+            return asyncio.run(coroutine)
+
+        def stop(self, timeout):
+            del timeout
+            self.stopped = True
+
+    class Tail:
+        def result(self, timeout):
+            del timeout
+            raise TimeoutError("injected durable writer stall")
+
+    class Executor:
+        def __init__(self):
+            self.shutdown_calls = []
+
+        def shutdown(self, *, wait, cancel_futures):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    channel = object.__new__(HeadChannel)
+    channel._stop_lock = threading.Lock()
+    channel._stopped = False
+    channel._stop_clean = True
+    channel._listener = Listener()
+    channel._loop = Loop()
+    channel._durable_lock = threading.Lock()
+    channel._durable_closed = False
+    channel._durable_tail = Tail()
+    channel._durable_executor = Executor()
+    channel.ledger = SimpleNamespace(binding_store=None)
+    channel.failures = []
+
+    assert channel.stop(timeout=1) is False
+    assert channel._durable_executor.shutdown_calls == [(False, True)]
+    assert channel._loop.stopped is True
+    assert any("durable receipt writer cleanup failed" in item for item in channel.failures)
 
 
 @pytest.fixture
