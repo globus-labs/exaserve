@@ -59,6 +59,8 @@ class LiteLLMProxy(ProxyBackend):
             disable_hf_tokenizer_download (bool):
                                        Use LiteLLM's bundled tokenizer fallback
                                        instead of network downloads. Default: true.
+            keepalive_timeout (int):   Idle client-connection lifetime in
+                                       seconds. Default: 120.
             db_url (str):              SQLAlchemy URL for usage DB.
                                        Default: "sqlite:///litellm_usage.db" (local file).
             extra_general (dict):      Merged verbatim into general_settings.
@@ -72,6 +74,7 @@ class LiteLLMProxy(ProxyBackend):
                 "extra_general",
                 "extra_router",
                 "disable_hf_tokenizer_download",
+                "keepalive_timeout",
                 "num_retries",
                 "routing_strategy",
                 "timeout",
@@ -99,6 +102,14 @@ class LiteLLMProxy(ProxyBackend):
         disable_hf_tokenizer_download = options.get("disable_hf_tokenizer_download", True)
         if not isinstance(disable_hf_tokenizer_download, bool):
             raise ValueError("proxy.options.disable_hf_tokenizer_download must be boolean")
+        # Launch consumes this value through LiteLLM's supported CLI.  Validate
+        # it here as well because renderers remain safe when called directly.
+        strict_int(
+            options.get("keepalive_timeout", 120),
+            "proxy.options.keepalive_timeout",
+            minimum=1,
+            maximum=86400,
+        )
 
         # Build the model_list -- one entry per reachable Serve application.
         # Canonical multi-replica deployments expose independent applications

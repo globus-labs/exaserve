@@ -303,7 +303,7 @@ def test_litellm_gets_one_endpoint_per_canonical_replica_not_a_cartesian_product
     assert {endpoint.host for endpoint in endpoints} == {"n0", "n1"}
     assert all(endpoint.replica_routes == 0 for endpoint in endpoints)
     argv = root.gateway_argv(str(tmp_path))
-    assert argv[-3:] == ["--num_workers", "8", "--run_gunicorn"]
+    assert argv[-4:] == ["--num_workers", "8", "--keepalive_timeout", "120"]
 
 
 def test_validation_direct_advertises_the_serve_port(tmp_path):

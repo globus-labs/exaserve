@@ -1733,12 +1733,9 @@ class CompositionRoot:
                 "0.0.0.0",
                 "--num_workers",
                 str(gateway.worker_count),
+                "--keepalive_timeout",
+                str(options["keepalive_timeout"]),
             ]
-            if gateway.worker_count > 1:
-                # LiteLLM documents this as its multi-worker process manager.
-                # Readiness remains external and authoritative; Gunicorn is
-                # process ownership, not evidence that the request path works.
-                argv.append("--run_gunicorn")
             self._gateway_environment = child_env
         elif gateway.kind == "nginx":
             from .proxy.nginx_proxy import NGINXProxy

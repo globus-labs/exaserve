@@ -659,10 +659,9 @@ deadline. This permits READY to remain revoked while already-admitted requests
 drain within the gateway's own bounded contract and still fails closed if
 ingress does not recover; it does not make LiteLLM production-qualified.
 
-When the immutable LiteLLM plan requests more than one worker, the launcher
-uses LiteLLM's supported `--run_gunicorn` multi-worker mode. The plain Uvicorn
-spawn path and Gunicorn path were both evaluated against the paper workload;
-process-manager selection alone did not repair the cold pass. The owned gateway
+The plain Uvicorn spawn path and LiteLLM's supported Gunicorn path were both
+evaluated against the paper workload; process-manager selection alone did not
+repair the cold pass. The owned gateway
 log identified the actual blocker: request handling attempted repeated online
 downloads of `Xenova/llama-3-tokenizer` from compute nodes without Internet
 egress. The immutable LiteLLM options therefore default
@@ -672,6 +671,15 @@ the hash-bound plan. This changes LiteLLM's accounting tokenizer, not the model
 server's generation tokenizer or the request/response workload. The normal
 advertised-endpoint canary and continuous revocable predicate remain
 authoritative, so neither setting adds a readiness marker or second lifecycle.
+
+The Gunicorn alternative also imposes its two-second keep-alive default without
+forwarding LiteLLM's `--keepalive_timeout` option. At the paper's connection-pool
+shape, two otherwise healthy passes produced 20 and 104 client-side connection
+resets as stale idle sockets were reused. The selected launcher therefore uses
+LiteLLM's supported Uvicorn multi-worker path and passes a hash-bound
+`keepalive_timeout` of 120 seconds by default. This exceeds the harness's
+75-second inter-pass cooldown and 90-second client idle-connection lifetime;
+operators can tune it explicitly without changing request deadlines.
 
 **Listener bind, initial registration, reconnect, and deadlines**
 

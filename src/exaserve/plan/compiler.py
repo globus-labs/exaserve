@@ -102,6 +102,7 @@ _LITELLM_OPTION_KEYS = {
     "disable_hf_tokenizer_download",
     "extra_general",
     "extra_router",
+    "keepalive_timeout",
     "master_key",
     "num_retries",
     "routing_strategy",
@@ -600,6 +601,13 @@ def _litellm_options(raw: Any, path: str) -> tuple[tuple[str, Any], ...]:
         options.get("disable_hf_tokenizer_download"),
         f"{path}.disable_hf_tokenizer_download",
         default=True,
+    )
+    normalized["keepalive_timeout"] = _integer(
+        options.get("keepalive_timeout"),
+        f"{path}.keepalive_timeout",
+        default=120,
+        minimum=1,
+        maximum=86400,
     )
     if "extra_general" in options:
         normalized["extra_general"] = _optional_mapping(

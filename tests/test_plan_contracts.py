@@ -348,6 +348,7 @@ def test_litellm_resolves_an_evidence_based_startup_budget_floor():
     assert plan.readiness.gateway_start_deadline_s == 120.0
     assert dict(plan.gateway.options)["timeout"] == 300
     assert dict(plan.gateway.options)["disable_hf_tokenizer_download"] is True
+    assert dict(plan.gateway.options)["keepalive_timeout"] == 120
     assert plan.readiness.recovery_deadline_s == 360.0
 
 
@@ -380,6 +381,20 @@ def test_litellm_request_timeout_is_hash_bound_and_sizes_recovery():
         deployment_id="litellm-online-tokenizer",
     )
     assert dict(offline_override.gateway.options)["disable_hf_tokenizer_download"] is False
+
+    keepalive_override = compile_deployment_plan(
+        _raw(
+            gateway={
+                "kind": "litellm",
+                "port": 4001,
+                "options": {"keepalive_timeout": 180},
+            },
+            validation_mode=True,
+        ),
+        site=_site(gateway_kinds=("haproxy", "litellm")),
+        deployment_id="litellm-keepalive",
+    )
+    assert dict(keepalive_override.gateway.options)["keepalive_timeout"] == 180
 
     with pytest.raises(PlanError, match="must be a boolean"):
         compile_deployment_plan(

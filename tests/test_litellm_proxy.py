@@ -69,3 +69,10 @@ def test_litellm_offline_tokenizer_policy_is_strict(tmp_path):
             tmp_path / "invalid",
             disable_hf_tokenizer_download="true",
         )
+
+    with pytest.raises(ValueError, match="keepalive_timeout must be an integer"):
+        LiteLLMProxy().generate_config(
+            endpoint,
+            tmp_path / "invalid-keepalive",
+            keepalive_timeout=True,
+        )
