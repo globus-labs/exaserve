@@ -26,13 +26,16 @@ resolver falls back to flat `runs/<name>/` for anything never relocated.
 Invariant: `runs/sc26workshop/` contains only folders that mirror this spec
 tree, and a folder there means real data from that suite stage.
 
-All `validation/` and `full/` specs set `launch.clean_stage: true`: node-local
-artifacts (staged weights, instrumentation, scratch) are wiped before staging,
-so the bring-up/lifecycle numbers (Phase 2 included) are cold-start regardless
-of whether cells run as fresh PBS jobs or back-to-back on a reused allocation.
-Serving metrics are unaffected (staging precedes the replay; the in-group
-warm-up protocol is unchanged). `calibration/` and `smokes/` leave it off for
-iteration speed.
+All `validation/` and `full/` specs set `launch.clean_stage: true`: the Python
+staging transaction removes each plan-owned node-local model publication and
+its abandoned candidate/quarantine paths on every bound rank before broadcast.
+Every rank must return a validated cleanup receipt. This makes Phase-2 model
+staging a cold start whether cells use fresh PBS jobs or a reused allocation,
+without broadly deleting unrelated `/tmp` state. Source/runtime artifacts use
+their own content-addressed, generation-scoped lifecycle. Serving metrics are
+unaffected (staging precedes replay; the in-group warm-up protocol is
+unchanged). `calibration/` and most `smokes/` leave clean stage off for iteration
+speed.
 
 ## Suite contents (mirror of plan_exp.md §9)
 

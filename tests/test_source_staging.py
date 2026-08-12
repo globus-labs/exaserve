@@ -21,6 +21,7 @@ from exaserve.model_bcast import (
     _prepare_model_bcast_source,
     _runtime_rank,
     _source_model_manifest,
+    _validate_cache_clean_result,
     _validate_cache_probe_result,
     _validate_model_receipt,
     main as model_bcast_main,
@@ -484,6 +485,62 @@ def test_model_cache_probe_publishes_result_without_stdout_protocol(tmp_path, mo
     assert result["rank"] == 3
     assert result["generation"] == 12
     assert result["state"] == "missing"
+
+
+def test_clean_stage_removes_only_exact_plan_owned_model_paths(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "hf-home"
+    root.mkdir()
+    owned = [
+        root / "org--model",
+        root / f".exaserve_stage.org--model.7.{'a' * 32}",
+        root / f".exaserve_pp_candidate.org--model.7.{'b' * 32}.stage0",
+        root / ".org--model.invalid.7.123.456",
+    ]
+    for path in owned:
+        path.mkdir()
+        (path / "content").write_text("x")
+    unrelated = root / f".exaserve_stage.other--model.7.{'c' * 32}"
+    unrelated.mkdir()
+    (unrelated / "keep").write_text("safe")
+    overlapping = root / f".exaserve_stage.org--model.extra.7.{'d' * 32}"
+    overlapping.mkdir()
+    (overlapping / "keep").write_text("safe")
+    attempt = "c" * 32
+    result_dir = create_result_dir(tmp_path, "model-clean-cli", attempt)
+    monkeypatch.setenv("PALS_RANKID", "0")
+
+    assert (
+        model_bcast_main(
+            [
+                "--clean-cache-root",
+                str(root),
+                "--clean-model-id",
+                "org/model",
+                "--generation",
+                "7",
+                "--result-dir",
+                str(result_dir),
+                "--attempt-id",
+                attempt,
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == ""
+    receipt = _validate_cache_clean_result(load_rank_results(result_dir, attempt_id=attempt)[0])
+    assert receipt["targets"] == [str(root / "org--model")]
+    assert set(receipt["removed_paths"]) == {str(path) for path in owned}
+    assert all(not path.exists() for path in owned)
+    assert (unrelated / "keep").read_text() == "safe"
+    assert (overlapping / "keep").read_text() == "safe"
+
+
+@pytest.mark.parametrize(("root", "model_id"), [("/", "org/model"), ("/tmp/cache", ".")])
+def test_clean_stage_rejects_broad_root_or_unsafe_model_name(root, model_id):
+    from exaserve.model_bcast import clean_model_caches_locally
+
+    with pytest.raises(RuntimeError, match="unsafe"):
+        clean_model_caches_locally(root, [model_id], generation=1)
 
 
 def test_wrong_content_never_replaces_the_previous_publication(tmp_path, monkeypatch):

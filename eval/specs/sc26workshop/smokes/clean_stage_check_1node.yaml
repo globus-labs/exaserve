@@ -1,7 +1,7 @@
 name: clean_stage_check_1node
 # Validation for the per-run clean-stage flag: 1 node, startup_only (no replay),
-# clean_stage=true. Expect: "CLEAN-STAGE: wiping..." -> cleanup_run.sh output ->
-# model-broadcast result manifest proves a fresh stage before canonical READY.
+# clean_stage=true. Expect a complete per-rank CLEAN-STAGE receipt set, then a
+# model-broadcast result with cache_reused=false before canonical READY.
 matrix:
   name_template: '{num_nodes}_nodes'
   axes:

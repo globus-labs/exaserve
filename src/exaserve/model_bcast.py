@@ -35,6 +35,14 @@ _CACHE_PROBE_FIELDS = _RESULT_ENVELOPE_FIELDS | {
     "state",
     "generation",
 }
+_CACHE_CLEAN_FIELDS = _RESULT_ENVELOPE_FIELDS | {
+    "rank",
+    "node",
+    "generation",
+    "targets",
+    "removed_paths",
+    "cleanup_duration_s",
+}
 _MODEL_RECEIPT_FIELDS = _RESULT_ENVELOPE_FIELDS | {
     "rank",
     "node",
@@ -101,6 +109,34 @@ def _validate_cache_probe_result(value: object) -> dict:
         or not _nonnegative_int(value["generation"])
     ):
         raise RuntimeError("[ModelBcast] Cache probe result values are invalid")
+    return value
+
+
+def _validate_cache_clean_result(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != _CACHE_CLEAN_FIELDS:
+        raise RuntimeError("[ModelBcast] Cache cleanup result fields are invalid")
+    duration = value["cleanup_duration_s"]
+    if (
+        not _valid_result_envelope(value)
+        or not _nonnegative_int(value["rank"])
+        or not isinstance(value["node"], str)
+        or not value["node"]
+        or not _nonnegative_int(value["generation"])
+        or not isinstance(value["targets"], list)
+        or not value["targets"]
+        or any(not isinstance(path, str) or not os.path.isabs(path) for path in value["targets"])
+        or len(value["targets"]) != len(set(value["targets"]))
+        or not isinstance(value["removed_paths"], list)
+        or any(
+            not isinstance(path, str) or not os.path.isabs(path) for path in value["removed_paths"]
+        )
+        or len(value["removed_paths"]) != len(set(value["removed_paths"]))
+        or isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration < 0
+    ):
+        raise RuntimeError("[ModelBcast] Cache cleanup result values are invalid")
     return value
 
 
@@ -466,6 +502,182 @@ def run_cache_probe(path: Path, num_nodes: int, *, binding, scheduler: str = "pb
     return [by_rank[index] for index in range(num_nodes)]
 
 
+def _cache_cleanup_paths(
+    local_stage_path: str, model_ids
+) -> tuple[Path, list[Path], tuple[str, ...]]:
+    """Resolve the exact stable and transactional paths owned by these models."""
+    root = Path(local_stage_path)
+    if not root.is_absolute() or root == Path(root.anchor):
+        raise RuntimeError(f"[ModelBcast] Refusing unsafe clean-stage root {local_stage_path!r}")
+    safe_names: list[str] = []
+    targets: list[Path] = []
+    for model_id in model_ids:
+        safe_name = get_model_storage_name(model_id)
+        target = root / safe_name
+        # A model identity must resolve to one direct child.  This guard also
+        # prevents a future storage-name change from widening clean-stage.
+        if (
+            not safe_name
+            or safe_name in {".", ".."}
+            or Path(safe_name).name != safe_name
+            or target.parent != root
+            or target == root
+        ):
+            raise RuntimeError(
+                f"[ModelBcast] Model {model_id!r} has unsafe cache name {safe_name!r}"
+            )
+        safe_names.append(safe_name)
+        targets.append(target)
+    if not targets or len(targets) != len(set(targets)):
+        raise RuntimeError("[ModelBcast] Clean-stage model targets must be nonempty and unique")
+    return root, targets, tuple(safe_names)
+
+
+def _is_owned_cache_artifact(name: str, safe_names: tuple[str, ...]) -> bool:
+    patterns = (
+        rf"\.exaserve_stage\.{re.escape(safe_name)}\.\d+\.[0-9a-f]{{32}}"
+        for safe_name in safe_names
+    )
+    pp_patterns = (
+        rf"\.exaserve_pp_candidate\.{re.escape(safe_name)}\.\d+\."
+        rf"[0-9a-f]{{32}}\.stage\d+"
+        for safe_name in safe_names
+    )
+    quarantine_patterns = (
+        rf"\.{re.escape(safe_name)}\.invalid\.\d+\.\d+\.\d+" for safe_name in safe_names
+    )
+    return any(
+        re.fullmatch(pattern, name) is not None
+        for pattern in (*patterns, *pp_patterns, *quarantine_patterns)
+    )
+
+
+def clean_model_caches_locally(local_stage_path: str, model_ids, *, generation: int) -> dict:
+    """Remove only plan-owned model publications/candidates on this rank's node."""
+    started = time.monotonic()
+    root, targets, safe_names = _cache_cleanup_paths(local_stage_path, model_ids)
+    owned = set(targets)
+    if os.path.lexists(root):
+        try:
+            entries = list(root.iterdir())
+        except OSError as exc:
+            raise RuntimeError(
+                f"[ModelBcast] Cannot inspect clean-stage root {root}: {exc}"
+            ) from exc
+        owned.update(entry for entry in entries if _is_owned_cache_artifact(entry.name, safe_names))
+
+    removed: list[str] = []
+    for path in sorted(owned, key=lambda item: item.name):
+        if not os.path.lexists(path):
+            continue
+        try:
+            mode = os.lstat(path).st_mode
+            if stat.S_ISDIR(mode):
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError as exc:
+            raise RuntimeError(f"[ModelBcast] Clean-stage failed to remove {path}: {exc}") from exc
+        removed.append(str(path))
+    remaining = [str(path) for path in owned if os.path.lexists(path)]
+    if remaining:
+        raise RuntimeError(f"[ModelBcast] Clean-stage paths remain after cleanup: {remaining}")
+    return {
+        "rank": _runtime_rank(),
+        "node": socket.gethostname(),
+        "generation": generation,
+        "targets": [str(path) for path in targets],
+        "removed_paths": removed,
+        "cleanup_duration_s": round(time.monotonic() - started, 6),
+    }
+
+
+def clean_model_caches(
+    local_stage_path: str,
+    model_ids,
+    num_nodes: int,
+    *,
+    binding,
+    scheduler: str = "pbs",
+) -> list[dict]:
+    """Run bounded clean-stage on every bound rank and validate every receipt."""
+    from .plan.contracts import same_node
+    from .staging_results import create_result_dir, load_rank_results
+
+    model_ids = list(model_ids)
+    _root, targets, _safe_names = _cache_cleanup_paths(local_stage_path, model_ids)
+    attempt = uuid.uuid4().hex
+    result_dir = create_result_dir(_run_result_root(), "model-cache-clean", attempt)
+    command = mpi_launch_prefix(num_nodes, scheduler=scheduler) + [
+        sys.executable,
+        "-m",
+        "exaserve.model_bcast",
+        "--clean-cache-root",
+        local_stage_path,
+        "--generation",
+        str(binding.generation),
+        "--result-dir",
+        str(result_dir),
+        "--attempt-id",
+        attempt,
+    ]
+    for model_id in model_ids:
+        command.extend(("--clean-model-id", model_id))
+    try:
+        result = run_finite(command, timeout_s=1800)
+    except (OSError, FiniteProcessError) as exc:
+        raise RuntimeError(f"[ModelBcast] Clean-stage command failed: {exc}") from exc
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n", flush=True)
+    if result.stderr:
+        print(
+            result.stderr,
+            end="" if result.stderr.endswith("\n") else "\n",
+            file=sys.stderr,
+            flush=True,
+        )
+    if result.returncode:
+        raise RuntimeError(f"[ModelBcast] Clean-stage command exited {result.returncode}")
+
+    receipts = [
+        _validate_cache_clean_result(item)
+        for item in load_rank_results(result_dir, attempt_id=attempt)
+    ]
+    by_rank = {item["rank"]: item for item in receipts}
+    if (
+        len(receipts) != num_nodes
+        or len(by_rank) != num_nodes
+        or set(by_rank) != set(range(num_nodes))
+    ):
+        raise RuntimeError(
+            f"[ModelBcast] Clean-stage returned {len(receipts)} receipt(s) "
+            f"for {num_nodes} bound ranks"
+        )
+    expected_targets = [str(path) for path in targets]
+    root = Path(local_stage_path)
+    safe_names = tuple(path.name for path in targets)
+    for rank, planned_node in binding.rank_to_node:
+        receipt = by_rank[rank]
+        removed_are_owned = all(
+            Path(path).parent == root
+            and (Path(path) in targets or _is_owned_cache_artifact(Path(path).name, safe_names))
+            for path in receipt["removed_paths"]
+        )
+        if (
+            not same_node(receipt["node"], planned_node)
+            or receipt["generation"] != binding.generation
+            or receipt["targets"] != expected_targets
+            or not removed_are_owned
+        ):
+            raise RuntimeError(f"[ModelBcast] Clean-stage rank {rank} has wrong identity")
+    print(
+        f"[ModelBcast] CLEAN-STAGE: {num_nodes}/{num_nodes} rank receipts; "
+        f"removed {sum(len(item['removed_paths']) for item in receipts)} owned path(s)",
+        flush=True,
+    )
+    return [by_rank[index] for index in range(num_nodes)]
+
+
 def check_cache_state(
     model_id: str,
     local_stage_path: str,
@@ -753,6 +965,7 @@ def bcast_models(
     num_nodes: int,
     *,
     shard_aware: bool = False,
+    clean_stage: bool = False,
     binding=None,
     deployment_plan=None,
     scheduler: str = "pbs",
@@ -762,14 +975,25 @@ def bcast_models(
     """
     if binding is None or len(binding.rank_to_node) != num_nodes:
         raise RuntimeError("model staging requires the exact AllocationBinding")
+    if not isinstance(clean_stage, bool):
+        raise TypeError("clean_stage must be a boolean")
     binary_path = compile_bcast()
 
     lustre_model_paths = stage_models(model_configs, lustre_path)
     local_model_paths: Dict[str, str] = {}
 
     per_model_timings: list[dict] = []
+    unique_model_ids = list(iter_unique_model_ids(model_configs))
+    if clean_stage:
+        clean_model_caches(
+            local_path,
+            unique_model_ids,
+            num_nodes,
+            binding=binding,
+            scheduler=scheduler,
+        )
 
-    for model_id in iter_unique_model_ids(model_configs):
+    for model_id in unique_model_ids:
         model_t0 = time.monotonic()
         model_config = next(cfg for cfg in model_configs if cfg.model_id == model_id)
         # Shard-aware PP is still an outer, pre-launch transaction.  Allocation
@@ -958,6 +1182,8 @@ def main(argv: list[str] | None = None) -> int:
         "--probe-cache",
         help="Internal mode: print local cache state for one model path as JSON",
     )
+    parser.add_argument("--clean-cache-root")
+    parser.add_argument("--clean-model-id", action="append", default=[])
     parser.add_argument("--verify-model-candidate")
     parser.add_argument("--publish-target")
     parser.add_argument("--model-id")
@@ -971,6 +1197,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.generation is None or not args.result_dir or not args.attempt_id:
             raise SystemExit("cache probe requires generation/result-dir/attempt-id")
         payload = probe_cache_locally(Path(args.probe_cache), generation=args.generation)
+        from .staging_results import write_rank_result
+
+        write_rank_result(args.result_dir, attempt_id=args.attempt_id, payload=payload)
+        return 0
+
+    if args.clean_cache_root:
+        if (
+            args.generation is None
+            or not args.result_dir
+            or not args.attempt_id
+            or not args.clean_model_id
+        ):
+            raise SystemExit("cache cleanup requires model-id/generation/result-dir/attempt-id")
+        payload = clean_model_caches_locally(
+            args.clean_cache_root,
+            args.clean_model_id,
+            generation=args.generation,
+        )
         from .staging_results import write_rank_result
 
         write_rank_result(args.result_dir, attempt_id=args.attempt_id, payload=payload)
@@ -1036,6 +1280,7 @@ def main(argv: list[str] | None = None) -> int:
         plan.local_stage_path,
         args.num_nodes,
         shard_aware=shard_aware,
+        clean_stage=plan.runtime.clean_stage,
         binding=binding,
         deployment_plan=plan,
         scheduler=plan.scale_envelope.scheduler_type,

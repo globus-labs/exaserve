@@ -157,6 +157,12 @@ def test_broadcast_uses_plan_ranks_not_binding_prefix(tmp_path, monkeypatch):
         "exaserve.model_bcast.stage_models",
         lambda _models, _storage: {model_id: str(source)},
     )
+    monkeypatch.setattr(
+        "exaserve.model_bcast.clean_model_caches",
+        lambda local, models, nodes, **kwargs: observed.update(
+            clean=(local, list(models), nodes, kwargs["binding"])
+        ),
+    )
 
     def fake_pp(*args, **kwargs):
         observed["nodes"] = list(args[5])
@@ -172,10 +178,12 @@ def test_broadcast_uses_plan_ranks_not_binding_prefix(tmp_path, monkeypatch):
         str(tmp_path / "local"),
         4,
         shard_aware=True,
+        clean_stage=True,
         binding=binding,
         deployment_plan=deployment,
     )
     assert observed["nodes"] == ["n2", "n0", "n3", "n1"]
+    assert observed["clean"] == (str(tmp_path / "local"), [model_id], 4, binding)
 
 
 def test_shard_aware_aggregate_contract_binds_every_stage_to_planned_nodes():
