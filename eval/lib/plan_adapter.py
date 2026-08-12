@@ -80,6 +80,12 @@ def deployment_raw_from_spec(
         getattr(deployment, "replica_max_ongoing_requests", 32)
     )
     raw["collect_stats"] = bool(getattr(deployment, "collect_stats", False))
+    control = dict(getattr(deployment, "control", {}) or {})
+    if control:
+        raw["control"] = control
+    readiness = dict(getattr(deployment, "readiness", {}) or {})
+    if readiness:
+        raw["readiness"] = readiness
     launch = dict(launch or {})
     if "ray_node_cpus" in launch:
         raw["node_cpus"] = launch["ray_node_cpus"]

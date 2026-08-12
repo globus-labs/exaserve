@@ -333,6 +333,8 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
             "replica_max_ongoing_requests",
             "num_gpus_per_node",
             "collect_stats",
+            "control",
+            "readiness",
             "validation_mode",
             "engine",
         },
@@ -453,6 +455,8 @@ def load_experiment_spec(path: str) -> ExperimentSpec:
         collect_stats=_boolean(
             deployment_raw.get("collect_stats", False), "deployment.collect_stats"
         ),
+        control=_mapping(deployment_raw.get("control", {}), "deployment.control"),
+        readiness=_mapping(deployment_raw.get("readiness", {}), "deployment.readiness"),
         validation_mode=_boolean(
             deployment_raw.get("validation_mode", False), "deployment.validation_mode"
         ),
@@ -558,7 +562,11 @@ DEFAULT_PROXY_CLIENT_NODES = 4
 
 def normalize_experiment_spec(spec: ExperimentSpec) -> ExperimentSpec:
     normalized = replace(spec)
-    normalized.deployment = replace(spec.deployment)
+    normalized.deployment = replace(
+        spec.deployment,
+        control=dict(spec.deployment.control),
+        readiness=dict(spec.deployment.readiness),
+    )
     normalized.client = replace(spec.client)
     normalized.scheduler = replace(spec.scheduler)
     normalized.trace = replace(spec.trace)

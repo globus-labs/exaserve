@@ -72,6 +72,10 @@ workload:
   rate_per_node: 2.0
 deployment:
   replica_max_ongoing_requests: 7
+  control:
+    reconnect_grace_s: 300.0
+  readiness:
+    initial_deadline_s: 7200.0
   models:
     - model_id: test/model
       tensor_parallel_size: 1
@@ -267,6 +271,8 @@ def test_spec_load_and_matrix_expand(temp_spec):
     variants = expand_matrix(spec)
     assert spec.name == "test_spec"
     assert spec.deployment.replica_max_ongoing_requests == 7
+    assert spec.deployment.control == {"reconnect_grace_s": 300.0}
+    assert spec.deployment.readiness == {"initial_deadline_s": 7200.0}
     assert [variant.variant_name for variant in variants] == ["1_nodes", "2_nodes"]
     assert [variant.spec.deployment.num_nodes for variant in variants] == [1, 2]
     assert [variant.spec.client.num_nodes for variant in variants] == [1, 2]

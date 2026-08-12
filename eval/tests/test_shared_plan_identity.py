@@ -97,6 +97,25 @@ def test_eval_explicit_validation_mode_reaches_the_canonical_plan():
     assert plan.scale_envelope.validation_mode is True
 
 
+def test_eval_control_and_readiness_overrides_reach_the_canonical_plan():
+    spec = _spec(proxy={"type": "ray_serve", "backend_port": 8000})
+    spec.deployment.control = {"reconnect_grace_s": 300.0}
+    spec.deployment.readiness = {"initial_deadline_s": 7200.0}
+
+    plan = compile_shared_deployment_plan(spec, deployment_id="qualification")
+
+    assert plan.control.reconnect_grace_s == 300.0
+    assert plan.readiness.initial_deadline_s == 7200.0
+
+
+def test_eval_control_overrides_still_use_the_canonical_schema():
+    spec = _spec()
+    spec.deployment.control = {"invented_timeout_s": 300.0}
+
+    with pytest.raises(PlanError, match=r"deployment\.control: unknown key"):
+        compile_shared_deployment_plan(spec, deployment_id="qualification")
+
+
 def test_a_serving_change_moves_the_deployment_hash():
     a = compile_shared_deployment_plan(_spec(nodes=2), deployment_id="d")
     b = compile_shared_deployment_plan(_spec(nodes=4), deployment_id="d")

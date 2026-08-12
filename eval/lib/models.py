@@ -102,6 +102,10 @@ class DeploymentSpec:
     replica_max_ongoing_requests: int = 64
     num_gpus_per_node: int = 0
     collect_stats: bool = False
+    # Optional canonical compiler overrides.  Eval owns only the YAML frontend;
+    # the shared deployment compiler remains the schema and value authority.
+    control: dict[str, Any] = field(default_factory=dict)
+    readiness: dict[str, Any] = field(default_factory=dict)
     # Explicit qualification escape from the evidence-backed production
     # ceiling. This remains hash-bearing in the canonical DeploymentPlan and
     # cannot expand the candidate qualification target.
@@ -318,6 +322,16 @@ class RunMaterialization:
             replica_max_ongoing_requests=plan.replica_max_ongoing_requests,
             num_gpus_per_node=plan.num_gpus_per_node,
             collect_stats=plan.collect_stats,
+            control={
+                name: getattr(plan.control, name)
+                for name in plan.control.__dataclass_fields__
+                if name != "evidence_backed"
+            },
+            readiness={
+                name: getattr(plan.readiness, name)
+                for name in plan.readiness.__dataclass_fields__
+                if name != "evidence_backed"
+            },
             validation_mode=plan.validation_mode,
             engine=plan.engine,
         )
