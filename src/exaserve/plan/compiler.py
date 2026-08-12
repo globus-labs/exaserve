@@ -97,6 +97,15 @@ _HAPROXY_OPTION_KEYS = {
     "stats_bind",
     "stats_admin",
 }
+_LITELLM_OPTION_KEYS = {
+    "db_url",
+    "extra_general",
+    "extra_router",
+    "master_key",
+    "num_retries",
+    "routing_strategy",
+    "timeout",
+}
 _EXPOSURE_KEYS = {
     "mode",
     "advertised_scheme",
@@ -546,6 +555,56 @@ def _haproxy_options(raw: Any, path: str) -> tuple[tuple[str, Any], ...]:
     return deep_freeze(normalized, path)
 
 
+def _litellm_options(raw: Any, path: str) -> tuple[tuple[str, Any], ...]:
+    """Freeze LiteLLM's request semantics into the canonical plan.
+
+    The renderer used to supply its own 300-second request-timeout default,
+    which meant a code-only default change could alter runtime behavior without
+    changing the deployment-plan hash.  Resolve and validate those defaults at
+    compilation instead; secret-bearing values retain the reference-only rule.
+    """
+    options = _optional_mapping(raw, path)
+    _reject_unknown(options, _LITELLM_OPTION_KEYS, path)
+    _secret_safe_options(options, path)
+    normalized = dict(options)
+    strategy = _string(
+        options.get("routing_strategy"),
+        f"{path}.routing_strategy",
+        default="least-busy",
+    )
+    if strategy not in {"least-busy", "simple-shuffle", "latency-based-routing"}:
+        raise PlanError(f"{path}.routing_strategy is not supported: {strategy!r}")
+    normalized["routing_strategy"] = strategy
+    normalized["num_retries"] = _integer(
+        options.get("num_retries"),
+        f"{path}.num_retries",
+        default=2,
+        minimum=0,
+        maximum=100,
+    )
+    normalized["timeout"] = _integer(
+        options.get("timeout"),
+        f"{path}.timeout",
+        default=300,
+        minimum=1,
+        maximum=86400,
+    )
+    if "extra_general" in options:
+        normalized["extra_general"] = _optional_mapping(
+            options["extra_general"], f"{path}.extra_general"
+        )
+    if "extra_router" in options:
+        extra_router = _optional_mapping(options["extra_router"], f"{path}.extra_router")
+        shadowed = sorted({"routing_strategy", "num_retries", "timeout"}.intersection(extra_router))
+        if shadowed:
+            raise PlanError(
+                f"{path}.extra_router cannot override canonical option(s) {shadowed}; "
+                "set them at deployment.gateway.options"
+            )
+        normalized["extra_router"] = extra_router
+    return deep_freeze(normalized, path)
+
+
 def _compile_exposure(
     raw: Mapping[str, Any], *, site: SiteProfile, validation_mode: bool
 ) -> tuple[ExposurePlan, Optional[GatewayPlan]]:
@@ -648,7 +707,11 @@ def _compile_exposure(
         options=(
             _haproxy_options(raw_gateway.get("options"), "deployment.gateway.options")
             if kind == GatewayKind.HAPROXY.value
-            else _secret_safe_options(raw_gateway.get("options"), "deployment.gateway.options")
+            else (
+                _litellm_options(raw_gateway.get("options"), "deployment.gateway.options")
+                if kind == GatewayKind.LITELLM.value
+                else _secret_safe_options(raw_gateway.get("options"), "deployment.gateway.options")
+            )
         ),
     )
     if not site.supports_gateway(kind):
@@ -1072,15 +1135,16 @@ def compile_deployment_plan(
     # eight-worker paper topology reached READY 27.5s after endpoint setup.
     # The generic 30s edge is therefore unsafe while a two-minute boundary is
     # finite and retains measured headroom.  Its live ingress can also be
-    # intentionally saturated by the paper workload, so allow at least two
-    # complete canary deadlines for post-READY recovery rather than conflating
-    # the five-second polling cadence with request failure.
+    # intentionally saturated by the paper workload.  A queued request remains
+    # valid until LiteLLM's own resolved request timeout, so post-READY recovery
+    # must cover that bound plus one complete externally advertised canary.
     if gateway is not None and gateway.kind == GatewayKind.LITELLM.value:
+        litellm_request_timeout_s = float(dict(gateway.options)["timeout"])
         base_readiness["gateway_start_deadline_s"] = max(
             120.0, float(base_readiness["gateway_start_deadline_s"])
         )
         base_readiness["recovery_deadline_s"] = max(
-            2.0 * float(base_readiness["canary_timeout_s"]),
+            litellm_request_timeout_s + float(base_readiness["canary_timeout_s"]),
             float(base_readiness["recovery_deadline_s"]),
         )
     readiness = ReadinessLimits(**base_readiness)

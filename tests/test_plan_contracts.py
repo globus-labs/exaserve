@@ -346,7 +346,53 @@ def test_litellm_resolves_an_evidence_based_startup_budget_floor():
         deployment_id="litellm-benchmark",
     )
     assert plan.readiness.gateway_start_deadline_s == 120.0
-    assert plan.readiness.recovery_deadline_s == 120.0
+    assert dict(plan.gateway.options)["timeout"] == 300
+    assert plan.readiness.recovery_deadline_s == 360.0
+
+
+def test_litellm_request_timeout_is_hash_bound_and_sizes_recovery():
+    plan = compile_deployment_plan(
+        _raw(
+            gateway={
+                "kind": "litellm",
+                "port": 4001,
+                "options": {"timeout": 450},
+            },
+            validation_mode=True,
+        ),
+        site=_site(gateway_kinds=("haproxy", "litellm")),
+        deployment_id="litellm-benchmark",
+    )
+    assert dict(plan.gateway.options)["timeout"] == 450
+    assert plan.readiness.recovery_deadline_s == 510.0
+
+    with pytest.raises(PlanError, match=r"unknown key.*typo_timeout"):
+        compile_deployment_plan(
+            _raw(
+                gateway={
+                    "kind": "litellm",
+                    "port": 4001,
+                    "options": {"typo_timeout": 450},
+                },
+                validation_mode=True,
+            ),
+            site=_site(gateway_kinds=("haproxy", "litellm")),
+            deployment_id="litellm-benchmark",
+        )
+
+    with pytest.raises(PlanError, match=r"extra_router cannot override.*timeout"):
+        compile_deployment_plan(
+            _raw(
+                gateway={
+                    "kind": "litellm",
+                    "port": 4001,
+                    "options": {"extra_router": {"timeout": 1}},
+                },
+                validation_mode=True,
+            ),
+            site=_site(gateway_kinds=("haproxy", "litellm")),
+            deployment_id="litellm-benchmark",
+        )
 
 
 def test_validation_mode_still_refuses_a_mismatched_exposure_mode():

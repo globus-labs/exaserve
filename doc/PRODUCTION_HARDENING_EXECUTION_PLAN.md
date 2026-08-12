@@ -652,10 +652,12 @@ semantics: every initial and live inference canary uses the resolved
 `canary_timeout_s`, bounded by the remaining initial-readiness deadline, and
 never substitutes `validation_interval_s` as an I/O timeout. Recovery begins
 when a failed probe returns, not when it starts. For the Aurora LiteLLM
-validation topology, `recovery_deadline_s` is at least two complete canary
-deadlines. This permits READY to remain revoked through a bounded planned-load
-queue and still fails closed if ingress does not recover; it does not make
-LiteLLM production-qualified.
+validation topology, the gateway's request timeout is compiled explicitly into
+the immutable gateway options (300 seconds by default), and
+`recovery_deadline_s` is at least that request timeout plus one complete canary
+deadline. This permits READY to remain revoked while already-admitted requests
+drain within the gateway's own bounded contract and still fails closed if
+ingress does not recover; it does not make LiteLLM production-qualified.
 
 **Listener bind, initial registration, reconnect, and deadlines**
 
