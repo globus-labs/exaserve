@@ -507,7 +507,7 @@ def _cache_cleanup_paths(
 ) -> tuple[Path, list[Path], tuple[str, ...]]:
     """Resolve the exact stable and transactional paths owned by these models."""
     root = Path(local_stage_path)
-    if not root.is_absolute() or root == Path(root.anchor):
+    if not root.is_absolute() or root == Path(root.anchor) or ".." in root.parts:
         raise RuntimeError(f"[ModelBcast] Refusing unsafe clean-stage root {local_stage_path!r}")
     safe_names: list[str] = []
     targets: list[Path] = []

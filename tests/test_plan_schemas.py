@@ -62,6 +62,12 @@ def test_derived_model_identity_collisions_rejected():
         compile_deployment_plan(raw)
 
 
+@pytest.mark.parametrize("field", ["model_storage_path", "local_stage_path"])
+def test_compiler_rejects_parent_traversal_in_storage_paths(field):
+    with pytest.raises(PlanError, match=rf"deployment\.{field}.*parent traversal"):
+        compile_deployment_plan(_raw(**{field: "/tmp/cache/../escape"}))
+
+
 def test_plan_is_frozen_with_stable_hash_and_exact_slots():
     plan_a = compile_deployment_plan(_raw())
     plan_b = compile_deployment_plan(_raw())

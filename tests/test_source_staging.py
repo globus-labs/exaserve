@@ -535,7 +535,10 @@ def test_clean_stage_removes_only_exact_plan_owned_model_paths(tmp_path, monkeyp
     assert (overlapping / "keep").read_text() == "safe"
 
 
-@pytest.mark.parametrize(("root", "model_id"), [("/", "org/model"), ("/tmp/cache", ".")])
+@pytest.mark.parametrize(
+    ("root", "model_id"),
+    [("/", "org/model"), ("/tmp/cache/../escape", "org/model"), ("/tmp/cache", ".")],
+)
 def test_clean_stage_rejects_broad_root_or_unsafe_model_name(root, model_id):
     from exaserve.model_bcast import clean_model_caches_locally
 

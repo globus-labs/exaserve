@@ -36,6 +36,7 @@ import os
 import re
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from enum import Enum
+from pathlib import PurePath
 from typing import Any, Mapping, Optional
 
 SCHEMA_VERSION = 3
@@ -61,6 +62,14 @@ def require_sha256(value: Any, path: str, *, allow_empty: bool = False) -> None:
 def require_bool(value: Any, path: str) -> None:
     if not isinstance(value, bool):
         raise PlanError(f"{path} must be a boolean, got {value!r}")
+
+
+def require_absolute_path(value: Any, path: str) -> None:
+    """Require an absolute path whose lexical spelling cannot escape its root."""
+    if not isinstance(value, str) or not value or not os.path.isabs(value):
+        raise PlanError(f"{path} must be an absolute path")
+    if ".." in PurePath(value).parts:
+        raise PlanError(f"{path} must not contain parent traversal ('..')")
 
 
 def _canonical_value(value: Any, path: str = "$") -> Any:
@@ -642,8 +651,7 @@ class SiteProfile:
         if not self.model_storage_path or not self.local_stage_path:
             raise PlanError("site model_storage_path/local_stage_path must be non-empty")
         for name in ("model_storage_path", "local_stage_path"):
-            if not os.path.isabs(getattr(self, name)):
-                raise PlanError(f"site.{name} must be an absolute path")
+            require_absolute_path(getattr(self, name), f"site.{name}")
         ids = [item.envelope_id for item in self.scale_envelopes]
         if len(ids) != len(set(ids)):
             raise PlanError("site.scale_envelopes contains duplicate envelope_id values")
@@ -1118,8 +1126,7 @@ class DeploymentPlan:
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise PlanError(f"deployment.{name} must be a non-empty string")
         for name in ("model_storage_path", "local_stage_path"):
-            if not os.path.isabs(getattr(self, name)):
-                raise PlanError(f"deployment.{name} must be an absolute path")
+            require_absolute_path(getattr(self, name), f"deployment.{name}")
         for name in ("num_nodes", "num_gpus_per_node", "node_cpus", "replica_max_ongoing_requests"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:

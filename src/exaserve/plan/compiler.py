@@ -230,6 +230,8 @@ def _absolute_path(value: Any, path: str, *, default: str) -> str:
     result = _string(value, path, default=default)
     if not PurePath(result).is_absolute():
         raise PlanError(f"{path} must be an absolute path, got {result!r}")
+    if ".." in PurePath(result).parts:
+        raise PlanError(f"{path} must not contain parent traversal ('..')")
     return result
 
 

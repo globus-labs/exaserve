@@ -104,6 +104,12 @@ def test_site_profile_rejects_relative_storage_paths(field):
         _site(**{field: "relative/path"})
 
 
+@pytest.mark.parametrize("field", ["model_storage_path", "local_stage_path"])
+def test_site_profile_rejects_parent_traversal_in_storage_paths(field):
+    with pytest.raises(PlanError, match=rf"site\.{field}.*parent traversal"):
+        _site(**{field: "/tmp/cache/../escape"})
+
+
 def test_explicit_model_storage_path_does_not_require_account_lookup(monkeypatch):
     monkeypatch.setenv("EXASERVE_MODEL_STORAGE_PATH", "/models/explicit")
     monkeypatch.setattr(
