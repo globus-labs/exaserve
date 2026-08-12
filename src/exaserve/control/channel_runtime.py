@@ -292,6 +292,28 @@ class HeadChannel:
             for requirement in (() if receipts is None else receipts.plan.receipt_requirements)
         )
         self._enforce_planned_observations = sessions is not None
+        # Durable receipt/binding writes target the shared run directory.  On
+        # Aurora that is Lustre I/O and can take hundreds of milliseconds per
+        # actor during a synchronized deployment.  It must never execute on
+        # the listener's asyncio thread: doing so prevents that same thread
+        # from accepting heartbeats and reconnect REGISTER frames, turning a
+        # healthy high-cardinality deployment into a control-lease failure.
+        #
+        # One worker preserves the listener's former total ordering and the
+        # binding store's single-writer contract.  The bounded pending set is
+        # sized from the immutable plan, so authenticated traffic cannot grow
+        # memory without limit.  Snapshot and shutdown barriers wait for this
+        # queue before acknowledging durable state.
+        planned_receipts = len(self._planned_receipt_ids)
+        self._durable_limit = max(256, planned_receipts * 2 + expected_ranks * 4)
+        self._durable_lock = threading.Lock()
+        self._durable_pending: set[concurrent.futures.Future] = set()
+        self._durable_tail: Optional[concurrent.futures.Future] = None
+        self._durable_closed = False
+        self._durable_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="exaserve-binding-writer",
+        )
         expected_nodes = None
         limits = None
         if sessions is not None:
@@ -321,6 +343,9 @@ class HeadChannel:
         try:
             self._loop.call(self._listener.start())
         except BaseException as exc:
+            with self._durable_lock:
+                self._durable_closed = True
+            self._durable_executor.shutdown(wait=True, cancel_futures=True)
             try:
                 self._loop.stop()
             except BaseException as cleanup_exc:
@@ -335,6 +360,59 @@ class HeadChannel:
         self.port = self._listener.port
 
     # -- sinks -------------------------------------------------------------
+    def _submit_durable(self, callback: Callable[[], object]):
+        """Queue one ordered durable mutation without blocking transport I/O.
+
+        Isolated unit tests historically construct a HeadChannel-shaped object
+        with ``__new__``.  They retain synchronous semantics; production
+        instances always own the bounded executor initialized above.
+        """
+        executor = getattr(self, "_durable_executor", None)
+        if executor is None:
+            callback()
+            return None
+        with self._durable_lock:
+            if self._durable_closed:
+                raise RuntimeError("durable receipt writer is closed")
+            if len(self._durable_pending) >= self._durable_limit:
+                raise ContractError(
+                    "durable receipt queue capacity exhausted; refusing unbounded evidence"
+                )
+            future = executor.submit(callback)
+            self._durable_pending.add(future)
+            self._durable_tail = future
+
+        def completed(done: concurrent.futures.Future) -> None:
+            with self._durable_lock:
+                self._durable_pending.discard(done)
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is not None:
+                with self._state_lock:
+                    self.failures.append(
+                        "durable receipt mutation failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+
+        future.add_done_callback(completed)
+        return future
+
+    async def _await_durable_tail(self) -> tuple[bool, str]:
+        """Cross the ordered durability barrier without stalling the loop."""
+        lock = getattr(self, "_durable_lock", None)
+        if lock is None:
+            return True, "synchronous durable writer"
+        with lock:
+            tail = self._durable_tail
+        if tail is None:
+            return True, "no durable mutations pending"
+        try:
+            await asyncio.wrap_future(tail)
+        except BaseException as exc:
+            return False, f"durable receipt barrier failed: {type(exc).__name__}: {exc}"
+        return True, "durable receipt barrier complete"
+
     def _on_receipt(self, rank: int, payload: dict) -> None:
         """Rank-owned receipts arrive here and nowhere else.
 
@@ -376,17 +454,21 @@ class HeadChannel:
         if coordinator is not None:
             session = coordinator.sessions.get(rank)
             node = getattr(session, "node_id", None) if session else None
-        ok, detail = self.ledger.accept(
-            receipt,
-            session_rank=rank,
-            session_node=node,
-        )
-        if not ok:
-            self.receipt_rejections.append(f"rank {rank} {requirement_id}: {detail}")
-            print(
-                f"[Control] receipt rejected from rank {rank} ({requirement_id}): {detail}",
-                flush=True,
+
+        def accept_durably() -> None:
+            ok, detail = self.ledger.accept(
+                receipt,
+                session_rank=rank,
+                session_node=node,
             )
+            if not ok:
+                self.receipt_rejections.append(f"rank {rank} {requirement_id}: {detail}")
+                print(
+                    f"[Control] receipt rejected from rank {rank} ({requirement_id}): {detail}",
+                    flush=True,
+                )
+
+        self._submit_durable(accept_durably)
 
     def _on_observation(self, rank: int, obs: ComponentObservation) -> None:
         reason = self._observation_contract_reason(rank, obs)
@@ -471,7 +553,7 @@ class HeadChannel:
 
         return self.ledger.stage_rank_snapshot(rank, receipts, session_node=node)
 
-    def _on_snapshot(
+    async def _on_snapshot(
         self, rank: int, snapshot_id: str, complete_hash: str, items: list
     ) -> tuple[bool, str]:
         observation_payloads = [item["body"] for item in items if item["kind"] == "observation"]
@@ -482,6 +564,13 @@ class HeadChannel:
         ):
             return False, f"required supervisor receipt {supervisor_id!r} is missing"
 
+        # All incrementals preceding this replacement snapshot must be durable
+        # before its exact rank-owned set is staged.  Awaiting the worker future
+        # yields the listener loop, so other ranks' heartbeats and REGISTER
+        # frames continue to make progress.
+        ok, detail = await self._await_durable_tail()
+        if not ok:
+            return False, detail
         ok, detail, staged_ledger = self._decode_snapshot_receipts(rank, receipt_payloads)
         if not ok:
             self.receipt_rejections.append(f"rank {rank}: {detail}")
@@ -511,7 +600,20 @@ class HeadChannel:
                 return False, reason
         with self._state_lock:
             if staged_ledger is not None:
-                self.ledger.commit_staged(staged_ledger)
+                future = self._submit_durable(
+                    lambda: self.ledger.commit_rank_snapshot(rank, staged_ledger)
+                )
+            else:
+                future = None
+        if future is not None:
+            try:
+                await asyncio.wrap_future(future)
+            except BaseException as exc:
+                return False, (
+                    "durable snapshot commit failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        with self._state_lock:
             for key in [key for key in self._observation_arrivals if key[0] == rank]:
                 self._observation_arrivals.pop(key, None)
             self._observations_by_rank[rank] = staged_observations
@@ -561,7 +663,7 @@ class HeadChannel:
                 expected=expected_goodbye,
             )
             if self.ledger is not None:
-                self.ledger.drop_rank(rank)
+                self._submit_durable(lambda: self.ledger.drop_rank(rank))
             with self._state_lock:
                 self._observations_by_rank.pop(rank, None)
                 for key in [key for key in self._observation_arrivals if key[0] == rank]:
@@ -973,6 +1075,20 @@ class HeadChannel:
                 self.failures.append(
                     f"control listener cleanup failed: {type(exc).__name__}: {exc}"
                 )
+            executor = getattr(self, "_durable_executor", None)
+            if executor is not None:
+                try:
+                    with self._durable_lock:
+                        self._durable_closed = True
+                        tail = self._durable_tail
+                    if tail is not None:
+                        tail.result(timeout=remaining())
+                    executor.shutdown(wait=True, cancel_futures=False)
+                except Exception as exc:
+                    clean = False
+                    self.failures.append(
+                        f"durable receipt writer cleanup failed: {type(exc).__name__}: {exc}"
+                    )
             try:
                 binding_store = getattr(self.ledger, "binding_store", None)
                 if binding_store is not None:

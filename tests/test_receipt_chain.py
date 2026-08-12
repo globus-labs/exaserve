@@ -663,6 +663,62 @@ def test_head_without_a_ledger_does_not_crash(identity):
     assert head.receipt_payloads
 
 
+def test_production_head_queues_slow_durable_receipts_off_the_listener(
+    identity, monkeypatch
+):
+    """Shared-filesystem latency must not stall heartbeats/reconnect I/O."""
+    import threading
+
+    from exaserve.control.channel_runtime import HeadChannel
+    from exaserve.compat import receipt_v2
+
+    plan, binding = identity
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowLedger:
+        def __init__(self):
+            self.plan = plan
+            self.binding_store = None
+            self.accepted = 0
+
+        def accept(self, _receipt, **_kwargs):
+            started.set()
+            assert release.wait(5), "test did not release the durable writer"
+            self.accepted += 1
+            return True, "accepted"
+
+    ledger = SlowLedger()
+    monkeypatch.setattr(receipt_v2, "receipt_from_dict", lambda payload: dict(payload))
+    head = HeadChannel(
+        deployment_id=plan.deployment_id,
+        generation=binding.generation,
+        plan_hash=plan.deployment_plan_hash,
+        expected_ranks=plan.num_nodes,
+        host="127.0.0.1",
+        receipts=ledger,
+    )
+    try:
+        before = time.monotonic()
+        head._on_receipt(
+            0,
+            {
+                "receipt_requirement_id": "rank0/node_supervisor",
+                "component_id": "node_supervisor",
+                "instance_id": "slow",
+            },
+        )
+        assert time.monotonic() - before < 0.25
+        assert started.wait(1)
+        assert ledger.accepted == 0
+        release.set()
+        head._durable_tail.result(timeout=2)
+        assert ledger.accepted == 1
+    finally:
+        release.set()
+        head.stop()
+
+
 # -- end to end -----------------------------------------------------------
 def test_producer_to_hop_to_ledger(identity, tmp_path):
     """The full chain: SELF receipt -> local hop -> forward -> ledger slot."""

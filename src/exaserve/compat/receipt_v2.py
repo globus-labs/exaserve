@@ -603,20 +603,22 @@ class ExactReceiptLedger:
 
     def supersede_instance(self, slot_key: str, instance_id: str) -> None:
         """A restart invalidates that slot's evidence until it re-attests."""
-        current = self._by_slot.get(slot_key)
-        if current is not None and current.instance_id == instance_id:
-            if self.binding_store is not None:
-                self.binding_store.revoke_slot(slot_key, reason="superseded")
-            del self._by_slot[slot_key]
-            self._superseded.append(instance_id)
+        with self._lock:
+            current = self._by_slot.get(slot_key)
+            if current is not None and current.instance_id == instance_id:
+                if self.binding_store is not None:
+                    self.binding_store.revoke_slot(slot_key, reason="superseded")
+                del self._by_slot[slot_key]
+                self._superseded.append(instance_id)
 
     def drop_rank(self, rank: int) -> None:
         """Losing a rank's session removes its evidence immediately."""
-        for key, receipt in list(self._by_slot.items()):
-            if receipt.owner_rank == rank:
-                if self.binding_store is not None:
-                    self.binding_store.revoke_slot(key, reason="rank lease lost")
-                del self._by_slot[key]
+        with self._lock:
+            for key, receipt in list(self._by_slot.items()):
+                if receipt.owner_rank == rank:
+                    if self.binding_store is not None:
+                        self.binding_store.revoke_slot(key, reason="rank lease lost")
+                    del self._by_slot[key]
 
     def stage_rank_snapshot(
         self,
@@ -632,57 +634,99 @@ class ExactReceiptLedger:
         the returned candidate only after the control
         session state machine also accepts the complete snapshot.
         """
-        candidate = ExactReceiptLedger(self.plan, self.binding)
-        candidate._by_slot = dict(self._by_slot)
-        candidate._superseded = list(self._superseded)
-        candidate.rejected = list(self.rejected)
-        candidate.drop_rank(rank)
-        for receipt in receipts:
-            ok, detail = candidate.accept(
-                receipt,
-                session_rank=rank,
-                session_node=session_node,
-            )
-            if not ok:
-                return False, detail, None
-        return True, "rank snapshot staged", candidate
+        with self._lock:
+            candidate = ExactReceiptLedger(self.plan, self.binding)
+            candidate._by_slot = dict(self._by_slot)
+            candidate._superseded = list(self._superseded)
+            candidate.rejected = list(self.rejected)
+            candidate.drop_rank(rank)
+            for receipt in receipts:
+                ok, detail = candidate.accept(
+                    receipt,
+                    session_rank=rank,
+                    session_node=session_node,
+                )
+                if not ok:
+                    return False, detail, None
+            return True, "rank snapshot staged", candidate
 
     def commit_staged(self, candidate: "ExactReceiptLedger") -> None:
         """Publish a candidate produced by :meth:`stage_rank_snapshot`."""
-        if candidate.plan is not self.plan or candidate.binding is not self.binding:
-            raise ReceiptError("staged receipt ledger belongs to another plan/binding")
-        before = dict(self._by_slot)
-        if self.binding_store is not None:
-            for key, receipt in before.items():
-                replacement = candidate._by_slot.get(key)
-                if replacement is None:
-                    self.binding_store.revoke_slot(key, reason="replacement snapshot removed slot")
-            for key, receipt in candidate._by_slot.items():
-                prior = before.get(key)
-                if prior is None or prior.instance_id != receipt.instance_id:
-                    self.binding_store.bind_receipt(receipt)
-        self._by_slot = dict(candidate._by_slot)
-        self._superseded = list(candidate._superseded)
-        self.rejected = list(candidate.rejected)
+        with self._lock:
+            if candidate.plan is not self.plan or candidate.binding is not self.binding:
+                raise ReceiptError("staged receipt ledger belongs to another plan/binding")
+            before = dict(self._by_slot)
+            if self.binding_store is not None:
+                for key, receipt in before.items():
+                    replacement = candidate._by_slot.get(key)
+                    if replacement is None:
+                        self.binding_store.revoke_slot(
+                            key, reason="replacement snapshot removed slot"
+                        )
+                for key, receipt in candidate._by_slot.items():
+                    prior = before.get(key)
+                    if prior is None or prior.instance_id != receipt.instance_id:
+                        self.binding_store.bind_receipt(receipt)
+            self._by_slot = dict(candidate._by_slot)
+            self._superseded = list(candidate._superseded)
+            self.rejected = list(candidate.rejected)
+
+    def commit_rank_snapshot(self, rank: int, candidate: "ExactReceiptLedger") -> None:
+        """Publish only one rank from a staged replacement.
+
+        Other ranks may durably submit receipts while the listener awaits this
+        snapshot transaction.  Merging the candidate's rank-owned subset keeps
+        those concurrent receipts instead of replacing the whole ledger with a
+        stale copy.
+        """
+        with self._lock:
+            if candidate.plan is not self.plan or candidate.binding is not self.binding:
+                raise ReceiptError("staged receipt ledger belongs to another plan/binding")
+            before_rank = {
+                key: receipt
+                for key, receipt in self._by_slot.items()
+                if receipt.owner_rank == rank
+            }
+            after_rank = {
+                key: receipt
+                for key, receipt in candidate._by_slot.items()
+                if receipt.owner_rank == rank
+            }
+            if self.binding_store is not None:
+                for key in before_rank:
+                    if key not in after_rank:
+                        self.binding_store.revoke_slot(
+                            key, reason="replacement snapshot removed slot"
+                        )
+                for key, receipt in after_rank.items():
+                    prior = before_rank.get(key)
+                    if prior is None or prior.instance_id != receipt.instance_id:
+                        self.binding_store.bind_receipt(receipt)
+            for key in before_rank:
+                self._by_slot.pop(key, None)
+            self._by_slot.update(after_rank)
+            self._superseded = list(candidate._superseded)
+            self.rejected = list(candidate.rejected)
 
     # -- reconciliation ----------------------------------------------------
     def satisfied(self) -> tuple[bool, dict]:
-        planned = self.plan.requirement_keys()
-        accepted = frozenset(self._by_slot)
-        missing = sorted(planned - accepted)
-        unexpected = sorted(accepted - planned)
-        detail = {
-            "planned": len(planned),
-            "accepted": len(accepted),
-            # The transport already bounds planned items.  Truncating this set
-            # hid the actual blocker (for example rank1 loss sorted after model
-            # slots), violating the exact blocker-reporting contract.
-            "missing": missing,
-            "unexpected": unexpected,
-            "superseded": len(self._superseded),
-            "rejected": len(self.rejected),
-        }
-        return (not missing and not unexpected), detail
+        with self._lock:
+            planned = self.plan.requirement_keys()
+            accepted = frozenset(self._by_slot)
+            missing = sorted(planned - accepted)
+            unexpected = sorted(accepted - planned)
+            detail = {
+                "planned": len(planned),
+                "accepted": len(accepted),
+                # The transport already bounds planned items.  Truncating this set
+                # hid the actual blocker (for example rank1 loss sorted after model
+                # slots), violating the exact blocker-reporting contract.
+                "missing": missing,
+                "unexpected": unexpected,
+                "superseded": len(self._superseded),
+                "rejected": len(self.rejected),
+            }
+            return (not missing and not unexpected), detail
 
     def count(self) -> int:
         with self._lock:
