@@ -659,6 +659,17 @@ deadline. This permits READY to remain revoked while already-admitted requests
 drain within the gateway's own bounded contract and still fails closed if
 ingress does not recover; it does not make LiteLLM production-qualified.
 
+When the immutable LiteLLM plan requests more than one worker, the launcher
+uses LiteLLM's supported `--run_gunicorn` multi-worker mode. The plain Uvicorn
+spawn path binds the shared listener before independently spawned workers have
+finished proxy initialization: the observed eight-worker cold pass admitted
+only 2,158 of 6,600 connections and produced 4,442 30-second TCP dial timeouts,
+while the already-warm second pass admitted 6,594 successful requests. The
+Gunicorn mode preloads the configured application before worker forks; the
+normal advertised-endpoint canary and continuous revocable predicate remain
+authoritative, so this process-manager selection adds no readiness marker or
+second lifecycle.
+
 **Listener bind, initial registration, reconnect, and deadlines**
 
 The authenticated control listener is mandatory. Its implementation may retry
