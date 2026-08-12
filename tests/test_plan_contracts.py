@@ -24,7 +24,6 @@ from exaserve.plan.contracts import (
     provenance_hash,
     same_node,
 )
-from exaserve.plan.runtime_environment import runtime_environment
 from exaserve.site import (
     default_model_storage_path,
     default_site_profile,
@@ -310,20 +309,6 @@ def test_head_only_is_an_explicit_gateway_free_benchmark_topology():
     assert plan.scale_envelope.gateway_kind is None
     assert plan.scale_envelope.validation_mode is True
     assert plan.readiness.recovery_deadline_s == 360.0
-    runtime_env = runtime_environment(plan)
-    assert runtime_env["RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING"] == "0"
-    assert runtime_env["RAY_SERVE_PROXY_PREFER_LOCAL_AZ_ROUTING"] == "0"
-
-
-def test_noncentralized_serve_ingress_preserves_locality_preferences():
-    plan = compile_deployment_plan(
-        _raw(),
-        site=_site(),
-        deployment_id="gateway-backed",
-    )
-    runtime_env = runtime_environment(plan)
-    assert runtime_env["RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING"] == "1"
-    assert runtime_env["RAY_SERVE_PROXY_PREFER_LOCAL_AZ_ROUTING"] == "1"
 
 
 def test_head_only_rejects_topologies_that_cannot_bind_native_replica_slots():

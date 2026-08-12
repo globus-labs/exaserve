@@ -22,7 +22,6 @@ def staged_pythonpath(plan, inherited: str = "") -> str:
 
 def runtime_environment(plan) -> dict[str, str]:
     policy = plan.runtime
-    centralized_serve_ingress = plan.uses_head_only_serve_proxy()
     pp_enabled = any(model.pipeline_parallel_size > 1 for model in plan.models)
     multiproc_enabled = any(
         model.pipeline_parallel_size == 1 and model.tensor_parallel_size > 1
@@ -52,11 +51,6 @@ def runtime_environment(plan) -> dict[str, str]:
         "RAY_SERVE_PROXY_READY_CHECK_TIMEOUT_S": str(
             plan.readiness.serve_proxy_ready_check_timeout_s
         ),
-        # Native HeadOnly is an explicit centralized-ingress benchmark. Ray
-        # Serve otherwise prefers replicas on the proxy's node (and AZ), which
-        # overloads the head node and leaves remote replicas mostly idle.
-        "RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING": ("0" if centralized_serve_ingress else "1"),
-        "RAY_SERVE_PROXY_PREFER_LOCAL_AZ_ROUTING": ("0" if centralized_serve_ingress else "1"),
         "EXASERVE_RAY_SERVE_START_PROXY_TIMEOUT_S": str(plan.readiness.serve_start_proxy_timeout_s),
         "EXASERVE_ENGINE": plan.engine,
         "EXASERVE_VENDOR": plan.vendor,
