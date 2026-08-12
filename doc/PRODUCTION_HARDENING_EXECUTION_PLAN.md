@@ -609,6 +609,18 @@ not an external managed gateway, and cannot support a production claim.
 `ProxyLocation.EveryNode`, exact per-node proxy evidence, and the proxy-anchor
 applications needed to make idle allocation nodes host a Serve proxy.
 
+The paper's HeadOnly arm is intentionally the out-of-the-box centralized Ray
+Serve baseline. It retains Ray Serve's default local-node and local-AZ routing
+preferences; implementation code must not disable those preferences, add
+multiple head listeners, insert an external load balancer, or otherwise tune
+away the topology's measured streaming bottleneck. At the paper's fixed
+110-request/s/node offered load, proxy resets and declining successful
+throughput are experimental outcomes, not permission to retry or relabel failed
+requests. The replay artifact remains reportable as an explicitly `PARTIAL`
+result with exact scheduled/completed/error counts, but it must never be called
+`SUCCEEDED`. A differently tuned Ray Serve topology is a separately named
+ablation and cannot replace this arm.
+
 The legacy value `proxy_config.type: none` is not a production gateway. During
 migration the legacy adapter may map it only to explicit
 `DIRECT_VALIDATION`; it must never be the production default or silently make
@@ -681,6 +693,14 @@ LiteLLM's supported Uvicorn multi-worker path and passes a hash-bound
 75-second inter-pass cooldown and 90-second client idle-connection lifetime;
 operators can tune it explicitly without changing request deadlines.
 
+The replay client's hash-bound `request_timeout_s` is the single deadline for
+an admitted HTTP request, including connection establishment. Go transports
+must not add an independent literal dial timeout (the removed 30-second dial
+clock changed the experiment under queueing); TCP keepalive and TLS handshake
+budgets remain transport mechanics, but neither may shorten the compiled
+request deadline. A connection reset, refused connection, or kernel connect
+timeout is still recorded as a request error and is never silently retried.
+
 **Listener bind, initial registration, reconnect, and deadlines**
 
 The authenticated control listener is mandatory. Its implementation may retry
@@ -731,6 +751,14 @@ no such exception. A normal GOODBYE closes that session without creating a new
 failure, while readiness remains revoked during intentional shutdown. An
 unsolicited `GOODBYE` from a required rank is an explicit rank loss and is
 terminal; it is not a clean-success shortcut.
+
+The listener commits GOODBYE authorization in the same serialized event-loop
+turn that validates a successful `DRAIN`/`STOP` `COMMAND_RESULT`, before waking
+head-side result waiters. Head-side authorization is idempotent and cannot erase
+an already accepted GOODBYE. This ordering is required because ranks receive a
+broadcast concurrently while the head collects acknowledgements sequentially;
+a fast later rank may legitimately acknowledge and close before the head has
+finished waiting on an earlier rank.
 
 The immutable resolved plan contains positive
 `registration_deadline_s`, `reconnect_grace_s`, `heartbeat_interval_s`,
