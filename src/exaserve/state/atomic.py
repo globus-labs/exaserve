@@ -319,8 +319,13 @@ class LeaseHeldError(RuntimeError):
     """The lease is validly held by another owner."""
 
     def __init__(self, path: str, owner: dict[str, Any]):
+        self.path = os.fspath(path)
         self.owner = owner
-        super().__init__(f"lease {path} held by {owner}")
+        super().__init__(f"lease {self.path} held by {owner}")
+
+    def __reduce__(self):
+        """Preserve the constructor contract across multiprocessing workers."""
+        return (type(self), (self.path, self.owner))
 
 
 class LeaseReleaseError(RuntimeError):

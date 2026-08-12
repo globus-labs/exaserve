@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import stat
 import threading
 
@@ -197,6 +198,15 @@ def test_lease_exclusive_and_foreign_live_lease_respected(tmp_path):
         with pytest.raises(LeaseHeldError):
             ExclusiveLease(lease_path, ttl_s=3600).acquire()
     assert not lease_path.exists()  # released
+
+
+def test_lease_held_error_round_trips_through_multiprocessing_pickle(tmp_path):
+    error = LeaseHeldError(str(tmp_path / "run.lease"), {"host": "node", "pid": 7})
+    restored = pickle.loads(pickle.dumps(error))
+
+    assert restored.path == error.path
+    assert restored.owner == error.owner
+    assert str(restored) == str(error)
 
 
 def test_lease_ttl_expiry_and_dead_pid_takeover(tmp_path):
