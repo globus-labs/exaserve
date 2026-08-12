@@ -93,26 +93,39 @@ class LiteLLMProxy(ProxyBackend):
             maximum=86400,
         )
 
-        # Build the model_list -- one entry per (node, model) pair.
-        # LiteLLM groups entries with the same model_name and load-balances
-        # across them, which is exactly the semantics we want.
+        # Build the model_list -- one entry per reachable Serve application.
+        # Canonical multi-replica deployments expose independent applications
+        # at <path_prefix>_r0.._rN, not at the unsuffixed model prefix.  LiteLLM
+        # groups entries with the same model_name and load-balances across them.
         model_list = []
         for ep in backends:
             validate_endpoint(ep, "litellm")
-            api_base = f"http://{ep.host}:{ep.port}{ep.path_prefix}/v1"
-            model_list.append(
-                {
-                    "model_name": ep.model_id,
-                    "litellm_params": {
-                        # "openai/" prefix tells LiteLLM the backend speaks the
-                        # OpenAI API protocol (which Ray Serve does).
-                        "model": f"openai/{ep.model_id}",
-                        "api_base": api_base,
-                        # Ray Serve doesn't require auth; LiteLLM needs a non-empty value.
-                        "api_key": "dummy",
-                    },
-                }
-            )
+            if ep.replica_routes:
+                if not ep.path_prefix:
+                    raise ValueError(
+                        f"LiteLLM replica-routed model {ep.model_id!r} requires a path_prefix"
+                    )
+                route_prefixes = [
+                    f"{ep.path_prefix}_r{index}" for index in range(ep.replica_routes)
+                ]
+            else:
+                route_prefixes = [ep.path_prefix]
+            for route_prefix in route_prefixes:
+                api_base = f"http://{ep.host}:{ep.port}{route_prefix}/v1"
+                model_list.append(
+                    {
+                        "model_name": ep.model_id,
+                        "litellm_params": {
+                            # "openai/" tells LiteLLM the backend speaks the
+                            # OpenAI API protocol (which Ray Serve does).
+                            "model": f"openai/{ep.model_id}",
+                            "api_base": api_base,
+                            # Ray Serve doesn't require auth; LiteLLM needs a
+                            # non-empty value.
+                            "api_key": "dummy",
+                        },
+                    }
+                )
         if not model_list:
             raise ValueError("LiteLLM requires at least one backend endpoint")
 
