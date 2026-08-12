@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from exaserve.source_staging import (
     SourceStagingError,
+    _clean_package_snapshot,
     _rank,
     _validate_source_receipt,
     main as source_staging_main,
@@ -164,6 +167,44 @@ def test_tree_manifest_covers_path_size_and_content(tmp_path):
 
     (package / "module.py").write_text("VALUE = 3\n")
     assert tree_manifest(package)["source_manifest_hash"] != first["source_manifest_hash"]
+
+
+def test_clean_package_snapshot_can_extend_and_remove_read_only_release(
+    tmp_path, monkeypatch
+):
+    installed = tmp_path / "installed" / "exaserve"
+    nested = installed / "nested"
+    nested.mkdir(parents=True)
+    (installed / "__init__.py").write_text("VERSION = 1\n")
+    (nested / "module.py").write_text("VALUE = 2\n")
+    (installed / "__init__.py").chmod(0o444)
+    (nested / "module.py").chmod(0o444)
+    nested.chmod(0o555)
+    installed.chmod(0o555)
+
+    monkeypatch.setattr("exaserve.source_staging.resources.files", lambda _name: installed)
+    monkeypatch.setattr(
+        "exaserve.compat.profile.default_profile",
+        lambda _vendor: SimpleNamespace(profile_id="test-profile"),
+    )
+
+    def materialize(_profile, root):
+        root = Path(root)
+        root.mkdir(parents=True)
+        (root / "overlay.py").write_text("PATCHED = True\n")
+
+    monkeypatch.setattr("exaserve.compat.generated_overlay.materialize", materialize)
+    transaction = tmp_path / "transaction"
+    transaction.mkdir()
+    try:
+        clean = _clean_package_snapshot(transaction, vendor="aurora")
+        assert (clean / "_compat_runtime" / "test-profile" / "overlay.py").is_file()
+        assert not os.access(installed, os.W_OK)
+        shutil.rmtree(transaction)
+        assert not transaction.exists()
+    finally:
+        installed.chmod(0o755)
+        nested.chmod(0o755)
 
 
 def test_verify_then_atomic_publish_emits_rank_identity(tmp_path, monkeypatch):

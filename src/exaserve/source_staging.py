@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import sys
 import time
 import uuid
@@ -397,6 +398,24 @@ def _clean_package_snapshot(destination: Path, *, vendor: str) -> Path:
         raise SourceStagingError("installed ExaServe package is not a filesystem artifact")
     clean = destination / "exaserve"
     shutil.copytree(package, clean, symlinks=False, ignore=_ignore)
+    # Immutable release snapshots are intentionally read-only.  ``copytree``
+    # preserves those directory modes, but this private transaction still has
+    # to add its generated compatibility overlay and remove its input when the
+    # broadcast finishes.  Add owner permissions only to directories in the
+    # newly-created copy; never mutate the installed snapshot or broaden file
+    # permissions in the artifact being broadcast.
+    clean.chmod(clean.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    for current, directories, _files in os.walk(clean, topdown=True, followlinks=False):
+        current_path = Path(current)
+        for name in directories:
+            directory = current_path / name
+            if directory.is_symlink():
+                raise SourceStagingError(
+                    f"clean source copy contains an unresolved directory symlink: {directory}"
+                )
+            directory.chmod(
+                directory.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+            )
     from .compat.generated_overlay import materialize
     from .compat.profile import default_profile
 
