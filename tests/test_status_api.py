@@ -32,16 +32,17 @@ from exaserve.status_api import (
 )
 
 
-def _plan(num_nodes: int = 2):
+def _plan(num_nodes: int = 2, *, head_only: bool = False):
+    raw = {
+        "num_nodes": num_nodes,
+        "num_gpus_per_node": 12,
+        "validation_mode": True,
+        "models": [{"model_id": "m", "tensor_parallel_size": 1, "max_model_len": 128, "size": 8}],
+    }
+    if head_only:
+        raw["exposure"] = {"mode": "RAY_SERVE_HEAD_ONLY", "serve_port": 8000}
     return compile_deployment_plan(
-        {
-            "num_nodes": num_nodes,
-            "num_gpus_per_node": 12,
-            "validation_mode": True,
-            "models": [
-                {"model_id": "m", "tensor_parallel_size": 1, "max_model_len": 128, "size": 8}
-            ],
-        },
+        raw,
         site=default_site_profile(),
         deployment_id="d1",
     )
@@ -56,8 +57,8 @@ def _binding(plan, generation=3):
     )
 
 
-def _publisher(tmp_path, generation=3):
-    plan = _plan()
+def _publisher(tmp_path, generation=3, *, head_only: bool = False):
+    plan = _plan(head_only=head_only)
     binding = _binding(plan, generation)
     pub = DeploymentStatusPublisher(
         str(tmp_path), plan=plan, binding=binding, generation=generation, log=lambda *_: None
@@ -118,7 +119,8 @@ def _ready_snapshot(pub, receipt_path, receipt_hash, endpoint="http://h:8000"):
         }
         for rank, node in pub.binding.rank_to_node
     ]
-    proxies = [{"node_id": item["node_id"], "status": "HEALTHY"} for item in nodes]
+    proxy_nodes = nodes[:1] if pub.plan.uses_head_only_serve_proxy() else nodes
+    proxies = [{"node_id": item["node_id"], "status": "HEALTHY"} for item in proxy_nodes]
     model_map = {
         model.model_id: {
             "route_name": model.route_name,
@@ -160,6 +162,15 @@ def test_publisher_walks_the_real_lifecycle(tmp_path):
     _walk_to_ready(pub)
     assert pub.state == "READY"
     assert read_deployment_status(str(tmp_path)).ready
+
+
+def test_head_only_ready_status_uses_one_planned_proxy_at_multiple_nodes(tmp_path):
+    pub, _, _ = _publisher(tmp_path, head_only=True)
+    _walk_to_ready(pub)
+    status = read_deployment_status(str(tmp_path))
+    assert status.ready
+    assert status.exposure_mode == "RAY_SERVE_HEAD_ONLY"
+    assert status.readiness_snapshot["proxies"] == [{"node_id": "id-0", "status": "HEALTHY"}]
 
 
 def test_an_illegal_transition_is_refused_not_written(tmp_path):

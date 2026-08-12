@@ -130,7 +130,13 @@ def _validate_capability_map(value: Any) -> dict[str, Any]:
     return value
 
 
-def _validate_cluster_projection(nodes: Any, proxies: Any, *, expected_nodes: int) -> None:
+def _validate_cluster_projection(
+    nodes: Any,
+    proxies: Any,
+    *,
+    expected_nodes: int,
+    expected_proxy_count: int,
+) -> None:
     if not isinstance(nodes, list) or len(nodes) != expected_nodes:
         raise ValueError(f"nodes must contain exactly {expected_nodes} planned entries")
     node_fields = {"node_id", "node_name", "node_address", "alive", "cpu", "gpu"}
@@ -155,8 +161,8 @@ def _validate_cluster_projection(nodes: Any, proxies: Any, *, expected_nodes: in
         node_ids.append(node["node_id"])
     if len(node_ids) != len(set(node_ids)):
         raise ValueError("nodes contain duplicate node_id values")
-    if not isinstance(proxies, list) or len(proxies) != expected_nodes:
-        raise ValueError(f"proxies must contain exactly {expected_nodes} planned entries")
+    if not isinstance(proxies, list) or len(proxies) != expected_proxy_count:
+        raise ValueError(f"proxies must contain exactly {expected_proxy_count} planned entries")
     proxy_ids: list[str] = []
     for index, proxy in enumerate(proxies):
         if (
@@ -168,12 +174,22 @@ def _validate_cluster_projection(nodes: Any, proxies: Any, *, expected_nodes: in
         ):
             raise ValueError(f"proxies[{index}] is not a typed healthy proxy")
         proxy_ids.append(proxy["node_id"])
-    if len(proxy_ids) != len(set(proxy_ids)) or set(proxy_ids) != set(node_ids):
+    if len(proxy_ids) != len(set(proxy_ids)):
+        raise ValueError("proxies contain duplicate node_id values")
+    if not set(proxy_ids).issubset(node_ids):
+        raise ValueError("proxy node identities are not planned node identities")
+    if expected_proxy_count == expected_nodes and set(proxy_ids) != set(node_ids):
         raise ValueError("proxy node identities do not exactly match nodes")
 
 
 def _validate_ready_payload(
-    snapshot: Any, *, model_map: Any, capability_map: Any, num_nodes: int, plan=None
+    snapshot: Any,
+    *,
+    model_map: Any,
+    capability_map: Any,
+    num_nodes: int,
+    exposure_mode: str,
+    plan=None,
 ) -> None:
     """Validate the complete public READY snapshot, without coercion."""
     if not isinstance(snapshot, dict) or set(snapshot) != _READY_SNAPSHOT_FIELDS:
@@ -206,7 +222,15 @@ def _validate_ready_payload(
         raise ValueError("READY snapshot model_map disagrees with status data")
     if snapshot["capability_map"] != capability_map:
         raise ValueError("READY snapshot capability_map disagrees with status data")
-    _validate_cluster_projection(snapshot["nodes"], snapshot["proxies"], expected_nodes=num_nodes)
+    if plan is not None and exposure_mode != plan.exposure.mode:
+        raise ValueError("READY exposure mode disagrees with the plan")
+    expected_proxy_count = 1 if exposure_mode == "RAY_SERVE_HEAD_ONLY" else num_nodes
+    _validate_cluster_projection(
+        snapshot["nodes"],
+        snapshot["proxies"],
+        expected_nodes=num_nodes,
+        expected_proxy_count=expected_proxy_count,
+    )
     if plan is not None:
         expected_models = {model.model_id: model for model in plan.models}
         if set(model_map) != set(expected_models):
@@ -359,6 +383,7 @@ class DeploymentStatusPublisher:
                     model_map=model_map,
                     capability_map=capability_map,
                     num_nodes=self.plan.num_nodes,
+                    exposure_mode=self.plan.exposure.mode,
                     plan=self.plan,
                 )
                 data["readiness_snapshot"] = snapshot
@@ -443,6 +468,7 @@ class DeploymentStatusPublisher:
                 model_map=model_map,
                 capability_map=capability_map,
                 num_nodes=self.plan.num_nodes,
+                exposure_mode=self.plan.exposure.mode,
                 plan=self.plan,
             )
         except ValueError as exc:
@@ -592,6 +618,7 @@ def read_deployment_status(run_dir: str) -> Optional[DeploymentStatus]:
                 model_map=data.get("model_map"),
                 capability_map=data.get("capability_map"),
                 num_nodes=num_nodes,
+                exposure_mode=data.get("exposure_mode", ""),
             )
         except ValueError as exc:
             raise InvalidDeploymentStatus(
