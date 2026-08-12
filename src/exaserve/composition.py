@@ -1498,35 +1498,48 @@ class CompositionRoot:
             f"{list(verdict.blockers)}"
         )
 
-    def gateway_argv(self, config_dir: str) -> Optional[list[str]]:
-        """Render, atomically publish, and preflight the exact gateway config."""
-        if self.plan.gateway is None:
-            return None
+    def _gateway_backend_endpoints(self):
+        """Return the canonical Serve applications visible to the gateway."""
         if self.binding is None:
             raise CompositionError("gateway preparation requires AllocationBinding")
-        import hashlib
-        import re
-        import shutil
-        from pathlib import Path
+        if self.plan.gateway is None:
+            return []
 
-        from .control.finite_process import run_finite
         from .proxy.base import BackendEndpoint
-        from .state.atomic import atomic_create_or_verify_json, regular_file_reader
 
         gateway = self.plan.gateway
-        ref = gateway.executable_ref
-        if ref.startswith("PATH:"):
-            name = ref.removeprefix("PATH:")
-            if not re.fullmatch(r"[A-Za-z0-9_.+-]+", name):
-                raise CompositionError(f"unsafe gateway PATH reference {ref!r}")
-            executable = shutil.which(name)
-        else:
-            executable = ref if os.path.isabs(ref) and os.access(ref, os.X_OK) else None
-        if not executable:
-            raise CompositionError(f"gateway executable could not be resolved from {ref!r}")
-
         single_model = len(self.plan.models) == 1
         endpoints = []
+        rank_to_node = dict(self.binding.rank_to_node)
+        if gateway.kind == "litellm":
+            # LiteLLM performs application selection itself.  Give it exactly
+            # one directly addressable entry per canonical replica, on that
+            # replica's primary planned node.  Feeding every replica route to
+            # every node creates a node x replica Cartesian product (49,152
+            # entries at the 64-node paper point) with no additional reachability.
+            for model in self.plan.models:
+                if model.num_replicas > 1:
+                    for replica in model.replicas:
+                        endpoints.append(
+                            BackendEndpoint(
+                                host=rank_to_node[replica.planned_ranks[0]],
+                                port=gateway.backend_port,
+                                model_id=model.model_id,
+                                path_prefix=(f"/{model.route_name}_r{replica.replica_index}"),
+                            )
+                        )
+                else:
+                    replica = model.replicas[0]
+                    endpoints.append(
+                        BackendEndpoint(
+                            host=rank_to_node[replica.planned_ranks[0]],
+                            port=gateway.backend_port,
+                            model_id=model.model_id,
+                            path_prefix=(f"/{model.route_name}" if not single_model else ""),
+                        )
+                    )
+            return endpoints
+
         for _rank, node in self.binding.rank_to_node:
             for model in self.plan.models:
                 replica_routes = model.num_replicas if model.num_replicas > 1 else 0
@@ -1541,6 +1554,35 @@ class CompositionRoot:
                         replica_routes=replica_routes,
                     )
                 )
+        return endpoints
+
+    def gateway_argv(self, config_dir: str) -> Optional[list[str]]:
+        """Render, atomically publish, and preflight the exact gateway config."""
+        if self.plan.gateway is None:
+            return None
+        if self.binding is None:
+            raise CompositionError("gateway preparation requires AllocationBinding")
+        import hashlib
+        import re
+        import shutil
+        from pathlib import Path
+
+        from .control.finite_process import run_finite
+        from .state.atomic import atomic_create_or_verify_json, regular_file_reader
+
+        gateway = self.plan.gateway
+        ref = gateway.executable_ref
+        if ref.startswith("PATH:"):
+            name = ref.removeprefix("PATH:")
+            if not re.fullmatch(r"[A-Za-z0-9_.+-]+", name):
+                raise CompositionError(f"unsafe gateway PATH reference {ref!r}")
+            executable = shutil.which(name)
+        else:
+            executable = ref if os.path.isabs(ref) and os.access(ref, os.X_OK) else None
+        if not executable:
+            raise CompositionError(f"gateway executable could not be resolved from {ref!r}")
+
+        endpoints = self._gateway_backend_endpoints()
 
         def thaw(value):
             if isinstance(value, tuple):

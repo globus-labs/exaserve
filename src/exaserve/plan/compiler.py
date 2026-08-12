@@ -1066,13 +1066,14 @@ def compile_deployment_plan(
             base_readiness[key] = _boolean(value, f"deployment.readiness.{key}")
         else:
             base_readiness[key] = _number(value, f"deployment.readiness.{key}", minimum=0.0000001)
-    # LiteLLM imports and initializes its worker stack before binding. Aurora
-    # measurements for this exact launcher were 51s (one worker) and 59s
-    # (eight workers), so the generic 30s gateway budget is a false failure.
-    # Resolve a kind-specific floor with approximately 2x measured margin.
+    # LiteLLM imports and initializes every worker before binding.  The small
+    # probe took 51s (one worker) and 59s (eight workers), while the real
+    # 12-replica/eight-worker paper topology remained alive beyond 120s.  The
+    # generic 30s budget and the former 120s floor are therefore false failures.
+    # Resolve a kind-specific, still-finite five-minute startup boundary.
     if gateway is not None and gateway.kind == GatewayKind.LITELLM.value:
         base_readiness["gateway_start_deadline_s"] = max(
-            120.0, float(base_readiness["gateway_start_deadline_s"])
+            300.0, float(base_readiness["gateway_start_deadline_s"])
         )
     readiness = ReadinessLimits(**base_readiness)
 

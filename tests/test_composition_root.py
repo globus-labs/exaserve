@@ -256,6 +256,49 @@ def test_the_advertised_endpoint_is_the_gateway_port(tmp_path):
     assert root.advertised_endpoint("10.0.0.1") == "http://10.0.0.1:4001"
 
 
+def test_litellm_gets_one_endpoint_per_canonical_replica_not_a_cartesian_product(tmp_path):
+    site = SiteProfile(
+        schema_version=3,
+        site_id="s",
+        max_nodes=64,
+        gpus_per_node=12,
+        cpus_per_node=64,
+        scheduler_types=("pbs",),
+        gateway_kinds=("litellm",),
+        vendors=("xpu",),
+        engines=("vllm",),
+        model_storage_path="/m",
+        local_stage_path="/t",
+        launcher_capabilities=("ray_serve.run_many",),
+    ).finalize()
+    plan = compile_deployment_plan(
+        {
+            "num_nodes": 2,
+            "validation_mode": True,
+            "models": [
+                {
+                    "model_id": "a/b",
+                    "tensor_parallel_size": 1,
+                    "max_model_len": 4096,
+                    "size": 8,
+                }
+            ],
+            "gateway": {"kind": "litellm", "port": 4001},
+        },
+        site=site,
+        deployment_id="d",
+    )
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path), log=lambda *_: None)
+    root.bind_allocation(["n0", "n1"], "j")
+
+    endpoints = root._gateway_backend_endpoints()
+
+    assert len(endpoints) == plan.models[0].num_replicas == 24
+    assert len({endpoint.path_prefix for endpoint in endpoints}) == 24
+    assert {endpoint.host for endpoint in endpoints} == {"n0", "n1"}
+    assert all(endpoint.replica_routes == 0 for endpoint in endpoints)
+
+
 def test_validation_direct_advertises_the_serve_port(tmp_path):
     raw = {
         "num_nodes": 1,
