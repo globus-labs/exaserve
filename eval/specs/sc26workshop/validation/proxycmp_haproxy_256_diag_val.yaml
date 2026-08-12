@@ -14,6 +14,7 @@ matrix:
 trace: {kind: weak_scaling}
 workload: {duration: 60.0, input_len: 64, output_len: 64, rate_per_node: 110.0, arrival: fixed, generation_mode: deterministic}
 deployment:
+  validation_mode: true
   models:
   - {model_id: meta-llama/Meta-Llama-3-8B-Instruct, tensor_parallel_size: 1, pipeline_parallel_size: 1, max_model_len: 4096, size: 8, gpu_memory_utilization: 0.90, enforce_eager: true, max_num_seqs: 64}
   replica_max_ongoing_requests: 256

@@ -111,7 +111,15 @@ def default_site_profile(site_id: str = "") -> SiteProfile:
     site_id = site_id or os.environ.get("EXASERVE_SITE_ID", AURORA_SITE_ID)
     from .compat.profile import default_profile
 
-    max_nodes = int(os.environ.get("EXASERVE_SITE_MAX_NODES", "64"))
+    # ``max_nodes`` is the physical/validation ceiling, not a production
+    # qualification claim.  Keep the candidate release target independent so
+    # explicit 128/256-node validation plans compile into the generic,
+    # unqualified envelope without widening the candidate-64 release boundary.
+    max_nodes = int(os.environ.get("EXASERVE_SITE_MAX_NODES", "256"))
+    qualification_target_nodes = min(
+        int(os.environ.get("EXASERVE_QUALIFICATION_TARGET_NODES", "64")),
+        max_nodes,
+    )
     gpus_per_node = int(os.environ.get("EXASERVE_SITE_GPUS_PER_NODE", "12"))
     model_storage_path = os.environ.get("EXASERVE_MODEL_STORAGE_PATH")
     if not model_storage_path:
@@ -137,10 +145,10 @@ def default_site_profile(site_id: str = "") -> SiteProfile:
             streaming_mode="non_streaming",
             min_nodes=1,
             supported_max_nodes=min(2, max_nodes),
-            qualification_target_nodes=max_nodes,
+            qualification_target_nodes=qualification_target_nodes,
             qualification_target_approved=False,
-            max_replicas_per_model=max_nodes * gpus_per_node,
-            max_total_replicas=max_nodes * gpus_per_node,
+            max_replicas_per_model=qualification_target_nodes * gpus_per_node,
+            max_total_replicas=qualification_target_nodes * gpus_per_node,
             max_models=64,
             validation_tier="candidate-64-unapproved",
             evidence_refs=("doc/hardening/decisions/ADR-000-production-envelope.md",),

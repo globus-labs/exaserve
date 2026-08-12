@@ -70,11 +70,14 @@ def _raw(**kw):
 
 def test_default_aurora_profile_claims_only_qualified_stack_families():
     site = default_site_profile()
+    assert site.max_nodes == 256
     assert site.scheduler_types == ("pbs",)
     assert site.vendors == ("xpu",)
     assert site.engines == ("vllm",)
     assert len(site.scale_envelopes) == 1
     envelope = site.scale_envelopes[0]
+    assert envelope.qualification_target_nodes == 64
+    assert envelope.qualification_target_approved is False
     assert (envelope.gateway_kind, envelope.request_mode, envelope.streaming_mode) == (
         "haproxy",
         "completion",
@@ -246,6 +249,27 @@ def test_execution_boundary_distinguishes_validation_from_qualified_production()
     ).finalize()
     with pytest.raises(RuntimeError, match="not declared by SiteProfile"):
         require_execution_qualification(forged_plan, qualified)
+
+
+def test_default_site_allows_256_node_validation_without_widening_release_envelope():
+    site = default_site_profile()
+    plan = compile_deployment_plan(
+        _raw(
+            num_nodes=256,
+            validation_mode=True,
+            gateway={"kind": "envoy", "port": 4001},
+        ),
+        site=site,
+        deployment_id="validation-256",
+    )
+
+    assert plan.num_nodes == 256
+    assert plan.validation_mode is True
+    assert plan.scale_envelope.envelope_id == "alcf-aurora-unqualified-generic"
+    assert plan.scale_envelope.validation_tier == "synthetic-site-profile"
+    assert plan.scale_envelope.supported_max_nodes == 256
+    assert all(item.qualification_target_nodes == 64 for item in site.scale_envelopes)
+    assert require_execution_qualification(plan, site) is False
 
 
 def test_validation_execution_still_requires_the_exact_site_profile_identity():
