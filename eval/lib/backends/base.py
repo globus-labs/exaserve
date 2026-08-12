@@ -278,6 +278,15 @@ def terminate_process_tree(
         else min(deadline, now + float(graceful_s))
     )
     while time.monotonic() < term_deadline and process_group_exists(process_group):
+        # ``killpg(..., 0)`` continues to report a process group whose leader
+        # has exited but remains an unreaped zombie. Poll the Popen owner in
+        # the graceful phase so waitpid can reap that leader immediately. A
+        # clean ExaServe shutdown otherwise burns the entire watchdog despite
+        # having no live owned process, delaying every accepted experiment by
+        # up to two minutes and consuming scale-allocation walltime.
+        process.poll()
+        if not process_group_exists(process_group):
+            break
         time.sleep(min(0.05, max(0.0, term_deadline - time.monotonic())))
     if process_group_exists(process_group):
         signal_owned(signal.SIGKILL)

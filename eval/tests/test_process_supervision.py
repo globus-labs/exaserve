@@ -199,6 +199,24 @@ def test_backend_cleanup_reaps_descendant_after_launcher_exits(tmp_path):
         assert Path(f"/proc/{child_pid}/stat").read_text().split()[2] == "Z"
 
 
+def test_backend_cleanup_reaps_an_exited_group_leader_during_grace():
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    started = time.monotonic()
+
+    terminate_process_tree(
+        process,
+        process_group=process.pid,
+        deadline_s=1.0,
+        graceful_s=0.8,
+    )
+
+    assert process.returncode is not None
+    assert time.monotonic() - started < 0.7
+
+
 def _captured_process(program: str):
     stdout_capture = tempfile.TemporaryFile(mode="w+b")
     stderr_capture = tempfile.TemporaryFile(mode="w+b")
