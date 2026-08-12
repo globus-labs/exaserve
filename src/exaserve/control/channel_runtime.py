@@ -883,25 +883,26 @@ class HeadChannel:
             if remaining <= 0:
                 self.failures.append(f"{operation} broadcast cleanup deadline exhausted")
                 return 0
-            sent = int(
+            sent_ranks = tuple(
                 self._loop.call(
-                    self._listener.broadcast_command(operation, operation),
+                    self._listener.broadcast_command_targets(operation, operation),
                     timeout=min(remaining, 30.0),
                 )
             )
+            sent = len(sent_ranks)
             acknowledged = 0
             acknowledged_ranks: set[int] = set()
-            for rank in range(self.expected_ranks):
-                if not self._listener.is_established(rank):
-                    continue
-                command_id = f"{operation}:{rank}"
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                result = self._loop.call(
-                    self._listener.wait_command_result(command_id, remaining),
+            remaining = deadline - time.monotonic()
+            results: dict[str, dict | None] = {}
+            if remaining > 0 and sent_ranks:
+                command_ids = tuple(f"{operation}:{rank}" for rank in sent_ranks)
+                results = self._loop.call(
+                    self._listener.wait_command_results(command_ids, remaining),
                     timeout=_completion_timeout(remaining),
                 )
+            for rank in sent_ranks:
+                command_id = f"{operation}:{rank}"
+                result = results.get(command_id)
                 if not (
                     result
                     and result.get("operation") == operation

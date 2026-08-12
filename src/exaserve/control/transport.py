@@ -28,7 +28,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from .contracts import (
     MAX_MESSAGE_BYTES,
@@ -1337,17 +1337,29 @@ class ControlListener:
         except (ConnectionError, OSError, ContractError):
             return False
 
-    async def broadcast_command(
+    async def broadcast_command_targets(
         self, command_id: str, operation: str, payload: dict | None = None
-    ) -> int:
-        """Send to every known session. Returns how many were reachable."""
-        sent = 0
+    ) -> tuple[int, ...]:
+        """Send to every established session and freeze the delivered ranks.
+
+        A successful shutdown recipient may acknowledge, send GOODBYE, and
+        cease to be established before the head inspects its result.  Returning
+        the immutable delivery set prevents that correct fast close from being
+        mistaken for a rank that never received the command.
+        """
+        sent: list[int] = []
         for rank in range(self.expected_ranks):
             if not self.is_established(rank):
                 continue
             if await self._send_command(rank, f"{command_id}:{rank}", operation, payload):
-                sent += 1
-        return sent
+                sent.append(rank)
+        return tuple(sent)
+
+    async def broadcast_command(
+        self, command_id: str, operation: str, payload: dict | None = None
+    ) -> int:
+        """Compatibility count for callers that do not need delivery identity."""
+        return len(await self.broadcast_command_targets(command_id, operation, payload))
 
     async def send_command(
         self, rank: int, command_id: str, operation: str, payload: dict | None = None
@@ -1407,6 +1419,18 @@ class ControlListener:
         except asyncio.TimeoutError:
             return None
         return self.command_result(command_id)
+
+    async def wait_command_results(
+        self, command_ids: Sequence[str], timeout: float
+    ) -> dict[str, dict | None]:
+        """Wait for a fixed command set without rank-order head-of-line blocking."""
+        identifiers = tuple(command_ids)
+        if len(set(identifiers)) != len(identifiers):
+            raise ContractError("command result wait requires unique command IDs")
+        results = await asyncio.gather(
+            *(self.wait_command_result(command_id, timeout) for command_id in identifiers)
+        )
+        return dict(zip(identifiers, results, strict=True))
 
     def _register(self, env: Envelope) -> tuple[SessionInfo | None, str | None]:
         rank, node = env.sender_rank, env.sender_node

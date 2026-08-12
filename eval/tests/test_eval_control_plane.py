@@ -584,6 +584,58 @@ def test_keyboard_interrupt_publishes_cancelled_after_cleanup(monkeypatch):
     assert transitions[-1][1]["error"].startswith("KeyboardInterrupt:")
 
 
+@pytest.mark.parametrize("clean", [True, False])
+def test_ray_backend_stop_requires_clean_terminal_evidence(tmp_path, monkeypatch, clean):
+    from types import SimpleNamespace
+
+    from eval.lib.backends.base import LaunchedBackend
+    from eval.lib.backends.ray import RayBackendAdapter
+
+    plan_hash = "p" * 64
+    generation = 17
+    status_dir = tmp_path / "deployment"
+    status_dir.mkdir()
+    report = {
+        "deployment_plan_hash": plan_hash,
+        "clean": clean,
+        "errors": [] if clean else ["rank drain protocol incomplete"],
+        "terminal_publication": "published",
+        "observed_terminal_state": "STOPPED" if clean else "FAILED",
+        "components": {
+            "deployment": {"state": "STOPPED", "returncode": 0},
+            "rank_launcher": {"state": "STOPPED", "returncode": 0},
+        },
+    }
+    (status_dir / "shutdown_report.json").write_text(json.dumps(report), encoding="utf-8")
+    terminal_status = SimpleNamespace(
+        deployment_plan_hash=plan_hash,
+        generation=generation,
+        state="STOPPED" if clean else "FAILED",
+    )
+    monkeypatch.setattr("exaserve.status_api.read_deployment_status", lambda _path: terminal_status)
+    monitor = SimpleNamespace(
+        process=None,
+        process_group=None,
+        status_dir=str(status_dir),
+        expected_generation=generation,
+        readiness_source="deployment_status",
+        close=lambda **_kwargs: None,
+    )
+    launched = LaunchedBackend(monitor=monitor)
+    run_plan = SimpleNamespace(
+        deployment_plan_hash=plan_hash,
+        semantic_plan=SimpleNamespace(
+            deployment=SimpleNamespace(control=SimpleNamespace(watchdog_cleanup_deadline_s=1.0))
+        ),
+    )
+
+    if clean:
+        RayBackendAdapter().stop(SimpleNamespace(run_plan=run_plan), launched)
+    else:
+        with pytest.raises(RuntimeError, match="clean terminal contract"):
+            RayBackendAdapter().stop(SimpleNamespace(run_plan=run_plan), launched)
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

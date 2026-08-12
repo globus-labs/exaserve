@@ -853,8 +853,9 @@ def test_shutdown_ack_atomically_authorizes_immediate_goodbye():
             await channel.close(expected=True)
 
         await asyncio.gather(*(acknowledge_and_close(channel) for channel in channels))
+        results = await listener.wait_command_results(("DRAIN:0", "DRAIN:1"), 2)
         for rank in range(2):
-            result = await listener.wait_command_result(f"DRAIN:{rank}", 2)
+            result = results[f"DRAIN:{rank}"]
             assert result is not None and result["ok"] is True
             # The head-side authorization happens after the rank has already
             # closed in this test; it must not erase the accepted GOODBYE.

@@ -15,6 +15,7 @@ Key responsibilities:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -309,6 +310,24 @@ class RayBackendAdapter(BackendAdapter):
 
     def stop(self, run_ctx: BackendRunContext, launched: LaunchedBackend) -> None:
         failures: list[BaseException] = []
+        from exaserve.status_api import read_deployment_status
+
+        try:
+            status_before_stop = read_deployment_status(launched.monitor.status_dir)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # Cleanup must still run when terminal evidence is missing or
+            # malformed; the post-stop validator will report that defect.
+            status_before_stop = None
+        if status_before_stop is not None and status_before_stop.state in {
+            "STOPPED",
+            "CANCELLED",
+            "FAILED",
+        }:
+            expected_terminal_state = status_before_stop.state
+        elif getattr(launched.monitor, "readiness_source", "") == "deployment_status":
+            expected_terminal_state = "STOPPED"
+        else:
+            expected_terminal_state = "CANCELLED"
         watchdog_s = float(
             run_ctx.run_plan.semantic_plan.deployment.control.watchdog_cleanup_deadline_s
         )
@@ -331,11 +350,88 @@ class RayBackendAdapter(BackendAdapter):
             launched.monitor.close(deadline=cleanup_deadline)
         except BaseException as exc:
             failures.append(exc)
+        try:
+            self._validate_shutdown_evidence(
+                run_ctx,
+                launched,
+                expected_terminal_state=expected_terminal_state,
+            )
+        except BaseException as exc:
+            failures.append(exc)
         if failures:
             primary = RuntimeError(f"Ray backend cleanup failed: {failures[0]}")
             for secondary in failures[1:]:
                 add_exception_note(primary, f"additional cleanup failure: {secondary}")
             raise primary from failures[0]
+
+    @staticmethod
+    def _validate_shutdown_evidence(
+        run_ctx: BackendRunContext,
+        launched: LaunchedBackend,
+        *,
+        expected_terminal_state: str,
+    ) -> None:
+        """Require typed clean teardown before the run may publish success."""
+        from exaserve.status_api import read_deployment_status
+
+        status_dir = launched.monitor.status_dir
+        if not isinstance(status_dir, str) or not status_dir:
+            raise RuntimeError("Ray backend cleanup lacks a deployment status directory")
+        report_path = os.path.join(status_dir, "shutdown_report.json")
+        try:
+            with open(report_path, encoding="utf-8") as handle:
+                report = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read shutdown report {report_path}: {exc}") from exc
+        if not isinstance(report, dict):
+            raise RuntimeError("shutdown report must be a JSON object")
+
+        expected_hash = run_ctx.run_plan.deployment_plan_hash
+        if report.get("deployment_plan_hash") != expected_hash:
+            raise RuntimeError("shutdown report deployment identity does not match the run plan")
+        expected_publication = (
+            "not_required" if expected_terminal_state == "FAILED" else "published"
+        )
+        if (
+            report.get("clean") is not True
+            or report.get("terminal_publication") != expected_publication
+            or report.get("observed_terminal_state") != expected_terminal_state
+            or report.get("errors") not in (None, [])
+        ):
+            raise RuntimeError(
+                "deployment cleanup did not satisfy its clean terminal contract: "
+                f"{report.get('errors') or report}"
+            )
+        components = report.get("components")
+        if not isinstance(components, dict) or not components:
+            raise RuntimeError("shutdown report has no owned-component evidence")
+        invalid_components = {
+            component_id: evidence
+            for component_id, evidence in components.items()
+            if not isinstance(evidence, dict) or evidence.get("state") != "STOPPED"
+        }
+        if invalid_components:
+            raise RuntimeError(
+                f"shutdown report retains non-stopped components: {invalid_components}"
+            )
+        if expected_terminal_state == "STOPPED":
+            deployment = components.get("deployment")
+            if not isinstance(deployment, dict) or deployment.get("returncode") != 0:
+                raise RuntimeError(f"deployment did not complete its graceful drain: {deployment}")
+
+        status = read_deployment_status(status_dir)
+        if status is None:
+            raise RuntimeError("canonical deployment status is missing after cleanup")
+        if (
+            status.deployment_plan_hash != expected_hash
+            or status.generation != launched.monitor.expected_generation
+        ):
+            raise RuntimeError("terminal deployment status identity does not match the launch")
+        if status.state != expected_terminal_state:
+            raise RuntimeError(
+                f"canonical deployment status is {status.state}, "
+                f"expected clean {expected_terminal_state}"
+            )
 
     def _proxy_settings(self, run_plan: RunMaterialization) -> dict:
         return dict(run_plan.backend_args.get("proxy", {}))

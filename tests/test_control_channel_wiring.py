@@ -80,6 +80,53 @@ def test_head_channel_stop_is_idempotent(head):
     assert head.stop()
 
 
+def test_shutdown_accounting_uses_delivered_ranks_after_fast_close():
+    """A rank that already closed cleanly remains part of the ACK barrier."""
+    import asyncio
+
+    class Loop:
+        def call(self, coroutine, timeout):
+            return asyncio.run(asyncio.wait_for(coroutine, timeout))
+
+    class Listener:
+        def __init__(self):
+            self.authorized = []
+
+        async def broadcast_command_targets(self, command_id, operation):
+            assert (command_id, operation) == ("DRAIN", "DRAIN")
+            return (0, 1)
+
+        async def wait_command_results(self, command_ids, _timeout):
+            assert command_ids == ("DRAIN:0", "DRAIN:1")
+            return {
+                command_id: {
+                    "operation": "DRAIN",
+                    "status": "SUCCEEDED",
+                    "ok": True,
+                }
+                for command_id in command_ids
+            }
+
+        def is_established(self, _rank):
+            raise AssertionError("shutdown accounting must not re-query live sessions")
+
+        def expect_goodbye(self, rank):
+            self.authorized.append(rank)
+
+    channel = object.__new__(HeadChannel)
+    channel.expected_ranks = 2
+    channel.failures = []
+    channel.sessions_coordinator = None
+    channel._listener = Listener()
+    channel._loop = Loop()
+    channel._shutdown_acknowledged_ranks = set()
+
+    assert channel.broadcast_shutdown("DRAIN", timeout=1) == 2
+    assert channel._shutdown_acknowledged_ranks == {0, 1}
+    assert channel._listener.authorized == [0, 1]
+    assert channel.failures == []
+
+
 @pytest.fixture
 def head():
     channel = HeadChannel(
