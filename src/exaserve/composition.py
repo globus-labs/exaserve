@@ -1736,12 +1736,8 @@ class CompositionRoot:
             ]
             if gateway.worker_count > 1:
                 # LiteLLM documents this as its multi-worker process manager.
-                # Plain ``uvicorn --workers`` binds before independently
-                # spawned workers finish importing/configuring the proxy; on
-                # the paper's eight-worker cold start that exposed a 2,048-ish
-                # accept backlog and 4,442 client dial timeouts.  Gunicorn's
-                # preloaded application gives every fork the same initialized
-                # router before readiness admits benchmark traffic.
+                # Readiness remains external and authoritative; Gunicorn is
+                # process ownership, not evidence that the request path works.
                 argv.append("--run_gunicorn")
             self._gateway_environment = child_env
         elif gateway.kind == "nginx":

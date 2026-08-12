@@ -347,6 +347,7 @@ def test_litellm_resolves_an_evidence_based_startup_budget_floor():
     )
     assert plan.readiness.gateway_start_deadline_s == 120.0
     assert dict(plan.gateway.options)["timeout"] == 300
+    assert dict(plan.gateway.options)["disable_hf_tokenizer_download"] is True
     assert plan.readiness.recovery_deadline_s == 360.0
 
 
@@ -365,6 +366,34 @@ def test_litellm_request_timeout_is_hash_bound_and_sizes_recovery():
     )
     assert dict(plan.gateway.options)["timeout"] == 450
     assert plan.readiness.recovery_deadline_s == 510.0
+
+    offline_override = compile_deployment_plan(
+        _raw(
+            gateway={
+                "kind": "litellm",
+                "port": 4001,
+                "options": {"disable_hf_tokenizer_download": False},
+            },
+            validation_mode=True,
+        ),
+        site=_site(gateway_kinds=("haproxy", "litellm")),
+        deployment_id="litellm-online-tokenizer",
+    )
+    assert dict(offline_override.gateway.options)["disable_hf_tokenizer_download"] is False
+
+    with pytest.raises(PlanError, match="must be a boolean"):
+        compile_deployment_plan(
+            _raw(
+                gateway={
+                    "kind": "litellm",
+                    "port": 4001,
+                    "options": {"disable_hf_tokenizer_download": "true"},
+                },
+                validation_mode=True,
+            ),
+            site=_site(gateway_kinds=("haproxy", "litellm")),
+            deployment_id="litellm-invalid-tokenizer-policy",
+        )
 
     with pytest.raises(PlanError, match=r"unknown key.*typo_timeout"):
         compile_deployment_plan(

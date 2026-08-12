@@ -99,6 +99,7 @@ _HAPROXY_OPTION_KEYS = {
 }
 _LITELLM_OPTION_KEYS = {
     "db_url",
+    "disable_hf_tokenizer_download",
     "extra_general",
     "extra_router",
     "master_key",
@@ -588,6 +589,17 @@ def _litellm_options(raw: Any, path: str) -> tuple[tuple[str, Any], ...]:
         default=300,
         minimum=1,
         maximum=86400,
+    )
+    # Aurora compute nodes do not have general Internet egress.  LiteLLM's
+    # Llama-family token counter otherwise attempts an on-demand Hugging Face
+    # tokenizer download in request handling, which can block every worker
+    # under load.  Resolve the supported LiteLLM offline fallback into the
+    # immutable plan instead of depending on ambient environment or a renderer
+    # default that would not affect the plan hash.
+    normalized["disable_hf_tokenizer_download"] = _boolean(
+        options.get("disable_hf_tokenizer_download"),
+        f"{path}.disable_hf_tokenizer_download",
+        default=True,
     )
     if "extra_general" in options:
         normalized["extra_general"] = _optional_mapping(

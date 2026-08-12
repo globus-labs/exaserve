@@ -661,14 +661,17 @@ ingress does not recover; it does not make LiteLLM production-qualified.
 
 When the immutable LiteLLM plan requests more than one worker, the launcher
 uses LiteLLM's supported `--run_gunicorn` multi-worker mode. The plain Uvicorn
-spawn path binds the shared listener before independently spawned workers have
-finished proxy initialization: the observed eight-worker cold pass admitted
-only 2,158 of 6,600 connections and produced 4,442 30-second TCP dial timeouts,
-while the already-warm second pass admitted 6,594 successful requests. The
-Gunicorn mode preloads the configured application before worker forks; the
-normal advertised-endpoint canary and continuous revocable predicate remain
-authoritative, so this process-manager selection adds no readiness marker or
-second lifecycle.
+spawn path and Gunicorn path were both evaluated against the paper workload;
+process-manager selection alone did not repair the cold pass. The owned gateway
+log identified the actual blocker: request handling attempted repeated online
+downloads of `Xenova/llama-3-tokenizer` from compute nodes without Internet
+egress. The immutable LiteLLM options therefore default
+`disable_hf_tokenizer_download=true`, which LiteLLM maps to its supported local
+tokenizer fallback. Operators may explicitly disable that policy only through
+the hash-bound plan. This changes LiteLLM's accounting tokenizer, not the model
+server's generation tokenizer or the request/response workload. The normal
+advertised-endpoint canary and continuous revocable predicate remain
+authoritative, so neither setting adds a readiness marker or second lifecycle.
 
 **Listener bind, initial registration, reconnect, and deadlines**
 

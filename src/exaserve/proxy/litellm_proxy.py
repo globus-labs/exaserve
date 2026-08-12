@@ -56,6 +56,9 @@ class LiteLLMProxy(ProxyBackend):
                                        Default: "least-busy".
             num_retries (int):         Retries on backend failure. Default: 2.
             timeout (int):             Per-request timeout in seconds. Default: 300.
+            disable_hf_tokenizer_download (bool):
+                                       Use LiteLLM's bundled tokenizer fallback
+                                       instead of network downloads. Default: true.
             db_url (str):              SQLAlchemy URL for usage DB.
                                        Default: "sqlite:///litellm_usage.db" (local file).
             extra_general (dict):      Merged verbatim into general_settings.
@@ -68,6 +71,7 @@ class LiteLLMProxy(ProxyBackend):
             {
                 "extra_general",
                 "extra_router",
+                "disable_hf_tokenizer_download",
                 "num_retries",
                 "routing_strategy",
                 "timeout",
@@ -92,6 +96,9 @@ class LiteLLMProxy(ProxyBackend):
             minimum=1,
             maximum=86400,
         )
+        disable_hf_tokenizer_download = options.get("disable_hf_tokenizer_download", True)
+        if not isinstance(disable_hf_tokenizer_download, bool):
+            raise ValueError("proxy.options.disable_hf_tokenizer_download must be boolean")
 
         # Build the model_list -- one entry per reachable Serve application.
         # Canonical multi-replica deployments expose independent applications
@@ -151,6 +158,9 @@ class LiteLLMProxy(ProxyBackend):
             "model_list": model_list,
             "router_settings": router_settings,
             "general_settings": general_settings,
+            "litellm_settings": {
+                "disable_hf_tokenizer_download": disable_hf_tokenizer_download,
+            },
         }
 
         config_path = output_dir / "litellm_config.yaml"
