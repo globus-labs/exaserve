@@ -96,3 +96,22 @@ def test_current_binding_artifact_carries_every_generation_hash(tmp_path):
     assert current["deployment_plan_hash"] == plan.deployment_plan_hash
     assert current["site_profile_hash"] == plan.site_profile_hash
     assert current["allocation_binding_hash"] == binding.allocation_binding_hash
+
+
+def test_current_projection_can_batch_but_flushes_exactly(tmp_path):
+    plan, binding = _plan_and_binding()
+    store = ComponentBindingStore(
+        str(tmp_path), plan=plan, binding=binding, current_publish_batch_size=64
+    )
+    store.bind_receipt(_receipt("n0:100"))
+
+    # The immutable event is already durable; only the disposable projection
+    # is allowed to lag until its explicit readiness/shutdown barrier.
+    assert len(list((tmp_path / "component_bindings" / "events").glob("*.json"))) == 1
+    assert json.loads(Path(store.current_path).read_text())["revision"] == 0
+    assert store.current()["rank0/ray_head"].instance_id == "n0:100"
+
+    store.flush()
+    current = json.loads(Path(store.current_path).read_text())
+    assert current["revision"] == 1
+    assert current["bindings"][0]["instance_id"] == "n0:100"

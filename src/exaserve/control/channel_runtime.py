@@ -974,6 +974,15 @@ class HeadChannel:
                     f"control listener cleanup failed: {type(exc).__name__}: {exc}"
                 )
             try:
+                binding_store = getattr(self.ledger, "binding_store", None)
+                if binding_store is not None:
+                    binding_store.flush()
+            except Exception as exc:
+                clean = False
+                self.failures.append(
+                    f"component binding projection flush failed: {type(exc).__name__}: {exc}"
+                )
+            try:
                 self._loop.stop(timeout=remaining())
             except Exception as exc:
                 clean = False

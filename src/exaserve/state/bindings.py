@@ -32,9 +32,18 @@ class BindingStoreError(RuntimeError):
 class ComponentBindingStore:
     """The composition root's sole durable writer for live slot bindings."""
 
-    def __init__(self, run_dir: str, *, plan, binding) -> None:
+    def __init__(
+        self, run_dir: str, *, plan, binding, current_publish_batch_size: int = 1
+    ) -> None:
+        if (
+            isinstance(current_publish_batch_size, bool)
+            or not isinstance(current_publish_batch_size, int)
+            or current_publish_batch_size < 1
+        ):
+            raise ValueError("current_publish_batch_size must be a positive integer")
         self.plan = plan
         self.binding = binding
+        self.current_publish_batch_size = current_publish_batch_size
         self.directory = os.path.join(run_dir, "component_bindings")
         self.events_dir = os.path.join(self.directory, "events")
         self.current_path = os.path.join(self.directory, "current.json")
@@ -43,6 +52,7 @@ class ComponentBindingStore:
         self._thread_lock = threading.RLock()
         self._current: dict[str, ComponentInstanceBinding] = {}
         self._sequence = 0
+        self._published_sequence = 0
         self._recover()
 
     def _identity(self) -> dict:
@@ -97,6 +107,7 @@ class ComponentBindingStore:
                 "bindings": [asdict(self._current[key]) for key in sorted(self._current)],
             },
         )
+        self._published_sequence = self._sequence
 
     def _append(self, event: ComponentInstanceBinding) -> None:
         self._verify_identity(event)
@@ -117,7 +128,26 @@ class ComponentBindingStore:
             if current is not None and current.instance_id == event.instance_id:
                 self._current.pop(event.key(), None)
         self._sequence = event.binding_sequence
-        self._publish_current()
+        if self._sequence - self._published_sequence >= self.current_publish_batch_size:
+            self._publish_current()
+
+    def flush(self) -> None:
+        """Publish the exact in-memory projection after durable event appends.
+
+        Immutable events are authoritative and individually durable.  The
+        replaceable ``current.json`` projection is batched in production so a
+        synchronized receipt burst does not rewrite an ever-growing Lustre
+        file once per receipt and starve the control listener.  READY and
+        shutdown call this barrier explicitly.
+        """
+        with (
+            self._thread_lock,
+            ExclusiveLease(
+                self.lease_path, ttl_s=60, owner_note="component-instance-binding-writer"
+            ),
+        ):
+            if self._published_sequence != self._sequence:
+                self._publish_current()
 
     def bind_receipt(self, receipt) -> ComponentInstanceBinding:
         """Durably bind an already validated receipt to its planned slot."""

@@ -235,7 +235,10 @@ class CompositionRoot:
         from .state.bindings import ComponentBindingStore
 
         self.binding_store = ComponentBindingStore(
-            self.run_dir, plan=self.plan, binding=self.binding
+            self.run_dir,
+            plan=self.plan,
+            binding=self.binding,
+            current_publish_batch_size=64,
         )
         return self.binding
 
@@ -1980,6 +1983,9 @@ class CompositionRoot:
         from .state.receipts import ReceiptManifest, write_receipt_manifest
         from .state.status import DeploymentState
 
+        # Immutable binding events are authoritative; force their batched live
+        # projection to the exact accepted set before publishing READY.
+        self.binding_store.flush()
         accepted = self.receipts.accepted_receipts()
         receipt_hashes = tuple(sorted(item.receipt_hash for item in accepted))
         if receipt_hashes != tuple(verdict.receipt_hashes):
