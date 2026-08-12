@@ -1860,8 +1860,13 @@ Compute-session acquisition and validation:
 4. A session is valid only when `PBS_JOBID` is set, `PBS_NODEFILE` exists and is
    readable, the current hostname is in that file, and the shell is either marked
    `AURORA_SUBJOB=1` or verified as the interactive PBS compute shell.
-5. In every fresh compute session, source `~/script/env_aurora` for Ray work or
-   `~/script/env_litellm` for LiteLLM work. Verify node count, working directory,
+5. In every fresh compute session, source `~/script/env_aurora` for an ExaServe
+   Ray/vLLM run, including one whose canonical plan selects LiteLLM. The parent
+   must retain the framework environment while the plan launches LiteLLM from
+   its separate, hash-bound executable; activating the LiteLLM virtualenv in
+   the parent can make its NumPy version incompatible with vLLM/Numba. Source
+   `~/script/env_litellm` only for a standalone LiteLLM diagnostic that does not
+   import or run Ray/vLLM in the parent. Verify node count, working directory,
    Python/environment, executables, input models/data, unique output directory,
    remaining walltime, and XPU visibility before launch. Use
    `ZE_AFFINITY_MASK`; never introduce `ONEAPI_DEVICE_SELECTOR`.

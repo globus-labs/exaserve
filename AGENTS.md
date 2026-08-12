@@ -54,8 +54,8 @@ After entering the allocated compute environment, source the appropriate environ
 
 | Command | When to use |
 |---------|-------------|
-| `source ~/script/env_aurora` | Ray-only work (loads `frameworks` module, sets proxies) |
-| `source ~/script/env_litellm` | LiteLLM work (loads `frameworks` module, sets proxies, activates `~/agpt/venv/litellm` virtualenv) |
+| `source ~/script/env_aurora` | Ray/vLLM work, including ExaServe runs that use an isolated LiteLLM gateway (loads `frameworks` module, sets proxies) |
+| `source ~/script/env_litellm` | Standalone LiteLLM-only diagnostics that do not import or run Ray/vLLM in the parent process (also activates `~/agpt/venv/litellm`) |
 
 These scripts handle module loading, proxy configuration, and virtualenv activation. Always source the correct one for the task at hand.
 
@@ -121,7 +121,11 @@ When the user asks to "run", "launch", "train", "evaluate", or otherwise execute
    - `hostname` matches one of the hosts listed in `$PBS_NODEFILE`
    - the shell is either marked `$AURORA_SUBJOB=1` or verified as the active compute-node shell entered from interactive PBS
 2. If not active, prefer `subjob N`; use `srundbg` or `srundsc N` only when no lease source is available.
-3. Once inside the compute session, source the correct environment script (`source ~/script/env_aurora` or `source ~/script/env_litellm`).
+3. Once inside the compute session, source the correct environment script. Use
+   `source ~/script/env_aurora` for every ExaServe Ray/vLLM run, including
+   LiteLLM proxy experiments; the canonical plan launches the gateway from its
+   isolated, hash-bound executable. Use `source ~/script/env_litellm` only for
+   standalone LiteLLM diagnostics that do not run Ray/vLLM in the parent.
 4. Perform lightweight preflight checks.
 5. Run the requested command.
 6. Monitor the run and summarize status, failures, and next actions.
@@ -166,7 +170,9 @@ Any deviation from this should be treated as exceptional and called out explicit
 Unless the user explicitly says otherwise, interpret "run this" as:
 
 1. use a validated compute session if not already inside one (`subjob N` preferred; `srundbg`/`srundsc N` fallback)
-2. initialize the project runtime environment (`source ~/script/env_aurora` for Ray, `source ~/script/env_litellm` for LiteLLM)
+2. initialize the project runtime environment (`source ~/script/env_aurora` for
+   ExaServe Ray/vLLM runs, including runs with an isolated LiteLLM gateway;
+   `source ~/script/env_litellm` is only for standalone LiteLLM diagnostics)
 3. run the experiment on the allocated compute node
 4. monitor the results for failures or suspicious behavior
 5. report concise status updates
@@ -261,8 +267,8 @@ This project uses helper scripts in `~/script/`:
 | `~/script/subjob N` | Preferred N-node lease from the user-managed keepalive/debug allocation |
 | `~/script/srundbg` | Interactive 1-node debug allocation |
 | `~/script/srundsc $N` | Interactive N-node debug-scaling allocation |
-| `~/script/env_aurora` | Environment setup for Ray-only work |
-| `~/script/env_litellm` | Environment setup for LiteLLM work |
+| `~/script/env_aurora` | Parent environment for ExaServe Ray/vLLM work, including isolated LiteLLM gateway runs |
+| `~/script/env_litellm` | Environment for standalone LiteLLM-only diagnostics; not the parent environment for Ray/vLLM |
 
 Additionally, batch jobs are materialized and submitted through the shared
 Python control plane:
