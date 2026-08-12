@@ -14,6 +14,7 @@ from exaserve.plan.contracts import (
     ExposurePlan,
     GatewayPlan,
     PlanError,
+    ReadinessLimits,
     ReplicaPlan,
     RunProvenance,
     SchedulerPlan,
@@ -83,6 +84,35 @@ def test_default_aurora_profile_claims_only_qualified_stack_families():
         "completion",
         "non_streaming",
     )
+
+
+def test_ray_internal_proxy_watchdog_cannot_preempt_initial_readiness():
+    default_limits = ReadinessLimits()
+    assert default_limits.serve_proxy_health_check_timeout_s == 3600.0
+    assert (
+        default_limits.serve_proxy_health_check_timeout_s
+        >= default_limits.initial_deadline_s
+    )
+
+    with pytest.raises(PlanError, match="cannot preempt canonical initial readiness"):
+        ReadinessLimits(
+            initial_deadline_s=600.0,
+            serve_proxy_health_check_timeout_s=300.0,
+        )
+
+    plan = compile_deployment_plan(
+        _raw(
+            validation_mode=True,
+            readiness={
+                "initial_deadline_s": 7200.0,
+                "serve_proxy_health_check_timeout_s": 300.0,
+            },
+        ),
+        site=_site(),
+        deployment_id="scale-aware-proxy-watchdog",
+    )
+    assert plan.readiness.initial_deadline_s == 7200.0
+    assert plan.readiness.serve_proxy_health_check_timeout_s == 7200.0
 
 
 def test_default_model_storage_path_uses_the_local_account_not_a_developer(

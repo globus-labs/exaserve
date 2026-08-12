@@ -1151,6 +1151,15 @@ def compile_deployment_plan(
             base_readiness[key] = _boolean(value, f"deployment.readiness.{key}")
         else:
             base_readiness[key] = _number(value, f"deployment.readiness.{key}", minimum=0.0000001)
+    # Ray's proxy health check is a dependency-internal watchdog, not the
+    # deployment readiness authority.  Keep it outside the complete initial
+    # readiness window even when an experiment extends that window.  Typed
+    # NodeSupervisor probes and ReadinessCoordinator deadlines still detect
+    # proxy loss promptly and fail closed.
+    base_readiness["serve_proxy_health_check_timeout_s"] = max(
+        float(base_readiness["initial_deadline_s"]),
+        float(base_readiness["serve_proxy_health_check_timeout_s"]),
+    )
     # HeadOnly is deliberately a single-ingress validation topology.  At the
     # paper's fixed weak-scaling arrival rate its one native Serve proxy can
     # temporarily stop accepting health/canary connections while already

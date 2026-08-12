@@ -384,7 +384,13 @@ class ReadinessLimits:
     # They are nevertheless plan semantics: changing any one changes which
     # deployment failures are tolerated and for how long.
     serve_start_proxy_timeout_s: float = 3600.0
-    serve_proxy_health_check_timeout_s: float = 300.0
+    # This dependency-internal timeout must not preempt ExaServe's canonical
+    # initial-readiness decision.  At 64 nodes Ray otherwise expires every
+    # proxy check together while its controller is still reconciling hundreds
+    # of already-healthy applications, creating a self-inflicted control-loop
+    # storm.  ExaServe's node-local proxy probes and readiness coordinator own
+    # prompt failure detection instead.
+    serve_proxy_health_check_timeout_s: float = 3600.0
     serve_proxy_ready_check_timeout_s: float = 60.0
     serve_replica_health_check_period_s: float = 30.0
     serve_replica_health_check_timeout_s: float = 120.0
@@ -418,6 +424,12 @@ class ReadinessLimits:
         if self.observation_freshness_s < 3 * self.validation_interval_s:
             raise PlanError(
                 "readiness.observation_freshness_s must be at least three validation intervals"
+            )
+        if self.serve_proxy_health_check_timeout_s < self.initial_deadline_s:
+            raise PlanError(
+                "readiness.serve_proxy_health_check_timeout_s must be at least "
+                "readiness.initial_deadline_s so Ray's dependency-internal proxy "
+                "watchdog cannot preempt canonical initial readiness"
             )
 
 

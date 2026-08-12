@@ -659,6 +659,19 @@ setup. Its resolved `gateway_start_deadline_s` therefore has a 120-second
 minimum. Other gateway kinds retain the site/profile value. This budget covers
 bind/startup only and does not weaken route or inference-canary deadlines.
 
+Ray Serve's dependency-internal per-proxy health-check timeout must be at least
+the complete resolved `initial_deadline_s`. A 64-node qualification with 768
+model applications and 64 proxy anchors showed that all replicas were healthy
+in about 81 seconds, but Ray's single controller was still serializing
+application state when all 64 proxy checks expired together at 300 seconds.
+The synchronized timeout work delayed readiness publication even though no
+proxy, node, or replica had failed. The Aurora default is therefore 3,600
+seconds and the compiler raises it with any longer initial-readiness budget.
+This does not weaken ExaServe failure detection: authenticated node-local
+Serve-proxy probes, observation freshness, revocable READY, canary deadlines,
+and bounded recovery remain authoritative. The Ray timeout is only prevented
+from preempting ExaServe's canonical initial-readiness decision.
+
 The validation cadence and a canary's request deadline are separate plan
 semantics: every initial and live inference canary uses the resolved
 `canary_timeout_s`, bounded by the remaining initial-readiness deadline, and
