@@ -706,6 +706,16 @@ LiteLLM's supported Uvicorn multi-worker path and passes a hash-bound
 75-second inter-pass cooldown and 90-second client idle-connection lifetime;
 operators can tune it explicitly without changing request deadlines.
 
+Envoy's upstream HTTP/1 pool has a separate ownership boundary. Ray Serve
+closes an idle proxy connection after 90 seconds, while the paper harness
+leaves 75 seconds between passes; a connection last used early in the first
+60-second pass can therefore be closed by Ray while Envoy still considers it
+reusable. At 64 nodes this produced 13 identical connection-termination 503s,
+all within the first four seconds of pass two, after a zero-error first pass.
+The immutable Envoy options now default `upstream_idle_timeout_s` to 60 seconds
+so Envoy retires its side first and opens a fresh connection after cooldown.
+The client is not retried, and any remaining reset is still a request error.
+
 Gateway shutdown is governed by the same resolved outer cleanup watchdog as
 deployment drain and rank-local cleanup, not a universal five-second constant.
 The ordered dependency cleanup reserves the final quarter of that watchdog for
@@ -715,6 +725,13 @@ terminate and reap its complete process group before Serve drains. This bound
 is long enough for LiteLLM's worker parent to reap spawned workers while still
 preserving the deployment and rank cleanup tails; failure to prove an empty
 gateway process group remains a cleanup failure.
+
+The default whole-deployment cleanup watchdog is 300 seconds. A 64-node run
+proved that 120 seconds could stop ingress and Serve yet expire after only 55
+of 64 rank-local Ray supervisors had completed DRAIN and GOODBYE. The longer
+bound is one outer deadline shared by ordered gateway, deployment, rank, and
+forced-reap phases; it does not add independent component timeouts, weaken the
+all-rank terminal predicate, or change the gateway's 30-second cleanup cap.
 
 The replay client's hash-bound `request_timeout_s` is the single deadline for
 an admitted HTTP request, including connection establishment. Go transports

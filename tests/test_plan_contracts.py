@@ -302,6 +302,34 @@ def test_default_site_allows_256_node_validation_without_widening_release_envelo
     assert require_execution_qualification(plan, site) is False
 
 
+def test_envoy_upstream_idle_timeout_is_hash_bound():
+    plan = compile_deployment_plan(
+        _raw(
+            validation_mode=True,
+            gateway={"kind": "envoy", "port": 4001},
+        ),
+        site=_site(gateway_kinds=("haproxy", "envoy")),
+        deployment_id="envoy-idle-pool",
+    )
+    assert dict(plan.gateway.options)["upstream_idle_timeout_s"] == 60
+    assert plan.control.watchdog_cleanup_deadline_s == 300.0
+
+    overridden = compile_deployment_plan(
+        _raw(
+            validation_mode=True,
+            gateway={
+                "kind": "envoy",
+                "port": 4001,
+                "options": {"upstream_idle_timeout_s": 45},
+            },
+        ),
+        site=_site(gateway_kinds=("haproxy", "envoy")),
+        deployment_id="envoy-idle-pool-override",
+    )
+    assert dict(overridden.gateway.options)["upstream_idle_timeout_s"] == 45
+    assert overridden.deployment_plan_hash != plan.deployment_plan_hash
+
+
 def test_validation_execution_still_requires_the_exact_site_profile_identity():
     candidate = default_site_profile()
     validation_plan = compile_deployment_plan(

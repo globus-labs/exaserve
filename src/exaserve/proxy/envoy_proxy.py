@@ -49,6 +49,8 @@ class EnvoyProxy(ProxyBackend):
             request_timeout (int): Per-route timeout in seconds. Default: 330.
             connect_timeout (str): cluster connect timeout. Default: "5s".
             max_connections (int): Max upstream connections per cluster. Default: 50000.
+            upstream_idle_timeout_s (int): Retire idle upstream HTTP/1
+                connections after this many seconds. Default: 60.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -62,6 +64,7 @@ class EnvoyProxy(ProxyBackend):
                 "listen_port",
                 "max_connections",
                 "request_timeout",
+                "upstream_idle_timeout_s",
             },
             "envoy",
         )
@@ -91,6 +94,12 @@ class EnvoyProxy(ProxyBackend):
             minimum=1,
             maximum=10_000_000,
         )
+        upstream_idle_timeout_s = strict_int(
+            options.get("upstream_idle_timeout_s", 60),
+            "proxy.options.upstream_idle_timeout_s",
+            minimum=1,
+            maximum=86400,
+        )
         listen_port = strict_int(
             options.get("listen_port", 4001), "proxy.options.listen_port", minimum=1, maximum=65535
         )
@@ -116,6 +125,23 @@ class EnvoyProxy(ProxyBackend):
                     "connect_timeout": connect_timeout,
                     "lb_policy": lb_policy,
                     "dns_lookup_family": "V4_ONLY",
+                    # Ray Serve's HTTP server closes idle connections after 90
+                    # seconds.  Envoy must retire its side first; otherwise a
+                    # peer-closed connection can survive in the pool across
+                    # the benchmark's 75-second cooldown and surface as an
+                    # upstream connection-termination 503 in the next pass.
+                    "typed_extension_protocol_options": {
+                        "envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {
+                            "@type": (
+                                "type.googleapis.com/envoy.extensions.upstreams.http.v3."
+                                "HttpProtocolOptions"
+                            ),
+                            "common_http_protocol_options": {
+                                "idle_timeout": f"{upstream_idle_timeout_s}s"
+                            },
+                            "explicit_http_config": {"http_protocol_options": {}},
+                        }
+                    },
                     "circuit_breakers": {
                         "thresholds": [
                             {

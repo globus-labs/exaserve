@@ -319,7 +319,13 @@ class ControlLimits:
     heartbeat_interval_s: float = 5.0
     lease_timeout_s: float = 30.0
     snapshot_assembly_deadline_s: float = 60.0
-    watchdog_cleanup_deadline_s: float = 120.0
+    # Large Ray deployments tear down hundreds of Serve applications and
+    # node-local process groups before every rank can acknowledge DRAIN and
+    # deliver GOODBYE.  The 120-second whole-deployment budget was exhausted
+    # at 64 nodes after serving work had already stopped, truncating otherwise
+    # healthy rank cleanup.  This remains one bounded outer watchdog, not a
+    # per-component stack of additive timeouts.
+    watchdog_cleanup_deadline_s: float = 300.0
     max_frame_bytes: int = 1 << 20
     max_snapshot_chunks: int = 256
     max_snapshot_bytes: int = 64 << 20

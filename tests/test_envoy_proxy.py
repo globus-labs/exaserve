@@ -58,3 +58,17 @@ def test_envoy_cluster_names_are_collision_resistant(tmp_path):
     )
     names = [item["name"] for item in _config(path)["static_resources"]["clusters"]]
     assert len(names) == len(set(names)) == 2
+
+
+def test_envoy_retires_upstream_connections_before_ray_serve(tmp_path):
+    path = EnvoyProxy().generate_config(
+        [BackendEndpoint("node-a", 8000, "org/model", "/org--model")],
+        tmp_path,
+        upstream_idle_timeout_s=60,
+    )
+    cluster = _config(path)["static_resources"]["clusters"][0]
+    protocol_options = cluster["typed_extension_protocol_options"][
+        "envoy.extensions.upstreams.http.v3.HttpProtocolOptions"
+    ]
+    assert protocol_options["common_http_protocol_options"]["idle_timeout"] == "60s"
+    assert protocol_options["explicit_http_config"] == {"http_protocol_options": {}}

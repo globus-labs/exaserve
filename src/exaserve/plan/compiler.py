@@ -108,6 +108,15 @@ _LITELLM_OPTION_KEYS = {
     "routing_strategy",
     "timeout",
 }
+_ENVOY_OPTION_KEYS = {
+    "admin_port",
+    "concurrency",
+    "connect_timeout",
+    "lb_policy",
+    "max_connections",
+    "request_timeout",
+    "upstream_idle_timeout_s",
+}
 _EXPOSURE_KEYS = {
     "mode",
     "advertised_scheme",
@@ -627,6 +636,52 @@ def _litellm_options(raw: Any, path: str) -> tuple[tuple[str, Any], ...]:
     return deep_freeze(normalized, path)
 
 
+def _envoy_options(raw: Any, path: str) -> tuple[tuple[str, Any], ...]:
+    """Resolve Envoy connection-pool semantics into the immutable plan.
+
+    Ray Serve closes an idle HTTP/1 connection after 90 seconds.  The paper
+    harness deliberately leaves a 75-second gap between passes, so an Envoy
+    connection last used early in pass one can otherwise be closed by Ray
+    while it remains reusable in Envoy's pool.  Retiring Envoy's idle
+    upstreams first prevents deterministic connection-termination 503s at the
+    beginning of pass two without retrying or masking a request failure.
+    """
+    options = _optional_mapping(raw, path)
+    _reject_unknown(options, _ENVOY_OPTION_KEYS, path)
+    normalized: dict[str, Any] = {}
+    lb_policy = _string(
+        options.get("lb_policy"),
+        f"{path}.lb_policy",
+        default="LEAST_REQUEST",
+    )
+    if lb_policy not in {"LEAST_REQUEST", "ROUND_ROBIN", "RANDOM"}:
+        raise PlanError(f"{path}.lb_policy is not supported: {lb_policy!r}")
+    normalized["lb_policy"] = lb_policy
+    for key, default, minimum, maximum in (
+        ("admin_port", 9902, 0, 65535),
+        ("concurrency", 0, 0, 4096),
+        ("request_timeout", 330, 1, 86400),
+        ("max_connections", 50000, 1, 10_000_000),
+        ("upstream_idle_timeout_s", 60, 1, 86400),
+    ):
+        normalized[key] = _integer(
+            options.get(key),
+            f"{path}.{key}",
+            default=default,
+            minimum=minimum,
+            maximum=maximum,
+        )
+    connect_timeout = _string(
+        options.get("connect_timeout"),
+        f"{path}.connect_timeout",
+        default="5s",
+    )
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?(?:ms|s)", connect_timeout):
+        raise PlanError(f"{path}.connect_timeout has invalid duration")
+    normalized["connect_timeout"] = connect_timeout
+    return deep_freeze(normalized, path)
+
+
 def _compile_exposure(
     raw: Mapping[str, Any], *, site: SiteProfile, validation_mode: bool
 ) -> tuple[ExposurePlan, Optional[GatewayPlan]]:
@@ -732,7 +787,13 @@ def _compile_exposure(
             else (
                 _litellm_options(raw_gateway.get("options"), "deployment.gateway.options")
                 if kind == GatewayKind.LITELLM.value
-                else _secret_safe_options(raw_gateway.get("options"), "deployment.gateway.options")
+                else (
+                    _envoy_options(raw_gateway.get("options"), "deployment.gateway.options")
+                    if kind == GatewayKind.ENVOY.value
+                    else _secret_safe_options(
+                        raw_gateway.get("options"), "deployment.gateway.options"
+                    )
+                )
             )
         ),
     )
