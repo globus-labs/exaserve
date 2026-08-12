@@ -765,7 +765,11 @@ listener successfully delivered `DRAIN`/`STOP`, not to a later query of which
 sessions remain established. The head waits for that fixed command-result set
 concurrently, so a fast rank that has already sent an authorized `GOODBYE` is
 still counted and one slow rank cannot hide already-accepted results from later
-ranks. A run may publish `SUCCEEDED` only after the eval owner validates the
+ranks. Ordered graceful cleanup reserves at least one quarter of the shared
+outer cleanup deadline (with a two-second minimum) for rank-local Ray reaping,
+the terminal observation, and GOODBYE delivery; that mandatory tail must not
+be capped at ten seconds while the preceding Serve deployment drain is allowed
+to consume the rest. A run may publish `SUCCEEDED` only after the eval owner validates the
 same-generation shutdown report as clean, terminally `STOPPED`, and gracefully
 drained; a replay result cannot override failed teardown evidence.
 

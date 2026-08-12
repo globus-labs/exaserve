@@ -2134,7 +2134,16 @@ class CompositionRoot:
                 # DRAIN before this point used to tear down Ray underneath
                 # ``serve.shutdown()``, producing a deterministic 30-second
                 # hang and forced SIGKILL on every otherwise-clean stop.
-                rank_cleanup_reserve = min(10.0, max(2.0, remaining() * 0.25))
+                # Rank-local shutdown includes Ray process-group reaping,
+                # optional bounded diagnostics, the terminal observation, and
+                # GOODBYE delivery.  A ten-second ceiling made that mandatory
+                # tail shorter than the rank's own cleanup operations at
+                # scale: every rank could exit zero while the head reached its
+                # deadline before consuming all queued GOODBYEs.  Preserve a
+                # quarter of the one outer deadline (with a two-second floor)
+                # for the all-rank protocol instead of capping it below the
+                # work the protocol is required to perform.
+                rank_cleanup_reserve = max(2.0, remaining() * 0.25)
                 gateway_budget = max(0.0, remaining() - rank_cleanup_reserve)
                 stop_global_component(
                     self.gateway_component,
