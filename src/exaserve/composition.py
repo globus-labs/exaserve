@@ -2151,10 +2151,22 @@ class CompositionRoot:
                 # work the protocol is required to perform.
                 rank_cleanup_reserve = max(2.0, remaining() * 0.25)
                 gateway_budget = max(0.0, remaining() - rank_cleanup_reserve)
+                # A universal five-second slice is too short for an owned
+                # multiprocess gateway. In particular, LiteLLM's Uvicorn
+                # parent must terminate and reap every spawned worker before
+                # the process group can be proven empty. Give ingress up to
+                # one third of the pre-rank budget (bounded at 30 seconds),
+                # while preserving both the deployment-drain tail and the
+                # explicit all-rank reserve under this same outer deadline.
+                gateway_stop_budget = min(
+                    gateway_budget,
+                    30.0,
+                    max(5.0, gateway_budget / 3.0),
+                )
                 stop_global_component(
                     self.gateway_component,
                     reason="revoke ingress before deployment drain",
-                    deadline=time.monotonic() + min(5.0, gateway_budget),
+                    deadline=time.monotonic() + gateway_stop_budget,
                 )
                 stop_global_component(
                     self.deployment_component,

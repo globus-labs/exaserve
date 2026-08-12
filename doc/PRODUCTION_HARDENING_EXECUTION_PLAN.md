@@ -693,6 +693,16 @@ LiteLLM's supported Uvicorn multi-worker path and passes a hash-bound
 75-second inter-pass cooldown and 90-second client idle-connection lifetime;
 operators can tune it explicitly without changing request deadlines.
 
+Gateway shutdown is governed by the same resolved outer cleanup watchdog as
+deployment drain and rank-local cleanup, not a universal five-second constant.
+The ordered dependency cleanup reserves the final quarter of that watchdog for
+the all-rank DRAIN/GOODBYE protocol. Within the preceding interval, an owned
+multiprocess gateway receives up to one third, capped at 30 seconds, to
+terminate and reap its complete process group before Serve drains. This bound
+is long enough for LiteLLM's worker parent to reap spawned workers while still
+preserving the deployment and rank cleanup tails; failure to prove an empty
+gateway process group remains a cleanup failure.
+
 The replay client's hash-bound `request_timeout_s` is the single deadline for
 an admitted HTTP request, including connection establishment. Go transports
 must not add an independent literal dial timeout (the removed 30-second dial

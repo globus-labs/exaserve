@@ -651,6 +651,66 @@ def test_healthy_shutdown_reserves_quarter_deadline_for_rank_goodbyes(tmp_path, 
     assert observed["rank_deadline"] >= started + 94.9
 
 
+def test_multiprocess_gateway_gets_a_bounded_proportional_stop_budget(tmp_path, monkeypatch):
+    """Gateway workers are reaped before deployment drain, without stealing the rank tail."""
+    root = _root(tmp_path)
+    root.bind_allocation(["n0", "n1"], "job1")
+    observed = {}
+
+    class Gateway:
+        component_id = "gateway/litellm"
+        state = "RUNNING"
+        process = None
+
+        def stop(self, _reason, *, deadline):
+            observed["gateway_deadline"] = deadline
+            self.state = "STOPPED"
+
+    class Deployment:
+        component_id = "deployment"
+        state = "RUNNING"
+        process = None
+
+        def stop(self, _reason, *, deadline):
+            observed["deployment_deadline"] = deadline
+            self.state = "STOPPED"
+
+    class Channel:
+        def start_broadcast(self):
+            return True
+
+        def broadcast_shutdown(self, *_args, **kwargs):
+            observed["rank_deadline"] = kwargs["deadline"]
+            return 2
+
+        def wait_shutdown_goodbyes(self, **_kwargs):
+            return 2
+
+        def stop(self, **_kwargs):
+            return True
+
+    gateway = Gateway()
+    deployment = Deployment()
+    root.gateway_component = gateway
+    root.deployment_component = deployment
+    root.supervisor.components = {
+        gateway.component_id: gateway,
+        deployment.component_id: deployment,
+    }
+    root.head_channel = Channel()
+    monkeypatch.setattr(root.supervisor, "shutdown", lambda **_kwargs: True)
+
+    started = time.monotonic()
+    root.shutdown(drain_s=120)
+
+    # Twenty-five percent remains reserved for rank cleanup. Of the preceding
+    # ninety seconds, LiteLLM may use at most thirty and the deployment child
+    # retains the rest of that pre-rank interval.
+    assert started + 29.9 <= observed["gateway_deadline"] <= started + 30.1
+    assert observed["deployment_deadline"] <= started + 90.1
+    assert observed["rank_deadline"] >= started + 114.9
+
+
 def test_rank_control_loss_skips_dependency_drain_that_requires_live_ray(tmp_path, monkeypatch):
     root = _root(tmp_path)
     root.bind_allocation(["n0", "n1"], "job1")
