@@ -51,31 +51,29 @@ from .plan.runtime_binding import (
 )
 from .scaling_trace import tracer
 
-# GCS-bootstrap hardening prepared by the site/runtime profile. RayConfig consumes
-# RAY_* env at process start, so the value is only live in a process whose
-# environment carries it — env present in a spawned Ray worker == RayConfig in
-# that worker read it. Verified against a real remote worker (the process
-# class that failed in sglang_direct_n256 run0-run3) instead of the driver,
-# because a driver-only export that misses the mpiexec'd `ray start` is
-# exactly the silent failure mode this guards against.
-_CORE_ENV_EXPECTED = (
+# Plan-derived Ray runtime policy is consumed at process/import time, so its
+# values are only live in processes whose environments carry them. Verify a
+# real remote worker rather than the driver: a driver-only export that misses
+# the mpiexec'd `ray start` is exactly the silent failure mode guarded here.
+_RAY_RUNTIME_ENV_EXPECTED = (
     "RAY_gcs_rpc_server_connect_timeout_s",
     "RAY_gcs_rpc_server_reconnect_timeout_s",
     "RAY_worker_register_timeout_seconds",
     "RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT",
+    "RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING",
+    "RAY_SERVE_PROXY_PREFER_LOCAL_AZ_ROUTING",
 )
 
 
 def _verify_core_env() -> None:
-    """Probe a fresh remote Ray worker and fail fast if the GCS-hardening env
-    did not propagate. This safety check has no ambient bypass."""
-    missing = [key for key in _CORE_ENV_EXPECTED if not os.environ.get(key)]
+    """Fail fast unless plan/site Ray policy reached a fresh remote worker."""
+    missing = [key for key in _RAY_RUNTIME_ENV_EXPECTED if not os.environ.get(key)]
     if missing:
         raise RuntimeError(
-            "verified SiteProfile did not prepare required Ray core environment: "
+            "compiled plan/site profile did not prepare required Ray runtime environment: "
             + ", ".join(missing)
         )
-    expected = {key: os.environ[key] for key in _CORE_ENV_EXPECTED}
+    expected = {key: os.environ[key] for key in _RAY_RUNTIME_ENV_EXPECTED}
 
     @ray.remote(num_cpus=0)
     def _probe(keys):
@@ -88,9 +86,9 @@ def _verify_core_env() -> None:
     if mismatched:
         detail = ", ".join(f"{k}: driver={v} worker={w}" for k, (v, w) in mismatched.items())
         raise RuntimeError(
-            f"GCS-hardening env not live in Ray workers ({detail}). "
+            f"Ray runtime environment not live in Ray workers ({detail}). "
             "Exports did not reach the mpiexec'd ray start; aborting before "
-            "deploy rather than replaying the run0-run3 bootstrap lottery."
+            "deploy rather than running with an unverified policy."
         )
     print(
         "[ExaServe] Core env verified in remote worker: "
@@ -270,29 +268,39 @@ def init_ray_cluster(
     ) from last_error
 
 
-def verify_ray_serve_timing_contract(plan) -> None:
-    """Fail before Ray connection if plan-derived timing delivery drifted."""
+def verify_ray_serve_runtime_contract(plan) -> None:
+    """Fail before Ray connection if plan-derived Serve policy drifted."""
     from ray.serve._private import constants
 
-    checks = {
+    timing_checks = {
         "HTTP_PROXY_TIMEOUT": plan.readiness.serve_start_proxy_timeout_s,
         "PROXY_HEALTH_CHECK_TIMEOUT_S": (plan.readiness.serve_proxy_health_check_timeout_s),
         "PROXY_READY_CHECK_TIMEOUT_S": (plan.readiness.serve_proxy_ready_check_timeout_s),
     }
+    routing_checks = {
+        "RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING": not plan.uses_head_only_serve_proxy(),
+        "RAY_SERVE_PROXY_PREFER_LOCAL_AZ_ROUTING": not plan.uses_head_only_serve_proxy(),
+    }
     mismatches = []
-    for name, expected in checks.items():
+    for name, expected in timing_checks.items():
         observed = getattr(constants, name, None)
         if observed is None or float(observed) != float(expected):
+            mismatches.append(f"{name}: plan={expected}, runtime={observed}")
+    for name, expected in routing_checks.items():
+        observed = getattr(constants, name, None)
+        if observed is None or bool(observed) is not expected:
             mismatches.append(f"{name}: plan={expected}, runtime={observed}")
     if not getattr(constants, "_exaserve_serve_start_timeout_patch", False):
         mismatches.append("HTTP_PROXY_TIMEOUT compatibility activation has no sentinel")
     if mismatches:
         raise RuntimeError(
-            "Ray Serve timing contract was not delivered before import: " + "; ".join(mismatches)
+            "Ray Serve runtime contract was not delivered before import: " + "; ".join(mismatches)
         )
     print(
-        "[ExaServe] Ray Serve timing contract verified: "
-        + ", ".join(f"{name}={value}" for name, value in checks.items()),
+        "[ExaServe] Ray Serve runtime contract verified: "
+        + ", ".join(
+            f"{name}={value}" for name, value in {**timing_checks, **routing_checks}.items()
+        ),
         flush=True,
     )
 
@@ -1837,7 +1845,7 @@ def main() -> None:
         flush=True,
     )
 
-    verify_ray_serve_timing_contract(canonical_plan)
+    verify_ray_serve_runtime_contract(canonical_plan)
 
     with tracer.phase("ray.init"):
         init_ray_cluster(ray_address, namespace="serve", include_dashboard=False)
