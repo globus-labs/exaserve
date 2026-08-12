@@ -679,7 +679,7 @@ def test_producer_to_hop_to_ledger(identity, tmp_path):
             owner_scope="RANK",
             owner_rank=0,
             node_id=HOST,
-            postcondition=lambda patch_id: patch_id == "RS-02",
+            postcondition=lambda patch_id: patch_id in {"RS-02", "RS-03"},
         )
         assert producers.deliver(receipt, path=path)
         for payload in ingress.drain():
@@ -710,7 +710,8 @@ def test_ledger_is_satisfied_only_by_the_exact_planned_set(identity, monkeypatch
                 owner_scope="RANK",
                 owner_rank=rank,
                 node_id=node,
-                postcondition=lambda patch_id: patch_id == "RS-02",
+                postcondition=lambda patch_id, role=role: patch_id == "RS-02"
+                or (role == "ray_head" and patch_id == "RS-03"),
             )
             head._on_receipt(rank, receipt.to_dict())
     ok, detail = head.ledger.satisfied()

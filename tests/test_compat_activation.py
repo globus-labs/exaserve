@@ -336,7 +336,7 @@ def test_default_manifest_has_every_required_wp3_identity_field():
     assert "EN-01" in p.required_patch_ids("engine_core")
     assert "EN-01" in p.required_patch_ids("engine_worker")
     assert p.required_patch_ids("deployment") == ("RS-01", "RS-03")
-    assert p.required_patch_ids("ray_head") == ("RS-02",)
+    assert p.required_patch_ids("ray_head") == ("RS-02", "RS-03")
     assert p.required_patch_ids("ray_worker") == ("RS-02",)
 
 
@@ -501,3 +501,34 @@ def test_ray_serve_proxy_timeout_does_not_complete_chained_source_future(monkeyp
             loop.set_exception_handler(previous_handler)
 
     asyncio.run(exercise())
+
+
+def test_ray_serve_proxy_timeout_overlay_reaches_inherited_ray_head_role(tmp_path):
+    pytest.importorskip("ray", exc_type=ImportError)
+    import os
+    import sys
+    from pathlib import Path
+
+    from exaserve.compat.generated_overlay import ROOT_ENV, materialize
+    from exaserve.control.finite_process import run_finite
+
+    profile = default_profile("xpu")
+    overlay = tmp_path / "overlay"
+    materialize(profile, overlay)
+
+    env = dict(os.environ)
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = os.pathsep.join([source_root, env.get("PYTHONPATH", "")])
+    env[ROOT_ENV] = str(overlay)
+    env["EXASERVE_COMPAT_PROFILE_ID"] = profile.profile_id
+    env["EXASERVE_COMPAT_ROLE"] = "ray_head"
+    code = """
+from exaserve.compat.generated_overlay import install_from_environment
+install_from_environment()
+from ray.serve._private import proxy_state
+assert proxy_state.wrap_as_future._exaserve_proxy_timeout_patch is True
+print('verified-ray-head')
+"""
+    result = run_finite([sys.executable, "-c", code], timeout_s=30.0, env=env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "verified-ray-head"

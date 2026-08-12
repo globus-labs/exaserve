@@ -713,7 +713,11 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
             "RS-03",
             "ray.serve._private.proxy_state.wrap_as_future",
             "upstream-fix",
-            ("deployment",),
+            # The deployment driver calls Serve, while Ray's ServeController
+            # is spawned by the head raylet and inherits the ray_head role.
+            # Both process families can import proxy_state and must receive
+            # the same exact-source repair.
+            ("deployment", "ray_head"),
             "generated-overlay",
             "serve_proxy_timeout_future_isolation",
             target_distribution=resolved_sources["RS-03"][0],
