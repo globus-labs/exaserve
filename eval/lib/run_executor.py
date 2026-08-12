@@ -27,7 +27,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from exaserve.exception_notes import add_exception_note
 from exaserve.schedulers import SubmissionRejected, get_scheduler
@@ -150,6 +150,7 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
                     base_urls,
                     topology_arm=arm,
                     log_name=f"replay_{arm}.log",
+                    backend_process=launched.monitor.process,
                 )
                 print(f"[run_executor] arm {arm} exited {rc}", flush=True)
                 if rc != 0:
@@ -163,6 +164,7 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
             exit_code = _run_replay_client(
                 run_plan,
                 base_urls,
+                backend_process=launched.monitor.process,
             )
         heartbeat.ensure_held()
         if exit_code == 0:
@@ -558,6 +560,7 @@ def _run_replay_client(
     *,
     topology_arm: str | None = None,
     log_name: str = "replay.log",
+    backend_process: subprocess.Popen | None = None,
 ) -> int:
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH", "")
@@ -576,6 +579,14 @@ def _run_replay_client(
     ]
     if topology_arm:
         replay_cmd.extend(["--dispatch-topology", topology_arm, "--result-subdir", topology_arm])
+
+    def backend_exit_reason() -> str | None:
+        if backend_process is None:
+            return None
+        return_code = backend_process.poll()
+        if return_code is None:
+            return None
+        return f"deployment backend exited with code {return_code}"
 
     if run_plan.client.num_nodes > 1:
         hostfile = _build_hostfile(run_plan.client.num_nodes)
@@ -615,6 +626,7 @@ def _run_replay_client(
                 cwd=run_plan.repo_root,
                 env=env,
                 timeout_s=timeout_s,
+                abort_check=backend_exit_reason,
             )
         except BaseException as exc:
             try:
@@ -643,6 +655,7 @@ def _run_replay_client(
         cwd=run_plan.repo_root,
         env=env,
         timeout_s=timeout_s,
+        abort_check=backend_exit_reason,
     )
 
 
@@ -703,6 +716,7 @@ def _run_command_with_tee(
     cwd: str,
     env: dict[str, str],
     timeout_s: float,
+    abort_check: Callable[[], str | None] | None = None,
 ) -> int:
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError("process timeout must be finite and positive")
@@ -734,13 +748,28 @@ def _run_command_with_tee(
     reader.start()
     boundary_error: BaseException | None = None
     return_code: int | None = None
+    deadline = time.monotonic() + timeout_s
     try:
-        return_code = process.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        boundary_error = TimeoutError(
-            f"replay process exceeded its {timeout_s:.1f}s deadline; diagnostics: {log_path}"
-        )
-        boundary_error.__cause__ = exc
+        while True:
+            if abort_check is not None:
+                reason = abort_check()
+                if reason is not None:
+                    boundary_error = RuntimeError(
+                        f"replay aborted because {reason}; diagnostics: {log_path}"
+                    )
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                boundary_error = TimeoutError(
+                    f"replay process exceeded its {timeout_s:.1f}s deadline; "
+                    f"diagnostics: {log_path}"
+                )
+                break
+            try:
+                return_code = process.wait(timeout=min(0.5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
     except BaseException as exc:
         boundary_error = exc
 

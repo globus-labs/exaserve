@@ -438,7 +438,7 @@ def test_litellm_resolves_an_evidence_based_startup_budget_floor():
     assert dict(plan.gateway.options)["timeout"] == 300
     assert dict(plan.gateway.options)["disable_hf_tokenizer_download"] is True
     assert dict(plan.gateway.options)["keepalive_timeout"] == 120
-    assert plan.readiness.recovery_deadline_s == 360.0
+    assert plan.readiness.recovery_deadline_s == 3600.0
 
 
 def test_litellm_request_timeout_is_hash_bound_and_sizes_recovery():
@@ -455,7 +455,18 @@ def test_litellm_request_timeout_is_hash_bound_and_sizes_recovery():
         deployment_id="litellm-benchmark",
     )
     assert dict(plan.gateway.options)["timeout"] == 450
-    assert plan.readiness.recovery_deadline_s == 510.0
+    assert plan.readiness.recovery_deadline_s == 3600.0
+
+    long_initial = compile_deployment_plan(
+        _raw(
+            gateway={"kind": "litellm", "port": 4001},
+            validation_mode=True,
+            readiness={"initial_deadline_s": 7200, "recovery_deadline_s": 420},
+        ),
+        site=_site(gateway_kinds=("haproxy", "litellm")),
+        deployment_id="litellm-long-readiness",
+    )
+    assert long_initial.readiness.recovery_deadline_s == 7200.0
 
     offline_override = compile_deployment_plan(
         _raw(

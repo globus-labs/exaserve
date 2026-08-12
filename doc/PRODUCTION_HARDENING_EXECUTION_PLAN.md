@@ -679,10 +679,20 @@ never substitutes `validation_interval_s` as an I/O timeout. Recovery begins
 when a failed probe returns, not when it starts. For the Aurora LiteLLM
 validation topology, the gateway's request timeout is compiled explicitly into
 the immutable gateway options (300 seconds by default), and
-`recovery_deadline_s` is at least that request timeout plus one complete canary
-deadline. This permits READY to remain revoked while already-admitted requests
-drain within the gateway's own bounded contract and still fails closed if
-ingress does not recover; it does not make LiteLLM production-qualified.
+`recovery_deadline_s` is at least both that request timeout plus one complete
+canary deadline and the resolved initial-readiness horizon. A 64-node streaming
+qualification measured a 642-second complete pass while the centralized
+gateway remained saturated, proving that the former 420-second experiment
+override could terminate a live, fully accounted run. The default 3,600-second
+horizon permits READY to remain revoked while already-admitted requests drain
+and still fails closed on a finite plan-owned boundary; it does not make
+LiteLLM production-qualified.
+
+The run executor observes the owned backend process while replay is active. If
+that backend exits, the executor terminates the complete replay process group
+immediately and preserves the backend failure as the cause; it must not let a
+multi-pass client continue through cooldown or issue requests to a dead
+endpoint merely because the replay's outer timeout has not expired.
 
 The plain Uvicorn spawn path and LiteLLM's supported Gunicorn path were both
 evaluated against the paper workload; process-manager selection alone did not

@@ -129,6 +129,33 @@ def test_replay_process_group_is_killed_at_deadline(tmp_path):
     assert "started" in log_path.read_text(encoding="utf-8")
 
 
+def test_replay_process_group_is_killed_when_backend_exits(tmp_path):
+    backend = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.2)"],
+        start_new_session=True,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="deployment backend exited with code 0"):
+            _run_command_with_tee(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                log_path=str(tmp_path / "backend-exit.log"),
+                cwd=str(tmp_path),
+                env=os.environ.copy(),
+                timeout_s=30.0,
+                abort_check=(
+                    lambda: (
+                        None
+                        if backend.poll() is None
+                        else f"deployment backend exited with code {backend.returncode}"
+                    )
+                ),
+            )
+    finally:
+        if backend.poll() is None:
+            backend.terminate()
+        backend.wait(timeout=5)
+
+
 def test_replay_clean_launcher_exit_cannot_leave_descendants(tmp_path):
     child_path = tmp_path / "escaped.pid"
     program = (

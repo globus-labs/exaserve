@@ -1238,14 +1238,20 @@ def compile_deployment_plan(
     # The generic 30s edge is therefore unsafe while a two-minute boundary is
     # finite and retains measured headroom.  Its live ingress can also be
     # intentionally saturated by the paper workload.  A queued request remains
-    # valid until LiteLLM's own resolved request timeout, so post-READY recovery
-    # must cover that bound plus one complete externally advertised canary.
+    # valid until LiteLLM's own resolved request timeout.  At 64 nodes the
+    # centralized validation gateway also remained continuously saturated for
+    # 642s while a complete streaming replay pass drained, so a timeout-plus-
+    # canary floor (360s with Aurora defaults) can still kill a live, fully
+    # accounted benchmark.  Keep recovery bounded by the same complete plan-
+    # owned horizon used for initial readiness, as well as the request timeout
+    # plus one externally advertised canary.
     if gateway is not None and gateway.kind == GatewayKind.LITELLM.value:
         litellm_request_timeout_s = float(dict(gateway.options)["timeout"])
         base_readiness["gateway_start_deadline_s"] = max(
             120.0, float(base_readiness["gateway_start_deadline_s"])
         )
         base_readiness["recovery_deadline_s"] = max(
+            float(base_readiness["initial_deadline_s"]),
             litellm_request_timeout_s + float(base_readiness["canary_timeout_s"]),
             float(base_readiness["recovery_deadline_s"]),
         )
