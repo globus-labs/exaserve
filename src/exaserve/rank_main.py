@@ -29,6 +29,7 @@ documentation described.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import math
 import os
 import socket
@@ -123,6 +124,11 @@ class _ReceiptForwarder:
         self._stop = threading.Event()
         self._failure_lock = threading.Lock()
         self._failure: Optional[str] = None
+        # A control reconnect is an allowed, bounded state.  Keep the one
+        # batch already accepted by the bounded node-local ingress until the
+        # authenticated channel is established again; draining another batch
+        # before this one is delivered would defeat the ingress memory bound.
+        self._pending: deque[dict] = deque()
         self._thread = threading.Thread(
             target=self._pump,
             daemon=True,
@@ -142,16 +148,24 @@ class _ReceiptForwarder:
         self._stop.set()
 
     def _forward_pending(self) -> bool:
-        for payload in self._ingress.drain():
+        if not self._pending:
+            self._pending.extend(self._ingress.drain())
+        while self._pending:
+            payload = self._pending[0]
             # The payload is deliberately forwarded unchanged.  The
             # supervisor transports another process's attestation; it must
             # never reconstruct, re-sign, or reinterpret it.
             if not self._channel.submit_receipt(payload):
-                self._fail(
-                    self._channel.control_failure()
-                    or "authenticated control channel rejected a receipt"
-                )
-                return False
+                failure = self._channel.control_failure()
+                if failure:
+                    self._fail(failure)
+                    return False
+                # The channel removes readiness and enters its finite
+                # reconnect grace before publishing a terminal failure.  Do
+                # not turn that permitted transient into a rank death or lose
+                # the already-drained receipt; retry it after the next poll.
+                return True
+            self._pending.popleft()
         return True
 
     def _pump(self) -> None:
@@ -163,6 +177,11 @@ class _ReceiptForwarder:
             # shutdown from being lost between the last poll and stop().
             if self.failure is None:
                 self._forward_pending()
+            if self.failure is None and self._pending:
+                self._fail(
+                    self._channel.control_failure()
+                    or f"{len(self._pending)} receipt(s) remained undelivered at shutdown"
+                )
         except Exception as exc:  # noqa: BLE001 - terminal thread boundary
             self._fail(f"{type(exc).__name__}: {exc}")
 

@@ -14,6 +14,7 @@ import json
 import os
 import socket
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -890,6 +891,74 @@ def test_rank_main_receipt_forwarder_surfaces_delivery_failure():
     forwarder = rank_main._forward_receipts(Channel(), Ingress(), 0, poll_s=0.01)
     assert not forwarder.stop(timeout_s=1.0)
     assert forwarder.failure == "receipt delivery failed"
+
+
+def test_rank_main_receipt_forwarder_retains_batch_across_reconnect():
+    """A permitted transient disconnect must neither kill the rank nor lose evidence."""
+    from exaserve import rank_main
+
+    first = {"receipt_requirement_id": "rank0/first"}
+    second = {"receipt_requirement_id": "rank0/second"}
+
+    class Ingress:
+        def __init__(self):
+            self.batch = [first, second]
+            self.drain_count = 0
+
+        def drain(self):
+            self.drain_count += 1
+            batch, self.batch = self.batch, []
+            return batch
+
+    class Channel:
+        def __init__(self):
+            self.available = False
+            self.received = []
+
+        def submit_receipt(self, value):
+            if not self.available:
+                self.available = True
+                return False
+            self.received.append(value)
+            return True
+
+        def control_failure(self):
+            return None
+
+    ingress = Ingress()
+    channel = Channel()
+    forwarder = rank_main._forward_receipts(channel, ingress, 0, poll_s=0.01)
+    deadline = time.monotonic() + 1.0
+    while len(channel.received) != 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert forwarder.stop(timeout_s=1.0)
+    assert channel.received == [first, second]
+    assert channel.received[0] is first
+    assert channel.received[1] is second
+    assert ingress.drain_count >= 1
+
+
+def test_rank_main_receipt_forwarder_fails_if_shutdown_strands_pending_batch():
+    from exaserve import rank_main
+
+    class Ingress:
+        def __init__(self):
+            self.batch = [{"receipt_requirement_id": "rank0/ray_head"}]
+
+        def drain(self):
+            batch, self.batch = self.batch, []
+            return batch
+
+    class Channel:
+        def submit_receipt(self, _value):
+            return False
+
+        def control_failure(self):
+            return None
+
+    forwarder = rank_main._forward_receipts(Channel(), Ingress(), 0, poll_s=0.01)
+    assert not forwarder.stop(timeout_s=1.0)
+    assert forwarder.failure == "1 receipt(s) remained undelivered at shutdown"
 
 
 def test_rank_registration_cleanup_shares_one_absolute_deadline(monkeypatch):

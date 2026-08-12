@@ -742,6 +742,15 @@ must finish within `watchdog_cleanup_deadline_s`. Implementations must not add
 the lease timeout and reconnect grace twice or kill children before the
 declared recovery interval ends.
 
+Rank-owned compatibility receipts already accepted by the bounded node-local
+ingress must remain in a bounded, ordered pending batch while the authenticated
+channel is inside that reconnect grace. A transient disconnected state is not
+a receipt rejection and must not kill the rank or discard the drained batch.
+The forwarder retries the same unchanged payload after the replacement
+snapshot barrier; it does not drain a second local batch until the first is
+delivered. A terminal channel failure or shutdown with pending receipts is
+explicitly non-clean and cannot be reported as successful receipt delivery.
+
 `GOODBYE` is normal only after the sending `NodeSupervisor` has received an
 acknowledged `DRAIN`/`STOP` command. Completion of a finite child component does
 not authorize its long-lived rank control session to disappear. A future plan
