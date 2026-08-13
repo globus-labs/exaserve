@@ -1224,10 +1224,14 @@ def compile_deployment_plan(
     # HeadOnly is deliberately a single-ingress validation topology.  At the
     # paper's fixed weak-scaling arrival rate its one native Serve proxy can
     # temporarily stop accepting health/canary connections while already
-    # accepted requests drain.  Keep revoking READY immediately, but allow six
-    # complete canary windows before making that recoverable overload terminal.
+    # accepted requests drain.  A 64-node non-streaming pass took 488.7s and
+    # disproved the former six-canary-window (360s) recovery floor.  Keep
+    # revoking READY immediately, but use the same complete, finite plan-owned
+    # horizon as initial convergence before making recoverable saturation
+    # terminal.
     if exposure.mode == ExposureMode.RAY_SERVE_HEAD_ONLY.value:
         base_readiness["recovery_deadline_s"] = max(
+            float(base_readiness["initial_deadline_s"]),
             6.0 * float(base_readiness["canary_timeout_s"]),
             float(base_readiness["recovery_deadline_s"]),
         )

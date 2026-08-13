@@ -396,7 +396,19 @@ def test_head_only_is_an_explicit_gateway_free_benchmark_topology():
     assert plan.uses_head_only_serve_proxy()
     assert plan.scale_envelope.gateway_kind is None
     assert plan.scale_envelope.validation_mode is True
-    assert plan.readiness.recovery_deadline_s == 360.0
+    assert plan.readiness.recovery_deadline_s == 3600.0
+
+    long_initial = compile_deployment_plan(
+        _raw(
+            gateway=None,
+            validation_mode=True,
+            exposure={"mode": "RAY_SERVE_HEAD_ONLY"},
+            readiness={"initial_deadline_s": 7200, "recovery_deadline_s": 420},
+        ),
+        site=_site(),
+        deployment_id="ray-native-long-readiness",
+    )
+    assert long_initial.readiness.recovery_deadline_s == 7200.0
 
 
 def test_head_only_rejects_topologies_that_cannot_bind_native_replica_slots():

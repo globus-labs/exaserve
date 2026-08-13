@@ -688,6 +688,17 @@ horizon permits READY to remain revoked while already-admitted requests drain
 and still fails closed on a finite plan-owned boundary; it does not make
 LiteLLM production-qualified.
 
+The native-Ray `RAY_SERVE_HEAD_ONLY` benchmark is also a deliberately
+centralized validation ingress. READY is revoked immediately when its single
+Serve proxy or advertised-endpoint canary becomes unhealthy, but its bounded
+recovery horizon must be at least the resolved initial-readiness horizon. A
+64-node non-streaming qualification attempt measured a 488.7-second complete replay
+pass while the native proxy was saturated; the former six-canary-window
+(360-second) floor terminated the deployment before that already-dispatched
+pass could drain. The default 3,600-second plan-owned horizon accommodates the
+measured overload without weakening the exact READY predicate or turning this
+validation-only baseline into a production exposure.
+
 The run executor observes the owned backend process while replay is active. If
 that backend exits, the executor terminates the complete replay process group
 immediately and preserves the backend failure as the cause; it must not let a
