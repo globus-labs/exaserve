@@ -1,14 +1,45 @@
-# Final audit — final43 production-hardening candidate
+# Final audit — final43 evidence and release/v0.4.0 successor
 
-**Audit date:** 2026-08-09
+**Audit date:** 2026-08-09; successor reconciliation 2026-08-30
 
-**Verdict:** implementation pass at one and two Aurora nodes; release scope and
-larger-scale qualification pending.
+**Verdict:** final43 implementation pass at one and two Aurora nodes;
+release/v0.4.0 source fixes complete, clean package and exact-candidate scale
+qualification pending.
 
 This audit covers code reached by a production deployment. Earlier audit,
 feasibility, Known Issues, and TODO documents remain context; the architecture
 authority is `doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md` and the evidence-bound
 dispositions are in `doc/hardening/FINDINGS.yaml`.
+
+## Successor reconciliation
+
+The clean preview lineage through `ccccb82` contains the runtime corrections
+exercised by the 4/16/64-node paper preview, including native HeadOnly,
+isolated LiteLLM, exact readiness/recovery, immutable staging, and bounded
+scale cleanup. The release branch preserves that lineage and incorporates the
+previously separate scale qualification/adjudication tooling and preview
+ledger.
+
+The final release audit additionally closed four locally actionable gaps:
+
+1. oversized requests are rejected with a correlated HTTP 400 before JSON or
+   SSE response commitment;
+2. only explicitly classified incremental SSE may report TTFT/TBT, while
+   LiteLLM buffered and non-streaming results retain non-token timing evidence;
+3. exposure fields are either implemented by HAProxy or rejected; and
+4. READY leases use monotonic time fenced by Linux boot identity, while mixed
+   scheduler groups fail before submission.
+
+These source changes intentionally invalidate old plan/result identities for
+release qualification. Final43 receipts and the multi-snapshot paper preview
+are retained evidence, not proof for the successor wheel. A new clean package
+gate and owner-approved 4/16/64 ladder are required before changing the
+production support maximum.
+
+The reconciled successor source gate in validated PBS job `8792581` passes
+1,323 tests with 19 skips, repository-wide Ruff and compileall, the canonical
+findings validator, the scale adjudicator/harness tests, and Go formatting,
+vet, and unit tests.
 
 ## 1. Architecture outcome
 

@@ -1214,22 +1214,28 @@ findings:
   primary_work_package: WP9
   affected_regions:
   - doc/KNOWN_ISSUES.md
+  - src/exaserve/capabilities.py
+  - eval/lib/replay_engine.py
+  - eval/plot/sc26_preview.py
+  - eval/plot/sc26_full_figures.py
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: 'Verified on the final43 production path: Fake streaming never enters real-streaming comparisons'
+  decision: The release/v0.4.0 source candidate derives timing semantics from the immutable deployment plan; only incremental SSE populates TTFT/TBT, while LiteLLM buffered and non-streaming results retain throughput, errors, E2E latency, and explicitly labelled raw observations without entering token-delivery comparisons.
   evidence:
-  - tests/test_observability.py
-  - tests/test_request_validation.py
-  - clientlab/tests/test_runtime_smoke.py
-  - clientlab/tests/test_spec_and_analysis.py
+  - tests/test_capabilities.py
+  - eval/tests/test_replay_engine.py
+  - eval/tests/test_timing_semantics.py
+  - src/exaserve/capabilities.py
+  - eval/lib/replay_engine.py
+  - eval/plot/sc26_preview.py
+  - eval/plot/sc26_full_figures.py
   fallback: Fail closed; there is no legacy lifecycle or evidence fallback.
-  residual_risk: Proof is bound to the final43 Aurora/Ray/vLLM/HAProxy profile and one/two-node dimensions;
-    dependency, profile, or support-envelope changes reopen qualification.
-  support_impact: No remaining defect within the exact qualified final43 dimensions.
+  residual_risk: Historical result files without a timing classification are retained as evidence but fail closed for TTFT/TBT and must be rematerialized for current timing comparisons.
+  support_impact: LiteLLM remains a validation throughput/error benchmark and is not represented as a real streaming transport.
   owner: codex
   approval: null
-  revisit_condition: Implementation, pinned profile, or declared support dimensions change.
+  revisit_condition: A gateway's incremental-delivery capability or the result timing schema changes.
 - id: KI-C1
   source: known_issues
   severity: high
@@ -2735,3 +2741,94 @@ findings:
   owner: codex
   approval: null
   revisit_condition: Receipt roles, topology derivation, or null-engine semantics change.
+- id: REL-API-01
+  source: 2026-08-30 release consolidation audit
+  severity: high
+  invariant: Requests exceeding the model context are rejected as typed client errors before generation or streaming headers
+  primary_work_package: WP7
+  affected_regions:
+  - src/exaserve/server.py
+  - src/exaserve/request_validation.py
+  - src/exaserve/engines/base.py
+  acceptance_tests:
+  - AC-PROXY-01
+  - AC-TST-01
+  status: FIXED
+  decision: The release/v0.4.0 source candidate counts the rendered prompt with the live backend tokenizer and returns a correlated OpenAI-shaped HTTP 400 before JSON generation or SSE headers when prompt plus requested completion exceeds max_model_len.
+  evidence:
+  - tests/test_context_preflight.py
+  - tests/test_request_validation.py
+  - tests/test_engine_creation_contracts.py
+  - src/exaserve/server.py
+  fallback: Fail closed before response headers when context validation cannot be completed.
+  residual_risk: Token accounting remains bound to the selected backend tokenizer and pinned dependency profile.
+  support_impact: Oversized chat and completion requests no longer appear as HTTP 500 or broken successful streams.
+  owner: codex
+  approval: null
+  revisit_condition: Backend tokenizer ownership or request admission semantics change.
+- id: REL-PLAN-01
+  source: 2026-08-30 release consolidation audit
+  severity: medium
+  invariant: Every accepted exposure field is enforced by the selected first-release gateway or rejected during compilation
+  primary_work_package: WP7
+  affected_regions:
+  - src/exaserve/plan/contracts.py
+  - src/exaserve/plan/compiler.py
+  - src/exaserve/composition.py
+  acceptance_tests:
+  - AC-PLAN-01
+  - AC-PROXY-01
+  status: FIXED
+  decision: The first release accepts only HTTP, /v1, trusted-allocation, unauthenticated exposure; HAProxy alone carries and enforces a bounded request-body limit, while validation gateways reject that unsupported field.
+  evidence:
+  - tests/test_plan_contracts.py
+  - src/exaserve/plan/contracts.py
+  - src/exaserve/plan/compiler.py
+  - src/exaserve/composition.py
+  fallback: Reject rather than hash configuration that the runtime cannot enforce.
+  residual_risk: TLS, authentication, public exposure, alternate paths, and alternate-gateway body limits require new capability profiles.
+  support_impact: Plans can no longer imply unenforced exposure or body-limit behavior.
+  owner: codex
+  approval: null
+  revisit_condition: The first-release exposure surface or production gateway changes.
+- id: REL-STAT-01
+  source: 2026-08-30 release consolidation audit
+  severity: high
+  invariant: READY lease validity uses monotonic time and cannot be changed by wall-clock adjustment or reboot ambiguity
+  primary_work_package: WP5
+  affected_regions:
+  - src/exaserve/status_api.py
+  acceptance_tests:
+  - AC-RDY-01
+  - AC-STAT-01
+  status: FIXED
+  decision: READY persists a monotonic deadline and Linux boot identity; same-boot readers compare monotonic time, boot mismatch fails closed, and wall expiry is evidence only.
+  evidence:
+  - tests/test_status_api.py
+  - src/exaserve/status_api.py
+  fallback: Treat READY as expired whenever the monotonic clock identity is unavailable or mismatched.
+  residual_risk: The selected implementation relies on Linux boot_id, which is part of the declared Aurora release platform.
+  support_impact: NTP or manual wall-clock changes cannot extend or prematurely revoke READY.
+  owner: codex
+  approval: null
+  revisit_condition: Status persistence crosses a non-Linux platform or clock domain.
+- id: REL-SCHED-01
+  source: 2026-08-30 release consolidation audit
+  severity: medium
+  invariant: Batch submission never selects one scheduler backend for a run group containing multiple scheduler types
+  primary_work_package: WP8
+  affected_regions:
+  - eval/lib/run_executor.py
+  acceptance_tests:
+  - AC-TST-01
+  status: FIXED
+  decision: The PBS release submit-all path scans every immutable run plan and rejects mixed scheduler groups before reconciliation, scheduler lookup, or submission.
+  evidence:
+  - eval/tests/test_eval_control_plane.py
+  - eval/lib/run_executor.py
+  fallback: Split runs into scheduler-homogeneous groups; native mixed-site orchestration remains deferred.
+  residual_risk: Genuine cross-scheduler group orchestration remains unimplemented until an offsite Slurm profile is qualified.
+  support_impact: A mixed group cannot silently send Slurm rows through PBS or vice versa.
+  owner: codex
+  approval: null
+  revisit_condition: Mixed-site orchestration enters a declared support envelope.

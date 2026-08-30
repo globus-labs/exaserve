@@ -1,10 +1,12 @@
 # ExaServe configuration and scale matrix
 
-**Status date:** 2026-08-09
+**Status date:** 2026-08-30
 
-**Candidate:** final43
+**Last packaged qualified candidate:** final43
 
-**Formal release state:** `TECHNICAL_PASS_SCOPE_PENDING`
+**Successor source:** `release/v0.4.0`, clean package and scale gates pending
+
+**Formal release state:** `SUCCESSOR_SOURCE_READY_SCALE_PENDING`
 
 This is the current-facing matrix. “Qualified candidate” means the exact
 immutable artifact passed that cell; it is not a published support promise
@@ -41,7 +43,7 @@ Any dependency or identity change is a new profile and reopens affected cells.
 | Engine | vLLM | null engine for lifecycle faults | SGLang in the selected profile |
 | Gateway | HAProxy | LiteLLM, Envoy, NGINX, Pingora adapters | Unowned/unprofiled gateways |
 | Exposure | `PROXIED_INTERNAL` on trusted allocation network | `DIRECT_VALIDATION` | public Internet/direct Serve production exposure |
-| API/mode | OpenAI-compatible non-streaming completion | streaming/chat/mixed experiments | fake streaming represented as per-token streaming |
+| API/mode | OpenAI-compatible non-streaming completion | streaming/chat/mixed experiments; LiteLLM buffered throughput/error evidence | buffered, coarse, or unclassified timing represented as incremental TTFT/TBT |
 | Model topology | TP=1/PP=1 at one node; one PP=2 replica across two nodes | explicitly gated combinations | topology outside the canonical capability set |
 | Scale | one and two physical nodes | proposed 4/16/64 ladder | >2 as a current support claim; 128/256 historical only |
 
@@ -55,11 +57,11 @@ satisfy production qualification.
 
 ## Scale tiers
 
-| Physical nodes | final43 status | Evidence / next requirement |
+| Physical nodes | production status | Evidence / next requirement |
 |---:|---|---|
 | 1 | **QUALIFIED CANDIDATE** — null and real XPU plus proxy toggle pair | `final43-null-1n-20260809-a1`, `final43-real-1n-20260809-a1`, proxy on/off results |
 | 2 | **QUALIFIED CANDIDATE** — null fault matrix, real PP=2, supervisor faults | `final43-null-2n-20260809-a1`, `final43-real-2n-20260809-a1`, supervisor q2 result |
-| 4 | **NOT RUN FOR FINAL43** | owner authorization and a new predeclared gate are required |
+| 4 | **NOT RUN FOR THE SUCCESSOR WHEEL** | owner authorization and a new predeclared gate are required |
 | 16 | **NOT QUALIFIED** | only after the approved envelope includes this tier |
 | 64 | **PROPOSED, UNAPPROVED, NOT QUALIFIED** | owner approval plus exact-candidate 4/16/64 ladder |
 | 128 / 256 | **NO SUPPORT CLAIM** | historical research context; explicit envelope expansion required |
@@ -94,6 +96,6 @@ matching and validates one FAILED terminal record for each.
 ## Revisit condition
 
 First record an owner decision selecting the release ceiling. Then declare and
-execute the exact final43 scale cells authorized by that decision. Any later
+execute the exact release/v0.4.0 scale cells authorized by that decision. Any later
 expansion—streaming, public exposure, another gateway/engine/vendor/scheduler,
 or 128/256 nodes—requires a new profile, evidence plan, and candidate review.

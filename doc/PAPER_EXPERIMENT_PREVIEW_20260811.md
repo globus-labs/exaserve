@@ -40,6 +40,13 @@ The materialized core inventory contains 42 specifications and 124 cells:
 | Offered-traffic and trace workloads | 18 | 36 | 1 and 64 nodes; stream/non-stream |
 | 405B pipeline-parallel scale | 4 | 28 | includes the late 128- and 256-node cells |
 
+The accepted tables currently contain 47 rows but only 46 unique cells: the
+64-node Envoy non-streaming cell appears once as historical measured-partial
+evidence and once as the accepted zero-error replacement. Therefore 78 of the
+124 inventory cells still require an accepted, rejected, externally blocked,
+or explicit not-run disposition. The older pending list understated this work
+by naming only twelve high-node proxy cells.
+
 The twelve Ray Serve proxy cells use the explicit `RAY_SERVE_HEAD_ONLY`
 validation exposure. They are supported as the paper's native, centralized Ray
 Serve baseline, but cannot support a production-exposure claim. The contract
@@ -124,12 +131,13 @@ paper summary records 0.99 attainment. The hardened executor correctly seals
 all six expected evidence entries but marks the manifest incomplete and the run
 `PARTIAL`; treating it as `SUCCEEDED` would violate the result contract.
 
-There is still a production API defect in this faithful outcome. Oversized
-non-stream requests return HTTP 500, while streaming requests start HTTP 200
-and then terminate the SSE body with an unexpected EOF. A request that exceeds
-the configured context is a client error and should be rejected as HTTP 400
-before streaming headers are sent. Correcting that classification need not
-change which paper trace records fail.
+This preview exposed a production API defect: oversized non-stream requests
+returned HTTP 500, while streaming requests started HTTP 200 and then
+terminated the SSE body with an unexpected EOF. The `release/v0.4.0` source
+candidate now performs live-tokenizer context preflight and returns a typed,
+correlated HTTP 400 before streaming headers. The sealed historical rows remain
+unchanged, and the same three trace records must still be counted as rejected
+requests when the affected cells are rerun.
 
 ## Rejected attempts and defects exposed by the preview
 
@@ -814,30 +822,25 @@ as request failures.
 
 ## Pending order
 
-1. All six 16-node proxy-comparison cells are now sealed. Preserve their exact
-   complete-success or measured-partial classifications; do not tune the native
-   HeadOnly topology away from the paper baseline.
-2. All eighteen 1-node offered-traffic cells are sealed; preserve their exact
-   complete-success or measured-partial classifications.
-3. The six current 64-node proxy-comparison cells are now sealed. Preserve the
-   sealed `c7b63f7` 64-node Envoy non-streaming measured-partial
-   result as historical comparison evidence and the accepted `e6b5ba8`
-   zero-error Envoy non-streaming result as the pre-watchdog-fix qualification.
-   The two `3ba15df` Envoy variants and the LiteLLM non-streaming variant are
-   sealed. The `bf27004` LiteLLM-streaming replacement is also sealed as the
-   measured partial in finding 52. The first `3ba15df` HeadOnly non-streaming
-   attempt is rejected as finding 53, and its `ccccb82` replacement is sealed
-   as the measured partial in finding 54. The `ccccb82` HeadOnly streaming cell
-   is sealed as the measured partial in finding 55. This completes the required
-   64-node checkpoint. The source-snapshot differences must remain explicit; they are
-   evidence of the measured centralized-ingress recovery corrections, not a
-   claim that the six cells share one binary identity. The rejected `4327fe9`
-   Envoy identity remains diagnostic evidence only.
-4. Rematerialize and report the six 128-node cells from the accepted current
-   candidate; the prior
-   `97ab2a7` bundles remain sealed historical preparation artifacts but do not
-   contain the now-required common reconnect budget.
-5. Rematerialize and report the six 256-node cells from the accepted current
-   candidate last.
-6. Reconcile every materialized cell into accepted, rejected, retired, blocked,
-   or not-run-with-reason; no unresolved cell may disappear from the report.
+1. Preserve all accepted and rejected evidence already recorded. In particular,
+   do not tune the native HeadOnly topology away from the paper baseline or
+   represent the multi-snapshot 64-node preview as one release artifact.
+2. Freeze one clean source candidate and rematerialize every remaining cell;
+   the new exposure and timing contracts intentionally change plan identity.
+3. Complete the twelve missing direct/HAProxy proxy cells at 4, 16, and 64
+   nodes, then complete all eighteen 64-node offered-traffic cells.
+4. Run the four 405B specifications at 4, 8, 16, 32, and 64 nodes before moving
+   upward. If the checkpoint or allocation is unavailable, record a durable
+   external blocker rather than silently omitting the cell.
+5. Report the complete 64-node inventory checkpoint.
+6. Run and report all ten 128-node proxy cells plus the four 128-node 405B
+   cells. The old `97ab2a7` bundles remain historical preparation artifacts and
+   cannot qualify the release candidate.
+7. Run and report all ten 256-node proxy cells plus the four 256-node 405B
+   cells last.
+8. Treat LiteLLM streaming as `buffered_response`: throughput and request-error
+   evidence remain valid, but it cannot enter incremental-SSE TTFT/TBT or
+   streaming-correctness comparisons. Non-streaming timing remains E2E only.
+9. Reconcile all 124 cells into accepted, measured-partial, rejected, retired,
+   externally blocked, or not-run-with-reason; no unresolved cell may disappear
+   from the report.

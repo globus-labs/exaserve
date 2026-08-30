@@ -1,12 +1,13 @@
 # Known issues and empirical failure log
 
-**Reconciled:** 2026-08-09 against final43.
+**Reconciled:** 2026-08-30 against the release/v0.4.0 source candidate.
 
 **Role:** historical/empirical evidence. `hardening/FINDINGS.yaml` is the
 authoritative disposition ledger; this file cannot close or waive a release
 gate.
 
-The final43 candidate is qualified at one and two Aurora nodes. Historical
+Final43 remains qualified at one and two Aurora nodes. The successor source
+candidate requires a new clean package and exact-candidate ladder. Historical
 128/256-node observations below remain useful diagnostic evidence, but they do
 not qualify the new architecture or establish a support envelope.
 
@@ -27,14 +28,14 @@ new control plane. Ledger: `KI-A1`, `IN_PROGRESS`.
 Historical 256-node runs showed roughly quadratic proxy/actor-handle work and a
 single-controller bottleneck. ExaServe's final readiness processing is indexed,
 bounded, and does not fleet-poll, but it cannot remove or claim to solve
-upstream Ray behavior. Measure the exact final43 candidate at the approved
+upstream Ray behavior. Measure the exact release/v0.4.0 candidate at the approved
 boundary tier before setting a larger supported maximum. Refs:
 `findings/gcs_contention_quantitative.md` and
 `findings/proxyactor_death_cascade_256n.md`. Ledger: `KI-A3`, `IN_PROGRESS`.
 
 ### A7 / D2. Residual source-import and MPI activation cost — scale proof missing
 
-Final43 transactionally inventories and stages one source tree, generated
+The release architecture transactionally inventories and stages one source tree, generated
 overlay, and bootstrap, then requires a receipt from every planned rank. The
 two-node gates prove both ranks activated identical bytes. Residual imports
 from the shared environment and native broadcast behavior still need
@@ -48,7 +49,7 @@ packet/retransmission storm (up to about 6.75 million retransmits and about
 195,000 established connections). A rarer run ended in total HAProxy death and
 connection refusal; its causal signal was not captured. Do not conflate the
 common degraded network regime with the rare process death. Streaming is not a
-final43 production claim. Refs:
+release/v0.4.0 production claim. Refs:
 `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md`. Ledger: `KI-B2`,
 `IN_PROGRESS`.
 
@@ -92,11 +93,23 @@ regression context, not final43 scale qualification and not evidence about
 streaming. Refs: `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md` and
 `findings/weakscaling_short_v3_progress.md`.
 
-### B3. LiteLLM fake streaming — resolved by capability refusal
+### B3. LiteLLM fake streaming — resolved by typed timing semantics
 
 LiteLLM's buffered end-burst cannot enter a real-streaming TBT comparison. The
-capability contract rejects that measurement instead of presenting degenerate
-near-zero TBT as good streaming behavior.
+release/v0.4.0 result contract classifies it as `buffered_response`, retains
+throughput/error/E2E evidence, and withholds TTFT/TBT. Only
+`incremental_sse` may enter token-delivery SLO plots. Legacy results lacking the
+classification fail closed rather than being inferred from plausible-looking
+fields. Ledger: `KI-B3`, `FIXED`.
+
+### B4. Over-context API error semantics — resolved before v0.4.0 qualification
+
+The paper preview found that oversized non-stream requests returned HTTP 500
+and streaming requests committed HTTP 200 before terminating the SSE body. The
+release source candidate now counts the rendered prompt with the live backend
+tokenizer and rejects prompt plus requested completion beyond `max_model_len`
+as a correlated HTTP 400 before generation or headers. Ledger: `REL-API-01`,
+`FIXED`.
 
 ### C1. Server statistics silent/partial success — resolved
 
@@ -131,9 +144,9 @@ hidden spec convention.
 
 ### C6. TTFT/TBT interpretation — resolved
 
-Analysis and figures report TTFT and TBT attainment separately. Non-streaming
-latency is labeled as a coarse full-response estimate and cannot masquerade as
-per-token streaming timing.
+Analysis and figures report TTFT and TBT only for `incremental_sse` timing.
+Non-streaming and buffered runs retain E2E latency but cannot populate or enter
+token-delivery fields and SLO panels.
 
 ### D3. Competing proxy instrumentation owner — resolved
 
@@ -150,8 +163,6 @@ fail plan capability checks rather than proceeding with ambiguous placement.
 
 ## Current release blockers
 
-- one additional four-node final43 attempt needs explicit authorization and a
-  predeclared candidate-bound gate;
 - ADR-000's proposed 64-node ceiling needs a product-owner decision; and
 - if 64 is selected, exact-candidate 4/16/64 qualification remains required.
 

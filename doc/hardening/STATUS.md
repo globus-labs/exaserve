@@ -1,13 +1,45 @@
 # ExaServe production-hardening status
 
-**Status date:** 2026-08-09
+**Status date:** 2026-08-30
 
-**Verdict:** `TECHNICAL_PASS_SCOPE_PENDING` — every locally resolvable
-production-hardening gate passes for the exact final43 artifact at one and two
-Aurora nodes. This is not an approved general production release and does not
-claim support above the measured boundary.
+**Verdict:** `SUCCESSOR_SOURCE_READY_SCALE_PENDING` — the
+`release/v0.4.0` source candidate incorporates the complete preview repair
+series and the final release-consolidation fixes. Final43 remains the last
+packaged artifact qualified at one and two Aurora nodes. This is not yet an
+approved general production release and does not claim support above that
+measured boundary.
 
-## Exact candidate
+## Successor source candidate
+
+The branch descends from validated preview candidate `ccccb82` and adds:
+
+- exact live-tokenizer context admission with pre-header HTTP 400 errors;
+- plan-derived incremental, buffered, and non-streaming timing semantics;
+- fail-closed first-release exposure configuration;
+- monotonic, boot-fenced READY leases;
+- mixed-scheduler `submit-all` refusal;
+- the hash-bound 4/16/64 scale qualification/adjudication lane; and
+- the complete preview evidence ledger and updated architecture call graph.
+
+Because these changes alter result and deployment-plan identity, every release
+qualification bundle must be rematerialized from the final clean wheel. The
+multi-snapshot preview remains diagnostic and paper evidence only.
+
+### Successor source gates
+
+| Gate | Result |
+|---|---|
+| Full source suite in validated one-node PBS job `8792581` | PASS — 1,323 passed, 19 skipped |
+| Focused release-contract integration | PASS — 200 passed |
+| Ruff and compileall | PASS |
+| Findings ledger | PASS — 93 FIXED / 8 IN_PROGRESS / 1 EXTERNAL_BLOCKER / 3 OUT_OF_PRODUCTION_SCOPE |
+| Scale harness/adjudicator regression | PASS — 30 passed, 9 skipped |
+| Go formatting, vet, and tests | PASS |
+
+The clean installed-wheel gate and owner-approved hardware scale ladder remain
+release gates; source success does not predeclare either result.
+
+## Last packaged qualified candidate
 
 | Identity | Value |
 |---|---|
@@ -24,7 +56,7 @@ The wheel was built from the sdist in an isolated environment. Installed Ray
 and vLLM files are never edited; the selected compatibility mechanism is the
 hash-verified, role-filtered generated overlay described in ADR-003.
 
-## Passed gates
+## Last packaged candidate gates
 
 | Gate | Result | Durable evidence |
 |---|---|---|
@@ -67,7 +99,7 @@ predeclared campaign rows, and the same wheel/site/compatibility identities.
 
 | Disposition | Count | Meaning |
 |---|---:|---|
-| `FIXED` | 89 | Candidate-bound tests and/or final43 receipts close the invariant at the qualified boundary. |
+| `FIXED` | 93 | Candidate-bound tests and/or final43 receipts close the invariant at the qualified boundary. |
 | `IN_PROGRESS` | 8 | Scale/scope approval or measurements are missing; none is a hidden two-node code defect. |
 | `EXTERNAL_BLOCKER` | 1 | Native Slurm plus CUDA/ROCm needs unavailable offsite hardware. |
 | `OUT_OF_PRODUCTION_SCOPE` | 3 | Optional caching, concurrent download optimization, and paper-only C++ client. |
@@ -108,9 +140,10 @@ contracts passed.
 1. A product owner must approve a release ceiling (the current ADR proposal is
    64 nodes) or select another envelope.
 2. Any envelope above two nodes requires authorization and a new immutable,
-   predeclared final43 ladder. For a 64-node ceiling the outstanding cells are
+   predeclared release/v0.4.0 ladder. For a 64-node ceiling the outstanding cells are
    4, 16, and 64 nodes.
 3. Offsite Slurm/CUDA/ROCm support requires an appropriate native allocation.
 
-Historical or earlier-candidate runs cannot satisfy these cells. Do not rebuild,
-relabel, or broaden final43 without creating a new candidate review.
+Historical or earlier-candidate runs cannot satisfy these cells. Do not
+relabel their receipts as release/v0.4.0 evidence; build a new candidate review
+from the final wheel and exact ladder.

@@ -5,12 +5,11 @@ An annotated, diagrammed walkthrough of every function between
 [`examples/config.haproxy.yaml`](../../examples/config.haproxy.yaml) at two
 nodes with one Llama-3-8B model.
 
-**Rendered version (diagrams, per-phase call traces, module reference):**
-<https://claude.ai/code/artifact/062933c9-92a6-462a-adad-b68c36e3a632>
-
-Traced at commit `7b20715` on `feature/slurm-amd-support`. The link is a private
-page; the summary below is the durable copy and does not depend on it. If a
-future refactor moves any of these boundaries, update both.
+Originally traced at commit `7b20715`, then reconciled on 2026-08-30 against
+the `release/v0.4.0` source candidate descended from `ccccb82`. This checked-in
+document is the durable authority; no private rendering or external artifact is
+required to read it. If a future refactor moves any boundary below, update this
+document with the corresponding contract tests.
 
 This note is descriptive. The normative architecture remains
 [`../PRODUCTION_HARDENING_EXECUTION_PLAN.md`](../PRODUCTION_HARDENING_EXECUTION_PLAN.md)

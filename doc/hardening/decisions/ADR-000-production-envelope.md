@@ -1,9 +1,10 @@
 # ADR-000: Initial production envelope and scale topology
 
 **Status:** TECHNICALLY SELECTED, AWAITING EXPLICIT PRODUCT-OWNER SCOPE
-APPROVAL. Last reconciled 2026-08-09. Final43 passes the clean package and
-one-/two-node final-architecture gates. The release state is
-`TECHNICAL_PASS_SCOPE_PENDING`; the evidence-derived maximum is two nodes.
+APPROVAL. Last reconciled 2026-08-30. Final43 remains the clean packaged
+one-/two-node evidence artifact. The `release/v0.4.0` successor source is ready
+for a new package and scale ladder but cannot inherit final43 receipts. The
+evidence-derived production maximum remains two nodes.
 
 No worker or agent may fill the missing approval identity/evidence, and no
 historical scale result may qualify this exact candidate.
@@ -22,6 +23,12 @@ historical scale result may qualify this exact candidate.
 | Topology | TP=1/PP=1 and capability-gated PP | unsupported canonical combinations |
 
 The 64-node target is a proposal, not an approval.
+
+The multi-snapshot paper preview through candidate `ccccb82` demonstrates that
+the successor architecture can reach exact READY, account requests, and clean
+64 nodes across Envoy, LiteLLM, and HeadOnly validation modes. It does not
+replace the proposed production proof: one immutable wheel must pass the
+HAProxy/non-streaming 4/16/64 ladder declared by this ADR.
 
 ## Exact final43 evidence
 

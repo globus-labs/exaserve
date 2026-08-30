@@ -1,18 +1,20 @@
 # ExaServe backlog and research TODOs
 
-**Reconciled:** 2026-08-09 against final43.
+**Reconciled:** 2026-08-30 against the `release/v0.4.0` source candidate.
+Final43 remains the last packaged one/two-node hardware-qualified artifact;
+the successor must not inherit those receipts by name.
 
 **Role:** non-normative backlog. The execution plan defines architecture and
 `hardening/FINDINGS.yaml` defines disposition; this file cannot waive a gate.
 
 ## Release-gating actions
 
-1. Product owner: authorize one additional four-node final43 attempt.
-2. Product owner: approve the proposed 64-node first-release ceiling or select
-   a different ceiling in ADR-000.
-3. After those decisions, predeclare and run only the matching final43 ladder.
+1. Product owner: approve the proposed 64-node first-release ceiling or select
+   a lower ceiling.
+2. After that decision, predeclare and run only the matching immutable
+   `release/v0.4.0` ladder.
    A 64-node choice requires 4, 16, and 64 nodes with the same immutable wheel.
-4. Update ADR-000, the compatibility matrix, ledger, and release verdict from
+3. Update ADR-000, the compatibility matrix, ledger, and release verdict from
    those exact receipts. Do not substitute legacy or earlier-candidate runs.
 
 ## Canonical work still open
@@ -24,7 +26,7 @@ evidence rather than an unresolved two-node code defect:
 |---|---|
 | `PR-033` | Owner-approved envelope and exact-candidate qualification at its boundary. |
 | `KI-A1` | Only if Envoy/streaming/256 nodes enters scope: reproduce with owned failure evidence. |
-| `KI-A3` | Measure final43 Ray/GCS/controller behavior at the approved boundary. |
+| `KI-A3` | Measure release/v0.4.0 Ray/GCS/controller behavior at the approved boundary. |
 | `KI-A7` | Measure residual shared-environment imports at the approved scale. |
 | `KI-B2` | Only if streaming enters scope: capture the rare HAProxy death's real cause. |
 | `KI-D2` | Prove native distribution and every activation receipt at the approved boundary. |

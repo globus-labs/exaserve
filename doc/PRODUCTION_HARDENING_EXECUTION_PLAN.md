@@ -762,6 +762,31 @@ budgets remain transport mechanics, but neither may shorten the compiled
 request deadline. A connection reset, refused connection, or kernel connect
 timeout is still recorded as a request error and is never silently retried.
 
+The first release has one deliberately narrow exposure surface: HTTP, the
+fixed `/v1` API prefix, `trusted_allocation`, and no authentication policy.
+HAProxy alone accepts and enforces the hash-bound request-body limit (16 MiB by
+default). Direct, HeadOnly, LiteLLM, and Envoy validation modes record a null
+body-limit capability and reject attempts to configure one. Any future path,
+TLS, authentication, public boundary, or alternate-gateway body-limit support
+is a new typed capability; accepting and then ignoring such a field is invalid.
+
+Every chat and completion request is rendered and counted with the live engine
+tokenizer before generation. If `prompt_tokens + max_tokens` exceeds the
+canonical model context, both streaming and non-streaming endpoints return a
+correlated OpenAI-shaped HTTP 400 `context_length_exceeded` response before SSE
+headers. Tokenizer failure itself is a correlated server error and also occurs
+before headers; a backend exception after admission cannot be used as context
+validation.
+
+Result timing has an explicit plan-derived meaning. `incremental_sse` alone may
+populate TTFT/TBT and enter token-delivery SLO comparisons.
+`buffered_response` (the pinned LiteLLM validation path),
+`coarse_full_response` (non-streaming), and legacy/unclassified results retain
+throughput, errors, E2E latency, and raw transport observations but expose no
+TTFT/TBT. Plotting and goodput code must fail closed when this classification
+is absent; it must never derive TBT by dividing full-response latency by token
+count.
+
 **Listener bind, initial registration, reconnect, and deadlines**
 
 The authenticated control listener is mandatory. Its implementation may retry
@@ -769,6 +794,12 @@ a transient bind/collision within a bounded pre-launch operation, but ultimate
 bind failure terminates the generation before any rank is launched. Launcher
 exit aggregation is redundant failure evidence, never a degraded substitute
 for the channel.
+
+Durable READY renewal persists a monotonic expiry together with the Linux boot
+identity that makes that value comparable across processes. A new reader on
+the same boot may validate the lease; a boot mismatch or unavailable identity
+expires it fail-closed. The parallel wall-clock expiry is operator evidence
+only and cannot grant, extend, or revoke READY.
 
 A bounded initial-registration deadline starts when `RankLauncher` starts.
 Every planned rank must authenticate with the expected rank, node, deployment,
@@ -1780,6 +1811,10 @@ Actions:
    identity. Define recovery after submit-success/state-write-failure.
 7. Remove legacy profile races and make SiteProfile selection explicit.
 8. Persist the real workspace/source provenance selected in WP2.
+9. Reject a `submit-all` run group containing more than one scheduler type
+   before reconciliation, scheduler lookup, or submission. The PBS-only first
+   release does not infer a backend from the first row; future mixed-site
+   orchestration requires an explicit grouped-submission contract.
 
 Fallback: a site-native backend is an acceptable final choice if PSI/J cannot
 express or reliably observe required behavior. The compromise is documented per
