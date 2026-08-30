@@ -3,7 +3,7 @@
 **Audit date:** 2026-08-09; successor reconciliation 2026-08-30
 
 **Verdict:** final43 implementation pass at one and two Aurora nodes;
-release/v0.4.0 source fixes complete, clean package and exact-candidate scale
+release/v0.4.0 source and clean package gates pass, exact-candidate scale
 qualification pending.
 
 This audit covers code reached by a production deployment. Earlier audit,
@@ -40,6 +40,14 @@ The reconciled successor source gate in validated PBS job `8792581` passes
 1,323 tests with 19 skips, repository-wide Ruff and compileall, the canonical
 findings validator, the scale adjudicator/harness tests, and Go formatting,
 vet, and unit tests.
+
+The final clean package built from source commit `a920d7e3` also passes in
+validated PBS job `8792605`: 1,302 tests pass with 31 optional-plugin skips,
+packaged resources are present, and the four-module typed core is mypy clean.
+The wheel SHA-256 is
+`75bab1c97948d29237000d5fa087f3ed1f1d18e5ef3233fe2c759b4faf0e32f8`;
+the sdist SHA-256 is
+`8e8b0a6af44ad75bc48004dba48b66fc382e451d8e44449b55ec36dd8cd6bcb3`.
 
 ## 1. Architecture outcome
 

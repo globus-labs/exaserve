@@ -1,9 +1,9 @@
 # ADR-000: Initial production envelope and scale topology
 
 **Status:** TECHNICALLY SELECTED, AWAITING EXPLICIT PRODUCT-OWNER SCOPE
-APPROVAL. Last reconciled 2026-08-30. Final43 remains the clean packaged
-one-/two-node evidence artifact. The `release/v0.4.0` successor source is ready
-for a new package and scale ladder but cannot inherit final43 receipts. The
+APPROVAL. Last reconciled 2026-08-30. Final43 remains the packaged
+one-/two-node hardware-evidence artifact. The `release/v0.4.0` successor clean
+package gate passes, but its scale ladder cannot inherit final43 receipts. The
 evidence-derived production maximum remains two nodes.
 
 No worker or agent may fill the missing approval identity/evidence, and no

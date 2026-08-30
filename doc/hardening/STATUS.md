@@ -35,9 +35,21 @@ multi-snapshot preview remains diagnostic and paper evidence only.
 | Findings ledger | PASS — 93 FIXED / 8 IN_PROGRESS / 1 EXTERNAL_BLOCKER / 3 OUT_OF_PRODUCTION_SCOPE |
 | Scale harness/adjudicator regression | PASS — 30 passed, 9 skipped |
 | Go formatting, vet, and tests | PASS |
+| Clean installed-wheel gate in validated PBS job `8792605` | PASS — 1,302 passed, 31 skipped; resources present; typed-core mypy clean |
 
-The clean installed-wheel gate and owner-approved hardware scale ladder remain
-release gates; source success does not predeclare either result.
+The owner-approved hardware scale ladder remains a release gate; package
+success does not predeclare that result.
+
+The installed package was built from source commit
+`a920d7e3f2e2909f636b5c71b26d33c6cdd05837`:
+
+- wheel: `artifacts/hardening/release-v0.4.0-rc2/exaserve-0.4.0-py3-none-any.whl`,
+  SHA-256 `75bab1c97948d29237000d5fa087f3ed1f1d18e5ef3233fe2c759b4faf0e32f8`;
+- sdist: `artifacts/hardening/release-v0.4.0-rc2/exaserve-0.4.0.tar.gz`,
+  SHA-256 `8e8b0a6af44ad75bc48004dba48b66fc382e451d8e44449b55ec36dd8cd6bcb3`;
+- package receipt:
+  `artifacts/hardening/release-v0.4.0-packaged-gate-20260830-a4/receipt.json`,
+  SHA-256 `dc28e9f38e8ff6e2af9aa06b3b6feb4931c869217369d2a61d03f38e3c9a5fad`.
 
 ## Last packaged qualified candidate
 
