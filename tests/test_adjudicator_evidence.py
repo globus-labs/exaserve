@@ -111,6 +111,16 @@ def test_review_shape_rejects_disposition_drift():
         adjudicator._verify_review_shape(review)
 
 
+def test_review_shape_accepts_only_the_optional_scale_campaign():
+    review = _shape_review()
+    review["campaigns"]["scale"] = {}
+    adjudicator._verify_review_shape(review)
+
+    review["campaigns"]["invented"] = {}
+    with pytest.raises(RuntimeError, match="only the optional scale"):
+        adjudicator._verify_review_shape(review)
+
+
 def test_lifecycle_result_rejects_embedded_declaration_drift():
     review, campaign, plan_path, harness, row = _lifecycle_inputs()
     declaration = deepcopy(campaign["results"][0])

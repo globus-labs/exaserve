@@ -48,7 +48,24 @@ production code.
   backend entry points, Python executable hash, and `pyproject.toml` hash in the
   artifact manifest.
 - `run_final_null_qualification.py`: execute the declared final qualification
-  protocol inside a validated compute allocation.
+  protocol inside a validated compute allocation. Its name is historical; the
+  pinned final43 runtime covers both null and real-engine cells.
+- `run_proxy_qualification.py`: execute the declared, bounded HAProxy no-delay
+  characterization campaign.
+- `run_supervisor_fault_qualification.py` plus its `v2`/`v3` wrappers: retained
+  byte-pinned final43 fault runtime and stricter adjudication layers. They are
+  historical evidence dependencies, not three production launch choices; do
+  not edit or consolidate them in place.
+- `run_scale_qualification.py`: future 4/16/64-node Aurora qualification lane.
+  It is inert until an owner supplies a hashed scope-approval document and an
+  immutable three-cell experiment plan. The runner verifies its own file, all
+  support files, approval, candidate, plans, and profiles before importing the
+  lifecycle support module. Its results are independently checked by the
+  optional scale campaign in `adjudicate.py`.
+- `hold_port.py`: exact-PID remote listener used only to inject a worker-proxy
+  port collision during qualification.
+- `probe_architecture_feasibility.py` and `probe_compatibility_overlay.py`:
+  migration-decision probes; they are not release or deployment entry points.
 - `run_packaged_gate.sh`: test-only Aurora wrapper for installing an immutable
   wheel in a fresh virtual environment and running the full installed-package,
   resource, and typed-core gates. It has no deployment lifecycle role.
@@ -56,6 +73,13 @@ production code.
 - `adjudicate.py`: ledger-maintenance helper; it cannot manufacture approval or
   convert missing evidence into closure.
 - `run_hermetic_check.sh`: clean-dependency and randomized-order test wrapper.
+
+The scale scope-approval document is JSON with an exact schema: version,
+decision ID, `APPROVE_QUALIFICATION_TARGET`, non-empty approver and timestamp,
+`approved_max_nodes: 64`, `required_ladder: [4, 16, 64]`, and the exact
+PBS/XPU/vLLM/HAProxy/proxied/non-streaming-completion dimensions. This file is
+intentionally absent while ADR-000 remains unapproved; an implementation worker
+must never manufacture it.
 
 Deleted spike/battery scripts were migration experiments. Their retained logs
 remain historical evidence, but they are not release gates and must not be

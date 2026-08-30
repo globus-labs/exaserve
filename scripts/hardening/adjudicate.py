@@ -67,6 +67,107 @@ CANDIDATE_FIELDS = {
     "compatibility_profile_hash",
     "compatibility_manifest_hash",
 }
+BASE_CAMPAIGNS = {"lifecycle", "proxy", "supervisor"}
+SCALE_CAMPAIGNS = BASE_CAMPAIGNS | {"scale"}
+SCALE_PLAN_FIELDS = {
+    "schema_version",
+    "created_at",
+    "candidate",
+    "harness",
+    "support",
+    "scope_approval",
+    "gates",
+}
+SCALE_SUPPORT_FIELDS = {"lifecycle", "port_holder"}
+SCALE_CODE_FIELDS = {"path", "sha256"}
+SCALE_GATE_FIELDS = {
+    "gate_id",
+    "lane",
+    "logical_nodes",
+    "physical_allocation_nodes",
+    "acquisition_source",
+    "queue",
+    "lease_ttl",
+    "expected_runtime",
+    "node_hours",
+    "attempt_limit",
+    "attempt",
+    "output_path",
+    "engine_mode",
+    "scenario_profile",
+    "ready_timeout_s",
+    "partial_observation_s",
+    "config_path",
+    "config_sha256",
+    "deployment_plan_path",
+    "deployment_plan_sha256",
+    "site_profile_path",
+    "site_profile_sha256",
+    "clean_state_reset_method",
+    "retry_reason_policy",
+    "expected_observations",
+}
+SCALE_APPROVAL_FIELDS = {
+    "schema_version",
+    "decision_id",
+    "decision",
+    "approver_id",
+    "approved_at",
+    "approved_max_nodes",
+    "required_ladder",
+    "dimensions",
+}
+SCALE_APPROVAL_DIMENSIONS = {
+    "scheduler": "pbs",
+    "vendor": "xpu",
+    "engine": "vllm",
+    "gateway": "haproxy",
+    "exposure_mode": "PROXIED_INTERNAL",
+    "request_mode": "completion",
+    "streaming_mode": "non_streaming",
+}
+SCALE_TIER_CONTRACT = {
+    4: {"queue": "capacity", "scenario_profile": "scale_real"},
+    16: {"queue": "capacity", "scenario_profile": "scale_real"},
+    64: {"queue": "debug-scaling", "scenario_profile": "scale_boundary"},
+}
+SCALE_AURORA_GPUS_PER_NODE = 12
+SCALE_SCENARIOS = {
+    "scale_real": [
+        "normal-drain",
+        "gateway-death",
+        "worker-death",
+        "duplicate-gateway-port",
+        "partial-worker-proxy",
+    ],
+    "scale_boundary": ["normal-drain", "worker-death"],
+}
+
+
+def _scale_expected_observations(profile: str) -> list[str]:
+    common = [
+        "fresh generation reaches canonical READY",
+        "real engine receipts satisfy the exact planned slot set",
+        "advertised HAProxy endpoint returns a typed completion",
+        "exact receipt slots and per-rank source staging are complete",
+        "exact Ray membership and resource totals match the compiled topology",
+        "every allocation node hosts its planned Serve proxy and dense replica set",
+        "SIGTERM drains and publishes STOPPED with exit 143",
+    ]
+    faults = [
+        "a fresh restart reaches READY",
+        "owned gateway death publishes process_dead evidence and FAILED with nonzero exit",
+        "exact highest-rank Ray worker death publishes FAILED with nonzero non-143 exit",
+        "an already-owned gateway port fails closed before READY",
+        "exact N-node Ray membership cannot publish READY while a worker Serve port is held",
+        "the bounded partial-readiness observation cancels cleanly if no typed failure wins first",
+    ]
+    if profile == "scale_real":
+        return common + faults
+    if profile == "scale_boundary":
+        return common + faults[0:1] + faults[2:3]
+    raise RuntimeError(f"unsupported scale scenario profile {profile!r}")
+
 
 EXPECTED_IN_PROGRESS = {
     "PR-033",
@@ -234,6 +335,8 @@ STATIC_EVIDENCE = {
     "AC-SCALE-01": [
         "doc/hardening/decisions/ADR-000-production-envelope.md",
         "doc/hardening/COMPATIBILITY_MATRIX.md",
+        "tests/test_scale_qualification_harness.py",
+        "tests/test_scale_adjudication.py",
     ],
 }
 
@@ -244,6 +347,14 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -303,9 +414,12 @@ def _verify_review_shape(review: dict[str, Any]) -> None:
     if not isinstance(candidate, dict) or set(candidate) != CANDIDATE_FIELDS:
         raise RuntimeError("candidate identity has the wrong exact schema")
     campaigns = review.get("campaigns")
-    if not isinstance(campaigns, dict) or set(campaigns) != {"lifecycle", "proxy", "supervisor"}:
+    if not isinstance(campaigns, dict) or frozenset(campaigns) not in {
+        frozenset(BASE_CAMPAIGNS),
+        frozenset(SCALE_CAMPAIGNS),
+    }:
         raise RuntimeError(
-            "candidate review must declare lifecycle, proxy, and supervisor campaigns"
+            "candidate review must declare the three base campaigns and only the optional scale campaign"
         )
     dispositions = review.get("dispositions")
     if not isinstance(dispositions, dict) or set(dispositions) != {
@@ -696,6 +810,508 @@ def _verify_lifecycle_campaign(review: dict[str, Any]) -> None:
         seen_cells.add(cell)
     if result_by_gate:
         raise RuntimeError("lifecycle review declares results not present in its plan")
+
+
+def _verify_scale_approval(plan: dict[str, Any]) -> Path:
+    declaration = plan.get("scope_approval")
+    if not isinstance(declaration, dict) or set(declaration) != SCALE_CODE_FIELDS:
+        raise RuntimeError("scale plan has an invalid scope approval declaration")
+    approval_path = _hashed_path(declaration, "path", "sha256", "scale.scope_approval")
+    approval = _load_json(approval_path)
+    if not isinstance(approval, dict) or set(approval) != SCALE_APPROVAL_FIELDS:
+        raise RuntimeError("scale scope approval has the wrong exact schema")
+    dimensions = approval.get("dimensions")
+    if (
+        approval.get("schema_version") != 1
+        or approval.get("decision") != "APPROVE_QUALIFICATION_TARGET"
+        or approval.get("approved_max_nodes") != 64
+        or approval.get("required_ladder") != sorted(SCALE_TIER_CONTRACT)
+        or dimensions != SCALE_APPROVAL_DIMENSIONS
+    ):
+        raise RuntimeError("scale scope approval does not authorize the exact 4/16/64 contract")
+    for field in ("decision_id", "approver_id", "approved_at"):
+        if not isinstance(approval.get(field), str) or not approval[field].strip():
+            raise RuntimeError(f"scale scope approval {field} must be non-empty text")
+    return approval_path
+
+
+def _verify_scale_canary(value: object, *, model_id: str, relative: str) -> None:
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise RuntimeError(f"scale canary evidence has the wrong shape: {relative}")
+    item = value[0]
+    response = item.get("response")
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if (
+        item.get("status_code") != 200
+        or item.get("model_id") != model_id
+        or not isinstance(response, dict)
+        or response.get("model") != model_id
+        or response.get("object") != "text_completion"
+        or not isinstance(choices, list)
+        or not choices
+        or not isinstance(choices[0], dict)
+        or not isinstance(choices[0].get("text"), str)
+    ):
+        raise RuntimeError(f"scale canary did not return a typed completion: {relative}")
+
+
+def _verify_scale_ready(
+    scenario: dict[str, Any],
+    *,
+    deployment: dict[str, Any],
+    nodes: int,
+    replicas: int,
+    relative: str,
+) -> None:
+    evidence = scenario.get("ready_evidence")
+    patch = evidence.get("engine_patch_evidence") if isinstance(evidence, dict) else None
+    instances = patch.get("instances") if isinstance(patch, dict) else None
+    receipt_requirements = deployment.get("receipt_requirements")
+    expected_slots = (
+        sorted(
+            item.get("receipt_requirement_id")
+            for item in receipt_requirements
+            if isinstance(item, dict)
+            and isinstance(item.get("receipt_requirement_id"), str)
+            and item["receipt_requirement_id"]
+        )
+        if isinstance(receipt_requirements, list)
+        else []
+    )
+    planned_ranks = {
+        item.get("planned_rank")
+        for item in instances or []
+        if isinstance(item, dict) and item.get("role") == "engine_core"
+    }
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("source_rank_receipts") != nodes
+        or not _is_sha256(evidence.get("source_manifest_hash"))
+        or not _is_sha256(evidence.get("receipt_manifest_hash"))
+        or not isinstance(receipt_requirements, list)
+        or len(expected_slots) != len(receipt_requirements)
+        or evidence.get("receipt_slots") != expected_slots
+        or not isinstance(patch, dict)
+        or patch.get("compatibility_profile_hash") != deployment.get("compatibility_profile_hash")
+        or patch.get("engine_core_count") != replicas
+        or patch.get("engine_worker_count") != 0
+        or not isinstance(instances, list)
+        or len(instances) != replicas
+        or planned_ranks != set(range(nodes))
+    ):
+        raise RuntimeError(f"scale READY evidence is incomplete or not dense: {relative}")
+
+
+def _verify_scale_result(
+    review: dict[str, Any],
+    plan_path: Path,
+    plan_hash: str,
+    plan: dict[str, Any],
+    row: dict[str, Any],
+    deployment: dict[str, Any],
+    declaration: dict[str, Any],
+) -> None:
+    required_declaration = {"gate_id", "path", "sha256", "scenarios", "cleanup"}
+    if not isinstance(declaration, dict) or set(declaration) != required_declaration:
+        raise RuntimeError("scale result declaration has the wrong exact schema")
+    relative = declaration.get("path")
+    if relative != f"{row.get('output_path')}/result.json":
+        raise RuntimeError("scale result is outside its declared gate output")
+    result_path = _hashed_path(declaration, "path", "sha256", "scale.result")
+    result = _load_json(result_path)
+    candidate = review["candidate"]
+    harness = plan["harness"]
+    support = plan["support"]
+    approval = plan["scope_approval"]
+    if (
+        result.get("schema_version") != 1
+        or result.get("passed") is not True
+        or result.get("declared_gate") != row
+        or result.get("candidate") != candidate
+        or result.get("gate_id") != row.get("gate_id")
+        or declaration.get("gate_id") != row.get("gate_id")
+        or result.get("experiment_plan_path") != str(plan_path)
+        or result.get("experiment_plan_sha256") != plan_hash
+        or result.get("harness") != str(_repository_path(harness["path"], "scale.harness.path"))
+        or result.get("harness_sha256") != harness["sha256"]
+        or result.get("lifecycle_support")
+        != str(_repository_path(support["lifecycle"]["path"], "scale.support.lifecycle"))
+        or result.get("lifecycle_support_sha256") != support["lifecycle"]["sha256"]
+        or result.get("port_holder_helper")
+        != str(_repository_path(support["port_holder"]["path"], "scale.support.port_holder"))
+        or result.get("port_holder_helper_sha256") != support["port_holder"]["sha256"]
+        or result.get("scope_approval")
+        != str(_repository_path(approval["path"], "scale.scope_approval"))
+        or result.get("scope_approval_sha256") != approval["sha256"]
+        or result.get("config_path")
+        != str(_repository_path(row["config_path"], "scale.config_path"))
+        or result.get("config_sha256") != row["config_sha256"]
+        or result.get("deployment_plan_path")
+        != str(_repository_path(row["deployment_plan_path"], "scale.deployment_plan_path"))
+        or result.get("deployment_plan_hash") != deployment.get("deployment_plan_hash")
+        or result.get("site_profile_path")
+        != str(_repository_path(row["site_profile_path"], "scale.site_profile_path"))
+        or result.get("wheel")
+        != str(_repository_path(candidate["wheel_path"], "candidate.wheel_path"))
+        or result.get("wheel_sha256") != candidate["wheel_sha256"]
+        or result.get("site_profile_hash") != candidate["site_profile_hash"]
+        or not isinstance(result.get("pbs_job_id"), str)
+        or not result["pbs_job_id"]
+    ):
+        raise RuntimeError(f"scale result identity or verdict is invalid: {relative}")
+    mirrored = (
+        "attempt",
+        "attempt_limit",
+        "engine_mode",
+        "gate_id",
+        "lane",
+        "logical_nodes",
+        "physical_allocation_nodes",
+        "queue",
+        "ready_timeout_s",
+        "scenario_profile",
+    )
+    if any(result.get(field) != row.get(field) for field in mirrored):
+        raise RuntimeError(f"scale result drifted from its declared gate: {relative}")
+
+    nodes = row["logical_nodes"]
+    model = deployment["models"][0]
+    replicas = nodes * deployment["num_gpus_per_node"]
+    expected_density = {
+        "num_nodes": nodes,
+        "num_gpus_per_node": deployment["num_gpus_per_node"],
+        "replicas": replicas,
+        "replicas_per_rank": deployment["num_gpus_per_node"],
+        "serve_applications": replicas + nodes,
+        "receipt_requirements": len(deployment["receipt_requirements"]),
+    }
+    if result.get("density") != expected_density or model.get("num_replicas") != replicas:
+        raise RuntimeError(f"scale result density differs from its deployment: {relative}")
+    scenarios = result.get("scenarios")
+    expected_scenarios = SCALE_SCENARIOS[row["scenario_profile"]]
+    if (
+        declaration.get("scenarios") != expected_scenarios
+        or not isinstance(scenarios, list)
+        or [item.get("scenario") for item in scenarios if isinstance(item, dict)]
+        != expected_scenarios
+        or len(scenarios) != len(expected_scenarios)
+        or any(not isinstance(item, dict) or item.get("passed") is not True for item in scenarios)
+    ):
+        raise RuntimeError(f"scale scenario evidence is incomplete: {relative}")
+    cleanup = declaration.get("cleanup")
+    if not isinstance(cleanup, dict) or set(cleanup) != set(expected_scenarios):
+        raise RuntimeError(f"scale cleanup declarations are incomplete: {relative}")
+    model_id = model["model_id"]
+    generations: set[int] = set()
+    for scenario in scenarios:
+        name = scenario["scenario"]
+        generation = scenario.get("generation")
+        expected_fault = {
+            "normal-drain": "operator_drain",
+            "gateway-death": "gateway_death",
+            "worker-death": "worker_death",
+            "duplicate-gateway-port": "duplicate_gateway_port",
+            "partial-worker-proxy": "partial_proxy_readiness",
+        }[name]
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation <= 0
+            or generation in generations
+            or scenario.get("deployment_plan_hash") != deployment.get("deployment_plan_hash")
+            or scenario.get("fault") != expected_fault
+        ):
+            raise RuntimeError(f"scale scenario identity is invalid: {relative}:{name}")
+        generations.add(generation)
+        if name not in {"duplicate-gateway-port", "partial-worker-proxy"}:
+            if (
+                not isinstance(scenario.get("advertised_endpoint"), str)
+                or not scenario["advertised_endpoint"]
+                or isinstance(scenario.get("ready_revision"), bool)
+                or not isinstance(scenario.get("ready_revision"), int)
+                or scenario["ready_revision"] < 0
+                or isinstance(scenario.get("terminal_revision"), bool)
+                or not isinstance(scenario.get("terminal_revision"), int)
+                or scenario["terminal_revision"] <= scenario["ready_revision"]
+            ):
+                raise RuntimeError(f"scale READY/terminal identity is invalid: {relative}:{name}")
+            _verify_scale_ready(
+                scenario,
+                deployment=deployment,
+                nodes=nodes,
+                replicas=replicas,
+                relative=f"{relative}:{name}",
+            )
+            _verify_scale_canary(
+                scenario.get("canary"), model_id=model_id, relative=f"{relative}:{name}"
+            )
+        if name == "normal-drain":
+            if (
+                scenario.get("returncode") != 143
+                or scenario.get("terminal_state") != "STOPPED"
+                or scenario.get("terminal_reason_code") != "DRAINED_AND_REAPED"
+            ):
+                raise RuntimeError(f"scale normal drain semantics are invalid: {relative}")
+            _verify_shutdown(scenario, relative, failed=False)
+        elif name == "gateway-death":
+            injection = scenario.get("fault_injection")
+            gateway_failure = scenario.get("gateway_failure")
+            if (
+                scenario.get("returncode") in {0, 143}
+                or scenario.get("terminal_state") != "FAILED"
+                or scenario.get("terminal_reason_code") != "FIRST_CAUSE"
+                or "gateway/haproxy: UNEXPECTED_EXIT" not in str(scenario.get("terminal_detail"))
+                or not isinstance(injection, dict)
+                or injection.get("kind") != "owned_gateway_death"
+                or isinstance(injection.get("pid"), bool)
+                or not isinstance(injection.get("pid"), int)
+                or injection["pid"] <= 0
+                or not isinstance(injection.get("node"), str)
+                or not injection["node"]
+                or not isinstance(gateway_failure, dict)
+                or gateway_failure.get("classification") != "process_dead"
+            ):
+                raise RuntimeError(f"scale gateway fault semantics are invalid: {relative}")
+            _verify_shutdown(scenario, relative, failed=True)
+        elif name == "worker-death":
+            detail = str(scenario.get("terminal_detail", "")).lower()
+            injection = scenario.get("fault_injection")
+            target = injection.get("target") if isinstance(injection, dict) else None
+            if (
+                scenario.get("returncode") in {0, 143}
+                or scenario.get("terminal_state") != "FAILED"
+                or scenario.get("terminal_reason_code") != "FIRST_CAUSE"
+                or f"rank {nodes - 1}" not in detail
+                or not any(term in detail for term in ("worker", "ray"))
+                or not isinstance(injection, dict)
+                or injection.get("kind") != "owned_ray_worker_death"
+                or injection.get("worker_rank") != nodes - 1
+                or not isinstance(target, dict)
+                or target.get("rank") != nodes - 1
+                or target.get("receipt_requirement_id") != f"rank{nodes - 1}/ray_worker"
+                or isinstance(target.get("pid"), bool)
+                or not isinstance(target.get("pid"), int)
+                or target["pid"] <= 0
+            ):
+                raise RuntimeError(f"scale worker fault semantics are invalid: {relative}")
+            _verify_shutdown(scenario, relative, failed=True)
+        elif name == "duplicate-gateway-port":
+            precondition = scenario.get("fault_precondition")
+            detail = (
+                f"{scenario.get('terminal_reason_code')}: {scenario.get('terminal_detail')}".lower()
+            )
+            if (
+                scenario.get("ready_revision") is not None
+                or scenario.get("terminal_state") != "FAILED"
+                or scenario.get("returncode") in {0, 143}
+                or "listener" not in detail
+                or "bind" not in detail
+                or not isinstance(precondition, dict)
+                or precondition.get("kind") != "local_gateway_port_holder"
+                or precondition.get("stopped") is not True
+            ):
+                raise RuntimeError(f"scale port collision did not fail before READY: {relative}")
+        elif name == "partial-worker-proxy":
+            history = scenario.get("status_history")
+            membership = scenario.get("membership_evidence")
+            precondition = scenario.get("fault_precondition")
+            cancelled = scenario.get("cancelled_after_observation")
+            if (
+                scenario.get("ready_revision") is not None
+                or not isinstance(history, list)
+                or any(item.get("state") == "READY" for item in history if isinstance(item, dict))
+                or not isinstance(membership, dict)
+                or membership.get("node_count") != nodes
+                or not isinstance(precondition, dict)
+                or precondition.get("kind") != "remote_worker_proxy_port_holder"
+                or scenario.get("held_node") != precondition.get("node")
+                or (
+                    cancelled is True
+                    and (
+                        scenario.get("terminal_state") != "CANCELLED"
+                        or scenario.get("returncode") != 143
+                    )
+                )
+                or (
+                    cancelled is False
+                    and (
+                        scenario.get("terminal_state") != "FAILED"
+                        or scenario.get("returncode") in {0, 143}
+                    )
+                )
+                or not isinstance(cancelled, bool)
+            ):
+                raise RuntimeError(f"scale partial proxy observation reached READY: {relative}")
+        _verify_exact_generation_cleanup(
+            cleanup[name],
+            expected_path=f"{row['output_path']}/{name}/exact_generation_cleanup.json",
+            deployment_id=str(row["gate_id"]).lower(),
+            generation=scenario.get("generation"),
+            deployment_plan_hash=scenario.get("deployment_plan_hash"),
+            nodes=nodes,
+            relative=f"{relative}:{name}",
+        )
+
+
+def _verify_scale_campaign(review: dict[str, Any]) -> None:
+    campaign = review["campaigns"]["scale"]
+    if not isinstance(campaign, dict) or set(campaign) != {"plan_path", "plan_sha256", "results"}:
+        raise RuntimeError("scale campaign has the wrong exact schema")
+    plan_path = _hashed_path(campaign, "plan_path", "plan_sha256", "scale")
+    plan = _load_json(plan_path)
+    if (
+        set(plan) != SCALE_PLAN_FIELDS
+        or plan.get("schema_version") != 3
+        or plan.get("candidate") != review["candidate"]
+    ):
+        raise RuntimeError("scale plan has the wrong schema or candidate")
+    harness = plan.get("harness")
+    support = plan.get("support")
+    if not isinstance(harness, dict) or set(harness) != SCALE_CODE_FIELDS:
+        raise RuntimeError("scale plan has an invalid harness declaration")
+    _hashed_path(harness, "path", "sha256", "scale.harness")
+    if not isinstance(support, dict) or set(support) != SCALE_SUPPORT_FIELDS:
+        raise RuntimeError("scale plan has invalid support declarations")
+    for name, declaration in support.items():
+        if not isinstance(declaration, dict) or set(declaration) != SCALE_CODE_FIELDS:
+            raise RuntimeError(f"scale support {name} has an invalid declaration")
+        _hashed_path(declaration, "path", "sha256", f"scale.support.{name}")
+    _verify_scale_approval(plan)
+
+    gates = plan.get("gates")
+    results = campaign.get("results")
+    if (
+        not isinstance(gates, list)
+        or not isinstance(results, list)
+        or len(gates) != len(SCALE_TIER_CONTRACT)
+        or len(results) != len(SCALE_TIER_CONTRACT)
+        or any(not isinstance(item, dict) for item in gates + results)
+    ):
+        raise RuntimeError("scale campaign must contain the exact 4/16/64 matrix")
+    result_by_gate = {item.get("gate_id"): item for item in results}
+    if len(result_by_gate) != len(results):
+        raise RuntimeError("scale result declarations contain duplicate gate IDs")
+    seen_nodes: set[int] = set()
+    candidate = review["candidate"]
+    for row in gates:
+        if set(row) != SCALE_GATE_FIELDS:
+            raise RuntimeError("scale gate has the wrong exact schema")
+        nodes = row.get("logical_nodes")
+        tier = SCALE_TIER_CONTRACT.get(nodes)
+        gate_id = row.get("gate_id")
+        if (
+            tier is None
+            or nodes in seen_nodes
+            or not isinstance(gate_id, str)
+            or not gate_id
+            or any(
+                character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in gate_id
+            )
+            or row.get("physical_allocation_nodes") != nodes
+            or row.get("lane") != "FINAL"
+            or row.get("engine_mode") != "real"
+            or row.get("queue") != tier["queue"]
+            or row.get("scenario_profile") != tier["scenario_profile"]
+            or row.get("attempt") != 1
+            or row.get("attempt_limit") != 1
+            or row.get("acquisition_source") not in {"subjob", "interactive_pbs", "batch_pbs"}
+            or not isinstance(row.get("node_hours"), int)
+            or isinstance(row.get("node_hours"), bool)
+            or row["node_hours"] < 1
+            or _finite(row.get("ready_timeout_s"), "scale.ready_timeout_s", 1.0) < 1.0
+            or _finite(row.get("partial_observation_s"), "scale.partial_observation_s", 1.0) < 1.0
+            or any(
+                not isinstance(row.get(field), str) or not row[field].strip()
+                for field in (
+                    "lease_ttl",
+                    "expected_runtime",
+                    "clean_state_reset_method",
+                    "retry_reason_policy",
+                )
+            )
+            or row.get("expected_observations")
+            != _scale_expected_observations(tier["scenario_profile"])
+        ):
+            raise RuntimeError(f"scale gate is outside the approved tier contract: {row!r}")
+        for path_field, hash_field in (
+            ("config_path", "config_sha256"),
+            ("deployment_plan_path", "deployment_plan_sha256"),
+            ("site_profile_path", "site_profile_sha256"),
+        ):
+            _hashed_path(row, path_field, hash_field, f"scale.{row.get('gate_id')}")
+        deployment = _load_json(
+            _repository_path(row["deployment_plan_path"], "scale.deployment_plan_path")
+        )
+        models = deployment.get("models")
+        model = models[0] if isinstance(models, list) and len(models) == 1 else None
+        replicas = model.get("replicas") if isinstance(model, dict) else None
+        gpus_per_node = deployment.get("num_gpus_per_node")
+        gateway = deployment.get("gateway")
+        exposure = deployment.get("exposure")
+        scale_envelope = deployment.get("scale_envelope")
+        runtime = deployment.get("runtime")
+        ranks = [
+            rank
+            for replica in replicas or []
+            if isinstance(replica, dict)
+            for rank in replica.get("planned_ranks", [])
+        ]
+        if (
+            deployment.get("deployment_id") != str(row.get("gate_id")).lower()
+            or deployment.get("num_nodes") != nodes
+            or deployment.get("site_profile_hash") != candidate["site_profile_hash"]
+            or deployment.get("compatibility_profile_hash")
+            != candidate["compatibility_profile_hash"]
+            or deployment.get("manifest_hash") != candidate["compatibility_manifest_hash"]
+            or deployment.get("site_profile_id") != "alcf-aurora"
+            or deployment.get("vendor") != "xpu"
+            or deployment.get("engine") != "vllm"
+            or deployment.get("validation_mode") is not True
+            or not isinstance(gateway, dict)
+            or gateway.get("kind") != "haproxy"
+            or not isinstance(exposure, dict)
+            or exposure.get("mode") != "PROXIED_INTERNAL"
+            or not isinstance(scale_envelope, dict)
+            or scale_envelope.get("site_id") != "alcf-aurora"
+            or scale_envelope.get("scheduler_type") != "pbs"
+            or scale_envelope.get("vendor") != "xpu"
+            or scale_envelope.get("accelerator") != "pvc"
+            or scale_envelope.get("engine") != "vllm"
+            or scale_envelope.get("gateway_kind") != "haproxy"
+            or scale_envelope.get("exposure_mode") != "PROXIED_INTERNAL"
+            or scale_envelope.get("request_mode") != "completion"
+            or scale_envelope.get("streaming_mode") != "non_streaming"
+            or scale_envelope.get("qualification_target_nodes") != 64
+            or scale_envelope.get("validation_mode") is not True
+            or not isinstance(runtime, dict)
+            or runtime.get("null_compute") is not False
+            or gpus_per_node != SCALE_AURORA_GPUS_PER_NODE
+            or not isinstance(model, dict)
+            or model.get("tensor_parallel_size") != 1
+            or model.get("pipeline_parallel_size") != 1
+            or model.get("num_replicas") != nodes * gpus_per_node
+            or len(ranks) != model.get("num_replicas")
+            or set(ranks) != set(range(nodes))
+            or any(ranks.count(rank) != gpus_per_node for rank in range(nodes))
+        ):
+            raise RuntimeError(
+                f"scale deployment identity or density drifted: {row.get('gate_id')}"
+            )
+        declaration = result_by_gate.pop(row.get("gate_id"), None)
+        if not isinstance(declaration, dict):
+            raise RuntimeError(f"scale gate has no exact result: {row.get('gate_id')}")
+        _verify_scale_result(
+            review,
+            plan_path,
+            campaign["plan_sha256"],
+            plan,
+            row,
+            deployment,
+            declaration,
+        )
+        seen_nodes.add(nodes)
+    if seen_nodes != set(SCALE_TIER_CONTRACT) or result_by_gate:
+        raise RuntimeError("scale campaign does not cover exactly 4, 16, and 64 nodes")
 
 
 def _verify_proxy_cleanup(
@@ -1142,6 +1758,8 @@ def verify_candidate_review(review_path: Path) -> dict[str, Any]:
     _verify_lifecycle_campaign(review)
     _verify_proxy_campaign(review)
     _verify_supervisor_campaign(review)
+    if "scale" in review["campaigns"]:
+        _verify_scale_campaign(review)
     return review
 
 
@@ -1149,6 +1767,7 @@ def _campaign_evidence(review: dict[str, Any]) -> dict[str, list[str]]:
     lifecycle = review["campaigns"]["lifecycle"]
     proxy = review["campaigns"]["proxy"]
     supervisor = review["campaigns"]["supervisor"]
+    scale = review["campaigns"].get("scale")
     package = review["packaged_gate"]
     lifecycle_paths = [item["path"] for item in lifecycle["results"]]
     by_cell: dict[tuple[int, str], str] = {}
@@ -1157,6 +1776,7 @@ def _campaign_evidence(review: dict[str, Any]) -> dict[str, list[str]]:
         by_cell[(row["logical_nodes"], row["engine_mode"])] = f"{row['output_path']}/result.json"
     proxy_paths = [item["path"] for item in proxy["results"]]
     supervisor_path = supervisor["result_path"]
+    scale_paths = [item["path"] for item in scale["results"]] if scale is not None else []
     return {
         "AC-TST-01": [
             package["receipt_path"],
@@ -1181,7 +1801,7 @@ def _campaign_evidence(review: dict[str, Any]) -> dict[str, list[str]]:
             by_cell[(2, "null")],
         ],
         "AC-INST-01": [],
-        "AC-SCALE-01": lifecycle_paths,
+        "AC-SCALE-01": [*lifecycle_paths, *scale_paths],
     }
 
 

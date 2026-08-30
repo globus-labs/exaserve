@@ -37,6 +37,9 @@ They use argument vectors, finite deadlines, process-group ownership, and
 structured handshakes/status. No shell script or stdout marker owns lifecycle or
 readiness.
 
+[`doc/design/call_graph.md`](doc/design/call_graph.md) walks the same path
+function by function, worked against the canonical two-node HAProxy example.
+
 ## Install on Aurora
 
 ```bash

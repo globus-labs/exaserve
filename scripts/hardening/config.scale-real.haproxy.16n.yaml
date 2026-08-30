@@ -1,0 +1,45 @@
+# Preparatory 16-node dense scale gate. This input is not authorized for
+# execution until its immutable experiment plan names a valid owner approval.
+ray_port: 6379
+node_cpus: 64
+num_nodes: 16
+num_gpus_per_node: 12
+validation_mode: true
+request_mode: completion
+streaming_mode: non_streaming
+
+exposure:
+  mode: PROXIED_INTERNAL
+  serve_port: 8000
+
+gateway:
+  kind: haproxy
+  port: 4001
+  backend_port: 8000
+  executable_ref: PATH:haproxy
+  worker_count: 1
+  options:
+    balance: leastconn
+    maxconn: 8000
+
+model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+local_stage_path: /tmp/hf_home
+deployment_name: exaserve_serve
+replica_max_ongoing_requests: 32
+
+runtime:
+  null_compute: false
+  instrumentation: true
+  stats_retention: 256
+  stats_push_period_s: 1.0
+  stats_sample_cap: 128
+
+models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 1024
+    size: 8
+    gpu_memory_utilization: 0.80
+    enforce_eager: true
+    max_num_seqs: 16

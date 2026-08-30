@@ -37,6 +37,7 @@ documents; historical runs do not automatically qualify the new architecture.
 
 ## Related notes
 
+- [`call_graph.md`](call_graph.md): submit-to-`READY` call graph, worked at two nodes
 - [`pluggable_interfaces.md`](pluggable_interfaces.md): engine and gateway seams
 - [`scheduler_abstraction.md`](scheduler_abstraction.md): shared scheduler boundary
 - [`vendor_site_abstraction.md`](vendor_site_abstraction.md): site and accelerator ownership

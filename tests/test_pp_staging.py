@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from exaserve.model_bcast import bcast_models, validate_model_bcast_result
-from exaserve.model_staging import COMPLETION_MARKER, check_model_exists, write_completion_marker
+from exaserve.model_staging import (
+    COMPLETION_MARKER,
+    MODEL_WEIGHT_SUFFIXES,
+    check_model_exists,
+    write_completion_marker,
+)
 from exaserve.pp_stage import (
     _validate_pp_receipt,
     assign_pp_nodes,
@@ -71,6 +76,79 @@ def test_stage_bundle_inventory_matches_dereferenced_broadcast(tmp_path):
     assert json.loads((received / COMPLETION_MARKER).read_text()) == json.loads(
         (stage / COMPLETION_MARKER).read_text()
     )
+
+
+def test_stage_bundle_excludes_unselected_weights_at_any_depth(tmp_path):
+    """Regression for an inventory class exposed by the failed four-node gate.
+
+    Retained evidence attributes that gate's 24.26 GiB transfer to a
+    dereferenced top-level `.cache` directory. A nested alternate-format weight
+    is the same class of manifest-versus-`tar -h` defect: it is not a selected
+    shard and must never enter shared metadata. Exclusion therefore has to be
+    by weight suffix at any depth, and the dereferenced payload has to stay
+    inside the planned shard budget.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text(json.dumps({"num_hidden_layers": 2}))
+    shard0 = "model-00001-of-00002.safetensors"
+    shard1 = "model-00002-of-00002.safetensors"
+    (source / shard0).write_bytes(b"0" * 4096)
+    (source / shard1).write_bytes(b"1" * 4096)
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.embed_tokens.weight": shard0,
+                    "model.layers.0.self_attn.q_proj.weight": shard0,
+                    "model.layers.1.self_attn.q_proj.weight": shard1,
+                    "lm_head.weight": shard1,
+                }
+            }
+        )
+    )
+    (source / "tokenizer.json").write_text("tokenizer")
+    original = source / "original"
+    original.mkdir()
+    # The exact shape of the Llama-3 HF repo: a second full checkpoint plus
+    # two small runtime metadata files that DO belong in every stage.
+    (original / "consolidated.00.pth").write_bytes(b"p" * 65536)
+    (original / "params.json").write_text(json.dumps({"dim": 4096}))
+    (original / "tokenizer.model").write_text("sentencepiece")
+    # Cover the rest of the suffix set at depth, too.
+    (original / "extra.bin").write_bytes(b"b" * 8192)
+    (original / "extra.pt").write_bytes(b"t" * 8192)
+    (original / "extra.gguf").write_bytes(b"g" * 8192)
+
+    stage = tmp_path / "stage"
+    summary = build_stage_dir(source, 2, 0, stage)
+    assert summary["shards"] == [shard0]
+
+    # No unselected weight rides along, at any depth.
+    carried_weights = sorted(
+        path.relative_to(stage).as_posix()
+        for path in stage.rglob("*")
+        if path.is_file() and path.name.endswith(MODEL_WEIGHT_SUFFIXES)
+    )
+    assert carried_weights == [shard0]
+
+    # Small shared runtime metadata in the same subdirectory is still carried.
+    assert (stage / "original" / "params.json").is_symlink()
+    assert (stage / "original" / "tokenizer.model").is_symlink()
+
+    # tar -h dereferences: the payload the receiver actually gets must not
+    # exceed the planned shard bytes by more than small metadata.
+    transmitted = sum(path.stat().st_size for path in stage.rglob("*") if path.is_file())
+    assert transmitted >= summary["bytes"]
+    assert transmitted - summary["bytes"] < 65536, (
+        f"stage bundle carries {transmitted - summary['bytes']} bytes beyond its "
+        f"{summary['bytes']}-byte shard budget"
+    )
+
+    received = tmp_path / "received"
+    shutil.copytree(stage, received, symlinks=False)
+    write_completion_marker(received, source_identity="test-source#pp2/stage0")
+    assert check_model_exists(received)
 
 
 def test_stage_bundle_refuses_nonempty_output(tmp_path):
