@@ -64,7 +64,7 @@ EXASERVE_TEST_INSTALLED_WHEEL=1 \
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 HF_HUB_OFFLINE=1 \
 TRANSFORMERS_OFFLINE=1 \
-  "$python_bin" -m pytest -q -p no:randomly "$repo_root" \
+  "$python_bin" -m pytest -q -x -p no:randomly "$repo_root" \
   2>&1 | tee "$output_dir/pytest.log"
 
 "$python_bin" -c "

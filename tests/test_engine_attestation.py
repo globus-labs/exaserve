@@ -167,6 +167,7 @@ def test_generated_watcher_rejects_a_non_engine_multiprocessing_helper(monkeypat
 
 
 def test_multiproc_bootstrap_exports_exact_rank_only_during_spawn(monkeypatch):
+    pytest.importorskip("vllm", reason="optional backend plugin is absent from clean wheel gate")
     from exaserve import _sitecustomize
     from vllm.v1.executor import multiproc_executor
 
