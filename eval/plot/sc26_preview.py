@@ -171,7 +171,8 @@ def extract_cell(
     if src is None:
         return None
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tag = f"{spec_stem}__n{node}"
+    # v2 refuses to synthesize TTFT/TBT from full-response or buffered timing.
+    tag = f"timing-v2__{spec_stem}__n{node}"
     sjson = CACHE_DIR / f"{tag}.json"
     snpz = CACHE_DIR / f"{tag}.npz"
     if not refresh and sjson.exists() and (not keep_arrays or snpz.exists()):
@@ -204,6 +205,8 @@ def extract_cell(
     n_meet = 0
     n_ttft_meet = [0, 0, 0]  # per TTFT_SLO_MULTI threshold
     n_tbt_meet = 0
+    timing_semantics_seen: set[str] = set()
+    per_run_timing_semantics: dict[int, set[str]] = defaultdict(set)
     # per-run counters: run_index -> [n_req, n_succ, n_tbt_meet, n_ttft1, n_ttft2, n_ttft3]
     pr_ctr: dict[int, list[int]] = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
     with open(src, "rb") as fh:
@@ -213,29 +216,25 @@ def extract_cell(
                 continue
             n_req += 1
             ok = bool(r.get("success", True))
-            ttft = r.get("ttft_s")
-            tbt = r.get("tbt_p99_s")
+            semantics = r.get("timing_semantics", "unclassified_legacy")
+            timing_semantics_seen.add(semantics)
+            per_run_timing_semantics[ri].add(semantics)
+            ttft = r.get("ttft_s") if semantics == "incremental_sse" else None
+            tbt = r.get("tbt_p99_s") if semantics == "incremental_sse" else None
             lat = r.get("latency")
             lat = float(lat) if lat is not None else float("nan")
-            # Non-stream requests carry no per-token timing (ttft_s/tbt_p99_s are
-            # null). Derive a COARSE estimate from the single E2E latency L and the
-            # completion-token count T: average per-token τ = L/T as the TBT proxy,
-            # and TTFT = L (the whole response arrives at once, so the first visible
-            # token is at L). Streaming requests use their real measured values.
-            if ttft is None and tbt is None and not np.isnan(lat):
-                comp = r.get("actual_completion_tokens") or r.get("output_len") or 0
-                comp = float(comp)
-                ttft = lat
-                tbt = (lat / comp) if comp > 0 else float("nan")
-            else:
-                ttft = float(ttft) if ttft is not None else float("nan")
-                tbt = float(tbt) if tbt is not None else float("nan")
+            # Token-delivery metrics are valid only for explicitly classified
+            # incremental SSE. Buffered and non-streaming runs retain E2E
+            # latency/throughput but cannot enter TTFT/TBT SLO comparisons.
+            ttft = float(ttft) if ttft is not None else float("nan")
+            tbt = float(tbt) if tbt is not None else float("nan")
             if ok:
                 n_success += 1
-                ttft_l.append(ttft)
-                tbt_l.append(tbt)
                 lat_l.append(lat)
-                dec_l.append(lat - ttft)
+                if semantics == "incremental_sse":
+                    ttft_l.append(ttft)
+                    tbt_l.append(tbt)
+                    dec_l.append(lat - ttft)
             ttft_meets = [ok and not np.isnan(ttft) and ttft <= thr for thr in TTFT_SLO_MULTI]
             tbt_ok = ok and not np.isnan(tbt) and tbt <= TBT_P99_SLO_S
             c = pr_ctr[ri]
@@ -256,7 +255,8 @@ def extract_cell(
     tbt_a = np.asarray(tbt_l, dtype=np.float32)
     lat_a = np.asarray(lat_l, dtype=np.float32)
     dec_a = np.asarray(dec_l, dtype=np.float32)
-    attainment = n_meet / n_req if n_req else float("nan")
+    token_timing_valid = timing_semantics_seen == {"incremental_sse"}
+    attainment = n_meet / n_req if n_req and token_timing_valid else float("nan")
     _p = lambda a, q: float(np.nanpercentile(a, q)) if a.size else float("nan")
     _frac = lambda num: (num / n_req if n_req else float("nan"))
 
@@ -271,10 +271,11 @@ def extract_cell(
         sr = (ns / nr) if nr else float("nan")
         runs_succ_rps.append(r_rps * sr)
         runs_succ_rate.append(sr)
-        runs_tbt.append(ntbt / nr if nr else float("nan"))
-        runs_t1.append(nt1 / nr if nr else float("nan"))
-        runs_t2.append(nt2 / nr if nr else float("nan"))
-        runs_t3.append(nt3 / nr if nr else float("nan"))
+        timing_valid = per_run_timing_semantics[ri] == {"incremental_sse"}
+        runs_tbt.append(ntbt / nr if nr and timing_valid else float("nan"))
+        runs_t1.append(nt1 / nr if nr and timing_valid else float("nan"))
+        runs_t2.append(nt2 / nr if nr and timing_valid else float("nan"))
+        runs_t3.append(nt3 / nr if nr and timing_valid else float("nan"))
 
     st = CellStats(
         spec=spec_stem,
@@ -285,8 +286,8 @@ def extract_cell(
         rps=rps,
         attainment=attainment,
         goodput=rps * attainment,
-        ttft_attainment=_frac(n_ttft_meet[0]),
-        tbt_attainment=_frac(n_tbt_meet),
+        ttft_attainment=(_frac(n_ttft_meet[0]) if token_timing_valid else float("nan")),
+        tbt_attainment=(_frac(n_tbt_meet) if token_timing_valid else float("nan")),
         success_rate=(n_success / n_req if n_req else float("nan")),
         ttft_p50=_p(ttft_a, 50),
         ttft_p99=_p(ttft_a, 99),
@@ -296,9 +297,9 @@ def extract_cell(
         e2e_p99=_p(lat_a, 99),
         decode_p50=_p(dec_a, 50),
         decode_p99=_p(dec_a, 99),
-        ttft_attain_1s=_frac(n_ttft_meet[0]),
-        ttft_attain_2s=_frac(n_ttft_meet[1]),
-        ttft_attain_3s=_frac(n_ttft_meet[2]),
+        ttft_attain_1s=(_frac(n_ttft_meet[0]) if token_timing_valid else float("nan")),
+        ttft_attain_2s=(_frac(n_ttft_meet[1]) if token_timing_valid else float("nan")),
+        ttft_attain_3s=(_frac(n_ttft_meet[2]) if token_timing_valid else float("nan")),
         runs_succ_rps=runs_succ_rps,
         runs_succ_rate=runs_succ_rate,
         runs_tbt_attain=runs_tbt,
@@ -312,7 +313,7 @@ def extract_cell(
 
 
 def load_arrays(spec_stem: str, node: int) -> tuple[np.ndarray, np.ndarray]:
-    npz = CACHE_DIR / f"{spec_stem}__n{node}.npz"
+    npz = CACHE_DIR / f"timing-v2__{spec_stem}__n{node}.npz"
     d = np.load(npz)
     return d["ttft"], d["tbt"]
 

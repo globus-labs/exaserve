@@ -738,12 +738,7 @@ def _compile_exposure(
                 if raw_exposure.get("auth_policy_ref") is None
                 else _string(raw_exposure["auth_policy_ref"], "deployment.exposure.auth_policy_ref")
             ),
-            request_body_limit_bytes=_integer(
-                raw_exposure.get("request_body_limit_bytes"),
-                "deployment.exposure.request_body_limit_bytes",
-                default=16 << 20,
-                minimum=1,
-            ),
+            request_body_limit_bytes=None,
             serve_port=_integer(
                 raw_exposure.get("serve_port"),
                 "deployment.exposure.serve_port",
@@ -752,6 +747,11 @@ def _compile_exposure(
                 maximum=65535,
             ),
         )
+        if "request_body_limit_bytes" in raw_exposure:
+            raise PlanError(
+                "deployment.exposure.request_body_limit_bytes is supported only "
+                "by the HAProxy gateway"
+            )
         return exposure, None
 
     kind = _string(raw_gateway.get("kind"), "deployment.gateway.kind").lower()
@@ -812,6 +812,11 @@ def _compile_exposure(
     )
     if mode != ExposureMode.PROXIED_INTERNAL.value:
         raise PlanError("a managed gateway requires deployment.exposure.mode=PROXIED_INTERNAL")
+    if kind != GatewayKind.HAPROXY.value and "request_body_limit_bytes" in raw_exposure:
+        raise PlanError(
+            "deployment.exposure.request_body_limit_bytes is supported only "
+            "by the HAProxy gateway"
+        )
     exposure = ExposurePlan(
         mode=mode,
         advertised_scheme=_string(
@@ -834,19 +839,22 @@ def _compile_exposure(
             if raw_exposure.get("auth_policy_ref") is None
             else _string(raw_exposure["auth_policy_ref"], "deployment.exposure.auth_policy_ref")
         ),
-        request_body_limit_bytes=_integer(
-            raw_exposure.get("request_body_limit_bytes"),
-            "deployment.exposure.request_body_limit_bytes",
-            default=16 << 20,
-            minimum=1,
+        request_body_limit_bytes=(
+            _integer(
+                raw_exposure.get("request_body_limit_bytes"),
+                "deployment.exposure.request_body_limit_bytes",
+                default=16 << 20,
+                minimum=1,
+                maximum=1 << 40,
+            )
+            if kind == GatewayKind.HAPROXY.value
+            else None
         ),
         serve_port=gateway.backend_port,
     )
     if kind == GatewayKind.HAPROXY.value:
         if exposure.advertised_scheme != "http":
             raise PlanError("the supported HAProxy profile does not declare TLS termination")
-        if exposure.auth_policy_ref is not None:
-            raise PlanError("the supported HAProxy profile does not implement an auth policy")
         if exposure.network_boundary != "trusted_allocation":
             raise PlanError("the first-release HAProxy boundary is trusted_allocation only")
     return exposure, gateway

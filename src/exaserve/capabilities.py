@@ -25,6 +25,20 @@ from dataclasses import dataclass
 from typing import Callable
 
 
+TIMING_INCREMENTAL_SSE = "incremental_sse"
+TIMING_BUFFERED_RESPONSE = "buffered_response"
+TIMING_COARSE_FULL_RESPONSE = "coarse_full_response"
+TIMING_UNAVAILABLE = "unavailable"
+TIMING_SEMANTICS = frozenset(
+    {
+        TIMING_INCREMENTAL_SSE,
+        TIMING_BUFFERED_RESPONSE,
+        TIMING_COARSE_FULL_RESPONSE,
+        TIMING_UNAVAILABLE,
+    }
+)
+
+
 class CapabilityUnavailable(RuntimeError):
     """A configuration requests a capability this deployment cannot provide."""
 
@@ -93,7 +107,9 @@ def _real_streaming(dest_or_proxy: str = "") -> bool:
 
 
 _PROBES: dict[str, Callable[[], bool]] = {
-    "real_streaming_metrics": lambda: True,  # checked per-run, see require_streaming
+    # This capability is run-specific.  A process-global query must fail
+    # closed; validate_deployment() resolves it from the immutable plan.
+    "real_streaming_metrics": lambda: False,
     "chat_template_fallback": _chat_fallback_allowed,
     "thread_oversubscription_guard": _thread_guards_present,
 }
@@ -156,6 +172,38 @@ def require_streaming_comparison(proxy_type: str, streaming: bool) -> None:
         )
 
 
+def classify_timing_semantics(proxy_type: str, streaming: bool) -> str:
+    """Classify what client timing fields mean for one hash-bound run.
+
+    A buffered transport is still useful for throughput/error experiments, but
+    it cannot produce token-delivery TTFT/TBT.  Non-streaming latency is a full
+    response observation, not a token timing observation.
+    """
+    if not streaming:
+        return TIMING_COARSE_FULL_RESPONSE
+    if not _real_streaming(proxy_type):
+        return TIMING_BUFFERED_RESPONSE
+    return TIMING_INCREMENTAL_SSE
+
+
+def _plan_proxy_type(config) -> str:
+    gateway = getattr(config, "gateway", None)
+    if gateway is not None:
+        return str(getattr(gateway, "kind", ""))
+    exposure = getattr(config, "exposure", None)
+    mode = str(getattr(exposure, "mode", ""))
+    if mode == "RAY_SERVE_HEAD_ONLY":
+        return "ray_serve"
+    return "direct"
+
+
+def deployment_timing_semantics(config) -> str:
+    """Return timing semantics derived entirely from a DeploymentPlan."""
+    envelope = getattr(config, "scale_envelope", None)
+    streaming = str(getattr(envelope, "streaming_mode", "non_streaming")) == "streaming"
+    return classify_timing_semantics(_plan_proxy_type(config), streaming)
+
+
 def validate_deployment(config, *, log: Callable[[str], None] = print) -> dict:
     """Check a deployment config against declared capabilities (KI-D4).
 
@@ -165,6 +213,9 @@ def validate_deployment(config, *, log: Callable[[str], None] = print) -> dict:
     report: dict[str, bool] = {}
     for capability in CAPABILITIES:
         report[capability.name] = available(capability.name)
+
+    timing_semantics = deployment_timing_semantics(config)
+    report["real_streaming_metrics"] = timing_semantics == TIMING_INCREMENTAL_SSE
 
     if not report["thread_oversubscription_guard"]:
         degrade_or_refuse("thread_oversubscription_guard", "deployment environment", log=log)

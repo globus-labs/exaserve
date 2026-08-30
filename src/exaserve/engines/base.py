@@ -29,6 +29,23 @@ import math
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 
+def count_tokenizer_prompt_tokens(tokenizer: Any, prompt: str, *, backend_name: str) -> int:
+    """Return an exact, validated count from a backend's live tokenizer."""
+    # Both supported engines tokenize text prompts through ``encode(prompt)``.
+    # Preserve that tokenizer-defined special-token policy instead of imposing
+    # a second policy in the HTTP host.
+    token_ids = tokenizer.encode(prompt)
+    if isinstance(token_ids, (str, bytes)):
+        raise RuntimeError(f"{backend_name} tokenizer returned text instead of token ids")
+    try:
+        count = len(token_ids)
+    except TypeError as exc:
+        raise RuntimeError(f"{backend_name} tokenizer returned unsized token ids") from exc
+    if type(count) is not int or count < 0:
+        raise RuntimeError(f"{backend_name} tokenizer returned invalid token count {count!r}")
+    return count
+
+
 def merge_engine_kwargs(
     canonical: Dict[str, Any],
     extra: Dict[str, Any],
@@ -196,6 +213,7 @@ class EngineBackend(ABC):
         engine.create(spec)                       # heavy: instantiate on tile(s)
         await engine.warmup()                     # optional (Serve reconfigure)
         prompt = engine.build_chat_prompt(...)    # tokenizer apply_chat_template
+        prompt_tokens = engine.count_prompt_tokens(prompt)
         res  = await engine.generate(prompt, sampling)
         async for d in engine.generate_stream(prompt, sampling): ...
     """
@@ -225,6 +243,16 @@ class EngineBackend(ABC):
             messages,
             add_generation_prompt=add_generation_prompt and not continue_final_message,
         )
+
+    @abstractmethod
+    def count_prompt_tokens(self, prompt: str) -> int:
+        """Count a rendered prompt with the tokenizer used by this backend.
+
+        The serving host uses this count to reject requests that cannot fit in
+        the configured context window *before* it commits streaming response
+        headers. Concrete model backends must therefore use their live engine
+        tokenizer and its normal special-token policy, not an approximation.
+        """
 
     @abstractmethod
     async def generate(self, prompt: str, sampling: Dict[str, Any]) -> GenResult:
@@ -271,6 +299,11 @@ class NullEngine(EngineBackend):
 
     def create(self, spec: EngineSpec) -> None:
         self.model_id = spec.model_id
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        # NullEngine is a validation-only backend with no model tokenizer. Its
+        # generator reports this same deterministic pseudo-token count.
+        return len(prompt.split())
 
     @staticmethod
     def _max_tokens(sampling: Dict[str, Any]) -> int:

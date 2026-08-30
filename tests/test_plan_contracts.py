@@ -380,6 +380,65 @@ def test_direct_exposure_compiles_only_in_explicit_validation_mode():
     )
     assert plan.gateway is None
     assert not plan.is_production_exposure()
+    assert plan.exposure.request_body_limit_bytes is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("advertised_path", "/custom", r"advertised_path must be /v1"),
+        ("auth_policy_ref", "secret://auth", r"auth_policy_ref is unsupported"),
+        ("advertised_scheme", "https", r"advertised_scheme must be http"),
+        (
+            "network_boundary",
+            "public",
+            r"network_boundary must be trusted_allocation",
+        ),
+    ],
+)
+def test_first_release_exposure_surface_rejects_unimplemented_claims(field, value, message):
+    with pytest.raises(PlanError, match=message):
+        compile_deployment_plan(
+            _raw(exposure={field: value}),
+            site=_site(),
+            deployment_id="unsupported-exposure-claim",
+        )
+
+
+def test_request_body_limit_is_hash_bound_only_where_haproxy_enforces_it():
+    default = compile_deployment_plan(_raw(), site=_site(), deployment_id="bounded")
+    bounded = compile_deployment_plan(
+        _raw(exposure={"request_body_limit_bytes": 4096}),
+        site=_site(),
+        deployment_id="bounded",
+    )
+    assert default.exposure.request_body_limit_bytes == 16 << 20
+    assert bounded.exposure.request_body_limit_bytes == 4096
+    assert bounded.deployment_plan_hash != default.deployment_plan_hash
+
+    with pytest.raises(PlanError, match="supported only by the HAProxy gateway"):
+        compile_deployment_plan(
+            _raw(
+                gateway=None,
+                validation_mode=True,
+                exposure={
+                    "mode": "DIRECT_VALIDATION",
+                    "request_body_limit_bytes": 4096,
+                },
+            ),
+            site=_site(),
+            deployment_id="unbounded-direct",
+        )
+    with pytest.raises(PlanError, match="supported only by the HAProxy gateway"):
+        compile_deployment_plan(
+            _raw(
+                gateway={"kind": "envoy", "port": 4001},
+                validation_mode=True,
+                exposure={"request_body_limit_bytes": 4096},
+            ),
+            site=_site(gateway_kinds=("haproxy", "envoy")),
+            deployment_id="unbounded-envoy",
+        )
 
 
 def test_head_only_is_an_explicit_gateway_free_benchmark_topology():

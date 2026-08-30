@@ -125,6 +125,11 @@ def _request_meets_slo(req: dict, preset: SLOPreset) -> bool:
     """
     if not req.get("success", True):
         return False
+    needs_token_timing = any(
+        value is not None for value in (preset.ttft_s, preset.tpot_s, preset.tbt_p99_s)
+    )
+    if needs_token_timing and req.get("timing_semantics") != "incremental_sse":
+        return False
     if preset.e2e_s is not None:
         lat = req.get("latency")
         if lat is None or lat > preset.e2e_s:
@@ -174,11 +179,17 @@ def _strip_warmup(result: dict) -> tuple[dict, int]:
 
 
 def _has_ttft(reqs: list[dict]) -> bool:
-    return any(r.get("ttft_s") is not None for r in reqs[:200])
+    return any(
+        r.get("timing_semantics") == "incremental_sse" and r.get("ttft_s") is not None
+        for r in reqs[:200]
+    )
 
 
 def _has_tbt(reqs: list[dict]) -> bool:
-    return any(r.get("tbt_p99_s") is not None for r in reqs[:200])
+    return any(
+        r.get("timing_semantics") == "incremental_sse" and r.get("tbt_p99_s") is not None
+        for r in reqs[:200]
+    )
 
 
 def _compute_goodput(result: dict, preset: SLOPreset) -> dict:
@@ -201,9 +212,9 @@ def _compute_goodput(result: dict, preset: SLOPreset) -> dict:
         (preset.ttft_s is not None) or (preset.tpot_s is not None) or (preset.tbt_p99_s is not None)
     )
     if needs_stream and not has_ttft:
-        # The preset has a TTFT/TPOT term but the run was non-streaming.
-        # Caller should warn; we still report attainment based only on E2E
-        # components (effectively just success/error check).
+        # The preset has a token-delivery term but the run is buffered,
+        # non-streaming, or legacy-unclassified. Every request has already
+        # failed the complete preset above; the caller may additionally warn.
         pass
     return {
         "rps": rps,

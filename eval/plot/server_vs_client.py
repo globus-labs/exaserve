@@ -40,8 +40,9 @@ def client_side(run_dir: Path) -> dict:
             if not r.get("success", True):
                 nerr += 1
                 continue
-            t = r.get("ttft_s")
-            b = r.get("tbt_p99_s")
+            incremental = r.get("timing_semantics") == "incremental_sse"
+            t = r.get("ttft_s") if incremental else None
+            b = r.get("tbt_p99_s") if incremental else None
             l = r.get("latency")
             if t is not None:
                 ttft.append(float(t))

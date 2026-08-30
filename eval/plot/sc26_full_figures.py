@@ -247,29 +247,28 @@ def extract_run(stem, n, good):
     lat = []
     dec = []
     nreq = nsucc = nmeet = nttft = ntbt = 0
+    timing_semantics_seen = set()
     with open(src, "rb") as fh:
         for r in ijson.items(fh, "requests.item"):
             if int(r.get("run_index", 0)) not in good:
                 continue
             nreq += 1
             ok = bool(r.get("success", True))
-            t = r.get("ttft_s")
-            b = r.get("tbt_p99_s")
+            semantics = r.get("timing_semantics", "unclassified_legacy")
+            timing_semantics_seen.add(semantics)
+            t = r.get("ttft_s") if semantics == "incremental_sse" else None
+            b = r.get("tbt_p99_s") if semantics == "incremental_sse" else None
             l = r.get("latency")
             l = float(l) if l is not None else float("nan")
-            if t is None and b is None and not np.isnan(l):
-                comp = float(r.get("actual_completion_tokens") or r.get("output_len") or 0)
-                t = l
-                b = (l / comp) if comp > 0 else float("nan")
-            else:
-                t = float(t) if t is not None else float("nan")
-                b = float(b) if b is not None else float("nan")
+            t = float(t) if t is not None else float("nan")
+            b = float(b) if b is not None else float("nan")
             if ok:
                 nsucc += 1
-                ttft.append(t)
-                tbt.append(b)
                 lat.append(l)
-                dec.append(l - t)
+                if semantics == "incremental_sse":
+                    ttft.append(t)
+                    tbt.append(b)
+                    dec.append(l - t)
             tok = ok and not np.isnan(t) and t <= P.TTFT_SLO_S
             bok = ok and not np.isnan(b) and b <= P.TBT_P99_SLO_S
             if tok:
@@ -281,7 +280,8 @@ def extract_run(stem, n, good):
     arr = lambda x: np.asarray(x, dtype=np.float32)
     _p = lambda a, q: float(np.nanpercentile(a, q)) if a.size else float("nan")
     ta, ba, la, da = arr(ttft), arr(tbt), arr(lat), arr(dec)
-    att = nmeet / nreq if nreq else float("nan")
+    timing_valid = timing_semantics_seen == {"incremental_sse"}
+    att = nmeet / nreq if nreq and timing_valid else float("nan")
     return CellStats(
         spec=stem,
         node=n,
@@ -291,8 +291,8 @@ def extract_run(stem, n, good):
         rps=rps,
         attainment=att,
         goodput=rps * att,
-        ttft_attainment=(nttft / nreq if nreq else float("nan")),
-        tbt_attainment=(ntbt / nreq if nreq else float("nan")),
+        ttft_attainment=(nttft / nreq if nreq and timing_valid else float("nan")),
+        tbt_attainment=(ntbt / nreq if nreq and timing_valid else float("nan")),
         success_rate=(nsucc / nreq if nreq else float("nan")),
         ttft_p50=_p(ta, 50),
         ttft_p99=_p(ta, 99),
@@ -461,12 +461,12 @@ def fig1_proxy_scaling(S, NS, wide=True):
     _throughput_panel(a_tps, S, "stream", "Successful throughput — streaming")
     _throughput_panel(a_tpn, NS, "nonstream", "Successful throughput — non-streaming")
 
-    # row 1, left) TBT attainment — both modes.
+    # row 1, left) TBT attainment — incremental SSE only. Non-stream and
+    # buffered transports remain visible in throughput/E2E panels, not here.
     for p in PROXIES:
-        for mode, src in (("stream", S), ("nonstream", NS)):
-            xs, ys, es = _collect(src, p, "tbt")
-            if xs:
-                ps.line(a_tbt, xs, ys, p, mode, yerr=es)
+        xs, ys, es = _collect(S, p, "tbt")
+        if xs:
+            ps.line(a_tbt, xs, ys, p, "stream", yerr=es)
     # Top is 1.8, not 1.18. AnnotationStacker flips a whole x-group DOWNWARD when
     # its upward stack would hit the ceiling, and that drops the near-zero labels
     # onto the x-tick row. The upper band is label space: a group needs min_gap
@@ -477,12 +477,11 @@ def fig1_proxy_scaling(S, NS, wide=True):
     a_tbt.set_yticks([0.0, 0.5, 1.0])  # the 0.25 steps drop out at iter11 height
     a_tbt.set_title("TBT attainment — P99 TBT ≤ 250ms", loc="left")
 
-    # row 1, right) TTFT attainment (2s budget) — both modes (merged from fig1_ttft).
+    # row 1, right) TTFT attainment (2s budget) — incremental SSE only.
     for p in PROXIES:
-        for mode, src in (("stream", S), ("nonstream", NS)):
-            xs, ys, es = _collect(src, p, "ttft2")
-            if xs:
-                ps.line(a_ttft, xs, ys, p, mode, yerr=es)
+        xs, ys, es = _collect(S, p, "ttft2")
+        if xs:
+            ps.line(a_ttft, xs, ys, p, "stream", yerr=es)
     a_ttft.set_ylim(-0.05, 1.8)
     a_ttft.set_ylabel("attainment")
     a_ttft.set_yticks([0.0, 0.5, 1.0])
@@ -653,19 +652,18 @@ def fig1_proxy_scaling(S, NS, wide=True):
 
 def fig1_ttft(S, NS):
     """TTFT attainment vs cluster size, one standalone figure per first-token
-    budget (1s / 2s / 3s) — pulled out of fig1 because three thresholds in one
-    panel were too noisy. Stream solid / non-stream dashed (coarse TTFT=L)."""
+    budget. Only explicitly classified incremental-SSE observations are
+    eligible; buffered and non-streaming runs remain in throughput/E2E plots."""
     outs = []
     for kind, sec in (("ttft2", 2),):  # 2s budget only (matches the 2s reference SLO)
         fig, axx = plt.subplots(figsize=(COL_W, 1.68))
         stk = ps.AnnotationStacker(axx, "{:.2f}", 7)
         for p in PROXIES:
-            for mode, src in (("stream", S), ("nonstream", NS)):
-                xs, ys, es = _collect(src, p, kind)
-                if not xs:
-                    continue
-                ps.line(axx, xs, ys, p, mode, label=ps.plabel(p, mode), yerr=es)
-                stk.add_series(xs, ys, COLORS[p], dashed=ps.is_dashed(mode))
+            xs, ys, es = _collect(S, p, kind)
+            if not xs:
+                continue
+            ps.line(axx, xs, ys, p, "stream", label=ps.plabel(p, "stream"), yerr=es)
+            stk.add_series(xs, ys, COLORS[p], dashed=False)
         _node_axis(axx)
         axx.set_ylim(-0.05, 1.18)
         axx.set_ylabel(f"TTFT attainment (≤ {sec}s)")
@@ -676,8 +674,8 @@ def fig1_ttft(S, NS):
             fig,
             f"TTFT attainment at a {sec}s first-token budget vs. cluster size",
             [
-                "Streaming (solid) vs non-stream (dashed) · error bars = $\\pm$std over runs",
-                "non-stream TTFT is a coarse estimate (= full E2E latency L; no per-token timing captured)",
+                "Incremental-SSE observations only · error bars = $\\pm$std over runs",
+                "buffered and non-streaming runs have no token-delivery TTFT classification",
             ]
             + CFG_8B,
         )

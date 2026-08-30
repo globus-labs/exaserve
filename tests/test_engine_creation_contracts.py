@@ -61,6 +61,26 @@ def test_null_engine_labels_approximate_token_accounting():
     assert result.prompt_tokens == 3
     assert result.completion_tokens == 2
     assert result.token_count_source == "whitespace_approximation"
+    assert engine.count_prompt_tokens("one two three") == 3
+
+
+@pytest.mark.parametrize("backend_type", [VLLMEngine, SGLangEngine])
+def test_model_backends_count_with_their_live_tokenizer(backend_type):
+    calls = []
+
+    class Tokenizer:
+        def encode(self, prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            return [11, 12, 13]
+
+    backend = backend_type()
+    if isinstance(backend, VLLMEngine):
+        backend.engine = SimpleNamespace(get_tokenizer=lambda: Tokenizer())
+    else:
+        backend.tokenizer = Tokenizer()
+
+    assert backend.count_prompt_tokens("rendered prompt") == 3
+    assert calls == [("rendered prompt", {})]
 
 
 def test_vllm_empty_stream_is_not_rendered_as_a_success(monkeypatch):

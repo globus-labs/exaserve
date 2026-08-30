@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 
 from exaserve.request_validation import (
+    ContextLengthExceeded,
     RequestValidationError,
     parse_sampling,
+    validate_context_window,
     validate_chat_options,
     validate_messages,
     validate_model_field,
@@ -84,3 +86,36 @@ def test_completion_prompt_rejects_unimplemented_batch_forms():
     for unsupported in (["one", "two"], [1, 2], None, 7):
         with pytest.raises(RequestValidationError, match="prompt must be a string"):
             validate_prompt(unsupported)
+
+
+def test_context_window_accepts_the_exact_boundary_and_rejects_one_token_over():
+    validate_context_window(
+        prompt_tokens=5,
+        requested_completion_tokens=3,
+        max_model_len=8,
+        prompt_param="prompt",
+    )
+
+    with pytest.raises(ContextLengthExceeded) as excinfo:
+        validate_context_window(
+            prompt_tokens=5,
+            requested_completion_tokens=4,
+            max_model_len=8,
+            prompt_param="prompt",
+        )
+    error = excinfo.value
+    assert error.code == "context_length_exceeded"
+    assert error.error_type == "invalid_request_error"
+    assert error.param == "max_tokens"
+    assert error.total_tokens == 9
+
+
+def test_context_window_attributes_a_prompt_that_alone_exceeds_the_limit():
+    with pytest.raises(ContextLengthExceeded) as excinfo:
+        validate_context_window(
+            prompt_tokens=9,
+            requested_completion_tokens=1,
+            max_model_len=8,
+            prompt_param="messages",
+        )
+    assert excinfo.value.param == "messages"

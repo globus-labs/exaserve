@@ -1647,7 +1647,12 @@ class CompositionRoot:
             except PortUnavailable as exc:
                 raise CompositionError(f"planned HAProxy listener cannot bind: {exc}") from exc
             try:
-                options["request_body_limit_bytes"] = self.plan.exposure.request_body_limit_bytes
+                request_body_limit_bytes = self.plan.exposure.request_body_limit_bytes
+                if request_body_limit_bytes is None:
+                    raise CompositionError(
+                        "compiled HAProxy exposure has no enforced request-body limit"
+                    )
+                options["request_body_limit_bytes"] = request_body_limit_bytes
                 options["bind_target"] = f"fd@{self._gateway_listener.fileno()}"
                 if not options.get("nbthread"):
                     options["nbthread"] = gateway.worker_count

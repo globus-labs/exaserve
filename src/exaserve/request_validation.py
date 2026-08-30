@@ -19,6 +19,60 @@ class RequestValidationError(ValueError):
     """A request body failed validation; the handler returns HTTP 400."""
 
 
+class ContextLengthExceeded(RequestValidationError):
+    """The rendered prompt and requested output cannot fit the model context."""
+
+    error_type = "invalid_request_error"
+    code = "context_length_exceeded"
+
+    def __init__(
+        self,
+        *,
+        prompt_tokens: int,
+        requested_completion_tokens: int,
+        max_model_len: int,
+        prompt_param: str,
+    ) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.requested_completion_tokens = requested_completion_tokens
+        self.max_model_len = max_model_len
+        self.total_tokens = prompt_tokens + requested_completion_tokens
+        self.param = prompt_param if prompt_tokens > max_model_len else "max_tokens"
+        super().__init__(
+            f"maximum context length is {max_model_len} tokens, but the rendered prompt uses "
+            f"{prompt_tokens} tokens and requests {requested_completion_tokens} completion "
+            f"tokens ({self.total_tokens} total)"
+        )
+
+
+def validate_context_window(
+    *,
+    prompt_tokens: int,
+    requested_completion_tokens: int,
+    max_model_len: int,
+    prompt_param: str,
+) -> None:
+    """Reject an over-context request using trusted, exact tokenizer counts."""
+    values = {
+        "prompt_tokens": prompt_tokens,
+        "requested_completion_tokens": requested_completion_tokens,
+        "max_model_len": max_model_len,
+    }
+    for name, value in values.items():
+        minimum = 0 if name == "prompt_tokens" else 1
+        if type(value) is not int or value < minimum:
+            raise RuntimeError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if not isinstance(prompt_param, str) or not prompt_param:
+        raise RuntimeError("prompt_param must be non-empty text")
+    if prompt_tokens + requested_completion_tokens > max_model_len:
+        raise ContextLengthExceeded(
+            prompt_tokens=prompt_tokens,
+            requested_completion_tokens=requested_completion_tokens,
+            max_model_len=max_model_len,
+            prompt_param=prompt_param,
+        )
+
+
 def _req_float(body: dict, key: str, *, lo: float, hi: float) -> float:
     value = body[key]
     if isinstance(value, bool) or not isinstance(value, (int, float)):

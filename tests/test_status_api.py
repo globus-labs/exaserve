@@ -25,6 +25,7 @@ from exaserve.status_api import (
     DeploymentNotReady,
     InvalidDeploymentStatus,
     DeploymentStatusPublisher,
+    StatusClock,
     StatusPublicationError,
     load_status_allocation_binding,
     read_deployment_status,
@@ -57,11 +58,16 @@ def _binding(plan, generation=3):
     )
 
 
-def _publisher(tmp_path, generation=3, *, head_only: bool = False):
+def _publisher(tmp_path, generation=3, *, head_only: bool = False, clock=None):
     plan = _plan(head_only=head_only)
     binding = _binding(plan, generation)
     pub = DeploymentStatusPublisher(
-        str(tmp_path), plan=plan, binding=binding, generation=generation, log=lambda *_: None
+        str(tmp_path),
+        plan=plan,
+        binding=binding,
+        generation=generation,
+        log=lambda *_: None,
+        clock=clock,
     )
     pub.initialize()
     return pub, plan, binding
@@ -338,31 +344,66 @@ def test_tampered_ready_receipt_manifest_fails_closed(tmp_path):
         read_deployment_status(str(tmp_path))
 
 
-def test_ready_evidence_expires_and_refresh_is_cas_published(tmp_path, monkeypatch):
-    pub, _, _ = _publisher(tmp_path)
-    _walk_to_ready(pub)
-    status = read_deployment_status(str(tmp_path))
-    revision = status.revision
-    expires = status.readiness_snapshot["lease_expires_at"]
+def _fake_status_clock(state, *, boot_id="boot-a"):
+    return StatusClock(
+        wall_time=lambda: state["wall"],
+        monotonic_time=lambda: state["monotonic"],
+        boot_id=lambda: boot_id,
+    )
 
+
+def test_ready_evidence_uses_monotonic_expiry_and_refresh_is_cas_published(tmp_path):
+    state = {"wall": 2_000_000_000.0, "monotonic": 100.0}
+    clock = _fake_status_clock(state)
+    pub, _, _ = _publisher(tmp_path, clock=clock)
+    _walk_to_ready(pub)
+    status = read_deployment_status(str(tmp_path), clock=clock)
+    revision = status.revision
+    expires = status.readiness_snapshot["lease_expires_monotonic"]
+
+    # Wall-clock jumps in either direction are evidence changes only. They
+    # cannot revoke or extend the monotonic READY lease.
+    state["wall"] += 1_000_000_000.0
+    assert read_deployment_status(str(tmp_path), clock=clock).ready
+    state["wall"] = 1.0
+    assert read_deployment_status(str(tmp_path), clock=clock).ready
+
+    state["monotonic"] += 1.0
     pub.refresh_ready(
         readiness_snapshot=status.readiness_snapshot,
         model_map=status.model_map,
         capability_map=status.capability_map,
         receipt_hashes=list(status.receipt_hashes),
     )
-    refreshed = read_deployment_status(str(tmp_path))
+    refreshed = read_deployment_status(str(tmp_path), clock=clock)
     assert refreshed.revision == revision + 1
-    assert refreshed.readiness_snapshot["lease_expires_at"] >= expires
+    assert refreshed.readiness_snapshot["lease_expires_monotonic"] > expires
 
-    import exaserve.status_api as api
-
-    monkeypatch.setattr(
-        api.time, "time", lambda: refreshed.readiness_snapshot["lease_expires_at"] + 1
-    )
-    assert read_deployment_status(str(tmp_path)).ready is False
+    state["monotonic"] = refreshed.readiness_snapshot["lease_expires_monotonic"]
+    assert read_deployment_status(str(tmp_path), clock=clock).ready is False
     with pytest.raises(DeploymentNotReady, match="lease expired"):
-        require_ready_endpoint(str(tmp_path))
+        require_ready_endpoint(str(tmp_path), clock=clock)
+
+
+def test_ready_lease_survives_reader_restart_on_same_boot_and_expires_on_boot_change(tmp_path):
+    state = {"wall": 2_000_000_000.0, "monotonic": 100.0}
+    publisher_clock = _fake_status_clock(state, boot_id="boot-a")
+    pub, _, _ = _publisher(tmp_path, clock=publisher_clock)
+    _walk_to_ready(pub)
+
+    # A separately constructed clock models a new reader process. Kernel
+    # monotonic time remains comparable for the duration of the same boot.
+    restarted_reader_clock = _fake_status_clock(state, boot_id="boot-a")
+    assert read_deployment_status(
+        str(tmp_path), clock=restarted_reader_clock
+    ).ready
+
+    rebooted_reader_clock = _fake_status_clock(state, boot_id="boot-b")
+    assert not read_deployment_status(
+        str(tmp_path), clock=rebooted_reader_clock
+    ).ready
+    with pytest.raises(DeploymentNotReady, match="lease expired"):
+        require_ready_endpoint(str(tmp_path), clock=rebooted_reader_clock)
 
 
 def test_ready_heartbeats_do_not_grow_transition_history_without_bound(tmp_path):

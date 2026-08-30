@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -131,6 +132,44 @@ def test_fake_streaming_cannot_enter_a_real_streaming_comparison():
     # A real streaming proxy is fine, and a non-streaming run is unaffected.
     caps.require_streaming_comparison("haproxy", streaming=True)
     caps.require_streaming_comparison("litellm", streaming=False)
+
+
+@pytest.mark.parametrize(
+    ("proxy", "streaming", "expected"),
+    [
+        ("haproxy", True, caps.TIMING_INCREMENTAL_SSE),
+        ("envoy", True, caps.TIMING_INCREMENTAL_SSE),
+        ("litellm", True, caps.TIMING_BUFFERED_RESPONSE),
+        ("litellm", False, caps.TIMING_COARSE_FULL_RESPONSE),
+    ],
+)
+def test_timing_semantics_are_explicit(proxy, streaming, expected):
+    assert caps.classify_timing_semantics(proxy, streaming) == expected
+
+
+def test_litellm_streaming_deployment_does_not_claim_real_token_timing(monkeypatch):
+    monkeypatch.setenv("RAYON_NUM_THREADS", "1")
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "false")
+    plan = SimpleNamespace(
+        gateway=SimpleNamespace(kind="litellm"),
+        exposure=SimpleNamespace(mode="PROXIED_INTERNAL"),
+        scale_envelope=SimpleNamespace(streaming_mode="streaming"),
+    )
+    report = caps.validate_deployment(plan)
+    assert report["real_streaming_metrics"] is False
+    assert caps.deployment_timing_semantics(plan) == caps.TIMING_BUFFERED_RESPONSE
+
+
+def test_haproxy_incremental_streaming_claim_is_plan_specific(monkeypatch):
+    monkeypatch.setenv("RAYON_NUM_THREADS", "1")
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "false")
+    plan = SimpleNamespace(
+        gateway=SimpleNamespace(kind="haproxy"),
+        exposure=SimpleNamespace(mode="PROXIED_INTERNAL"),
+        scale_envelope=SimpleNamespace(streaming_mode="streaming"),
+    )
+    assert caps.validate_deployment(plan)["real_streaming_metrics"] is True
+    assert caps.available("real_streaming_metrics") is False
 
 
 def test_aurora_xpu_isolation_never_introduces_oneapi_selector(monkeypatch):

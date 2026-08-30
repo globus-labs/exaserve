@@ -13,7 +13,15 @@ import uuid
 from typing import Any, AsyncIterator, Dict, Optional
 
 from ..exception_notes import add_exception_note
-from .base import EngineBackend, EngineCaps, EngineSpec, GenDelta, GenResult, merge_engine_kwargs
+from .base import (
+    EngineBackend,
+    EngineCaps,
+    EngineSpec,
+    GenDelta,
+    GenResult,
+    count_tokenizer_prompt_tokens,
+    merge_engine_kwargs,
+)
 
 
 class SGLangEngine(EngineBackend):
@@ -186,6 +194,9 @@ class SGLangEngine(EngineBackend):
         )
 
     # ---- prompt --------------------------------------------------------------
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return count_tokenizer_prompt_tokens(self.tokenizer, prompt, backend_name="SGLang")
 
     def build_chat_prompt(
         self,

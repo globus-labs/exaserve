@@ -75,7 +75,9 @@ def _ttft_stats(data: dict) -> tuple[float, float, float]:
     ts = [
         r["ttft_s"]
         for r in data.get("requests", [])
-        if r.get("ttft_s") is not None and r.get("success")
+        if r.get("timing_semantics") == "incremental_sse"
+        and r.get("ttft_s") is not None
+        and r.get("success")
     ]
     if not ts:
         return float("nan"), float("nan"), float("nan")

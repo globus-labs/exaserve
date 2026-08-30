@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 import eval.site_config as site_config
+from eval.lib import run_executor
 from eval.lib.backends import get_backend_adapter
 from eval.lib.matrix import expand_matrix
 from eval.lib.models import VariantSpec
@@ -1027,6 +1028,39 @@ def test_cli_validate_and_submit_all_exact_run_group_dry_run(temp_spec, tmp_path
     assert submit_all.returncode == 0
     assert "run1" in submit_all.stdout
     assert "run0" not in submit_all.stdout
+
+
+def test_submit_all_rejects_mixed_scheduler_group_before_scheduler_contact(
+    tmp_path, monkeypatch, capsys
+):
+    from types import SimpleNamespace
+
+    plans = [
+        SimpleNamespace(scheduler=SimpleNamespace(type="pbs")),
+        SimpleNamespace(scheduler=SimpleNamespace(type="slurm")),
+    ]
+    monkeypatch.setattr(run_executor, "_all_run_plans", lambda _group_dir: plans)
+    monkeypatch.setattr(
+        run_executor,
+        "_reconcile_ambiguous_runs",
+        lambda _group_dir: pytest.fail("mixed groups must fail before reconciliation"),
+    )
+    monkeypatch.setattr(
+        run_executor,
+        "get_scheduler",
+        lambda _kind: pytest.fail("mixed groups must not contact a scheduler"),
+    )
+    heartbeat = SimpleNamespace(ensure_held=lambda: None)
+
+    assert (
+        run_executor._submit_all_locked(
+            str(tmp_path), "mixed", False, 1, heartbeat
+        )
+        == 1
+    )
+    output = capsys.readouterr().out
+    assert "Mixed scheduler types" in output
+    assert "No scheduler was contacted" in output
 
 
 def test_plot_scripts_resolve_an_exact_run_group_and_result(tmp_path, monkeypatch):

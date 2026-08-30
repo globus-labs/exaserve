@@ -24,7 +24,15 @@ EXP = get_runs_root()
 
 
 def _ttft(reqs):
-    ts = sorted([r["ttft_s"] for r in reqs if r.get("ttft_s") is not None and r.get("success")])
+    ts = sorted(
+        [
+            r["ttft_s"]
+            for r in reqs
+            if r.get("timing_semantics") == "incremental_sse"
+            and r.get("ttft_s") is not None
+            and r.get("success")
+        ]
+    )
     if not ts:
         return float("nan"), float("nan"), float("nan")
     return ts[len(ts) // 2], ts[int(len(ts) * 0.95)], ts[int(len(ts) * 0.99)]

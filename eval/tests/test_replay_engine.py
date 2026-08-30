@@ -6,10 +6,53 @@ os.environ.setdefault("MPI4PY_RC_INITIALIZE", "0")
 
 from eval.lib.replay_engine import (
     TraceRequest,
+    _classified_timing_fields,
     _probe_direct_target,
     _summarize_run_results,
     _wait_for_direct_targets,
 )
+
+
+def test_incremental_sse_exposes_token_delivery_metrics() -> None:
+    fields = _classified_timing_fields(
+        "incremental_sse",
+        first_byte_s=1.0,
+        first_byte_at=2.0,
+        interchunk_p50_s=0.1,
+        interchunk_p99_s=0.2,
+        interchunk_max_s=0.3,
+    )
+    assert fields["ttft_s"] == 1.0
+    assert fields["tbt_p99_s"] == 0.2
+    assert fields["observed_first_byte_s"] == 1.0
+
+
+@pytest.mark.parametrize("semantics", ["buffered_response", "coarse_full_response"])
+def test_nonincremental_timing_is_retained_but_not_reported_as_ttft_tbt(semantics) -> None:
+    fields = _classified_timing_fields(
+        semantics,
+        first_byte_s=4.0,
+        first_byte_at=5.0,
+        interchunk_p50_s=0.0,
+        interchunk_p99_s=0.0,
+        interchunk_max_s=0.0,
+    )
+    assert fields["timing_semantics"] == semantics
+    assert fields["observed_first_byte_s"] == 4.0
+    assert fields["ttft_s"] is None
+    assert fields["tbt_p99_s"] is None
+
+
+def test_unknown_timing_semantics_fail_closed() -> None:
+    with pytest.raises(ValueError, match="unknown timing semantics"):
+        _classified_timing_fields(
+            "pretend_streaming",
+            first_byte_s=1.0,
+            first_byte_at=2.0,
+            interchunk_p50_s=0.1,
+            interchunk_p99_s=0.2,
+            interchunk_max_s=0.3,
+        )
 
 
 def test_summarize_run_results_raw_rows() -> None:

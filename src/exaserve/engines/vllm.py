@@ -15,7 +15,15 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Dict, Optional
 
-from .base import EngineBackend, EngineCaps, EngineSpec, GenDelta, GenResult, merge_engine_kwargs
+from .base import (
+    EngineBackend,
+    EngineCaps,
+    EngineSpec,
+    GenDelta,
+    GenResult,
+    count_tokenizer_prompt_tokens,
+    merge_engine_kwargs,
+)
 from ..exception_notes import add_exception_note
 
 
@@ -359,6 +367,10 @@ class VLLMEngine(EngineBackend):
             raise RuntimeError("; ".join(failures))
 
     # ---- prompt --------------------------------------------------------------
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        tokenizer = self.engine.get_tokenizer()
+        return count_tokenizer_prompt_tokens(tokenizer, prompt, backend_name="vLLM")
 
     def build_chat_prompt(
         self,

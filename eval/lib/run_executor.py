@@ -1230,6 +1230,20 @@ def _submit_all_locked(
     heartbeat,
 ) -> int:
     heartbeat.ensure_held()
+    scheduler_types = sorted(
+        {
+            getattr(run_plan.scheduler, "type", "pbs")
+            for run_plan in _all_run_plans(group_dir)
+        }
+    )
+    if len(scheduler_types) > 1:
+        print(
+            "Mixed scheduler types in one submit-all group are unsupported by "
+            f"the PBS release control plane: {scheduler_types}. "
+            "No scheduler was contacted and no jobs were submitted.",
+            flush=True,
+        )
+        return 1
     reconciliation_errors = _reconcile_ambiguous_runs(group_dir)
     if reconciliation_errors:
         for error in reconciliation_errors:

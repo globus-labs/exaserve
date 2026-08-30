@@ -12,8 +12,8 @@ wheel=$1
 output_dir=$2
 repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
 
-if [ "${AURORA_SUBJOB:-}" != "1" ] || [ -z "${PBS_JOBID:-}" ]; then
-  echo "packaged gate requires a validated Aurora subjob lease" >&2
+if [ -z "${PBS_JOBID:-}" ]; then
+  echo "packaged gate requires a validated Aurora PBS allocation" >&2
   exit 2
 fi
 current_host=$(hostname)

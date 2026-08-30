@@ -2048,6 +2048,36 @@ async def replay_from_manifest(
             add_exception_note(active_error, f"replay temporary cleanup also failed: {cleanup_exc}")
 
 
+def _classified_timing_fields(
+    semantics: str,
+    *,
+    first_byte_s,
+    first_byte_at,
+    interchunk_p50_s,
+    interchunk_p99_s,
+    interchunk_max_s,
+) -> dict:
+    """Expose TTFT/TBT only for real incremental token delivery."""
+    from exaserve.capabilities import TIMING_INCREMENTAL_SSE, TIMING_SEMANTICS
+
+    if semantics not in TIMING_SEMANTICS:
+        raise ValueError(f"unknown timing semantics {semantics!r}")
+    incremental = semantics == TIMING_INCREMENTAL_SSE
+    return {
+        "timing_semantics": semantics,
+        "observed_first_byte_s": first_byte_s,
+        "observed_first_byte_at": first_byte_at,
+        "observed_interchunk_p50_s": interchunk_p50_s,
+        "observed_interchunk_p99_s": interchunk_p99_s,
+        "observed_interchunk_max_s": interchunk_max_s,
+        "ttft_s": first_byte_s if incremental else None,
+        "first_token_at": first_byte_at if incremental else None,
+        "tbt_p50_s": interchunk_p50_s if incremental else None,
+        "tbt_p99_s": interchunk_p99_s if incremental else None,
+        "tbt_max_s": interchunk_max_s if incremental else None,
+    }
+
+
 def _save_results(
     exp_config: EvalManifest,
     total_requests: int,
@@ -2073,6 +2103,9 @@ def _save_results(
     final_save_path = _next_result_path(result_dir)
     config_dict = exp_config.to_yaml_dict()
     plan = exp_config.deployment_plan
+    from exaserve.capabilities import deployment_timing_semantics
+
+    timing_semantics = deployment_timing_semantics(plan)
     config_dict["deployment_plan"] = {
         **plan.canonical(),
         "deployment_plan_hash": plan.deployment_plan_hash,
@@ -2101,6 +2134,7 @@ def _save_results(
         "dispatch_timings": dispatch_timings,
         "gather": gather_by_run[-1] if gather_by_run else None,
         "gather_by_run": gather_by_run,
+        "timing_semantics": timing_semantics,
     }
     duration = run_durations[-1] if run_durations else max(time.time() - t0, 1e-6)
     duration = max(duration, 1e-6)
@@ -2167,11 +2201,14 @@ def _save_results(
                         "actual_completion_tokens": actual_completion_tokens,
                         "tensor_parallel_size": request.tensor_parallel_size,
                         "req_id": request.req_id,
-                        "ttft_s": ttft_s,
-                        "first_token_at": first_token_at,
-                        "tbt_p50_s": tbt_p50_s,
-                        "tbt_p99_s": tbt_p99_s,
-                        "tbt_max_s": tbt_max_s,
+                        **_classified_timing_fields(
+                            timing_semantics,
+                            first_byte_s=ttft_s,
+                            first_byte_at=first_token_at,
+                            interchunk_p50_s=tbt_p50_s,
+                            interchunk_p99_s=tbt_p99_s,
+                            interchunk_max_s=tbt_max_s,
+                        ),
                         "decode_tokens": decode_tokens,
                     }
                 )

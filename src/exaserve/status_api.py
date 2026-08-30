@@ -32,13 +32,13 @@ a filename.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import stat
 import time
-import math
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import InitVar, dataclass
+from typing import Any, Callable, ClassVar, Optional
 
 from .state.status import (
     DeploymentState,
@@ -85,7 +85,85 @@ _READY_SNAPSHOT_FIELDS = {
     "receipt_manifest_path",
     "receipt_manifest_hash",
     "lease_expires_at",
+    "lease_expires_monotonic",
+    "lease_clock_boot_id",
 }
+
+
+def _system_boot_id() -> str:
+    """Return the kernel boot identity used to fence persisted monotonic time.
+
+    CLOCK_MONOTONIC values are comparable across processes on one boot, but
+    not across a reboot.  Aurora's release platform is Linux, where boot_id is
+    the kernel-provided identity.  An unavailable identity fails READY closed.
+    """
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            value = handle.read().strip()
+    except OSError:
+        return ""
+    return value if 0 < len(value) <= 128 else ""
+
+
+@dataclass(frozen=True)
+class StatusClock:
+    """Injectable wall/monotonic clock pair with its comparison identity."""
+
+    wall_time: Callable[[], float]
+    monotonic_time: Callable[[], float]
+    boot_id: Callable[[], str]
+
+
+_SYSTEM_STATUS_CLOCK = StatusClock(
+    wall_time=time.time,
+    monotonic_time=time.monotonic,
+    boot_id=_system_boot_id,
+)
+
+
+def _lease_evidence(clock: StatusClock, duration_s: float) -> dict[str, Any]:
+    wall_now = clock.wall_time()
+    monotonic_now = clock.monotonic_time()
+    boot_id = clock.boot_id()
+    for name, value in (("wall_time", wall_now), ("monotonic_time", monotonic_now)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError(f"status clock {name} is invalid")
+    if not isinstance(boot_id, str) or not boot_id or len(boot_id) > 128:
+        raise ValueError("status clock boot identity is unavailable")
+    return {
+        # This is operator evidence only. It is deliberately never consulted
+        # when deciding whether READY is current.
+        "lease_expires_at": float(wall_now) + duration_s,
+        "lease_expires_monotonic": float(monotonic_now) + duration_s,
+        "lease_clock_boot_id": boot_id,
+    }
+
+
+def _ready_lease_is_current(snapshot: dict[str, Any], clock: StatusClock) -> bool:
+    expiry = snapshot.get("lease_expires_monotonic")
+    expected_boot_id = snapshot.get("lease_clock_boot_id")
+    try:
+        current_boot_id = clock.boot_id()
+        monotonic_now = clock.monotonic_time()
+    except (OSError, TypeError, ValueError):
+        return False
+    return (
+        isinstance(expiry, (int, float))
+        and not isinstance(expiry, bool)
+        and math.isfinite(float(expiry))
+        and isinstance(expected_boot_id, str)
+        and bool(expected_boot_id)
+        and current_boot_id == expected_boot_id
+        and isinstance(monotonic_now, (int, float))
+        and not isinstance(monotonic_now, bool)
+        and math.isfinite(float(monotonic_now))
+        and float(monotonic_now) < float(expiry)
+    )
 
 
 def _string_sequence(value: Any, name: str, *, sorted_unique: bool) -> list[str]:
@@ -262,6 +340,7 @@ class DeploymentStatusPublisher:
         generation: int = 0,
         run_provenance=None,
         log=print,
+        clock: Optional[StatusClock] = None,
     ) -> None:
         self.path = status_path(run_dir)
         self.store = StatusStore.deployment(self.path)
@@ -270,6 +349,7 @@ class DeploymentStatusPublisher:
         self.generation = generation
         self.run_provenance = run_provenance
         self._log = log
+        self._clock = clock or _SYSTEM_STATUS_CLOCK
         self._state = DeploymentState.PLANNED
         self._revision = -1
 
@@ -373,7 +453,7 @@ class DeploymentStatusPublisher:
                         "deployment_plan_hash": self.plan.deployment_plan_hash,
                         "allocation_binding_hash": self.binding.allocation_binding_hash,
                         "receipt_hashes": hashes,
-                        "lease_expires_at": self._ready_lease_expiry(),
+                        **self._ready_lease_evidence(),
                     }
                 )
                 model_map = data.get("model_map")
@@ -401,7 +481,7 @@ class DeploymentStatusPublisher:
                     {
                         "ready": False,
                         "phase": target.value,
-                        "observed_at": time.time(),
+                        "observed_at": self._clock.wall_time(),
                     }
                 )
                 data["readiness_snapshot"] = snapshot
@@ -422,10 +502,10 @@ class DeploymentStatusPublisher:
         self._revision = record.revision
         return record
 
-    def _ready_lease_expiry(self) -> float:
+    def _ready_lease_evidence(self) -> dict[str, Any]:
         interval = float(self.plan.readiness.validation_interval_s)
         freshness = float(self.plan.readiness.observation_freshness_s)
-        return time.time() + max(freshness, 3.0 * interval)
+        return _lease_evidence(self._clock, max(freshness, 3.0 * interval))
 
     def refresh_ready(
         self,
@@ -459,7 +539,7 @@ class DeploymentStatusPublisher:
                 "receipt_hashes": receipt_hashes,
                 "receipt_manifest_path": previous["receipt_manifest_path"],
                 "receipt_manifest_hash": previous["receipt_manifest_hash"],
-                "lease_expires_at": self._ready_lease_expiry(),
+                **self._ready_lease_evidence(),
             }
         )
         try:
@@ -536,16 +616,20 @@ class DeploymentStatus:
     receipt_hashes: tuple[str, ...]
     receipt_manifest_path: str
     receipt_manifest_hash: str
+    clock: InitVar[Optional[StatusClock]] = None
+    _clock: ClassVar[StatusClock] = _SYSTEM_STATUS_CLOCK
+
+    def __post_init__(self, clock: Optional[StatusClock]) -> None:
+        # InitVar keeps the clock out of dataclasses.asdict(), which is used by
+        # the public CLI and evidence sealing. It is read-side policy, not
+        # persisted deployment evidence.
+        object.__setattr__(self, "_clock", clock or _SYSTEM_STATUS_CLOCK)
 
     @property
     def ready(self) -> bool:
-        expiry = self.readiness_snapshot.get("lease_expires_at", 0)
         return (
             self.state == DeploymentState.READY.value
-            and isinstance(expiry, (int, float))
-            and not isinstance(expiry, bool)
-            and math.isfinite(float(expiry))
-            and time.time() <= float(expiry)
+            and _ready_lease_is_current(self.readiness_snapshot, self._clock)
         )
 
     @property
@@ -557,7 +641,9 @@ class DeploymentStatus:
         )
 
 
-def read_deployment_status(run_dir: str) -> Optional[DeploymentStatus]:
+def read_deployment_status(
+    run_dir: str, *, clock: Optional[StatusClock] = None
+) -> Optional[DeploymentStatus]:
     """Read the shared record. None when no deployment published one."""
     record = StatusStore.deployment(status_path(run_dir)).load()
     if record is None:
@@ -647,9 +733,21 @@ def read_deployment_status(run_dir: str) -> Optional[DeploymentStatus]:
             isinstance(lease_expires_at, bool)
             or not isinstance(lease_expires_at, (int, float))
             or not math.isfinite(float(lease_expires_at))
-            or lease_expires_at <= record.updated_at
+            or lease_expires_at <= 0
         ):
-            raise InvalidDeploymentStatus("READY snapshot has an invalid readiness lease")
+            raise InvalidDeploymentStatus("READY snapshot has invalid wall-clock lease evidence")
+        lease_expires_monotonic = snapshot.get("lease_expires_monotonic")
+        lease_clock_boot_id = snapshot.get("lease_clock_boot_id")
+        if (
+            isinstance(lease_expires_monotonic, bool)
+            or not isinstance(lease_expires_monotonic, (int, float))
+            or not math.isfinite(float(lease_expires_monotonic))
+            or lease_expires_monotonic <= 0
+            or not isinstance(lease_clock_boot_id, str)
+            or not lease_clock_boot_id
+            or len(lease_clock_boot_id) > 128
+        ):
+            raise InvalidDeploymentStatus("READY snapshot has an invalid monotonic readiness lease")
         manifest_path = snapshot.get("receipt_manifest_path")
         manifest_hash = snapshot.get("receipt_manifest_hash")
         if (
@@ -720,6 +818,7 @@ def read_deployment_status(run_dir: str) -> Optional[DeploymentStatus]:
         receipt_hashes=tuple(hashes),
         receipt_manifest_path=receipt_manifest_path,
         receipt_manifest_hash=receipt_manifest_hash,
+        clock=clock,
     )
 
 
@@ -778,7 +877,11 @@ def load_status_allocation_binding(run_dir: str, status: Optional[DeploymentStat
 
 
 def require_ready_status(
-    run_dir: str, *, expected_generation: Optional[int] = None, expected_plan_hash: str = ""
+    run_dir: str,
+    *,
+    expected_generation: Optional[int] = None,
+    expected_plan_hash: str = "",
+    clock: Optional[StatusClock] = None,
 ) -> DeploymentStatus:
     """Return one atomically read status that is READY *right now*.
 
@@ -786,7 +889,7 @@ def require_ready_status(
     client would then hammer: no record, wrong generation, wrong plan, not
     READY, or READY with no endpoint recorded.
     """
-    status = read_deployment_status(run_dir)
+    status = read_deployment_status(run_dir, clock=clock)
     if status is None:
         raise DeploymentNotReady(
             f"no deployment status published under {run_dir}; a client must not "
@@ -817,11 +920,16 @@ def require_ready_status(
 
 
 def require_ready_endpoint(
-    run_dir: str, *, expected_generation: Optional[int] = None, expected_plan_hash: str = ""
+    run_dir: str,
+    *,
+    expected_generation: Optional[int] = None,
+    expected_plan_hash: str = "",
+    clock: Optional[StatusClock] = None,
 ) -> str:
     """Return the endpoint from one atomically validated READY status."""
     return require_ready_status(
         run_dir,
         expected_generation=expected_generation,
         expected_plan_hash=expected_plan_hash,
+        clock=clock,
     ).advertised_endpoint

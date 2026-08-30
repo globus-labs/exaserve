@@ -259,7 +259,10 @@ class ExposurePlan:
     advertised_path: str = "/v1"
     network_boundary: str = "trusted_allocation"
     auth_policy_ref: Optional[str] = None
-    request_body_limit_bytes: int = 16 << 20
+    # Only the first-release HAProxy profile enforces a request-body limit.
+    # ``None`` is therefore the honest value for validation-only direct and
+    # benchmark gateways; DeploymentPlan validates the cross-component rule.
+    request_body_limit_bytes: Optional[int] = None
     # The canonical advertised endpoint is resolved at bind time from the
     # gateway (PROXIED_INTERNAL) or the declared Serve endpoint
     # (DIRECT_VALIDATION); the plan fixes only its SHAPE.
@@ -274,28 +277,33 @@ class ExposurePlan:
         ):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise PlanError(f"exposure.{name} must be a non-empty string")
-        if self.auth_policy_ref is not None and (
-            not isinstance(self.auth_policy_ref, str) or not self.auth_policy_ref
-        ):
-            raise PlanError("exposure.auth_policy_ref must be null or a non-empty string")
+        if self.auth_policy_ref is not None:
+            raise PlanError("exposure.auth_policy_ref is unsupported in the first release")
         if self.mode not in {m.value for m in ExposureMode}:
             raise PlanError(f"exposure.mode {self.mode!r} is not valid")
-        if self.advertised_scheme not in ("http", "https"):
-            raise PlanError("exposure.advertised_scheme must be http or https")
-        if not self.advertised_path.startswith("/"):
-            raise PlanError("exposure.advertised_path must start with '/'")
+        if self.advertised_scheme != "http":
+            raise PlanError("exposure.advertised_scheme must be http in the first release")
+        if self.advertised_path != "/v1":
+            raise PlanError("exposure.advertised_path must be /v1 in the first release")
+        if self.network_boundary != "trusted_allocation":
+            raise PlanError(
+                "exposure.network_boundary must be trusted_allocation in the first release"
+            )
         if (
             isinstance(self.serve_port, bool)
             or not isinstance(self.serve_port, int)
             or not 1 <= self.serve_port <= 65535
         ):
             raise PlanError(f"exposure.serve_port out of range: {self.serve_port}")
-        if (
+        if self.request_body_limit_bytes is not None and (
             isinstance(self.request_body_limit_bytes, bool)
             or not isinstance(self.request_body_limit_bytes, int)
             or self.request_body_limit_bytes < 1
+            or self.request_body_limit_bytes > 1 << 40
         ):
-            raise PlanError("exposure.request_body_limit_bytes must be positive")
+            raise PlanError(
+                "exposure.request_body_limit_bytes must be null or in 1..1099511627776"
+            )
 
 
 # ------------------------------------------------------------ control ---
@@ -1182,6 +1190,13 @@ class DeploymentPlan:
             raise PlanError("managed deployment gateway requires PROXIED_INTERNAL exposure")
         elif not self.validation_mode and self.gateway.kind != GatewayKind.HAPROXY.value:
             raise PlanError("production deployment requires the HAProxy gateway")
+        if self.gateway is not None and self.gateway.kind == GatewayKind.HAPROXY.value:
+            if self.exposure.request_body_limit_bytes is None:
+                raise PlanError("HAProxy exposure requires request_body_limit_bytes")
+        elif self.exposure.request_body_limit_bytes is not None:
+            raise PlanError(
+                "exposure.request_body_limit_bytes is supported only by the HAProxy gateway"
+            )
 
         envelope_dimensions = {
             "site_id": self.site_profile_id,

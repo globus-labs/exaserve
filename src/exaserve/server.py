@@ -314,6 +314,31 @@ from .observability import (  # noqa: E402
 app.add_middleware(_RequestMetricsMiddleware)
 
 
+def _typed_api_error(
+    *,
+    correlation: str,
+    status_code: int,
+    message: str,
+    error_type: str,
+    code: str,
+    param: Optional[str],
+) -> JSONResponse:
+    """Build a correlated, OpenAI-shaped API error response."""
+    return JSONResponse(
+        {
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": param,
+                "code": code,
+            },
+            "request_id": correlation,
+        },
+        status_code=status_code,
+        headers={"X-Request-ID": correlation},
+    )
+
+
 class CollectingStatLogger:
     """Buffers vLLM scheduler and per-request stats for post-run collection.
 
@@ -871,6 +896,10 @@ class EngineWorker:
             stats_sample_cap=stats_sample_cap,
             enable_log_requests=enable_log_requests,
         )
+        # The host, not a backend-specific exception path, owns the public
+        # context-window contract. Retain the exact canonical limit so both
+        # JSON and SSE requests can be rejected before generation begins.
+        self.max_model_len = spec.max_model_len
 
         if null_compute:
             latency = float(null_compute_latency_s)
@@ -1216,6 +1245,14 @@ class EngineWorker:
             chat_template=body.get("chat_template"),
             chat_template_kwargs=body.get("chat_template_kwargs") or {},
         )
+        preflight_error = self._context_preflight_response(
+            prompt,
+            sampling,
+            correlation=correlation,
+            prompt_param="messages",
+        )
+        if preflight_error is not None:
+            return preflight_error
 
         request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         sampling["_request_id"] = request_id
@@ -1258,6 +1295,14 @@ class EngineWorker:
             return JSONResponse(
                 {"error": str(exc)}, status_code=400, headers={"X-Request-ID": correlation}
             )
+        preflight_error = self._context_preflight_response(
+            prompt,
+            sampling,
+            correlation=correlation,
+            prompt_param="prompt",
+        )
+        if preflight_error is not None:
+            return preflight_error
         request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
         sampling["_request_id"] = request_id
         sampling["_correlation_id"] = correlation
@@ -1298,6 +1343,50 @@ class EngineWorker:
         )
 
     # ---- Internal helpers ----------------------------------------------------
+
+    def _validate_request_context(self, prompt: str, sampling: dict, *, prompt_param: str) -> None:
+        prompt_tokens = self.backend.count_prompt_tokens(prompt)
+        _rv.validate_context_window(
+            prompt_tokens=prompt_tokens,
+            requested_completion_tokens=sampling["max_tokens"],
+            max_model_len=self.max_model_len,
+            prompt_param=prompt_param,
+        )
+
+    def _context_preflight_response(
+        self,
+        prompt: str,
+        sampling: dict,
+        *,
+        correlation: str,
+        prompt_param: str,
+    ) -> Optional[JSONResponse]:
+        try:
+            self._validate_request_context(prompt, sampling, prompt_param=prompt_param)
+        except _rv.ContextLengthExceeded as exc:
+            return _typed_api_error(
+                correlation=correlation,
+                status_code=400,
+                message=str(exc),
+                error_type=exc.error_type,
+                code=exc.code,
+                param=exc.param,
+            )
+        except Exception as exc:
+            print(
+                f"[EngineWorker] prompt tokenization failed for request {correlation}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return _typed_api_error(
+                correlation=correlation,
+                status_code=500,
+                message="the model tokenizer could not validate this request",
+                error_type="server_error",
+                code="prompt_tokenization_failed",
+                param=None,
+            )
+        return None
 
     def _served_model_names(self) -> set:
         """Identities a client may name in the `model` field for THIS
