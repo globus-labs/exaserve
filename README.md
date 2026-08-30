@@ -7,7 +7,7 @@ trusted allocation-internal network. Slurm, CUDA/ROCm, SGLang, streaming, direct
 Serve exposure, and alternate gateways are rejected or validation-only unless a
 separately qualified `SiteProfile` says otherwise.
 
-The active successor source is `release/v0.4.0`. Final43 remains the last
+The active successor source is `release-v0.4.0`. Final43 remains the last
 packaged one/two-node hardware-qualified artifact until that branch passes a
 clean wheel gate and the owner-approved scale ladder; preview results are not
 silently promoted into release evidence.

@@ -1,6 +1,6 @@
 # Known issues and empirical failure log
 
-**Reconciled:** 2026-08-30 against the release/v0.4.0 source candidate.
+**Reconciled:** 2026-08-30 against the release-v0.4.0 source candidate.
 
 **Role:** historical/empirical evidence. `hardening/FINDINGS.yaml` is the
 authoritative disposition ledger; this file cannot close or waive a release
@@ -28,7 +28,7 @@ new control plane. Ledger: `KI-A1`, `IN_PROGRESS`.
 Historical 256-node runs showed roughly quadratic proxy/actor-handle work and a
 single-controller bottleneck. ExaServe's final readiness processing is indexed,
 bounded, and does not fleet-poll, but it cannot remove or claim to solve
-upstream Ray behavior. Measure the exact release/v0.4.0 candidate at the approved
+upstream Ray behavior. Measure the exact release-v0.4.0 candidate at the approved
 boundary tier before setting a larger supported maximum. Refs:
 `findings/gcs_contention_quantitative.md` and
 `findings/proxyactor_death_cascade_256n.md`. Ledger: `KI-A3`, `IN_PROGRESS`.
@@ -49,7 +49,7 @@ packet/retransmission storm (up to about 6.75 million retransmits and about
 195,000 established connections). A rarer run ended in total HAProxy death and
 connection refusal; its causal signal was not captured. Do not conflate the
 common degraded network regime with the rare process death. Streaming is not a
-release/v0.4.0 production claim. Refs:
+release-v0.4.0 production claim. Refs:
 `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md`. Ledger: `KI-B2`,
 `IN_PROGRESS`.
 
@@ -96,7 +96,7 @@ streaming. Refs: `eval/specs/sc26workshop/FINDINGS_haproxy_256n.md` and
 ### B3. LiteLLM fake streaming — resolved by typed timing semantics
 
 LiteLLM's buffered end-burst cannot enter a real-streaming TBT comparison. The
-release/v0.4.0 result contract classifies it as `buffered_response`, retains
+release-v0.4.0 result contract classifies it as `buffered_response`, retains
 throughput/error/E2E evidence, and withholds TTFT/TBT. Only
 `incremental_sse` may enter token-delivery SLO plots. Legacy results lacking the
 classification fail closed rather than being inferred from plausible-looking

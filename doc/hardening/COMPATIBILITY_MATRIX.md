@@ -4,7 +4,7 @@
 
 **Last packaged qualified candidate:** final43
 
-**Successor source:** `release/v0.4.0`; clean package passes, scale gate pending
+**Successor source:** `release-v0.4.0`; clean package passes, scale gate pending
 
 **Formal release state:** `SUCCESSOR_SOURCE_READY_SCALE_PENDING`
 
@@ -18,7 +18,7 @@ a higher tier or a different dependency/profile dimension.
 | Component | Selected identity | Qualification note |
 |---|---|---|
 | ExaServe | 0.4.0 wheel SHA `1041be53eb5b5875d198d5ee6c6664718b4085775dcba99107873dd3d1fcdff2` | final43 immutable candidate |
-| ExaServe successor | 0.4.0 wheel SHA `75bab1c97948d29237000d5fa087f3ed1f1d18e5ef3233fe2c759b4faf0e32f8` | release/v0.4.0 package gate passes; production scale unqualified |
+| ExaServe successor | 0.4.0 wheel SHA `75bab1c97948d29237000d5fa087f3ed1f1d18e5ef3233fe2c759b4faf0e32f8` | release-v0.4.0 package gate passes; production scale unqualified |
 | Aurora frameworks | 2025.3.1 | qualification environment |
 | Python | 3.12.12 | packaged and hardware gates |
 | Ray | 2.53.0, commit `0de2118` | exact base hashes; generated overlay; installed files untouched |
@@ -97,6 +97,6 @@ matching and validates one FAILED terminal record for each.
 ## Revisit condition
 
 First record an owner decision selecting the release ceiling. Then declare and
-execute the exact release/v0.4.0 scale cells authorized by that decision. Any later
+execute the exact release-v0.4.0 scale cells authorized by that decision. Any later
 expansion—streaming, public exposure, another gateway/engine/vendor/scheduler,
 or 128/256 nodes—requires a new profile, evidence plan, and candidate review.

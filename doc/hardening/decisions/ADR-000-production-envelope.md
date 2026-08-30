@@ -2,7 +2,7 @@
 
 **Status:** TECHNICALLY SELECTED, AWAITING EXPLICIT PRODUCT-OWNER SCOPE
 APPROVAL. Last reconciled 2026-08-30. Final43 remains the packaged
-one-/two-node hardware-evidence artifact. The `release/v0.4.0` successor clean
+one-/two-node hardware-evidence artifact. The `release-v0.4.0` successor clean
 package gate passes, but its scale ladder cannot inherit final43 receipts. The
 evidence-derived production maximum remains two nodes.
 

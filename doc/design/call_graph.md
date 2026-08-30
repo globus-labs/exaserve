@@ -6,7 +6,7 @@ An annotated, diagrammed walkthrough of every function between
 nodes with one Llama-3-8B model.
 
 Originally traced at commit `7b20715`, then reconciled on 2026-08-30 against
-the `release/v0.4.0` source candidate descended from `ccccb82`. This checked-in
+the `release-v0.4.0` source candidate descended from `ccccb82`. This checked-in
 document is the durable authority; no private rendering or external artifact is
 required to read it. If a future refactor moves any boundary below, update this
 document with the corresponding contract tests.

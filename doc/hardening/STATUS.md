@@ -3,7 +3,7 @@
 **Status date:** 2026-08-30
 
 **Verdict:** `SUCCESSOR_SOURCE_READY_SCALE_PENDING` — the
-`release/v0.4.0` source candidate incorporates the complete preview repair
+`release-v0.4.0` source candidate incorporates the complete preview repair
 series and the final release-consolidation fixes. Final43 remains the last
 packaged artifact qualified at one and two Aurora nodes. This is not yet an
 approved general production release and does not claim support above that
@@ -152,10 +152,10 @@ contracts passed.
 1. A product owner must approve a release ceiling (the current ADR proposal is
    64 nodes) or select another envelope.
 2. Any envelope above two nodes requires authorization and a new immutable,
-   predeclared release/v0.4.0 ladder. For a 64-node ceiling the outstanding cells are
+   predeclared release-v0.4.0 ladder. For a 64-node ceiling the outstanding cells are
    4, 16, and 64 nodes.
 3. Offsite Slurm/CUDA/ROCm support requires an appropriate native allocation.
 
 Historical or earlier-candidate runs cannot satisfy these cells. Do not
-relabel their receipts as release/v0.4.0 evidence; build a new candidate review
+relabel their receipts as release-v0.4.0 evidence; build a new candidate review
 from the final wheel and exact ladder.

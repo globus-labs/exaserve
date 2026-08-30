@@ -1221,7 +1221,7 @@ findings:
   acceptance_tests:
   - AC-OBS-01
   status: FIXED
-  decision: The release/v0.4.0 source candidate derives timing semantics from the immutable deployment plan; only incremental SSE populates TTFT/TBT, while LiteLLM buffered and non-streaming results retain throughput, errors, E2E latency, and explicitly labelled raw observations without entering token-delivery comparisons.
+  decision: The release-v0.4.0 source candidate derives timing semantics from the immutable deployment plan; only incremental SSE populates TTFT/TBT, while LiteLLM buffered and non-streaming results retain throughput, errors, E2E latency, and explicitly labelled raw observations without entering token-delivery comparisons.
   evidence:
   - tests/test_capabilities.py
   - eval/tests/test_replay_engine.py
@@ -2754,7 +2754,7 @@ findings:
   - AC-PROXY-01
   - AC-TST-01
   status: FIXED
-  decision: The release/v0.4.0 source candidate counts the rendered prompt with the live backend tokenizer and returns a correlated OpenAI-shaped HTTP 400 before JSON generation or SSE headers when prompt plus requested completion exceeds max_model_len.
+  decision: The release-v0.4.0 source candidate counts the rendered prompt with the live backend tokenizer and returns a correlated OpenAI-shaped HTTP 400 before JSON generation or SSE headers when prompt plus requested completion exceeds max_model_len.
   evidence:
   - tests/test_context_preflight.py
   - tests/test_request_validation.py

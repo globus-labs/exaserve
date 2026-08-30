@@ -1,9 +1,9 @@
-# Final audit — final43 evidence and release/v0.4.0 successor
+# Final audit — final43 evidence and release-v0.4.0 successor
 
 **Audit date:** 2026-08-09; successor reconciliation 2026-08-30
 
 **Verdict:** final43 implementation pass at one and two Aurora nodes;
-release/v0.4.0 source and clean package gates pass, exact-candidate scale
+release-v0.4.0 source and clean package gates pass, exact-candidate scale
 qualification pending.
 
 This audit covers code reached by a production deployment. Earlier audit,

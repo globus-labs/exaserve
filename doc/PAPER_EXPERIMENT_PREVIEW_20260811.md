@@ -133,7 +133,7 @@ all six expected evidence entries but marks the manifest incomplete and the run
 
 This preview exposed a production API defect: oversized non-stream requests
 returned HTTP 500, while streaming requests started HTTP 200 and then
-terminated the SSE body with an unexpected EOF. The `release/v0.4.0` source
+terminated the SSE body with an unexpected EOF. The `release-v0.4.0` source
 candidate now performs live-tokenizer context preflight and returns a typed,
 correlated HTTP 400 before streaming headers. The sealed historical rows remain
 unchanged, and the same three trace records must still be counted as rejected
