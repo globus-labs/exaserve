@@ -235,11 +235,16 @@ def terminate_process_tree(
     process_group: int | None = None,
     deadline_s: float = 20.0,
     deadline: float | None = None,
+    graceful_s: float | None = None,
 ) -> None:
     """Boundedly reap an owned process group, even after its leader exits."""
     if process is None:
         return
-    for name, value in (("deadline_s", deadline_s), ("deadline", deadline)):
+    for name, value in (
+        ("deadline_s", deadline_s),
+        ("deadline", deadline),
+        ("graceful_s", graceful_s),
+    ):
         if value is None:
             continue
         if (
@@ -266,7 +271,12 @@ def terminate_process_tree(
                 process.send_signal(sig)
 
     signal_owned(signal.SIGTERM)
-    term_deadline = time.monotonic() + max(0.0, deadline - time.monotonic()) / 2
+    now = time.monotonic()
+    term_deadline = (
+        now + max(0.0, deadline - now) / 2
+        if graceful_s is None
+        else min(deadline, now + float(graceful_s))
+    )
     while time.monotonic() < term_deadline and process_group_exists(process_group):
         time.sleep(min(0.05, max(0.0, term_deadline - time.monotonic())))
     if process_group_exists(process_group):

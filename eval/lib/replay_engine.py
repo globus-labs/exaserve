@@ -606,9 +606,15 @@ def _direct_health_paths(exp_config: EvalManifest) -> list[str]:
 
 
 def _probe_direct_target(base_url: str, health_paths: list[str], timeout_s: float) -> bool:
+    # These URLs are allocation-internal Ray Serve endpoints.  The Aurora
+    # environment deliberately configures an outbound HTTP proxy, and compute
+    # node IPs are not covered by its no_proxy host patterns.  Relying on the
+    # process-global urllib opener would therefore send 10.x health probes to
+    # the site proxy and report every healthy replica as unavailable.
+    direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     for path in health_paths:
         try:
-            with urllib.request.urlopen(f"{base_url}{path}", timeout=timeout_s) as response:
+            with direct_opener.open(f"{base_url}{path}", timeout=timeout_s) as response:
                 if response.status != 200:
                     return False
         except (urllib.error.URLError, OSError, ValueError):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -256,6 +257,7 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
         @staticmethod
         def from_engine_args(args, **kwargs):
             created["engine"] = (args, kwargs)
+            created["vllm_port"] = os.environ.get("VLLM_PORT")
             if constructor_fails:
                 raise RuntimeError("vLLM constructor failed")
             return FakeCreatedEngine()
@@ -322,5 +324,7 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
         backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
 
     assert created["args"]["master_port"] == lease.port
+    if not shim_fails:
+        assert created["vllm_port"] == str(lease.port)
     assert created["args"]["trust_remote_code"] is False
     assert lease.released

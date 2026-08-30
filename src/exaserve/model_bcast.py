@@ -522,6 +522,69 @@ def _marker(path: Path) -> dict:
         raise RuntimeError(f"model completion manifest is invalid at {path}: {exc}") from exc
 
 
+def _source_model_manifest(path: Path, *, model_id: str) -> dict:
+    """Return a verified source manifest without requiring source-store writes.
+
+    Shared site model stores are commonly mounted read-only.  Legacy snapshots
+    in those stores can be structurally complete without carrying ExaServe's
+    completion marker.  Preserve the strict manifest boundary by deriving the
+    same bounded content inventory, recording it in the run-owned evidence
+    directory, and later injecting that exact manifest only into the temporary
+    broadcast view and node-local candidate.
+    """
+    marker_path = path / COMPLETION_MARKER
+    if os.path.lexists(marker_path):
+        return _marker(path)
+    if not check_model_exists(path):
+        raise RuntimeError(f"model source for {model_id} is incomplete at {path}")
+    # A writable legacy store is upgraded by check_model_exists().  Read and
+    # validate that marker instead of deriving a second authority.
+    if os.path.lexists(marker_path):
+        return _marker(path)
+
+    from .model_staging import build_model_manifest
+    from .state.atomic import atomic_create_or_verify_json
+
+    manifest = build_model_manifest(
+        path,
+        source_identity=f"external-read-only:{path.resolve()}",
+    )
+    evidence_dir = _run_result_root() / "model-source-manifests"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_name = hashlib.sha256(model_id.encode()).hexdigest() + ".json"
+    atomic_create_or_verify_json(evidence_dir / evidence_name, manifest)
+    return manifest
+
+
+def _prepare_model_bcast_source(
+    source_path: Path,
+    *,
+    safe_name: str,
+    source_manifest: dict,
+    temporary_root: Path,
+) -> Path:
+    """Create a stable-name, marker-bearing broadcast view without copying weights."""
+    marker_path = source_path / COMPLETION_MARKER
+    if os.path.lexists(marker_path):
+        _marker(source_path)
+        if source_path.name == safe_name:
+            return source_path
+        symlink_path = temporary_root / safe_name
+        symlink_path.symlink_to(source_path, target_is_directory=True)
+        return symlink_path
+
+    from .state.atomic import atomic_create_json
+
+    overlay = temporary_root / safe_name
+    overlay.mkdir()
+    for entry in sorted(source_path.iterdir(), key=lambda item: item.name):
+        if entry.name == COMPLETION_MARKER:
+            continue
+        (overlay / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+    atomic_create_json(overlay / COMPLETION_MARKER, source_manifest)
+    return overlay
+
+
 def verify_and_publish_model(
     candidate: Path, target: Path, *, model_id: str, expected_manifest_hash: str, generation: int
 ) -> dict:
@@ -796,7 +859,7 @@ def bcast_models(
 
         source_path = Path(lustre_model_paths[model_id])
         safe_name = get_model_storage_name(model_id)
-        source_manifest = _marker(source_path)
+        source_manifest = _source_model_manifest(source_path, model_id=model_id)
         manifest_hash = source_manifest["manifest_hash"]
 
         if cache_state == "complete":
@@ -833,15 +896,16 @@ def bcast_models(
         )
         candidate_model = candidate_root / safe_name
 
-        # HF cache snapshots use a revision hash as the directory name. Create a
-        # temporary symlink with the stable model cache name so the extracted
-        # node-local directory always lands at <local_stage_path>/<safe_name>.
+        # HF cache snapshots use a revision hash as the directory name.  The
+        # temporary view also supplies a run-owned manifest when a read-only
+        # legacy snapshot could not be upgraded in place.
         with tempfile.TemporaryDirectory(prefix=f"model-bcast-{safe_name}-") as tmpdir:
-            bcast_source = source_path
-            if source_path.name != safe_name:
-                symlink_path = Path(tmpdir) / safe_name
-                symlink_path.symlink_to(source_path, target_is_directory=True)
-                bcast_source = symlink_path
+            bcast_source = _prepare_model_bcast_source(
+                source_path,
+                safe_name=safe_name,
+                source_manifest=source_manifest,
+                temporary_root=Path(tmpdir),
+            )
 
             print(
                 f"[ModelBcast] Broadcasting {model_id} from {source_path} to {target_path} "

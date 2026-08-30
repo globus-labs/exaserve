@@ -49,6 +49,23 @@ def test_scheduler_spec_snapshots_mutable_environment_and_paths():
         spec.environment["EXASERVE_MODE"] = "mutated"  # type: ignore[index]
 
 
+def test_scheduler_unsets_site_environment_after_bootstrap():
+    from exaserve.schedulers.pbs import PBSScheduler
+
+    script = PBSScheduler().render_job(
+        _spec(
+            source_env_script=Path("/tmp/env_aurora"),
+            environment_unset=("ONEAPI_DEVICE_SELECTOR",),
+        )
+    )
+    source_at = script.index("source /tmp/env_aurora")
+    unset_at = script.index("unset ONEAPI_DEVICE_SELECTOR")
+    nounset_at = script.index("set -u")
+    exec_at = script.index("exec python3")
+    assert source_at < unset_at < nounset_at < exec_at
+    assert script.index("set -eo pipefail") < source_at
+
+
 def test_scheduler_observation_and_allocation_contracts_are_typed():
     with pytest.raises(ValueError, match="SchedulerState"):
         JobObservation("job", "RUNNING")  # type: ignore[arg-type]
@@ -146,6 +163,8 @@ def test_eval_body_quotes_and_validates():
         )
     )
     assert "cd /tmp/repo" in script
+    assert "export PYTHONDONTWRITEBYTECODE=1" in script
+    assert "PYTHONPYCACHEPREFIX" in script
     assert "exec python3 -m eval.cli run execute /tmp/run.yaml" in script
 
 

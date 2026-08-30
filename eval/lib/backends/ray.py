@@ -309,12 +309,21 @@ class RayBackendAdapter(BackendAdapter):
 
     def stop(self, run_ctx: BackendRunContext, launched: LaunchedBackend) -> None:
         failures: list[BaseException] = []
-        cleanup_deadline = time.monotonic() + 20.0
+        watchdog_s = float(
+            run_ctx.run_plan.semantic_plan.deployment.control.watchdog_cleanup_deadline_s
+        )
+        # The composition root owns graceful cleanup and is contractually
+        # allowed the complete watchdog window.  The eval owner adds only a
+        # bounded forced-reap margin after that window; a hard-coded 20-second
+        # outer deadline previously killed a correct 120-second inner cleanup.
+        force_reap_s = min(30.0, max(5.0, watchdog_s * 0.1))
+        cleanup_deadline = time.monotonic() + watchdog_s + force_reap_s
         try:
             terminate_process_tree(
                 launched.monitor.process,
                 process_group=launched.monitor.process_group,
                 deadline=cleanup_deadline,
+                graceful_s=watchdog_s,
             )
         except BaseException as exc:
             failures.append(exc)

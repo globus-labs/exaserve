@@ -18,7 +18,9 @@ from exaserve.source_staging import (
 )
 from exaserve.staging_results import create_result_dir, load_rank_results, write_rank_result
 from exaserve.model_bcast import (
+    _prepare_model_bcast_source,
     _runtime_rank,
+    _source_model_manifest,
     _validate_cache_probe_result,
     _validate_model_receipt,
     main as model_bcast_main,
@@ -34,6 +36,41 @@ def _candidate(tmp_path: Path) -> Path:
     (package / "__init__.py").write_text("VERSION = 1\n")
     (package / "module.py").write_text("VALUE = 2\n")
     return package
+
+
+def test_read_only_markerless_model_gets_run_owned_broadcast_manifest(tmp_path, monkeypatch):
+    source = tmp_path / "shared" / "revision"
+    source.mkdir(parents=True)
+    (source / "config.json").write_text("{}")
+    (source / "model.safetensors").write_text("weights")
+    run_logs = tmp_path / "run-logs"
+    run_logs.mkdir()
+    monkeypatch.setenv("EXASERVE_RUN_LOG_DIR", str(run_logs))
+
+    def refuse_source_write(*_args, **_kwargs):
+        raise PermissionError("read-only model store")
+
+    monkeypatch.setattr("exaserve.model_staging.write_completion_marker", refuse_source_write)
+    manifest = _source_model_manifest(source, model_id="org/model")
+
+    assert not (source / ".exaserve_complete.json").exists()
+    evidence = list((run_logs / "model-source-manifests").glob("*.json"))
+    assert len(evidence) == 1
+    import json
+
+    assert json.loads(evidence[0].read_text()) == manifest
+
+    temporary_root = tmp_path / "overlay"
+    temporary_root.mkdir()
+    broadcast_source = _prepare_model_bcast_source(
+        source,
+        safe_name="org--model",
+        source_manifest=manifest,
+        temporary_root=temporary_root,
+    )
+    assert broadcast_source.name == "org--model"
+    assert (broadcast_source / "config.json").is_symlink()
+    assert json.loads((broadcast_source / ".exaserve_complete.json").read_text()) == manifest
 
 
 def _aggregate_source_result(tmp_path: Path, *, nodes=("n0", "n1")) -> dict:

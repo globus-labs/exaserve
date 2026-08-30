@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 from eval.lib.backends.base import BackendProcessHandle
 from exaserve.plan.compiler import compile_deployment_plan
@@ -150,3 +151,51 @@ def test_stdout_text_has_no_effect_on_readiness(tmp_path):
 
 def test_missing_status_times_out(tmp_path):
     assert _handle(tmp_path).wait_for_ready(timeout_s=0.05) is False
+
+
+def test_result_evidence_waits_for_bounded_ready_recovery(tmp_path, monkeypatch):
+    from eval.lib.run_executor import _capture_deployment_evidence
+
+    validating = SimpleNamespace(
+        state="VALIDATING",
+        ready=False,
+        terminal=False,
+        detail="saturated canary timed out",
+        reason_code="READINESS_REVOKED",
+    )
+    ready = SimpleNamespace(
+        state="READY",
+        ready=True,
+        terminal=False,
+        detail=None,
+        reason_code="READY",
+        generation=7,
+    )
+    statuses = iter((validating, ready))
+    monkeypatch.setattr(
+        "exaserve.status_api.read_deployment_status", lambda _status_dir: next(statuses)
+    )
+    captured = []
+
+    def capture(**kwargs):
+        captured.append(kwargs)
+        return {"deployment_ready_evidence": str(tmp_path / "ready.json")}
+
+    monkeypatch.setattr("exaserve.evidence.capture_ready_evidence", capture)
+    monkeypatch.setattr("eval.lib.run_executor.time.sleep", lambda _seconds: None)
+    run_plan = SimpleNamespace(
+        bundle=SimpleNamespace(results_dir=str(tmp_path)),
+        semantic_plan=SimpleNamespace(
+            deployment=SimpleNamespace(
+                readiness=SimpleNamespace(recovery_deadline_s=60.0, validation_interval_s=5.0)
+            )
+        ),
+        deployment_plan_hash="a" * 64,
+        run_semantic_hash="b" * 64,
+    )
+    launched = SimpleNamespace(monitor=SimpleNamespace(process=None, status_dir=str(tmp_path)))
+
+    result = _capture_deployment_evidence(run_plan, launched)
+
+    assert "deployment_ready_evidence" in result
+    assert captured[0]["expected_generation"] == 7

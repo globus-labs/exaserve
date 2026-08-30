@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import sys
+import threading
 
 # Every top-level compatibility mutation in this module must map to one exact
 # manifest patch ID.  A static regression compares this registry with the
@@ -722,32 +723,18 @@ def _patch_vllm_ray_worker_identity() -> None:
     _patch_log("Applied vLLM Ray-worker logical identity adapter")
 
 
-_EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN = None
-
-
-def _exaserve_multiproc_worker_main(*args, **kwargs):
-    """Bind a spawned vLLM multiprocessing worker before model imports."""
-    rank = kwargs.get("rank")
-    if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
-        raise RuntimeError(f"vLLM worker supplied invalid global rank {rank!r}")
-    os.environ["EXASERVE_ENGINE_WORKER_KIND"] = "multiproc"
-    os.environ["EXASERVE_ENGINE_WORKER_GLOBAL_RANK"] = str(rank)
-    os.environ["EXASERVE_COMPAT_ROLE"] = "engine_worker"
-    original = _EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN
-    if original is None:
-        raise RuntimeError("vLLM multiprocess worker adapter was not initialized")
-    return original(*args, **kwargs)
-
-
-_exaserve_multiproc_worker_main._exaserve_worker_identity_patch = True
+_EXASERVE_MULTIPROC_SPAWN_LOCK = threading.Lock()
 
 
 def _patch_vllm_multiproc_worker_identity() -> None:
-    """Pass vLLM's pinned worker rank into the self-attestation watcher.
+    """Pass vLLM's pinned worker rank into the spawned interpreter.
 
     A multiprocessing child does not have a Ray actor/resource identity. The
     executor's explicit ``rank`` argument is therefore the authoritative
-    mapping to the ordered device set inherited from its EngineCore.
+    mapping to the ordered device set inherited from its EngineCore.  Keep
+    vLLM's ``worker_main`` as the multiprocessing target: Python ``spawn``
+    resolves targets in a fresh interpreter, so a replacement target cannot
+    safely depend on a process-local captured upstream function.
     """
     try:
         import vllm.v1.executor.multiproc_executor as multiproc_executor
@@ -755,12 +742,35 @@ def _patch_vllm_multiproc_worker_identity() -> None:
         return
 
     worker_cls = multiproc_executor.WorkerProc
-    worker_main = worker_cls.worker_main
-    if getattr(worker_main, "_exaserve_worker_identity_patch", False):
+    make_worker_process = worker_cls.make_worker_process
+    if getattr(make_worker_process, "_exaserve_worker_identity_patch", False):
         return
-    global _EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN
-    _EXASERVE_ORIGINAL_MULTIPROC_WORKER_MAIN = worker_main
-    worker_cls.worker_main = staticmethod(_exaserve_multiproc_worker_main)
+
+    def make_worker_process_with_identity(*args, **kwargs):
+        rank = kwargs.get("rank", args[2] if len(args) > 2 else None)
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+            raise RuntimeError(f"vLLM worker supplied invalid global rank {rank!r}")
+        managed = {
+            "EXASERVE_ENGINE_WORKER_KIND": "multiproc",
+            "EXASERVE_ENGINE_WORKER_GLOBAL_RANK": str(rank),
+        }
+        # os.environ is process-global.  vLLM creates these children
+        # sequentially, and the lock also prevents an incidental concurrent
+        # spawner from observing another worker's logical identity.
+        with _EXASERVE_MULTIPROC_SPAWN_LOCK:
+            previous = {key: os.environ.get(key) for key in managed}
+            os.environ.update(managed)
+            try:
+                return make_worker_process(*args, **kwargs)
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+    make_worker_process_with_identity._exaserve_worker_identity_patch = True
+    worker_cls.make_worker_process = staticmethod(make_worker_process_with_identity)
     _patch_log("Applied vLLM multiprocessing worker identity adapter")
 
 
