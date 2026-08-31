@@ -29,6 +29,10 @@ deployment:
   validation_mode: true
   num_nodes: 32
   num_gpus_per_node: 12
+  control:
+    watchdog_cleanup_deadline_s: 900.0
+  readiness:
+    initial_deadline_s: 7200.0
   models:
   - model_id: meta-llama/Meta-Llama-3-8B-Instruct
     tensor_parallel_size: 1

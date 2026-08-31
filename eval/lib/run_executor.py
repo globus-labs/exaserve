@@ -105,12 +105,28 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
             print("[run_executor] startup_only=True — skipping replay client", flush=True)
             heartbeat.ensure_held()
             evidence_entries = _capture_deployment_evidence(run_plan, launched)
+            measurement_entries = _capture_startup_measurement(run_plan, launched)
             heartbeat.ensure_held()
             adapter.stop(ctx, launched)
+            terminal_entries = _capture_startup_terminal_evidence(run_plan, launched)
             launched = None
             heartbeat.ensure_held()
+            result_entries = {
+                **evidence_entries,
+                **measurement_entries,
+                **terminal_entries,
+            }
+            expected_ids = (
+                "deployment_ready_evidence",
+                "compatibility_receipts",
+                "run_provenance",
+                "startup_scaling_trace",
+                "startup_metrics",
+                "deployment_shutdown_report",
+                "deployment_terminal_status",
+            )
             manifest = _publish_result_manifest(
-                run_plan, entries=evidence_entries, expected_ids=tuple(evidence_entries), reasons=()
+                run_plan, entries=result_entries, expected_ids=expected_ids, reasons=()
             )
             if not manifest.complete:
                 write_run_state(
@@ -1001,6 +1017,188 @@ def _per_run_incomplete_reason(summary, run_index: int) -> str:
             f"completed={completed}, errors={errors}"
         )
     return ""
+
+
+def _finite_nonnegative(value, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise RuntimeError(f"startup measurement {label} must be finite and non-negative")
+    return float(value)
+
+
+def _capture_startup_measurement(run_plan, launched) -> dict[str, str]:
+    """Seal and summarize the canonical deployment trace for startup-only runs."""
+    from exaserve.state.atomic import (
+        atomic_create_or_verify_bytes,
+        atomic_create_or_verify_json,
+        regular_file_reader,
+        strict_json_load_path,
+    )
+    from exaserve.status_api import read_deployment_status
+
+    status_dir = launched.monitor.status_dir
+    if not isinstance(status_dir, str) or not status_dir:
+        raise RuntimeError("startup measurement has no deployment status directory")
+    trace_source = os.path.join(status_dir, "scaling_trace.json")
+    trace = strict_json_load_path(trace_source)
+    if not isinstance(trace, dict):
+        raise RuntimeError("startup scaling trace must be an object")
+    metadata = trace.get("metadata")
+    phases = trace.get("phases")
+    api_calls = trace.get("api_calls")
+    events = trace.get("events")
+    replicas = trace.get("replicas")
+    if not all(isinstance(value, list) for value in (phases, api_calls, events, replicas)):
+        raise RuntimeError("startup scaling trace collections are malformed")
+    if not isinstance(metadata, dict):
+        raise RuntimeError("startup scaling trace metadata is malformed")
+
+    plan = run_plan.semantic_plan.deployment
+    from exaserve.control.plan_readiness import planned_application_names
+
+    expected_replicas = sum(model.num_replicas for model in plan.models)
+    expected_applications = len(planned_application_names(plan))
+    expected_metadata = {
+        "deployment_plan_hash": run_plan.deployment_plan_hash,
+        "generation": launched.monitor.expected_generation,
+        "run_semantic_hash": run_plan.run_semantic_hash,
+        "source_snapshot_hash": run_plan.source_snapshot_hash,
+        "num_nodes": plan.num_nodes,
+        "expected_model_replicas": expected_replicas,
+        "expected_serve_applications": expected_applications,
+        "expected_receipt_requirements": len(plan.receipt_requirements),
+    }
+    for name, expected in expected_metadata.items():
+        if metadata.get(name) != expected:
+            raise RuntimeError(
+                f"startup scaling trace {name}={metadata.get(name)!r} != {expected!r}"
+            )
+    if len(replicas) != expected_replicas:
+        raise RuntimeError(
+            f"startup scaling trace covers {len(replicas)}/{expected_replicas} replicas"
+        )
+
+    phase_rows = []
+    phase_names = set()
+    for index, phase in enumerate(phases):
+        if not isinstance(phase, dict) or not isinstance(phase.get("name"), str):
+            raise RuntimeError(f"startup scaling trace phase[{index}] is malformed")
+        duration = _finite_nonnegative(phase.get("duration_s"), f"phase[{index}].duration_s")
+        phase_names.add(phase["name"])
+        phase_rows.append({"name": phase["name"], "duration_s": duration})
+    required_phases = {"ray.init", "serve.start", "deploy_from_canonical_plan", "stage3.total"}
+    missing = sorted(required_phases - phase_names)
+    if missing:
+        raise RuntimeError(f"startup scaling trace is missing required phases: {missing}")
+
+    api_summary: dict[str, dict[str, float | int]] = {}
+    for index, call in enumerate(api_calls):
+        if not isinstance(call, dict) or not isinstance(call.get("label"), str):
+            raise RuntimeError(f"startup scaling trace api_calls[{index}] is malformed")
+        duration = _finite_nonnegative(call.get("duration_s"), f"api_calls[{index}].duration_s")
+        item = api_summary.setdefault(
+            call["label"], {"count": 0, "total_duration_s": 0.0, "max_duration_s": 0.0}
+        )
+        item["count"] = int(item["count"]) + 1
+        item["total_duration_s"] = float(item["total_duration_s"]) + duration
+        item["max_duration_s"] = max(float(item["max_duration_s"]), duration)
+
+    status = read_deployment_status(status_dir)
+    if (
+        status is None
+        or not status.ready
+        or status.generation != launched.monitor.expected_generation
+        or status.deployment_plan_hash != run_plan.deployment_plan_hash
+    ):
+        raise RuntimeError("startup measurement lost the exact READY generation")
+    trace_start = _finite_nonnegative(metadata.get("trace_start"), "metadata.trace_start")
+    ready_after_trace_start_s = _finite_nonnegative(
+        status.updated_at - trace_start,
+        "ready_after_trace_start_s",
+    )
+
+    trace_dest = os.path.join(run_plan.bundle.results_dir, "startup_scaling_trace.json")
+    with regular_file_reader(trace_source, binary=True) as handle:
+        atomic_create_or_verify_bytes(trace_dest, handle.read())
+    summary_dest = os.path.join(run_plan.bundle.results_dir, "startup_metrics.json")
+    atomic_create_or_verify_json(
+        summary_dest,
+        {
+            "schema_version": 1,
+            **expected_metadata,
+            "gateway_kind": metadata.get("gateway_kind"),
+            "exposure_mode": metadata.get("exposure_mode"),
+            "null_compute": metadata.get("null_compute"),
+            "ready_revision": status.revision,
+            "ready_status_updated_at": status.updated_at,
+            "ready_after_trace_start_s": ready_after_trace_start_s,
+            "trace_total_duration_s": _finite_nonnegative(
+                metadata.get("total_duration_s"), "metadata.total_duration_s"
+            ),
+            "phase_timings": phase_rows,
+            "api_call_summary": api_summary,
+            "event_count": len(events),
+            "replica_measurement_count": len(replicas),
+            "timing_semantics": {
+                "trace_total_duration_s": "deployment child through canonical app deployment",
+                "ready_after_trace_start_s": "deployment trace start through external READY status observation",
+                "phase_timings": "current canonical phase names; not legacy deploy_apps/wait_proxies",
+            },
+        },
+    )
+    return {
+        "startup_scaling_trace": trace_dest,
+        "startup_metrics": summary_dest,
+    }
+
+
+def _capture_startup_terminal_evidence(run_plan, launched) -> dict[str, str]:
+    """Seal the already-validated shutdown report and terminal status."""
+    from dataclasses import asdict
+
+    from exaserve.state.atomic import (
+        atomic_create_or_verify_bytes,
+        atomic_create_or_verify_json,
+        regular_file_reader,
+        strict_json_load_path,
+    )
+    from exaserve.status_api import read_deployment_status
+
+    status_dir = launched.monitor.status_dir
+    report_source = os.path.join(status_dir, "shutdown_report.json")
+    report = strict_json_load_path(report_source)
+    if (
+        not isinstance(report, dict)
+        or report.get("clean") is not True
+        or report.get("deadline_exhausted") is not False
+        or report.get("errors") not in (None, [])
+        or report.get("observed_terminal_state") != "STOPPED"
+        or report.get("deployment_plan_hash") != run_plan.deployment_plan_hash
+        or report.get("generation") != launched.monitor.expected_generation
+    ):
+        raise RuntimeError(f"startup shutdown report is not clean/exact: {report}")
+    terminal = read_deployment_status(status_dir)
+    if (
+        terminal is None
+        or terminal.state != "STOPPED"
+        or terminal.generation != launched.monitor.expected_generation
+        or terminal.deployment_plan_hash != run_plan.deployment_plan_hash
+    ):
+        raise RuntimeError("startup terminal status is missing or has the wrong identity")
+
+    report_dest = os.path.join(run_plan.bundle.results_dir, "deployment_shutdown_report.json")
+    with regular_file_reader(report_source, binary=True) as handle:
+        atomic_create_or_verify_bytes(report_dest, handle.read())
+    status_dest = os.path.join(run_plan.bundle.results_dir, "deployment_terminal_status.json")
+    atomic_create_or_verify_json(status_dest, asdict(terminal))
+    return {
+        "deployment_shutdown_report": report_dest,
+        "deployment_terminal_status": status_dest,
+    }
 
 
 def _capture_deployment_evidence(run_plan, launched) -> dict[str, str]:

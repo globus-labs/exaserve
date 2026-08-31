@@ -15,9 +15,9 @@ matrix:
   - path: client.num_nodes
     expr: 'min(num_nodes, 4)'
   - path: scheduler.queue
-    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
+    expr: '"prod" if num_nodes >= 256 else "capacity"'
   - path: scheduler.walltime
-    expr: '"02:00:00" if num_nodes <= 16 else ("04:00:00" if num_nodes >= 256 else "01:00:00")'
+    expr: '"04:00:00" if num_nodes >= 256 else "02:00:00"'
 trace:
   kind: weak_scaling
 workload:
@@ -30,6 +30,12 @@ workload:
 deployment:
   validation_mode: true
   num_nodes: 4
+  control:
+    watchdog_cleanup_deadline_s: 900.0
+  readiness:
+    initial_deadline_s: 7200.0
+    recovery_deadline_s: 3600.0
+    canary_timeout_s: 300.0
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   local_stage_path: /tmp/pp405b_shard
   models:

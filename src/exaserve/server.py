@@ -1920,6 +1920,22 @@ def main() -> None:
         num_nodes=config.num_nodes,
         num_gpus_per_node=config.num_gpus_per_node,
         models=[cfg.model_id for cfg in config.models],
+        deployment_plan_hash=canonical_plan.deployment_plan_hash,
+        generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
+        run_semantic_hash=os.environ.get("EXASERVE_RUN_SEMANTIC_HASH", ""),
+        source_snapshot_hash=os.environ.get("EXASERVE_SOURCE_SNAPSHOT_HASH", ""),
+        gateway_kind=(
+            canonical_plan.gateway.kind if canonical_plan.gateway is not None else None
+        ),
+        exposure_mode=canonical_plan.exposure.mode,
+        null_compute=canonical_plan.runtime.null_compute,
+        expected_model_replicas=sum(model.num_replicas for model in canonical_plan.models),
+        expected_receipt_requirements=len(canonical_plan.receipt_requirements),
+    )
+    from .control.plan_readiness import planned_application_names
+
+    tracer.set_metadata(
+        expected_serve_applications=len(planned_application_names(canonical_plan)),
     )
     print(
         f"[ExaServe] Serve Init: Connecting to Ray cluster at {ray_address}...",

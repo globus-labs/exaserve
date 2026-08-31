@@ -497,6 +497,14 @@ def test_startup_only_cannot_succeed_with_an_incomplete_result_manifest(monkeypa
         lambda _plan, _launched: {"compatibility_receipts": "/missing"},
     )
     monkeypatch.setattr(
+        "eval.lib.run_executor._capture_startup_measurement",
+        lambda _plan, _launched: {"startup_metrics": "/missing-metrics"},
+    )
+    monkeypatch.setattr(
+        "eval.lib.run_executor._capture_startup_terminal_evidence",
+        lambda _plan, _launched: {"deployment_shutdown_report": "/missing-shutdown"},
+    )
+    monkeypatch.setattr(
         "eval.lib.run_executor._publish_result_manifest",
         lambda *_args, **_kwargs: incomplete,
     )
@@ -542,6 +550,10 @@ def test_startup_only_never_publishes_a_result_manifest_before_cleanup(monkeypat
     monkeypatch.setattr(
         "eval.lib.run_executor._capture_deployment_evidence",
         lambda _plan, _launched: {"compatibility_receipts": "/captured"},
+    )
+    monkeypatch.setattr(
+        "eval.lib.run_executor._capture_startup_measurement",
+        lambda _plan, _launched: {"startup_metrics": "/captured-metrics"},
     )
     monkeypatch.setattr(
         "eval.lib.run_executor._publish_result_manifest",
