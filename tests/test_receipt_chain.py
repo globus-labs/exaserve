@@ -370,6 +370,7 @@ def test_real_channel_crosses_snapshot_receipt_ack_and_start_barriers(monkeypatc
     }.items():
         monkeypatch.setenv(key, value)
     coordinator = SessionCoordinator(plan=plan, binding=binding, log=lambda _: None)
+    coordinator.begin_registration()  # this wire test begins at RankLauncher start
     ledger = ExactReceiptLedger(plan, binding)
     head = HeadChannel(
         deployment_id=plan.deployment_id,
@@ -440,6 +441,7 @@ def test_live_heartbeat_reconnect_snapshot_and_ordered_drain(monkeypatch, tmp_pa
     }.items():
         monkeypatch.setenv(key, value)
     coordinator = SessionCoordinator(plan=plan, binding=binding, log=lambda _: None)
+    coordinator.begin_registration()  # this wire test begins at RankLauncher start
     ledger = ExactReceiptLedger(plan, binding)
     head = HeadChannel(
         deployment_id=plan.deployment_id,
@@ -542,6 +544,7 @@ def test_outer_supervisor_loss_triggers_bounded_node_local_cleanup(monkeypatch, 
     }.items():
         monkeypatch.setenv(key, value)
     coordinator = SessionCoordinator(plan=plan, binding=binding, log=lambda _: None)
+    coordinator.begin_registration()  # this wire test begins at RankLauncher start
     ledger = ExactReceiptLedger(plan, binding)
     head = HeadChannel(
         deployment_id=plan.deployment_id,
