@@ -266,6 +266,7 @@ class RunMaterialization:
     run_semantic_hash: str
     deployment_plan_hash: str
     source_snapshot_hash: str
+    deployment_id_scheme: str
     input_prompt_path: str = ""
     input_trace_path: str = ""
     spec_path: str = ""
@@ -435,6 +436,7 @@ class RunMaterialization:
             "run_semantic_hash": self.run_semantic_hash,
             "deployment_plan_hash": self.deployment_plan_hash,
             "source_snapshot_hash": self.source_snapshot_hash,
+            "deployment_id_scheme": self.deployment_id_scheme,
             "input_prompt_path": self.input_prompt_path,
             "input_trace_path": self.input_trace_path,
             "spec_path": self.spec_path,

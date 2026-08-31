@@ -1335,8 +1335,23 @@ def _pp405b_points(stem, run_group, *, require_complete=False):
     import json
     import re
 
+    if isinstance(run_group, str):
+        result_paths = (P.RUNS_ROOT / stem / run_group).glob("n*/results/result0.json")
+    elif isinstance(run_group, dict) and all(
+        type(nodes) is int and isinstance(group, str) and group
+        for nodes, group in run_group.items()
+    ):
+        result_paths = (
+            P.RUNS_ROOT / stem / group / f"n{nodes}" / "results" / "result0.json"
+            for nodes, group in sorted(run_group.items())
+        )
+    else:
+        raise TypeError("PP=2 run pin must be a run group or node-to-group mapping")
+
     points = {}
-    for result_path in (P.RUNS_ROOT / stem / run_group).glob("n*/results/result0.json"):
+    for result_path in result_paths:
+        if not result_path.is_file():
+            continue
         if require_complete:
             _require_complete_current_result(result_path)
         n = int(re.search(r"/n(\d+)/", str(result_path)).group(1))
@@ -1403,7 +1418,7 @@ PP405B_VARIANTS = (
     ),
     (
         "pp405b_pp2_haproxy_nostream_v040",
-        "run3",
+        {4: "run3", 8: "run3", 16: "run3", 32: "run4", 64: "run4", 128: "run4", 256: "run4"},
         "haproxy_nonstream",
         "haproxy",
         "nonstream",

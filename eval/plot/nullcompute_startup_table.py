@@ -19,7 +19,7 @@ from eval.site_config import get_runs_root
 from exaserve.state.atomic import strict_json_load_path
 
 SPEC_NAME = "nullcompute_haproxy_scale_to256_v040"
-RUN_GROUPS = ("run4", "run5")
+RUN_GROUPS = ("run6", "run7")
 NODE_COUNTS = (32, 64, 128, 256)
 EXPECTED_RESULT_IDS = {
     "deployment_ready_evidence",

@@ -68,6 +68,39 @@ _RUN_GROUP_RE = re.compile(r"^run(\d+)$")
 # remain schema v2 because permissions protect, but do not change, the archived
 # source/tool content.
 _SNAPSHOT_LOCATION_TAG = "v2c"
+_DEPLOYMENT_ID_LEGACY = "legacy_truncate_v1"
+_DEPLOYMENT_ID_BOUNDED = "bounded_hash_v2"
+_DEPLOYMENT_ID_MAX = 40
+
+
+def materialized_deployment_id(
+    *, spec_name: str, run_group_id: str, run_id: str, scheme: str = _DEPLOYMENT_ID_BOUNDED
+) -> str:
+    """Return a bounded deployment identity without truncation collisions."""
+    full = slugify(f"{spec_name}-{run_group_id}-{run_id}")
+    if scheme == _DEPLOYMENT_ID_LEGACY:
+        return full[:_DEPLOYMENT_ID_MAX]
+    if scheme != _DEPLOYMENT_ID_BOUNDED:
+        raise ValueError(f"unknown deployment_id_scheme {scheme!r}")
+    if len(full) <= _DEPLOYMENT_ID_MAX:
+        return full
+    suffix = slugify(f"{run_group_id}-{run_id}")[-16:]
+    payload = json.dumps(
+        {
+            "spec_name": spec_name,
+            "run_group_id": run_group_id,
+            "run_id": run_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    digest = hashlib.sha256(payload).hexdigest()[:12]
+    prefix_budget = _DEPLOYMENT_ID_MAX - len(suffix) - len(digest) - 2
+    prefix = slugify(spec_name)[:prefix_budget].rstrip("-") or "deployment"
+    bounded = f"{prefix}-{suffix}-{digest}"
+    if len(bounded) > _DEPLOYMENT_ID_MAX:
+        raise ValueError("bounded deployment identity exceeds its contract")
+    return bounded
 
 
 def scheduler_run_identity(
@@ -815,12 +848,16 @@ def load_run_plan(path: str) -> RunMaterialization:
         "run_semantic_hash",
         "deployment_plan_hash",
         "source_snapshot_hash",
+        "deployment_id_scheme",
         "input_prompt_path",
         "input_trace_path",
         "spec_path",
     }
     unknown = sorted(set(data) - location_keys)
-    missing = sorted((location_keys - {"input_prompt_path", "input_trace_path"}) - set(data))
+    missing = sorted(
+        (location_keys - {"input_prompt_path", "input_trace_path", "deployment_id_scheme"})
+        - set(data)
+    )
     if unknown or missing:
         raise ValueError(f"run.yaml shape mismatch: unknown={unknown}, missing={missing}")
     bundle_raw = data["bundle"]
@@ -896,6 +933,10 @@ def load_run_plan(path: str) -> RunMaterialization:
         source_snapshot_hash=_materialization_text(
             data["source_snapshot_hash"], "source_snapshot_hash"
         ),
+        deployment_id_scheme=_materialization_text(
+            data.get("deployment_id_scheme", _DEPLOYMENT_ID_LEGACY),
+            "deployment_id_scheme",
+        ),
         input_prompt_path=_materialization_text(
             data.get("input_prompt_path", ""), "input_prompt_path", allow_empty=True
         ),
@@ -930,9 +971,12 @@ def load_run_plan(path: str) -> RunMaterialization:
     )
     if semantic.run_id != expected_run_identity:
         raise ValueError("run.yaml identity disagrees with canonical RunPlan.run_id")
-    expected_deployment_id = slugify(
-        f"{materialization.spec_name}-{materialization.run_group_id}-{materialization.run_id}"
-    )[:40]
+    expected_deployment_id = materialized_deployment_id(
+        spec_name=materialization.spec_name,
+        run_group_id=materialization.run_group_id,
+        run_id=materialization.run_id,
+        scheme=materialization.deployment_id_scheme,
+    )
     if deployment.deployment_id != expected_deployment_id:
         raise ValueError("run.yaml identity disagrees with DeploymentPlan.deployment_id")
     return materialization
@@ -1286,7 +1330,11 @@ def _materialize_variant(
     semantic_plan = compile_shared_run_plan(
         resolved_spec,
         run_id=f"{spec.name}/{run_group_id}/{run_id}",
-        deployment_id=slugify(f"{spec.name}-{run_group_id}-{run_id}")[:40],
+        deployment_id=materialized_deployment_id(
+            spec_name=spec.name,
+            run_group_id=run_group_id,
+            run_id=run_id,
+        ),
         site=site_profile,
     )
     # The trace is already materialized at this point, so its semantic identity
@@ -1329,6 +1377,7 @@ def _materialize_variant(
         run_semantic_hash=semantic_plan.run_semantic_hash,
         deployment_plan_hash=semantic_plan.deployment.deployment_plan_hash,
         source_snapshot_hash=source_snapshot_hash,
+        deployment_id_scheme=_DEPLOYMENT_ID_BOUNDED,
         input_prompt_path=spec.trace.input_prompt_path,
         input_trace_path=spec.trace.input_trace_path,
         spec_path=group_spec_path,

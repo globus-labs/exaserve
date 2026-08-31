@@ -20,6 +20,7 @@ from eval.lib.plan_adapter import (
     compile_shared_run_plan,
     deployment_raw_from_spec,
 )
+from eval.lib.run_planner import materialized_deployment_id
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import PlanError
 from exaserve.site import default_site_profile
@@ -69,6 +70,35 @@ def test_core_and_eval_derive_byte_identical_deployment_hashes():
     )
     via_core = compile_deployment_plan(raw, site=default_site_profile(), deployment_id="d")
     assert via_eval.deployment_plan_hash == via_core.deployment_plan_hash
+
+
+def test_bounded_materialized_deployment_ids_preserve_variant_identity():
+    spec = "pp405b_pp2_haproxy_nostream_v040"
+    n16 = materialized_deployment_id(spec_name=spec, run_group_id="run4", run_id="n16")
+    n128 = materialized_deployment_id(spec_name=spec, run_group_id="run4", run_id="n128")
+    assert n16 != n128
+    assert len(n16) <= 40 and len(n128) <= 40
+    assert "n16" in n16 and "n128" in n128
+    assert (
+        materialized_deployment_id(spec_name="short", run_group_id="run0", run_id="n1")
+        == "short-run0-n1"
+    )
+    assert (
+        materialized_deployment_id(
+            spec_name=spec,
+            run_group_id="run4",
+            run_id="n16",
+            scheme="legacy_truncate_v1",
+        )
+        == "pp405b-pp2-haproxy-nostream-v040-run4-n1"
+    )
+    with pytest.raises(ValueError, match="scheme"):
+        materialized_deployment_id(
+            spec_name=spec,
+            run_group_id="run4",
+            run_id="n16",
+            scheme="unknown",
+        )
 
 
 def test_eval_proxy_none_becomes_a_declared_validation_exposure():

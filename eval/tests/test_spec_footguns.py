@@ -188,7 +188,7 @@ def test_missing_pp_curve_plot_is_pinned_to_the_accepted_run_group() -> None:
     assert current == [
         (
             "pp405b_pp2_haproxy_nostream_v040",
-            "run3",
+            {4: "run3", 8: "run3", 16: "run3", 32: "run4", 64: "run4", 128: "run4", 256: "run4"},
             "haproxy_nonstream",
             "haproxy",
             "nonstream",
@@ -212,7 +212,7 @@ def test_missing_null_curve_consumer_pins_two_independent_lifecycles() -> None:
     }
     assert assignments == {
         "SPEC_NAME": "nullcompute_haproxy_scale_to256_v040",
-        "RUN_GROUPS": ("run4", "run5"),
+        "RUN_GROUPS": ("run6", "run7"),
         "NODE_COUNTS": (32, 64, 128, 256),
     }
 
