@@ -118,6 +118,42 @@ def test_every_in_envelope_catalog_cell_compiles_to_the_canonical_run_plan() -> 
     }
 
 
+def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() -> None:
+    spec_root = Path(__file__).parents[1] / "specs" / "sc26workshop" / "full"
+
+    null_variants = expand_matrix(
+        load_experiment_spec(str(spec_root / "nullcompute_haproxy_scale_to256_v040.yaml"))
+    )
+    assert [variant.spec.deployment.num_nodes for variant in null_variants] == [32, 64, 128, 256]
+    assert all(variant.spec.client.startup_only for variant in null_variants)
+    assert all(
+        variant.spec.backend.args["ray"]["launch"]["null_compute"]
+        for variant in null_variants
+    )
+
+    pp_variants = expand_matrix(
+        load_experiment_spec(str(spec_root / "pp405b_pp2_haproxy_nostream_v040.yaml"))
+    )
+    assert [variant.spec.deployment.num_nodes for variant in pp_variants] == [
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+    ]
+    for variant in pp_variants:
+        nodes = variant.spec.deployment.num_nodes
+        model = variant.spec.deployment.models[0]
+        assert model.tensor_parallel_size == 8
+        assert model.pipeline_parallel_size == 2
+        assert model.num_replicas == nodes // 2
+        assert variant.spec.client.num_runs == 2
+        assert variant.spec.client.stream is False
+        assert variant.spec.backend.args["ray"]["proxy"]["type"] == "haproxy"
+
+
 def _spec(dest="proxy", deployment_nodes=256, client_nodes=0):
     return ExperimentSpec(
         name="s",
