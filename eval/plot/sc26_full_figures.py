@@ -1357,14 +1357,22 @@ def _pp405b_points(stem):
 
 def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
     """405B (TP=8×PP=2, one replica per 2 nodes) shard-aware weak-scaling panel:
-    aggregate successful throughput vs cluster size, DIRECT vs HAProxy, against an
-    ideal-linear guide. Returns (handles, labels, per_node base rate)."""
+    aggregate successful throughput vs cluster size, DIRECT vs HAProxy in
+    incremental and non-streaming delivery, against an ideal-linear guide.
+    Returns (handles, labels, per_node base rate)."""
     variants = [
-        ("pp405b_pp2_scale_direct", "direct", "Direct"),
-        ("pp405b_pp2_scale", "haproxy", "HAProxy"),
+        ("pp405b_pp2_scale_direct", "direct_stream", "direct", "stream", "Direct"),
+        ("pp405b_pp2_scale", "haproxy_stream", "haproxy", "stream", "HAProxy"),
+        (
+            "pp405b_pp2_haproxy_nostream_v040",
+            "haproxy_nonstream",
+            "haproxy",
+            "nonstream",
+            "HAProxy non-stream",
+        ),
     ]
-    data = {key: _pp405b_points(stem) for stem, key, _ in variants}
-    base = data["direct"][0]
+    data = {key: _pp405b_points(stem) for stem, key, _, _, _ in variants}
+    base = data["direct_stream"][0]
     per_node = base["srps"] / base["nodes"]  # weak-scaling unit rate (per node)
     allnodes = sorted({p["nodes"] for pts in data.values() for p in pts})
     a.plot(
@@ -1377,9 +1385,16 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
         label="ideal (linear)",
     )
     sep = " · " if label_fs >= 5 else "\n"
-    for _, key, lab in variants:
+    for _, key, proxy, mode, lab in variants:
         pts = data[key]
-        ps.line(a, [p["nodes"] for p in pts], [p["srps"] for p in pts], key, "stream", label=lab)
+        ps.line(
+            a,
+            [p["nodes"] for p in pts],
+            [p["srps"] for p in pts],
+            proxy,
+            mode,
+            label=lab,
+        )
         # spread over the job's data iterations (run_index >= 1); absent for
         # single-iteration cells, where srps_std is 0 and no bar is drawn.
         yerr = [p.get("srps_std", 0.0) or 0.0 for p in pts]
@@ -1389,7 +1404,7 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
                 [p["srps"] for p in pts],
                 yerr=yerr,
                 fmt="none",
-                ecolor=COLORS[key],
+                ecolor=COLORS[proxy],
                 elinewidth=0.8,
                 capsize=2,
                 zorder=4,
@@ -1403,8 +1418,8 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
                 p["nodes"],
                 p["srps"],
                 f"{tp}{sep}{eff:.0f}%",
-                COLORS[key],
-                "up" if key == "direct" else "down",
+                COLORS[proxy],
+                "up" if proxy == "direct" or mode == "nonstream" else "down",
                 fs=label_fs,
             )
     a.set_yscale("log")
@@ -1428,7 +1443,8 @@ def _pp405b_caption(per_node):
         "Shard-aware pipeline-parallel weak scaling: Llama-3.1-405B (TP=8 × PP=2)",
         [
             "one replica per 2 nodes · 4–256 nodes (2–128 PP=2 replicas) · fixed offered rate/replica",
-            "successful throughput; point labels = throughput and weak-scaling efficiency "
+            "successful throughput; HAProxy solid = incremental, dashed = non-stream; "
+            "point labels = throughput and weak-scaling efficiency "
             f"vs the 4-node base ({per_node:.2f} query/s/node)",
         ],
     )
