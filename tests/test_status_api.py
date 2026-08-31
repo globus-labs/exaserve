@@ -236,13 +236,63 @@ def test_failure_is_published_with_its_first_cause(tmp_path):
 
 
 def test_provenance_carries_the_generation_and_hashes(tmp_path):
+    from dataclasses import asdict
+
     pub, plan, binding = _publisher(tmp_path)
     status = read_deployment_status(str(tmp_path))
+    record = pub.store.load()
+    assert record is not None
+    assert status.updated_at == record.updated_at
+    assert status.schema_version == 2
+    assert status.state_revision == 0
+    assert status.state_changed_at >= 0
+    assert status.state_changed_monotonic >= 0
+    assert status.state_clock_boot_id
+    serialized = asdict(status)
+    assert serialized["schema_version"] == 2
+    assert serialized["state_revision"] == 0
+    assert serialized["state_changed_monotonic"] == status.state_changed_monotonic
     assert status.generation == 3
     assert status.deployment_plan_hash == plan.deployment_plan_hash
     assert status.site_profile_hash == plan.site_profile_hash
     assert status.allocation_binding_hash == binding.allocation_binding_hash
     assert status.num_nodes == plan.num_nodes
+
+
+def test_legacy_public_status_remains_readable_without_fabricating_monotonic_time(tmp_path):
+    import json
+
+    pub, _, _ = _publisher(tmp_path)
+    raw = json.loads((tmp_path / "deployment_status.json").read_text(encoding="utf-8"))
+    for name in (
+        "deployment_status_schema_version",
+        "state_revision",
+        "state_changed_at",
+        "state_changed_monotonic",
+        "state_clock_boot_id",
+    ):
+        raw["data"].pop(name)
+    (tmp_path / "deployment_status.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    legacy = read_deployment_status(str(tmp_path))
+    assert legacy.schema_version == 1
+    assert legacy.state_revision is None
+    assert legacy.state_changed_at == raw["history"][-1]["at"]
+    assert legacy.state_changed_monotonic is None
+    assert legacy.state_clock_boot_id == ""
+    assert pub.store.load() is not None
+
+
+def test_unknown_public_status_schema_is_rejected_explicitly(tmp_path):
+    import json
+
+    _publisher(tmp_path)
+    path = tmp_path / "deployment_status.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["data"]["deployment_status_schema_version"] = 99
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(InvalidDeploymentStatus, match="schema_version=99"):
+        read_deployment_status(str(tmp_path))
 
 
 def test_status_loader_verifies_the_separate_allocation_binding(tmp_path):
@@ -359,6 +409,9 @@ def test_ready_evidence_uses_monotonic_expiry_and_refresh_is_cas_published(tmp_p
     _walk_to_ready(pub)
     status = read_deployment_status(str(tmp_path), clock=clock)
     revision = status.revision
+    state_revision = status.state_revision
+    state_changed_at = status.state_changed_at
+    state_changed_monotonic = status.state_changed_monotonic
     expires = status.readiness_snapshot["lease_expires_monotonic"]
 
     # Wall-clock jumps in either direction are evidence changes only. They
@@ -377,12 +430,81 @@ def test_ready_evidence_uses_monotonic_expiry_and_refresh_is_cas_published(tmp_p
     )
     refreshed = read_deployment_status(str(tmp_path), clock=clock)
     assert refreshed.revision == revision + 1
+    assert refreshed.state_revision == state_revision
+    assert refreshed.state_changed_at == state_changed_at
+    assert refreshed.state_changed_monotonic == state_changed_monotonic
     assert refreshed.readiness_snapshot["lease_expires_monotonic"] > expires
 
     state["monotonic"] = refreshed.readiness_snapshot["lease_expires_monotonic"]
     assert read_deployment_status(str(tmp_path), clock=clock).ready is False
     with pytest.raises(DeploymentNotReady, match="lease expired"):
         require_ready_endpoint(str(tmp_path), clock=clock)
+
+
+def test_ready_recovery_commits_a_new_state_transition_anchor(tmp_path):
+    state = {"wall": 2_000_000_000.0, "monotonic": 100.0}
+    clock = _fake_status_clock(state)
+    pub, _, _ = _publisher(tmp_path, clock=clock)
+    _walk_to_ready(pub)
+    first = read_deployment_status(str(tmp_path), clock=clock)
+
+    state["wall"] += 10.0
+    state["monotonic"] += 10.0
+    pub.advance(DeploymentState.VALIDATING, reason_code="READINESS_REVOKED")
+    path, digest = _empty_receipt_manifest(pub)
+    snapshot, model_map = _ready_snapshot(pub, path, digest)
+    state["wall"] += 5.0
+    state["monotonic"] += 5.0
+    pub.advance(
+        DeploymentState.READY,
+        reason_code="READY_RECOVERED",
+        advertised_endpoint="http://h:8000",
+        receipt_hashes=[],
+        readiness_snapshot=snapshot,
+        model_map=model_map,
+        capability_map={},
+    )
+    recovered = read_deployment_status(str(tmp_path), clock=clock)
+    assert recovered.state_revision > first.state_revision
+    assert recovered.state_changed_at == state["wall"]
+    assert recovered.state_changed_monotonic == state["monotonic"]
+
+
+def test_ready_transition_anchor_is_sampled_after_payload_validation(tmp_path, monkeypatch):
+    from exaserve.state import receipts as receipt_module
+
+    state = {"wall": 2_000_000_000.0, "monotonic": 100.0}
+    clock = _fake_status_clock(state)
+    pub, _, _ = _publisher(tmp_path, clock=clock)
+    pub.advance_through(
+        DeploymentState.STAGING,
+        DeploymentState.CLUSTER_STARTING,
+        DeploymentState.DEPLOYING,
+        DeploymentState.VALIDATING,
+        reason_code="X",
+    )
+    path, digest = _empty_receipt_manifest(pub)
+    snapshot, model_map = _ready_snapshot(pub, path, digest)
+    real_load = receipt_module.load_receipt_manifest
+
+    def delayed_manifest_validation(manifest_path):
+        state["wall"] += 50.0
+        state["monotonic"] += 50.0
+        return real_load(manifest_path)
+
+    monkeypatch.setattr(receipt_module, "load_receipt_manifest", delayed_manifest_validation)
+    pub.advance(
+        DeploymentState.READY,
+        reason_code="READY",
+        advertised_endpoint="http://h:8000",
+        receipt_hashes=[],
+        readiness_snapshot=snapshot,
+        model_map=model_map,
+        capability_map={},
+    )
+    status = read_deployment_status(str(tmp_path), clock=clock)
+    assert status.state_changed_at == 2_000_000_050.0
+    assert status.state_changed_monotonic == 150.0
 
 
 def test_ready_lease_survives_reader_restart_on_same_boot_and_expires_on_boot_change(tmp_path):
@@ -394,14 +516,10 @@ def test_ready_lease_survives_reader_restart_on_same_boot_and_expires_on_boot_ch
     # A separately constructed clock models a new reader process. Kernel
     # monotonic time remains comparable for the duration of the same boot.
     restarted_reader_clock = _fake_status_clock(state, boot_id="boot-a")
-    assert read_deployment_status(
-        str(tmp_path), clock=restarted_reader_clock
-    ).ready
+    assert read_deployment_status(str(tmp_path), clock=restarted_reader_clock).ready
 
     rebooted_reader_clock = _fake_status_clock(state, boot_id="boot-b")
-    assert not read_deployment_status(
-        str(tmp_path), clock=rebooted_reader_clock
-    ).ready
+    assert not read_deployment_status(str(tmp_path), clock=rebooted_reader_clock).ready
     with pytest.raises(DeploymentNotReady, match="lease expired"):
         require_ready_endpoint(str(tmp_path), clock=rebooted_reader_clock)
 

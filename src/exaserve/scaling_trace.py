@@ -27,6 +27,8 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
+from .state.clock import system_boot_id
+
 
 _TRACE_PARTS_DIRNAME = "scaling_trace_parts"
 
@@ -40,6 +42,32 @@ def tracing_enabled() -> bool:
     files on Lustre add significant overhead.
     """
     return os.environ.get("EXASERVE_SCALING_TRACE", "1") != "0"
+
+
+def merge_replica_init_evidence(
+    *, actor_fields: dict[str, Any], engine_fields: Optional[dict[str, Any]] = None
+) -> dict[str, Any]:
+    """Merge backend diagnostics without overwriting actor-level identity/time.
+
+    Backends historically used generic names such as ``total_init_s`` and
+    ``wall_end``. Those are useful, but they describe only engine creation;
+    the outer Serve actor owns the canonical replica-slot measurement. Any
+    collision is therefore retained under an explicit ``engine_`` prefix.
+    """
+    if not isinstance(actor_fields, dict) or (
+        engine_fields is not None and not isinstance(engine_fields, dict)
+    ):
+        raise TypeError("replica init evidence fields must be objects")
+    merged: dict[str, Any] = {}
+    for name, value in (engine_fields or {}).items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("engine init evidence keys must be non-empty strings")
+        destination = f"engine_{name}" if name in actor_fields else name
+        if destination in actor_fields or destination in merged:
+            raise ValueError(f"engine init evidence key collision at {destination!r}")
+        merged[destination] = value
+    merged.update(actor_fields)
+    return merged
 
 
 def _sanitize_token(raw: str) -> str:
@@ -89,7 +117,16 @@ def list_trace_part_paths(kind: str) -> list[str]:
 class ScalingTracer:
     """Thread-safe, singleton-style tracer for Ray scaling analysis."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        wall_time: Optional[Callable[[], float]] = None,
+        monotonic_time: Optional[Callable[[], float]] = None,
+        boot_id: Optional[Callable[[], str]] = None,
+    ) -> None:
+        self._wall_time = wall_time or time.time
+        self._monotonic_time = monotonic_time or time.monotonic
+        self._boot_id = boot_id or system_boot_id
         self._lock = threading.Lock()
         self._phases: list[dict] = []
         self._api_calls: list[dict] = []
@@ -98,7 +135,9 @@ class ScalingTracer:
         self._metadata: dict[str, Any] = {
             "hostname": socket.gethostname(),
             "pid": os.getpid(),
-            "trace_start": time.time(),
+            "trace_start": self._wall_time(),
+            "trace_start_monotonic": self._monotonic_time(),
+            "trace_clock_boot_id": self._boot_id(),
             "trace_token": trace_token(),
         }
         self._phase_stack: list[dict] = []
@@ -291,9 +330,11 @@ class ScalingTracer:
             return None
         if path is None:
             path = default_scaling_trace_path()
-        self._metadata["trace_end"] = time.time()
+        self._metadata["trace_end"] = self._wall_time()
+        self._metadata["trace_end_monotonic"] = self._monotonic_time()
         self._metadata["total_duration_s"] = round(
-            self._metadata["trace_end"] - self._metadata["trace_start"], 4
+            self._metadata["trace_end_monotonic"] - self._metadata["trace_start_monotonic"],
+            4,
         )
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = self.to_dict()

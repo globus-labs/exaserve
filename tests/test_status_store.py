@@ -192,6 +192,21 @@ def test_nonhistorical_updates_are_bounded_and_revision_accounted(tmp_path):
     assert record.data["status_history_events_omitted"] == 20
 
 
+def test_backward_wall_clock_does_not_corrupt_revision_order(tmp_path, monkeypatch):
+    from exaserve.state import status as status_module
+
+    store = StatusStore.deployment(tmp_path / "backward-clock.json")
+    store.initialize("d", DeploymentState.PLANNED)
+    initial = store.load().updated_at
+    monkeypatch.setattr(status_module.time, "time", lambda: initial - 100.0)
+    store.transition(DeploymentState.PLANNED, DeploymentState.STAGING, reason_code="STEP")
+    store.update(DeploymentState.STAGING, reason_code="HEARTBEAT", record_history=False)
+
+    record = store.load()
+    assert record.updated_at == initial
+    assert [event["at"] for event in record.history] == [initial, initial]
+
+
 @pytest.mark.parametrize("corruption", ["fabricated_ready", "illegal_edge", "bad_accounting"])
 def test_load_rejects_shape_valid_but_fabricated_history(tmp_path, corruption):
     path = tmp_path / f"{corruption}.json"

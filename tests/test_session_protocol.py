@@ -56,14 +56,17 @@ def _plan(nodes=2, **limits):
     return compile_deployment_plan(raw, site=site, deployment_id="d")
 
 
-def _coord(nodes=2, clock=None):
+def _coord(nodes=2, clock=None, *, begin=True):
     plan = _plan(nodes)
     binding = build_allocation_binding(
         plan=plan, generation=1, scheduler_allocation_id="j", nodes=[f"n{i}" for i in range(nodes)]
     )
-    return SessionCoordinator(
+    coordinator = SessionCoordinator(
         plan=plan, binding=binding, clock=clock or _Clock(), log=lambda *_: None
     )
+    if begin:
+        coordinator.begin_registration()
+    return coordinator
 
 
 def _establish(coord, rank, *, items=None, instance="i1"):
@@ -165,6 +168,40 @@ def test_one_missing_rank_at_the_deadline_is_terminal():
     assert reason and "not established" in reason
     assert coord.generation_state == GenerationState.TERMINAL.value
     assert not coord.may_start()[0]
+
+
+def test_registration_deadline_does_not_run_during_prelaunch_staging():
+    clock = _Clock()
+    coord = _coord(2, clock=clock, begin=False)
+    clock.advance(1000.0)
+    assert coord.check_registration_deadline() is None
+
+    started = coord.begin_registration()
+    assert started == clock.t
+    assert coord.registration_deadline_at() == started + 100.0
+    clock.advance(101.0)
+    reason = coord.check_registration_deadline()
+    assert reason and "not established" in reason
+
+
+def test_planned_registration_before_rank_launcher_is_refused_without_shifting_clock():
+    clock = _Clock()
+    coord = _coord(1, clock=clock, begin=False)
+    ok, why = coord.register(0, "n0", "premature")
+    assert not ok and "has not started" in why
+    assert coord.started_at is None
+    assert coord.generation_state == GenerationState.REGISTERING.value
+
+
+def test_exact_registration_deadline_is_generation_terminal():
+    clock = _Clock()
+    coord = _coord(2, clock=clock)
+    _establish(coord, 0)
+    clock.advance(100.0)
+    reason = coord.check_registration_deadline()
+    assert reason and "rank" in reason
+    assert coord.registration_remaining_s() == 0.0
+    assert coord.generation_state == GenerationState.TERMINAL.value
 
 
 def test_delayed_registration_within_the_deadline_succeeds():

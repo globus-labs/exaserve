@@ -754,7 +754,8 @@ class EngineWorker:
         stats_push_period_s: float = 10.0,
         stats_sample_cap: int = 1500,
     ):
-        init_start = time.time()
+        init_wall_start = time.time()
+        init_monotonic_start = time.monotonic()
         pid = os.getpid()
         hostname = socket.gethostname()
         self.model_id = model_id
@@ -916,24 +917,32 @@ class EngineWorker:
 
         self.backend.create(spec)
 
-        total_s = time.time() - init_start
+        init_monotonic_end = time.monotonic()
+        total_s = init_monotonic_end - init_monotonic_start
         print_red(f"[EngineWorker pid={pid}] ★ INIT TOTAL: {total_s:.2f}s ★")
 
-        from .scaling_trace import report_replica_stats
+        from .scaling_trace import merge_replica_init_evidence, report_replica_stats
 
-        replica_info = {
+        actor_init_evidence = {
             "pid": pid,
             "hostname": hostname,
             "model_id": model_id,
+            "replica_index": replica_index,
+            "component_slot": self._replica_component_id,
             "device_id": device_id,
             "null_compute": null_compute,
             "total_init_s": round(total_s, 4),
-            "wall_start": init_start,
+            "wall_start": init_wall_start,
             "wall_end": time.time(),
+            "monotonic_start": init_monotonic_start,
+            "monotonic_end": init_monotonic_end,
         }
         init_stats = getattr(self.backend, "init_stats", None)
-        if callable(init_stats):
-            replica_info.update(init_stats())
+        engine_init_evidence = init_stats() if callable(init_stats) else {}
+        replica_info = merge_replica_init_evidence(
+            actor_fields=actor_init_evidence,
+            engine_fields=engine_init_evidence,
+        )
         # Compat outcome rides along on the stats channel too: replica stdout
         # does not reach the driver log, so without this a receipt failure is
         # invisible and the readiness gate can only report the symptom.
@@ -1924,9 +1933,7 @@ def main() -> None:
         generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
         run_semantic_hash=os.environ.get("EXASERVE_RUN_SEMANTIC_HASH", ""),
         source_snapshot_hash=os.environ.get("EXASERVE_SOURCE_SNAPSHOT_HASH", ""),
-        gateway_kind=(
-            canonical_plan.gateway.kind if canonical_plan.gateway is not None else None
-        ),
+        gateway_kind=(canonical_plan.gateway.kind if canonical_plan.gateway is not None else None),
         exposure_mode=canonical_plan.exposure.mode,
         null_compute=canonical_plan.runtime.null_compute,
         expected_model_replicas=sum(model.num_replicas for model in canonical_plan.models),

@@ -351,8 +351,11 @@ def test_the_run_directory_is_propagated_to_ranks(tmp_path, monkeypatch):
     root = _root(tmp_path)
     root.bind_allocation(["n0", "n1"], "j")
     root._head_address = "10.0.0.1"
+    registration_starts = []
+    root.sessions = SimpleNamespace(begin_registration=lambda: registration_starts.append(True))
     component = root.launch_ranks(["/bin/true"], launch_prefix=["/bin/true"])
     try:
+        assert registration_starts == [True]
         assert component.env["EXASERVE_RUN_LOG_DIR"] == str(tmp_path)
         assert component.env["EXASERVE_HEAD_IP"]
         assert component.env["EXASERVE_PLAN_HASH"] == root.plan.deployment_plan_hash
@@ -361,6 +364,20 @@ def test_the_run_directory_is_propagated_to_ranks(tmp_path, monkeypatch):
         assert not ok and "control channel" in why
     finally:
         root.shutdown(drain_s=5)
+
+
+def test_rank_registration_clock_arms_before_even_a_failed_spawn_attempt(tmp_path):
+    from exaserve.control.supervisor import SupervisorError
+
+    root = _root(tmp_path)
+    root.bind_allocation(["n0", "n1"], "j")
+    root._head_address = "10.0.0.1"
+    registration_starts = []
+    root.sessions = SimpleNamespace(begin_registration=lambda: registration_starts.append(True))
+
+    with pytest.raises(SupervisorError, match="startup transaction failed"):
+        root.launch_ranks(["/bin/true"], launch_prefix=["/path/that/does/not/exist"])
+    assert registration_starts == [True]
 
 
 def test_rank_launcher_captures_authenticated_rank_failure_before_global_cause(
@@ -382,6 +399,7 @@ def test_rank_launcher_captures_authenticated_rank_failure_before_global_cause(
             return f"rank 1 component ray: exit=137; rank launcher exit={code}"
 
     root.head_channel = TypedHeadChannel()
+    root.sessions = SimpleNamespace(begin_registration=lambda: 0.0)
     component = root.launch_ranks(["/bin/true"], launch_prefix=["/bin/true"])
     try:
         assert component.on_unexpected_exit is not None

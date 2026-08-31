@@ -137,7 +137,11 @@ class SessionCoordinator:
         self._log = log
         self.generation_state = GenerationState.REGISTERING.value
         self.terminal_reason: Optional[str] = None
-        self.started_at = clock()
+        # Binding the listener happens before potentially long source/model
+        # staging. The registration lease begins only when RankLauncher is
+        # about to start; otherwise large model broadcasts consume a deadline
+        # for ranks that do not exist yet.
+        self.started_at: Optional[float] = None
         self.sessions: dict[int, RankSession] = {
             rank: RankSession(rank=rank, node_id=binding.node_for(rank) or "")
             for rank in binding.ranks()
@@ -155,6 +159,27 @@ class SessionCoordinator:
     def expected_ranks(self) -> tuple:
         return tuple(sorted(self.sessions))
 
+    def begin_registration(self) -> float:
+        """Start the one registration clock immediately before rank launch."""
+        if self.generation_state != GenerationState.REGISTERING.value:
+            raise RuntimeError(
+                f"cannot begin registration while generation is {self.generation_state}"
+            )
+        if self.started_at is None:
+            self.started_at = self._clock()
+            self._log("[Session] rank registration deadline started")
+        return self.started_at
+
+    def registration_deadline_at(self) -> float:
+        if self.started_at is None:
+            raise RuntimeError("rank registration deadline has not started")
+        return self.started_at + self.limits.registration_deadline_s
+
+    def registration_remaining_s(self) -> float:
+        if self.started_at is None:
+            raise RuntimeError("rank registration deadline has not started")
+        return max(0.0, self.registration_deadline_at() - self._clock())
+
     # -- phase 2: registration --------------------------------------------
     def register(self, rank: int, node_id: str, instance_id: str) -> tuple[bool, str]:
         """Authenticated REGISTER. Does NOT by itself count as registered."""
@@ -162,6 +187,11 @@ class SessionCoordinator:
         if session is None:
             # Unplanned rank: session-local rejection, not generation-fatal.
             return False, f"rank {rank} is not in the allocation binding"
+        if self.started_at is None:
+            # A planned connection before RankLauncher exists is stale traffic
+            # or a composition wiring defect. Never shift the global deadline
+            # to first arrival, which would hide both conditions.
+            return False, "rank registration has not started"
         bound = self.binding.node_for(rank)
         if bound and not self.binding.is_bound_node(rank, node_id):
             # An authenticated rank asserting the wrong node is deterministic
@@ -320,8 +350,10 @@ class SessionCoordinator:
         """One missing rank at the deadline makes the generation terminal."""
         if self.generation_state != GenerationState.REGISTERING.value:
             return None
+        if self.started_at is None:
+            return None
         elapsed = self._clock() - self.started_at
-        if elapsed <= self.limits.registration_deadline_s:
+        if elapsed < self.limits.registration_deadline_s:
             return None
         pending = sorted(r for r, s in self.sessions.items() if not s.is_established())
         if pending:

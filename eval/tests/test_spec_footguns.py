@@ -127,8 +127,7 @@ def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() 
     assert [variant.spec.deployment.num_nodes for variant in null_variants] == [32, 64, 128, 256]
     assert all(variant.spec.client.startup_only for variant in null_variants)
     assert all(
-        variant.spec.backend.args["ray"]["launch"]["null_compute"]
-        for variant in null_variants
+        variant.spec.backend.args["ray"]["launch"]["null_compute"] for variant in null_variants
     )
 
     pp_variants = expand_matrix(
@@ -152,6 +151,69 @@ def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() 
         assert variant.spec.client.num_runs == 2
         assert variant.spec.client.stream is False
         assert variant.spec.backend.args["ray"]["proxy"]["type"] == "haproxy"
+        if nodes <= 16:
+            assert (variant.spec.scheduler.queue, variant.spec.scheduler.walltime) == (
+                "capacity",
+                "02:00:00",
+            )
+        elif nodes < 256:
+            assert (variant.spec.scheduler.queue, variant.spec.scheduler.walltime) == (
+                "debug-scaling",
+                "01:00:00",
+            )
+        else:
+            assert (variant.spec.scheduler.queue, variant.spec.scheduler.walltime) == (
+                "prod",
+                "04:00:00",
+            )
+
+
+def test_missing_pp_curve_plot_is_pinned_to_the_accepted_run_group() -> None:
+    import ast
+
+    source = Path(__file__).parents[1] / "plot" / "sc26_full_figures.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "PP405B_VARIANTS"
+            for target in node.targets
+        )
+    )
+    variants = ast.literal_eval(assignment.value)
+    current = [row for row in variants if row[0] == "pp405b_pp2_haproxy_nostream_v040"]
+    assert current == [
+        (
+            "pp405b_pp2_haproxy_nostream_v040",
+            "run2",
+            "haproxy_nonstream",
+            "haproxy",
+            "nonstream",
+            "HAProxy non-stream",
+            True,
+        )
+    ]
+
+
+def test_missing_null_curve_consumer_pins_two_independent_lifecycles() -> None:
+    import ast
+
+    source = Path(__file__).parents[1] / "plot" / "nullcompute_startup_table.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    assignments = {
+        target.id: ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id in {"SPEC_NAME", "RUN_GROUPS", "NODE_COUNTS"}
+    }
+    assert assignments == {
+        "SPEC_NAME": "nullcompute_haproxy_scale_to256_v040",
+        "RUN_GROUPS": ("run2", "run3"),
+        "NODE_COUNTS": (32, 64, 128, 256),
+    }
 
 
 def _spec(dest="proxy", deployment_nodes=256, client_nodes=0):

@@ -708,6 +708,13 @@ class CompositionRoot:
             # an authenticated unexpected disconnect) delivered by WP4.4's
             # independent control signal.
             component.on_unexpected_exit = self.head_channel.launcher_exit_evidence
+        if self.sessions is None:
+            raise CompositionError("rank launcher requires a session coordinator")
+        # Arm at the last parent-only boundary before Popen: a fast MPI child
+        # must never reach REGISTER before the registration clock exists.
+        # Potentially multi-hour staging before this point consumes no budget;
+        # a failed launch attempt terminates the generation immediately.
+        component.on_starting = self.sessions.begin_registration
         self.supervisor.install_signal_handlers()
         self.supervisor.start_all(rollback_s=self.plan.control.watchdog_cleanup_deadline_s)
         self._log(f"[Composition] launched {self.plan.num_nodes} rank(s)")
@@ -724,8 +731,7 @@ class CompositionRoot:
 
     def await_all_registered(self, *, poll_s: float = 1.0) -> None:
         """Hold every Ray child until every planned rank is established."""
-        deadline = time.monotonic() + self.plan.control.registration_deadline_s
-        while time.monotonic() < deadline:
+        while True:
             if self.head_channel is None:
                 raise CompositionError("mandatory control listener is absent")
             self.raise_if_termination("rank registration interrupted")
@@ -737,11 +743,19 @@ class CompositionRoot:
                     "[Composition] every planned rank established; Ray children remain fenced"
                 )
                 return
-            time.sleep(poll_s)
-        pending = self.sessions.readiness_revoked_ranks()
-        raise CompositionError(
-            f"registration deadline expired with ranks {list(pending)[:8]} not established"
-        )
+            try:
+                remaining = self.sessions.registration_remaining_s()
+            except RuntimeError as exc:
+                raise CompositionError(str(exc)) from exc
+            # check_registration_deadline owns the exact >= boundary and the
+            # generation-fatal transition. Never bypass it with a local loop
+            # condition that leaves the coordinator REGISTERING.
+            if remaining <= 0:
+                reason = self.sessions.check_registration_deadline()
+                if reason:
+                    raise CompositionError(reason)
+                raise CompositionError("registration deadline expired without a terminal reason")
+            time.sleep(min(poll_s, remaining))
 
     def _await_rank_roles(
         self, expected: dict[int, str], *, timeout_s: float, poll_s: float

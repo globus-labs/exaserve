@@ -47,9 +47,11 @@ from .state.status import (
     StatusRecord,
     StatusStore,
 )
+from .state.clock import system_boot_id
 
 STATUS_FILENAME = "deployment_status.json"
 ALLOCATION_BINDING_FILENAME = "allocation_binding.json"
+DEPLOYMENT_STATUS_SCHEMA_VERSION = 2
 
 
 class DeploymentNotReady(RuntimeError):
@@ -90,21 +92,6 @@ _READY_SNAPSHOT_FIELDS = {
 }
 
 
-def _system_boot_id() -> str:
-    """Return the kernel boot identity used to fence persisted monotonic time.
-
-    CLOCK_MONOTONIC values are comparable across processes on one boot, but
-    not across a reboot.  Aurora's release platform is Linux, where boot_id is
-    the kernel-provided identity.  An unavailable identity fails READY closed.
-    """
-    try:
-        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
-            value = handle.read().strip()
-    except OSError:
-        return ""
-    return value if 0 < len(value) <= 128 else ""
-
-
 @dataclass(frozen=True)
 class StatusClock:
     """Injectable wall/monotonic clock pair with its comparison identity."""
@@ -117,11 +104,11 @@ class StatusClock:
 _SYSTEM_STATUS_CLOCK = StatusClock(
     wall_time=time.time,
     monotonic_time=time.monotonic,
-    boot_id=_system_boot_id,
+    boot_id=system_boot_id,
 )
 
 
-def _lease_evidence(clock: StatusClock, duration_s: float) -> dict[str, Any]:
+def _clock_sample(clock: StatusClock) -> tuple[float, float, str]:
     wall_now = clock.wall_time()
     monotonic_now = clock.monotonic_time()
     boot_id = clock.boot_id()
@@ -135,12 +122,28 @@ def _lease_evidence(clock: StatusClock, duration_s: float) -> dict[str, Any]:
             raise ValueError(f"status clock {name} is invalid")
     if not isinstance(boot_id, str) or not boot_id or len(boot_id) > 128:
         raise ValueError("status clock boot identity is unavailable")
+    return float(wall_now), float(monotonic_now), boot_id
+
+
+def _lease_evidence(clock: StatusClock, duration_s: float) -> dict[str, Any]:
+    wall_now, monotonic_now, boot_id = _clock_sample(clock)
     return {
         # This is operator evidence only. It is deliberately never consulted
         # when deciding whether READY is current.
-        "lease_expires_at": float(wall_now) + duration_s,
-        "lease_expires_monotonic": float(monotonic_now) + duration_s,
+        "lease_expires_at": wall_now + duration_s,
+        "lease_expires_monotonic": monotonic_now + duration_s,
         "lease_clock_boot_id": boot_id,
+    }
+
+
+def _state_transition_evidence(clock: StatusClock, *, revision: int) -> dict[str, Any]:
+    """Identity for one lifecycle state transition, stable across updates."""
+    wall_now, monotonic_now, boot_id = _clock_sample(clock)
+    return {
+        "state_revision": revision,
+        "state_changed_at": wall_now,
+        "state_changed_monotonic": monotonic_now,
+        "state_clock_boot_id": boot_id,
     }
 
 
@@ -383,9 +386,14 @@ class DeploymentStatusPublisher:
                 f"{self.plan.deployment_id}/gen{self.generation}",
                 DeploymentState.PLANNED,
                 provenance=provenance,
-                data={"exposure_mode": self.plan.exposure.mode, "num_nodes": self.plan.num_nodes},
+                data={
+                    "deployment_status_schema_version": DEPLOYMENT_STATUS_SCHEMA_VERSION,
+                    "exposure_mode": self.plan.exposure.mode,
+                    "num_nodes": self.plan.num_nodes,
+                    **_state_transition_evidence(self._clock, revision=0),
+                },
             )
-        except (StatusConflict, OSError) as exc:
+        except (StatusConflict, OSError, ValueError) as exc:
             raise StatusPublicationError(
                 f"could not initialize authoritative deployment status: {exc}"
             ) from exc
@@ -492,6 +500,12 @@ class DeploymentStatusPublisher:
                 detail=detail or None,
                 data_update=data or None,
                 expected_revision=self._revision,
+                # Sample inside StatusStore's CAS lease after all READY payload
+                # validation. This is the durable state transition, not method
+                # entry or a later heartbeat observation.
+                commit_data_factory=lambda revision: _state_transition_evidence(
+                    self._clock, revision=revision
+                ),
             )
         except (StatusConflict, IllegalTransition, OSError, ValueError) as exc:
             raise StatusPublicationError(
@@ -595,8 +609,14 @@ class DeploymentStatusPublisher:
 class DeploymentStatus:
     """What a consumer is allowed to know, typed."""
 
+    schema_version: int
     state: str
     revision: int
+    updated_at: float
+    state_revision: Optional[int]
+    state_changed_at: float
+    state_changed_monotonic: Optional[float]
+    state_clock_boot_id: str
     deployment_id: str
     generation: int
     deployment_plan_hash: str
@@ -627,9 +647,8 @@ class DeploymentStatus:
 
     @property
     def ready(self) -> bool:
-        return (
-            self.state == DeploymentState.READY.value
-            and _ready_lease_is_current(self.readiness_snapshot, self._clock)
+        return self.state == DeploymentState.READY.value and _ready_lease_is_current(
+            self.readiness_snapshot, self._clock
         )
 
     @property
@@ -648,8 +667,61 @@ def read_deployment_status(
     record = StatusStore.deployment(status_path(run_dir)).load()
     if record is None:
         return None
+    if (
+        isinstance(record.updated_at, bool)
+        or not isinstance(record.updated_at, (int, float))
+        or not math.isfinite(float(record.updated_at))
+        or record.updated_at < 0
+    ):
+        raise InvalidDeploymentStatus(
+            "deployment status updated_at must be finite and non-negative"
+        )
     provenance = record.provenance
     data = record.data
+    public_schema_version = data.get("deployment_status_schema_version", 1)
+    if (
+        isinstance(public_schema_version, bool)
+        or not isinstance(public_schema_version, int)
+        or public_schema_version not in {1, DEPLOYMENT_STATUS_SCHEMA_VERSION}
+    ):
+        raise InvalidDeploymentStatus(
+            f"unsupported DeploymentStatus schema_version={public_schema_version!r}"
+        )
+    if public_schema_version == DEPLOYMENT_STATUS_SCHEMA_VERSION:
+        state_revision = data.get("state_revision")
+        if (
+            isinstance(state_revision, bool)
+            or not isinstance(state_revision, int)
+            or state_revision < 0
+            or state_revision > record.revision
+        ):
+            raise InvalidDeploymentStatus("deployment status state_revision is invalid")
+        for name in ("state_changed_at", "state_changed_monotonic"):
+            value = data.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise InvalidDeploymentStatus(f"deployment status data.{name} is invalid")
+        state_changed_at = float(data["state_changed_at"])
+        state_changed_monotonic = float(data["state_changed_monotonic"])
+        state_clock_boot_id = data.get("state_clock_boot_id")
+        if (
+            not isinstance(state_clock_boot_id, str)
+            or not state_clock_boot_id
+            or len(state_clock_boot_id) > 128
+        ):
+            raise InvalidDeploymentStatus("deployment status data.state_clock_boot_id is invalid")
+    else:
+        # Legacy StatusRecord v1 artifacts remain inspectable. Their history
+        # supplies diagnostic wall evidence only; no publication-quality
+        # monotonic duration can be reconstructed after the fact.
+        state_revision = None
+        state_changed_at = float(record.history[-1]["at"])
+        state_changed_monotonic = None
+        state_clock_boot_id = ""
     required_provenance = {
         "deployment_id": str,
         "generation": int,
@@ -797,8 +869,14 @@ def read_deployment_status(
     if not isinstance(receipt_manifest_path, str) or not isinstance(receipt_manifest_hash, str):
         raise InvalidDeploymentStatus("deployment status receipt manifest identity must be text")
     return DeploymentStatus(
+        schema_version=public_schema_version,
         state=record.state,
         revision=record.revision,
+        updated_at=float(record.updated_at),
+        state_revision=state_revision,
+        state_changed_at=state_changed_at,
+        state_changed_monotonic=state_changed_monotonic,
+        state_clock_boot_id=state_clock_boot_id,
         deployment_id=provenance["deployment_id"],
         generation=provenance["generation"],
         deployment_plan_hash=provenance["deployment_plan_hash"],

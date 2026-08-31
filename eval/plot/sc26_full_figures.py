@@ -38,9 +38,11 @@ from eval.site_config import get_runs_root
 P.RUNS_ROOT = get_runs_root() / "sc26workshop/full"
 P.CACHE_DIR = Path("/tmp/sc26_full_cache")
 
-# The full paper campaign is frozen to run0 for every cell. A re-run receives a
-# new run group but cannot silently replace the data behind a published figure.
+# The original full paper campaign is frozen to run0. Replacement series name
+# their run group explicitly below; a rerun must never silently replace the
+# data behind a published figure.
 P.RUN_PIN = {}
+PP405B_CURRENT_NODES = frozenset({4, 8, 16, 32, 64, 128, 256})
 
 OUT = Path(__file__).resolve().parent / "output" / "sc26_full" / "iter13"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -1299,8 +1301,26 @@ def fig6_sglang_backend(S):
     return ps.finalize(fig, [], OUT / "fig6_sglang_backend.png", rect=(0, 0, 1, panel_top))
 
 
-def _pp405b_points(stem):
-    """Run0 results for a 405B PP=2 sweep variant → list of dicts
+def _require_complete_current_result(result_path):
+    """Fail closed before a current-infrastructure result reaches a figure."""
+    from eval.lib.paper_acceptance import require_accepted_paper_run
+
+    cell_dir = result_path.parents[1]
+    required = {
+        "replay/default",
+        "deployment_ready_evidence",
+        "compatibility_receipts",
+        "run_provenance",
+    }
+    accepted = require_accepted_paper_run(cell_dir, required_result_ids=required)
+    manifest = accepted.manifest
+    replay_entries = [entry for entry in manifest.entries if entry.logical_id == "replay/default"]
+    if len(replay_entries) != 1 or replay_entries[0].path != result_path.name:
+        raise RuntimeError(f"paper result manifest does not own result0.json: {cell_dir}")
+
+
+def _pp405b_points(stem, run_group, *, require_complete=False):
+    """Pinned results for a 405B PP=2 sweep variant → list of dicts
     (rep, srps=successful throughput, srps_std, p50, p99, errfrac), sorted by
     replica count.
 
@@ -1316,7 +1336,9 @@ def _pp405b_points(stem):
     import re
 
     points = {}
-    for result_path in (P.RUNS_ROOT / stem / "run0").glob("n*/results/result0.json"):
+    for result_path in (P.RUNS_ROOT / stem / run_group).glob("n*/results/result0.json"):
+        if require_complete:
+            _require_complete_current_result(result_path)
         n = int(re.search(r"/n(\d+)/", str(result_path)).group(1))
         with open(result_path, encoding="utf-8") as handle:
             d = json.load(handle)
@@ -1352,7 +1374,43 @@ def _pp405b_points(stem):
             errfrac=(err_t / comp_t if comp_t else 0.0),
         )
         points[n] = rec
+    if require_complete and set(points) != PP405B_CURRENT_NODES:
+        raise RuntimeError(
+            f"current PP=2 paper curve has nodes {sorted(points)}, "
+            f"expected {sorted(PP405B_CURRENT_NODES)}"
+        )
     return [points[n] for n in sorted(points)]
+
+
+PP405B_VARIANTS = (
+    (
+        "pp405b_pp2_scale_direct",
+        "run0",
+        "direct_stream",
+        "direct",
+        "stream",
+        "Direct",
+        False,
+    ),
+    (
+        "pp405b_pp2_scale",
+        "run0",
+        "haproxy_stream",
+        "haproxy",
+        "stream",
+        "HAProxy",
+        False,
+    ),
+    (
+        "pp405b_pp2_haproxy_nostream_v040",
+        "run2",
+        "haproxy_nonstream",
+        "haproxy",
+        "nonstream",
+        "HAProxy non-stream",
+        True,
+    ),
+)
 
 
 def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
@@ -1360,18 +1418,10 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
     aggregate successful throughput vs cluster size, DIRECT vs HAProxy in
     incremental and non-streaming delivery, against an ideal-linear guide.
     Returns (handles, labels, per_node base rate)."""
-    variants = [
-        ("pp405b_pp2_scale_direct", "direct_stream", "direct", "stream", "Direct"),
-        ("pp405b_pp2_scale", "haproxy_stream", "haproxy", "stream", "HAProxy"),
-        (
-            "pp405b_pp2_haproxy_nostream_v040",
-            "haproxy_nonstream",
-            "haproxy",
-            "nonstream",
-            "HAProxy non-stream",
-        ),
-    ]
-    data = {key: _pp405b_points(stem) for stem, key, _, _, _ in variants}
+    data = {
+        key: _pp405b_points(stem, run_group, require_complete=require_complete)
+        for stem, run_group, key, _, _, _, require_complete in PP405B_VARIANTS
+    }
     base = data["direct_stream"][0]
     per_node = base["srps"] / base["nodes"]  # weak-scaling unit rate (per node)
     allnodes = sorted({p["nodes"] for pts in data.values() for p in pts})
@@ -1385,7 +1435,7 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
         label="ideal (linear)",
     )
     sep = " · " if label_fs >= 5 else "\n"
-    for _, key, proxy, mode, lab in variants:
+    for _, _, key, proxy, mode, lab, _ in PP405B_VARIANTS:
         pts = data[key]
         ps.line(
             a,

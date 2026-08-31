@@ -17,6 +17,7 @@ script rendered by the planner.
 from __future__ import annotations
 
 import getpass
+import hashlib
 import math
 import os
 import re
@@ -105,7 +106,11 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
             print("[run_executor] startup_only=True — skipping replay client", flush=True)
             heartbeat.ensure_held()
             evidence_entries = _capture_deployment_evidence(run_plan, launched)
-            measurement_entries = _capture_startup_measurement(run_plan, launched)
+            measurement_entries = _capture_startup_measurement(
+                run_plan,
+                launched,
+                ready_evidence_path=evidence_entries["deployment_ready_evidence"],
+            )
             heartbeat.ensure_held()
             adapter.stop(ctx, launched)
             terminal_entries = _capture_startup_terminal_evidence(run_plan, launched)
@@ -1030,15 +1035,15 @@ def _finite_nonnegative(value, label: str) -> float:
     return float(value)
 
 
-def _capture_startup_measurement(run_plan, launched) -> dict[str, str]:
+def _capture_startup_measurement(run_plan, launched, *, ready_evidence_path: str) -> dict[str, str]:
     """Seal and summarize the canonical deployment trace for startup-only runs."""
     from exaserve.state.atomic import (
         atomic_create_or_verify_bytes,
         atomic_create_or_verify_json,
         regular_file_reader,
         strict_json_load_path,
+        strict_json_loads,
     )
-    from exaserve.status_api import read_deployment_status
 
     status_dir = launched.monitor.status_dir
     if not isinstance(status_dir, str) or not status_dir:
@@ -1077,9 +1082,58 @@ def _capture_startup_measurement(run_plan, launched) -> dict[str, str]:
             raise RuntimeError(
                 f"startup scaling trace {name}={metadata.get(name)!r} != {expected!r}"
             )
-    if len(replicas) != expected_replicas:
+    expected_slots = {
+        replica.replica_id: (model.model_id, replica.replica_index)
+        for model in plan.models
+        for replica in model.replicas
+    }
+    if len(expected_slots) != expected_replicas:
+        raise RuntimeError("canonical plan contains duplicate startup replica slots")
+    observed_slots = set()
+    null_compute = metadata.get("null_compute")
+    if type(null_compute) is not bool:
+        raise RuntimeError("startup scaling trace null_compute flag is malformed")
+    for index, replica in enumerate(replicas):
+        if not isinstance(replica, dict):
+            raise RuntimeError(f"startup scaling trace replica[{index}] is malformed")
+        slot = replica.get("component_slot")
+        expected_identity = expected_slots.get(slot)
+        if expected_identity is None:
+            raise RuntimeError(
+                f"startup scaling trace replica[{index}] names unplanned slot {slot!r}"
+            )
+        if slot in observed_slots:
+            raise RuntimeError(f"startup scaling trace duplicates replica slot {slot!r}")
+        if (replica.get("model_id"), replica.get("replica_index")) != expected_identity:
+            raise RuntimeError(
+                f"startup scaling trace replica slot {slot!r} has the wrong model/index"
+            )
+        if replica.get("null_compute") is not null_compute:
+            raise RuntimeError(f"startup scaling trace replica slot {slot!r} has inconsistent mode")
+        total_init_s = _finite_nonnegative(
+            replica.get("total_init_s"), f"replica[{index}].total_init_s"
+        )
+        _finite_nonnegative(replica.get("wall_start"), f"replica[{index}].wall_start")
+        _finite_nonnegative(replica.get("wall_end"), f"replica[{index}].wall_end")
+        monotonic_start = _finite_nonnegative(
+            replica.get("monotonic_start"), f"replica[{index}].monotonic_start"
+        )
+        monotonic_end = _finite_nonnegative(
+            replica.get("monotonic_end"), f"replica[{index}].monotonic_end"
+        )
+        if (
+            monotonic_end < monotonic_start
+            or abs(total_init_s - (monotonic_end - monotonic_start)) > 0.01
+        ):
+            raise RuntimeError(
+                f"startup scaling trace replica slot {slot!r} timing is inconsistent"
+            )
+        observed_slots.add(slot)
+    if observed_slots != set(expected_slots):
+        missing_slots = sorted(set(expected_slots) - observed_slots)
         raise RuntimeError(
-            f"startup scaling trace covers {len(replicas)}/{expected_replicas} replicas"
+            "startup scaling trace lacks exact replica coverage: "
+            f"observed={len(observed_slots)}/{expected_replicas}, missing={missing_slots[:8]}"
         )
 
     phase_rows = []
@@ -1107,19 +1161,68 @@ def _capture_startup_measurement(run_plan, launched) -> dict[str, str]:
         item["total_duration_s"] = float(item["total_duration_s"]) + duration
         item["max_duration_s"] = max(float(item["max_duration_s"]), duration)
 
-    status = read_deployment_status(status_dir)
+    if not isinstance(ready_evidence_path, str) or not ready_evidence_path:
+        raise RuntimeError("startup measurement has no sealed READY evidence path")
+    with regular_file_reader(ready_evidence_path, binary=True) as handle:
+        ready_evidence_bytes = handle.read()
+    ready_evidence = strict_json_loads(ready_evidence_bytes.decode("utf-8"))
+    readiness_snapshot = (
+        ready_evidence.get("readiness_snapshot", {}) if isinstance(ready_evidence, dict) else {}
+    )
     if (
-        status is None
-        or not status.ready
-        or status.generation != launched.monitor.expected_generation
-        or status.deployment_plan_hash != run_plan.deployment_plan_hash
+        not isinstance(ready_evidence, dict)
+        or not isinstance(readiness_snapshot, dict)
+        or ready_evidence.get("schema_version") != 2
+        or ready_evidence.get("state") != "READY"
+        or ready_evidence.get("generation") != launched.monitor.expected_generation
+        or ready_evidence.get("deployment_plan_hash") != run_plan.deployment_plan_hash
+        or ready_evidence.get("run_semantic_hash") != run_plan.run_semantic_hash
+        or readiness_snapshot.get("ready") is not True
     ):
-        raise RuntimeError("startup measurement lost the exact READY generation")
-    trace_start = _finite_nonnegative(metadata.get("trace_start"), "metadata.trace_start")
+        raise RuntimeError("startup measurement lacks the exact sealed READY generation")
+    ready_evidence_revision = ready_evidence.get("revision")
+    ready_transition_revision = ready_evidence.get("state_revision")
+    if (
+        isinstance(ready_evidence_revision, bool)
+        or not isinstance(ready_evidence_revision, int)
+        or isinstance(ready_transition_revision, bool)
+        or not isinstance(ready_transition_revision, int)
+        or ready_transition_revision < 0
+        or ready_transition_revision > ready_evidence_revision
+    ):
+        raise RuntimeError("startup READY evidence revision identity is malformed")
+    trace_start_monotonic = _finite_nonnegative(
+        metadata.get("trace_start_monotonic"), "metadata.trace_start_monotonic"
+    )
+    trace_end_monotonic = _finite_nonnegative(
+        metadata.get("trace_end_monotonic"), "metadata.trace_end_monotonic"
+    )
+    trace_boot_id = metadata.get("trace_clock_boot_id")
+    ready_boot_id = ready_evidence.get("state_clock_boot_id")
+    if (
+        not isinstance(trace_boot_id, str)
+        or not trace_boot_id
+        or len(trace_boot_id) > 128
+        or trace_boot_id != ready_boot_id
+    ):
+        raise RuntimeError("startup trace and READY transition do not share one boot clock")
+    ready_transition_monotonic = _finite_nonnegative(
+        ready_evidence.get("state_changed_monotonic"),
+        "ready_evidence.state_changed_monotonic",
+    )
     ready_after_trace_start_s = _finite_nonnegative(
-        status.updated_at - trace_start,
+        ready_transition_monotonic - trace_start_monotonic,
         "ready_after_trace_start_s",
     )
+    trace_total_duration_s = _finite_nonnegative(
+        metadata.get("total_duration_s"), "metadata.total_duration_s"
+    )
+    observed_trace_duration_s = _finite_nonnegative(
+        trace_end_monotonic - trace_start_monotonic,
+        "observed_trace_duration_s",
+    )
+    if abs(trace_total_duration_s - observed_trace_duration_s) > 0.01:
+        raise RuntimeError("startup scaling trace total duration disagrees with monotonic anchors")
 
     trace_dest = os.path.join(run_plan.bundle.results_dir, "startup_scaling_trace.json")
     with regular_file_reader(trace_source, binary=True) as handle:
@@ -1128,24 +1231,32 @@ def _capture_startup_measurement(run_plan, launched) -> dict[str, str]:
     atomic_create_or_verify_json(
         summary_dest,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             **expected_metadata,
             "gateway_kind": metadata.get("gateway_kind"),
             "exposure_mode": metadata.get("exposure_mode"),
-            "null_compute": metadata.get("null_compute"),
-            "ready_revision": status.revision,
-            "ready_status_updated_at": status.updated_at,
-            "ready_after_trace_start_s": ready_after_trace_start_s,
-            "trace_total_duration_s": _finite_nonnegative(
-                metadata.get("total_duration_s"), "metadata.total_duration_s"
+            "null_compute": null_compute,
+            "deployment_ready_evidence_sha256": hashlib.sha256(ready_evidence_bytes).hexdigest(),
+            "ready_evidence_revision": ready_evidence_revision,
+            "ready_evidence_updated_at": _finite_nonnegative(
+                ready_evidence.get("updated_at"), "ready_evidence.updated_at"
             ),
+            "ready_transition_revision": ready_transition_revision,
+            "ready_transition_at": _finite_nonnegative(
+                ready_evidence.get("state_changed_at"), "ready_evidence.state_changed_at"
+            ),
+            "ready_transition_monotonic": ready_transition_monotonic,
+            "clock_boot_id": ready_boot_id,
+            "ready_after_trace_start_s": ready_after_trace_start_s,
+            "trace_total_duration_s": trace_total_duration_s,
             "phase_timings": phase_rows,
             "api_call_summary": api_summary,
             "event_count": len(events),
             "replica_measurement_count": len(replicas),
             "timing_semantics": {
-                "trace_total_duration_s": "deployment child through canonical app deployment",
-                "ready_after_trace_start_s": "deployment trace start through external READY status observation",
+                "clock": "same-boot monotonic timestamps; wall timestamps are diagnostic only",
+                "trace_total_duration_s": "deployment child trace start through canonical app deployment",
+                "ready_after_trace_start_s": "deployment child trace start through the immutable external READY transition",
                 "phase_timings": "current canonical phase names; not legacy deploy_apps/wait_proxies",
             },
         },
@@ -1429,10 +1540,7 @@ def _submit_all_locked(
 ) -> int:
     heartbeat.ensure_held()
     scheduler_types = sorted(
-        {
-            getattr(run_plan.scheduler, "type", "pbs")
-            for run_plan in _all_run_plans(group_dir)
-        }
+        {getattr(run_plan.scheduler, "type", "pbs") for run_plan in _all_run_plans(group_dir)}
     )
     if len(scheduler_types) > 1:
         print(

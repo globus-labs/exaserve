@@ -15,9 +15,9 @@ matrix:
   - path: client.num_nodes
     expr: 'min(num_nodes, 4)'
   - path: scheduler.queue
-    expr: '"prod" if num_nodes >= 256 else "capacity"'
+    expr: '"capacity" if num_nodes <= 16 else ("prod" if num_nodes >= 256 else "debug-scaling")'
   - path: scheduler.walltime
-    expr: '"04:00:00" if num_nodes >= 256 else "02:00:00"'
+    expr: '"02:00:00" if num_nodes <= 16 else ("04:00:00" if num_nodes >= 256 else "01:00:00")'
 trace:
   kind: weak_scaling
 workload:

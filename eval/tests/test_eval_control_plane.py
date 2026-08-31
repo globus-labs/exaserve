@@ -494,11 +494,14 @@ def test_startup_only_cannot_succeed_with_an_incomplete_result_manifest(monkeypa
     )
     monkeypatch.setattr(
         "eval.lib.run_executor._capture_deployment_evidence",
-        lambda _plan, _launched: {"compatibility_receipts": "/missing"},
+        lambda _plan, _launched: {
+            "deployment_ready_evidence": "/missing-ready",
+            "compatibility_receipts": "/missing",
+        },
     )
     monkeypatch.setattr(
         "eval.lib.run_executor._capture_startup_measurement",
-        lambda _plan, _launched: {"startup_metrics": "/missing-metrics"},
+        lambda _plan, _launched, **_kwargs: {"startup_metrics": "/missing-metrics"},
     )
     monkeypatch.setattr(
         "eval.lib.run_executor._capture_startup_terminal_evidence",
@@ -549,11 +552,14 @@ def test_startup_only_never_publishes_a_result_manifest_before_cleanup(monkeypat
     )
     monkeypatch.setattr(
         "eval.lib.run_executor._capture_deployment_evidence",
-        lambda _plan, _launched: {"compatibility_receipts": "/captured"},
+        lambda _plan, _launched: {
+            "deployment_ready_evidence": "/captured-ready",
+            "compatibility_receipts": "/captured",
+        },
     )
     monkeypatch.setattr(
         "eval.lib.run_executor._capture_startup_measurement",
-        lambda _plan, _launched: {"startup_metrics": "/captured-metrics"},
+        lambda _plan, _launched, **_kwargs: {"startup_metrics": "/captured-metrics"},
     )
     monkeypatch.setattr(
         "eval.lib.run_executor._publish_result_manifest",
@@ -924,9 +930,7 @@ def test_reused_snapshot_fails_closed_after_artifact_tampering(temp_spec, tmp_pa
         materialize_run_bundles(str(temp_spec), **kwargs)
 
 
-def test_snapshot_permissions_prevent_import_bytecode_mutation(
-    temp_spec, tmp_path, monkeypatch
-):
+def test_snapshot_permissions_prevent_import_bytecode_mutation(temp_spec, tmp_path, monkeypatch):
     repo_root = _init_git_repo(tmp_path / "repo")
     (repo_root / "snapshot_probe.py").write_text("VALUE = 7\n", encoding="utf-8")
     subprocess.run(
@@ -945,7 +949,9 @@ def test_snapshot_permissions_prevent_import_bytecode_mutation(
     )[0]
     snapshot_root = Path(plan.snapshot_root)
 
-    assert all(not (path.stat().st_mode & 0o222) for path in (snapshot_root, *snapshot_root.rglob("*")))
+    assert all(
+        not (path.stat().st_mode & 0o222) for path in (snapshot_root, *snapshot_root.rglob("*"))
+    )
     environment = dict(os.environ)
     environment.pop("PYTHONDONTWRITEBYTECODE", None)
     environment.pop("PYTHONPYCACHEPREFIX", None)
@@ -1110,12 +1116,7 @@ def test_submit_all_rejects_mixed_scheduler_group_before_scheduler_contact(
     )
     heartbeat = SimpleNamespace(ensure_held=lambda: None)
 
-    assert (
-        run_executor._submit_all_locked(
-            str(tmp_path), "mixed", False, 1, heartbeat
-        )
-        == 1
-    )
+    assert run_executor._submit_all_locked(str(tmp_path), "mixed", False, 1, heartbeat) == 1
     output = capsys.readouterr().out
     assert "Mixed scheduler types" in output
     assert "No scheduler was contacted" in output

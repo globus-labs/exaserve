@@ -15,7 +15,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from .atomic import ExclusiveLease, LeaseHeldError, atomic_write_json, strict_json_load_path
 
@@ -366,6 +366,7 @@ class StatusStore:
         detail: str | None = None,
         data_update: dict[str, Any] | None = None,
         expected_revision: int | None = None,
+        commit_data_factory: Callable[[int], dict[str, Any]] | None = None,
     ) -> StatusRecord:
         """Compare-and-set a lifecycle transition.
 
@@ -380,6 +381,8 @@ class StatusStore:
         self._validate_reason_detail(reason_code, detail)
         self._validate_expected_revision(expected_revision)
         self._validate_data_update(data_update)
+        if commit_data_factory is not None and not callable(commit_data_factory):
+            raise ValueError("status commit_data_factory must be null or callable")
         if new_state not in self._transitions[expected_state]:
             raise IllegalTransition(f"{self.kind}: {expected_state.value} -> {new_state.value}")
         with self._acquire_lease():
@@ -396,11 +399,24 @@ class StatusStore:
                 )
             record.state = new_state.value
             record.revision += 1
-            record.updated_at = time.time()
+            # Revision defines ordering. Preserve a nondecreasing diagnostic
+            # wall timestamp even if NTP steps CLOCK_REALTIME backwards.
+            record.updated_at = max(float(record.updated_at), time.time())
             record.reason_code = reason_code
             record.detail = detail
             if data_update:
                 record.data.update(data_update)
+            # Invoke as late as possible inside the CAS lease, after validation
+            # and record construction but immediately before history/atomic
+            # publication. A callback failure still writes nothing.
+            commit_update = (
+                commit_data_factory(record.revision) if commit_data_factory is not None else None
+            )
+            self._validate_data_update(commit_update)
+            if commit_update and data_update and set(commit_update).intersection(data_update):
+                raise ValueError("status commit-time data overlaps caller data")
+            if commit_update:
+                record.data.update(commit_update)
             self._append_history(
                 record,
                 {"state": new_state.value, "at": record.updated_at, "reason_code": reason_code},
@@ -436,7 +452,9 @@ class StatusStore:
                     f"stale writer: expected revision {expected_revision}, found {record.revision}"
                 )
             record.revision += 1
-            record.updated_at = time.time()
+            # Same-state updates obey the same wall-clock rule as transitions;
+            # a clock correction must not make the next strict load unreadable.
+            record.updated_at = max(float(record.updated_at), time.time())
             record.reason_code = reason_code
             record.detail = detail
             if data_update:

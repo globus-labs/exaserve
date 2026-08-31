@@ -165,6 +165,7 @@ class ManagedComponent:
     stdout: Optional[object] = None  # file object; NEVER parsed for lifecycle
     # A finite component additionally validates its result before succeeding.
     result_check: Optional[Callable[[], tuple[bool, str]]] = None
+    on_starting: Optional[Callable[[], None]] = None
     on_started: Optional[Callable[[dict], None]] = None
     on_stopped: Optional[Callable[[], None]] = None
     on_unexpected_exit: Optional[Callable[[Optional[int]], str]] = None
@@ -225,7 +226,13 @@ class ManagedComponent:
                 raise ValueError("managed component cwd must be a non-empty path")
             if snapshot:
                 self.cwd = cwd
-        for name in ("result_check", "on_started", "on_stopped", "on_unexpected_exit"):
+        for name in (
+            "result_check",
+            "on_starting",
+            "on_started",
+            "on_stopped",
+            "on_unexpected_exit",
+        ):
             value = getattr(self, name)
             if value is not None and not callable(value):
                 raise ValueError(f"managed component {name} must be null or callable")
@@ -261,6 +268,15 @@ class ManagedComponent:
         if self.output_capture is not None and self.stdout is not None:
             self.state = ComponentState.FAILED.value
             raise ValueError("stdout and output_capture are mutually exclusive")
+        if self.on_starting is not None:
+            try:
+                # This is the last parent-only boundary before the child can
+                # execute. Launch-coupled protocol clocks arm here so a fast
+                # child cannot outrun a post-Popen callback.
+                self.on_starting()
+            except BaseException:
+                self.state = ComponentState.FAILED.value
+                raise
         # IMP-B03: own process group so termination reaches descendants
         # (Ray/Serve/engine children previously escaped cleanup).
         try:
