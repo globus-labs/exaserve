@@ -641,6 +641,54 @@ def test_a_single_model_matches_the_default_serve_application(tmp_path):
     assert root.application_for_model(model, apps)["running"] == 24
 
 
+def test_node_grouped_null_applications_preserve_exact_replica_totals(tmp_path):
+    from exaserve.composition import CompositionRoot
+
+    plan = compile_deployment_plan(
+        {
+            "num_nodes": 2,
+            "validation_mode": True,
+            "runtime": {"null_compute": True},
+            "gateway": {"kind": "haproxy", "port": 4001},
+            "models": [
+                {
+                    "model_id": "m",
+                    "tensor_parallel_size": 1,
+                    "num_replicas": 24,
+                    "max_model_len": 128,
+                    "size": 8,
+                }
+            ],
+        },
+        site=default_site_profile(),
+        deployment_id="grouped-null",
+    )
+    model = plan.models[0]
+    apps = {
+        f"{model.route_name}_g{group_index}": {
+            "running": 12,
+            "target": 12,
+            "route_prefix": f"/{model.route_name}_g{group_index}",
+            "status": "RUNNING",
+        }
+        for group_index in range(2)
+    }
+    root = CompositionRoot(plan=plan, generation=1, run_dir=str(tmp_path))
+    complete = root.application_for_model(model, apps)
+    assert complete["running"] == complete["target"] == 24
+    assert complete["_observation_state"] == "READY"
+    apps[f"{model.route_name}_g1"]["running"] = 11
+    degraded = root.application_for_model(model, apps)
+    assert degraded["running"] == 23
+    assert degraded["target"] == 24
+    assert degraded["_observation_state"] == "STARTING"
+    apps[f"{model.route_name}_g1"]["running"] = 12
+    apps.pop(f"{model.route_name}_g1")
+    incomplete = root.application_for_model(model, apps)
+    assert incomplete["running"] == 12
+    assert incomplete["_observation_state"] == "STARTING"
+
+
 def test_multi_model_matches_by_route_not_by_luck(tmp_path):
     from exaserve.composition import CompositionRoot
 

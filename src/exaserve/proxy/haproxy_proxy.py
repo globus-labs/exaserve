@@ -416,6 +416,8 @@ def _validate_endpoint(endpoint: BackendEndpoint) -> None:
         or endpoint.replica_routes > 1_000_000
     ):
         raise ValueError(f"invalid HAProxy replica-route count {endpoint.replica_routes!r}")
+    if endpoint.route_suffix not in {"_r", "_g"}:
+        raise ValueError(f"invalid HAProxy replica-route suffix {endpoint.route_suffix!r}")
 
 
 def _render_backend(
@@ -429,25 +431,26 @@ def _render_backend(
 ) -> str:
     """Render a single HAProxy backend section.
 
-    Bound replica routes (endpoints[].replica_routes > 0): the model is served as N
-    node-pinned single-replica deployments at routes <path_prefix>_r{0..N-1}.
-    Every node's Ray Serve proxy can route any replica route, so we keep the
-    node servers for TCP spread and pick a replica per request by REWRITING the
-    path to /<path_prefix>_r{rand}<orig-path>. Random selection (rand(N)) is
-    statistically even and avoids a shared round-robin counter under concurrency.
+    Bound routes (endpoints[].replica_routes > 0) use either node-pinned
+    single-replica applications (``_rN``) or dense null-compute node groups
+    (``_gN``). Every node's Ray Serve proxy can route either application, so we
+    retain node servers for TCP spread and independently pick a route per
+    request. Random selection is statistically even because grouped layouts
+    are admitted only when every group has the same replica count.
     """
     replica_n = endpoints[0].replica_routes if endpoints else 0
+    route_suffix = endpoints[0].route_suffix if endpoints else "_r"
     if any(endpoint.replica_routes != replica_n for endpoint in endpoints):
         raise ValueError(f"inconsistent replica-route counts for backend {name!r}")
+    if any(endpoint.route_suffix != route_suffix for endpoint in endpoints):
+        raise ValueError(f"inconsistent replica-route suffixes for backend {name!r}")
     lines = [
         f"backend {name}",
         f"    balance {balance}",
     ]
     if replica_n > 0:
-        # Every canonical replica is a node-pinned, single-replica application
-        # at <path_prefix>_r{0..N-1}. Pick a replica per request (rand, even and
-        # lock-free) and rewrite the path to its route; any node's Serve proxy then
-        # routes it to that replica.
+        # Select one exact application route (replica or equal-sized node group)
+        # per request; any node's Serve proxy can route to it cluster-wide.
         lines += [
             f"    http-request set-var(txn.ridx) rand({replica_n})",
         ]
@@ -455,11 +458,11 @@ def _render_backend(
             escaped = re.escape(path_prefix)
             lines.append(
                 f"    http-request replace-path ^{escaped}(/.*)?$ "
-                f"{path_prefix}_r%[var(txn.ridx)]\\1"
+                f"{path_prefix}{route_suffix}%[var(txn.ridx)]\\1"
             )
             lines.append(
-                f"    http-request set-path {path_prefix}_r%[var(txn.ridx)]%[path] "
-                f"unless {{ path_beg {path_prefix}_r }}"
+                f"    http-request set-path {path_prefix}{route_suffix}%[var(txn.ridx)]%[path] "
+                f"unless {{ path_beg {path_prefix}{route_suffix} }}"
             )
     # Health-check the Ray Serve proxy's OWN liveness (/-/healthz) in ALL cases,
     # never a model route. /-/healthz is answered locally by each node's proxy

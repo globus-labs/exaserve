@@ -34,6 +34,7 @@ def _synthetic(size: int):
         gateway=None,
         is_production_exposure=lambda: False,
         uses_head_only_serve_proxy=lambda: False,
+        node_grouped_null_application_groups=lambda _model: (),
     )
     binding = SimpleNamespace(
         generation=3,

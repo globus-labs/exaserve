@@ -103,6 +103,10 @@ def planned_application_names(plan) -> frozenset[str]:
     for model in plan.models:
         if plan.uses_head_only_serve_proxy():
             names.add(model.route_name)
+        elif groups := plan.node_grouped_null_application_groups(model):
+            names.update(
+                f"{model.route_name}_g{group_index}" for group_index, _group in enumerate(groups)
+            )
         elif model.num_replicas > 1:
             names.update(f"{model.route_name}_r{index}" for index in range(model.num_replicas))
         elif len(plan.models) == 1:

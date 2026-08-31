@@ -30,7 +30,7 @@ def _site():
     ).finalize()
 
 
-def _plan(nodes=2, gateway=True, replicas=2, head_only=False):
+def _plan(nodes=2, gateway=True, replicas=2, head_only=False, null_compute=False):
     raw = {
         "num_nodes": nodes,
         "models": [
@@ -43,6 +43,9 @@ def _plan(nodes=2, gateway=True, replicas=2, head_only=False):
             }
         ],
     }
+    if null_compute:
+        raw["validation_mode"] = True
+        raw["runtime"] = {"null_compute": True}
     if head_only:
         raw["validation_mode"] = True
         raw["exposure"] = {"mode": "RAY_SERVE_HEAD_ONLY"}
@@ -191,6 +194,31 @@ def test_every_planned_rank_has_an_exact_proxy_anchor_application():
         "_exaserve_proxy_anchor_r1",
     }
     assert anchors < planned_application_names(plan)
+
+
+def test_null_haproxy_groups_exact_replica_slots_by_planned_rank():
+    plan = _plan(nodes=2, replicas=24, null_compute=True)
+    model = plan.models[0]
+    assert plan.node_grouped_null_application_groups(model) == (
+        (0, tuple(range(12))),
+        (1, tuple(range(12, 24))),
+    )
+    assert planned_application_names(plan) == {
+        "_exaserve_proxy_anchor_r0",
+        "_exaserve_proxy_anchor_r1",
+        f"{model.route_name}_g0",
+        f"{model.route_name}_g1",
+    }
+
+
+def test_uneven_null_replica_groups_keep_exact_per_replica_routes():
+    plan = _plan(nodes=2, replicas=13, null_compute=True)
+    model = plan.models[0]
+    assert plan.node_grouped_null_application_groups(model) == ()
+    applications = planned_application_names(plan)
+    assert f"{model.route_name}_r0" in applications
+    assert f"{model.route_name}_r12" in applications
+    assert not any(name.startswith(f"{model.route_name}_g") for name in applications)
 
 
 def test_head_only_requires_only_the_head_proxy_and_no_anchor_applications():

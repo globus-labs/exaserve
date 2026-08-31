@@ -1542,6 +1542,7 @@ def deploy_model(
     replica_index: int,
     planned_placement: Optional[BoundReplica],
     native_replicas: int = 1,
+    dynamic_replica_binding: bool = False,
 ) -> tuple:
     """
     Build a bound VLLMWorker deployment for one model.
@@ -1549,10 +1550,11 @@ def deploy_model(
     Ray Serve options (num_gpus, replicas, max_ongoing_requests, …) are passed
     via .options() so no factory/class-creation indirection is needed.
 
-    Canonical managed/direct topologies build one exactly placed application
-    per logical replica. Native HeadOnly builds one public Serve deployment;
-    Serve schedules its replicas and each live actor binds its observed
-    rank/device tuple back to one exact canonical slot before engine import.
+    Canonical managed/direct topologies normally build one exactly placed
+    application per logical replica. Native HeadOnly and node-grouped
+    null-compute build multi-replica deployments; every live actor binds its
+    observed rank/device tuple back to one exact canonical slot before engine
+    import.
 
     Returns:
         (deployment, model_id)
@@ -1563,18 +1565,31 @@ def deploy_model(
 
     safe_name = model_config.route_name
     native_head_only = planned_placement is None
-    if native_head_only:
+    node_grouped = planned_placement is not None and dynamic_replica_binding
+    if native_head_only or node_grouped:
         if replica_index != -1:
-            raise ValueError("native Serve placement requires replica_index=-1")
+            raise ValueError("dynamic Serve placement requires replica_index=-1")
         if (
             isinstance(native_replicas, bool)
             or not isinstance(native_replicas, int)
             or native_replicas < 1
         ):
             raise ValueError("native_replicas must be a positive integer")
+        if node_grouped and (
+            not config.runtime.null_compute
+            or model_config.tensor_parallel_size != 1
+            or model_config.pipeline_parallel_size != 1
+        ):
+            raise ValueError("node-grouped placement supports only TP1/PP1 null-compute")
     elif native_replicas != 1:
         raise ValueError("canonical bound placement creates exactly one replica")
-    deployment_name_suffix = "-native" if native_head_only else f"-r{replica_index}"
+    deployment_name_suffix = (
+        "-native"
+        if native_head_only
+        else (
+            f"-group-rank{planned_placement.owner_rank}" if node_grouped else f"-r{replica_index}"
+        )
+    )
 
     print(
         f"[ExaServe] Configuring EngineWorker for {model_id}\n"
@@ -1633,6 +1648,13 @@ def deploy_model(
             print(
                 f"[ExaServe] Native Ray Serve placement for {native_replicas} TP replica(s) "
                 f"of {model_id}; each actor must match one canonical rank/device slot",
+                flush=True,
+            )
+        elif node_grouped:
+            assert planned_placement is not None
+            print(
+                f"[ExaServe] Node-grouped null placement for {native_replicas} replica(s) "
+                f"of {model_id} on rank {planned_placement.owner_rank}",
                 flush=True,
             )
         else:
@@ -1746,6 +1768,58 @@ def deploy_from_canonical_binding(
             print(
                 f"[ExaServe] ✓ native HeadOnly route http://localhost:8000/v1 "
                 f"(model: {model_id}, replicas={n_rep})",
+                flush=True,
+            )
+            continue
+        null_groups = config.node_grouped_null_application_groups(model_config)
+        if null_groups:
+            if not callable(getattr(serve, "run_many", None)) or not hasattr(serve, "RunTarget"):
+                raise RuntimeError("node-grouped null deployment requires ray_serve.run_many")
+            bound_by_rank: dict[int, list[BoundReplica]] = {}
+            for placement in model_plan.replicas:
+                bound_by_rank.setdefault(placement.owner_rank, []).append(placement)
+            targets = []
+            for group_index, (rank, replica_indices) in enumerate(null_groups):
+                placements = sorted(
+                    bound_by_rank.get(rank, ()), key=lambda item: item.replica_index
+                )
+                if [item.replica_index for item in placements] != list(replica_indices):
+                    raise RuntimeError(
+                        f"node-grouped null rank {rank} disagrees with canonical binding"
+                    )
+                deployment, model_id = deploy_model(
+                    model_config,
+                    model_path_map,
+                    config,
+                    replica_index=-1,
+                    planned_placement=placements[0],
+                    native_replicas=len(placements),
+                    dynamic_replica_binding=True,
+                )
+                targets.append(
+                    serve.RunTarget(
+                        target=deployment,
+                        name=f"{safe_name}_g{group_index}",
+                        route_prefix=f"/{safe_name}_g{group_index}",
+                    )
+                )
+            with tracer.phase(
+                "serve.run_many",
+                model_id=model_id,
+                replicas=n_rep,
+                applications=len(targets),
+                application_layout="node_grouped_null",
+            ):
+                try:
+                    serve.run_many(targets, wait_for_applications_running=True)
+                except Exception as deploy_exc:
+                    raise RuntimeError(
+                        f"node-grouped null deployment failed for {n_rep} replicas "
+                        f"of {model_id}: {deploy_exc}"
+                    ) from deploy_exc
+            print(
+                f"[ExaServe] ✓ {model_id}: {n_rep} exact replicas RUNNING "
+                f"in {len(targets)} node-grouped applications",
                 flush=True,
             )
             continue
@@ -1941,8 +2015,17 @@ def main() -> None:
     )
     from .control.plan_readiness import planned_application_names
 
+    application_layout = (
+        "node_grouped_null"
+        if any(
+            canonical_plan.node_grouped_null_application_groups(model)
+            for model in canonical_plan.models
+        )
+        else ("native_head_only" if canonical_plan.uses_head_only_serve_proxy() else "per_replica")
+    )
     tracer.set_metadata(
         expected_serve_applications=len(planned_application_names(canonical_plan)),
+        serve_application_layout=application_layout,
     )
     print(
         f"[ExaServe] Serve Init: Connecting to Ray cluster at {ray_address}...",

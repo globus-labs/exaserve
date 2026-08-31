@@ -19,7 +19,7 @@ from eval.site_config import get_runs_root
 from exaserve.state.atomic import strict_json_load_path
 
 SPEC_NAME = "nullcompute_haproxy_scale_to256_v040"
-RUN_GROUPS = ("run2", "run3")
+RUN_GROUPS = ("run4", "run5")
 NODE_COUNTS = (32, 64, 128, 256)
 EXPECTED_RESULT_IDS = {
     "deployment_ready_evidence",
@@ -59,6 +59,11 @@ def _load_trial(root: Path, run_group: str, nodes: int) -> dict:
         or metrics.get("schema_version") != 2
         or metrics.get("num_nodes") != nodes
         or metrics.get("null_compute") is not True
+        or metrics.get("serve_application_layout") != "node_grouped_null"
+        or metrics.get("expected_model_replicas") != 12 * nodes
+        or metrics.get("replica_measurement_count") != 12 * nodes
+        or metrics.get("expected_serve_applications") != 2 * nodes
+        or metrics.get("expected_receipt_requirements") != 14 * nodes + 2
         or metrics.get("generation") != run_provenance.generation
         or metrics.get("run_semantic_hash") != run_plan.run_semantic_hash
         or metrics.get("deployment_plan_hash") != run_plan.deployment_plan_hash

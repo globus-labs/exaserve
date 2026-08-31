@@ -145,3 +145,82 @@ def test_null_curve_requires_independent_trials_and_retains_all_timings(monkeypa
     monkeypatch.setattr(table, "_load_trial", copied_trial)
     with pytest.raises(RuntimeError, match="not independent lifecycles"):
         table.load_curve(Path("/unused"))
+
+
+def test_null_trial_acceptance_requires_grouped_graph_cardinality(monkeypatch):
+    from eval.plot import nullcompute_startup_table as table
+
+    entries = {
+        logical_id: SimpleNamespace(
+            logical_id=logical_id,
+            path=f"{logical_id}.json",
+            sha256=("d" * 64 if logical_id == "deployment_ready_evidence" else "e" * 64),
+        )
+        for logical_id in table.EXPECTED_RESULT_IDS
+    }
+    accepted = SimpleNamespace(
+        manifest=SimpleNamespace(
+            expected_ids=tuple(sorted(table.EXPECTED_RESULT_IDS)),
+            entries=tuple(entries.values()),
+        ),
+        run_plan=SimpleNamespace(
+            run_semantic_hash="a" * 64,
+            deployment_plan_hash="b" * 64,
+            source_snapshot_hash="c" * 64,
+        ),
+        run_provenance=SimpleNamespace(generation=7, run_provenance_hash="f" * 64),
+    )
+    metrics = {
+        "schema_version": 2,
+        "num_nodes": 32,
+        "null_compute": True,
+        "serve_application_layout": "node_grouped_null",
+        "expected_model_replicas": 384,
+        "replica_measurement_count": 384,
+        "expected_serve_applications": 64,
+        "expected_receipt_requirements": 450,
+        "generation": 7,
+        "run_semantic_hash": "a" * 64,
+        "deployment_plan_hash": "b" * 64,
+        "source_snapshot_hash": "c" * 64,
+        "deployment_ready_evidence_sha256": "d" * 64,
+        "ready_after_trace_start_s": 10.0,
+        "trace_total_duration_s": 9.0,
+        "phase_timings": [
+            {"name": "deploy_from_canonical_plan", "duration_s": 8.0},
+            {"name": "stage3.total", "duration_s": 8.5},
+        ],
+    }
+    ready = {
+        "schema_version": 2,
+        "state": "READY",
+        "generation": 7,
+        "deployment_plan_hash": "b" * 64,
+        "run_semantic_hash": "a" * 64,
+        "run_provenance_hash": "f" * 64,
+    }
+    terminal = {**ready, "state": "STOPPED"}
+
+    monkeypatch.setattr(table, "require_accepted_paper_run", lambda *_args, **_kwargs: accepted)
+
+    def load(path):
+        name = Path(path).name
+        if name == "startup_metrics.json":
+            return metrics
+        if name == "deployment_ready_evidence.json":
+            return ready
+        if name == "deployment_terminal_status.json":
+            return terminal
+        raise AssertionError(name)
+
+    # The fake manifest paths use logical IDs; map those exact names too.
+    entries["startup_metrics"].path = "startup_metrics.json"
+    entries["deployment_ready_evidence"].path = "deployment_ready_evidence.json"
+    entries["deployment_terminal_status"].path = "deployment_terminal_status.json"
+    monkeypatch.setattr(table, "strict_json_load_path", load)
+
+    trial = table._load_trial(Path("/unused"), "run4", 32)
+    assert trial["ready_s"] == 10.0
+    metrics["expected_serve_applications"] = 65
+    with pytest.raises(RuntimeError, match="metrics identity"):
+        table._load_trial(Path("/unused"), "run4", 32)

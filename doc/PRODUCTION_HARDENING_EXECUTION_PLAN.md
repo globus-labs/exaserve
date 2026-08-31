@@ -336,6 +336,21 @@ The startup sequence is fixed:
    failure, preserve the first cause, stop in reverse ownership order, and exit
    nonzero.
 
+For deployment-plan schema v3, one dense diagnostic topology has a mandatory
+derived Serve-application layout: a validation-only null-compute deployment
+with one HAProxy model, TP=1, PP=1, exactly `num_nodes * num_gpus_per_node`
+replicas, every allocation rank represented, and exact device coverage
+`0..num_gpus_per_node-1` uses one node-pinned model application per rank. That
+application has `num_gpus_per_node` Serve replicas; each actor resolves its live
+rank/device tuple back to one precompiled logical replica and publishes the same
+per-replica receipt/lifecycle identity. HAProxy selects uniformly among the
+node-group routes. Proxy anchors remain one per rank, so the exact application
+predicate is `2 * num_nodes` while replica/receipt/trace predicates remain
+`num_nodes * num_gpus_per_node`. Any partial, unequal, multi-model, non-HAProxy,
+non-null, or non-TP1/PP1 topology retains the per-replica application layout.
+This rule is deterministic for the schema/source pair; it is not an ambient
+switch and cannot be selected at runtime.
+
 #### 3.2.1 Binding cutover resolutions (2026-08-07)
 
 This subsection resolves every question in

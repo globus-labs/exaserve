@@ -1323,10 +1323,10 @@ class CompositionRoot:
         """Aggregate exactly the Serve applications that implement one model.
 
         Multi-replica canonical placement is represented by one application per
-        logical slot (``<route>_rN``).  Treating only the first such application
-        as the model made a healthy deployment look partial and could hide a
-        failed sibling.  The direct-validation router is deliberately excluded:
-        it proves the route, not an engine replica.
+        logical slot (``<route>_rN``), except TP1 null-compute where exact slots
+        sharing a rank use one node-grouped application (``<route>_gN``).
+        Treating only the first application as the model made a healthy
+        deployment look partial and could hide a failed sibling.
         """
         if not applications:
             return None
@@ -1334,7 +1334,12 @@ class CompositionRoot:
             name: info for name, info in applications.items() if name != "__cluster_snapshot__"
         }
         if model.num_replicas > 1 and not self.plan.uses_head_only_serve_proxy():
-            expected_names = {f"{model.route_name}_r{index}" for index in range(model.num_replicas)}
+            groups = self.plan.node_grouped_null_application_groups(model)
+            expected_names = (
+                {f"{model.route_name}_g{group_index}" for group_index, _group in enumerate(groups)}
+                if groups
+                else {f"{model.route_name}_r{index}" for index in range(model.num_replicas)}
+            )
             members = [info for name, info in app_items.items() if name in expected_names]
             if not members:
                 return None
@@ -1343,7 +1348,7 @@ class CompositionRoot:
             target = sum(info["target"] for info in members)
             status = (
                 "RUNNING"
-                if len(members) == model.num_replicas
+                if len(members) == len(expected_names)
                 and all(status == "RUNNING" for status in statuses)
                 else "STARTING"
             )
@@ -1568,9 +1573,16 @@ class CompositionRoot:
                     )
             return endpoints
 
+        grouped_routes = {
+            model.model_id: self.plan.node_grouped_null_application_groups(model)
+            for model in self.plan.models
+        }
         for _rank, node in self.binding.rank_to_node:
             for model in self.plan.models:
-                replica_routes = model.num_replicas if model.num_replicas > 1 else 0
+                groups = grouped_routes[model.model_id]
+                replica_routes = (
+                    len(groups) if groups else (model.num_replicas if model.num_replicas > 1 else 0)
+                )
                 endpoints.append(
                     BackendEndpoint(
                         host=node,
@@ -1580,6 +1592,7 @@ class CompositionRoot:
                             f"/{model.route_name}" if replica_routes or not single_model else ""
                         ),
                         replica_routes=replica_routes,
+                        route_suffix=("_g" if groups else "_r"),
                     )
                 )
         return endpoints

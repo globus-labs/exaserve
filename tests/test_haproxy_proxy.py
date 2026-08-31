@@ -141,6 +141,36 @@ def test_haproxy_rewrites_canonical_multi_model_path_to_bound_replica_route(tmp_
     ) in cfg
 
 
+def test_haproxy_rewrites_to_node_grouped_null_routes(tmp_path):
+    cfg = _read_config(
+        HAProxyProxy().generate_config(
+            [
+                BackendEndpoint("node-a", 8000, "org/model", "/org--model", 2, "_g"),
+                BackendEndpoint("node-b", 8000, "org/model", "/org--model", 2, "_g"),
+            ],
+            output_dir=tmp_path,
+            stats_port=0,
+        )
+    )
+    assert "set-var(txn.ridx) rand(2)" in cfg
+    assert (
+        r"replace-path ^/org\-\-model(/.*)?$ "
+        r"/org--model_g%[var(txn.ridx)]\1"
+    ) in cfg
+
+
+def test_haproxy_rejects_mixed_route_suffixes(tmp_path):
+    with pytest.raises(ValueError, match="suffixes"):
+        HAProxyProxy().generate_config(
+            [
+                BackendEndpoint("node-a", 8000, "org/model", "/org--model", 2, "_r"),
+                BackendEndpoint("node-b", 8000, "org/model", "/org--model", 2, "_g"),
+            ],
+            output_dir=tmp_path,
+            stats_port=0,
+        )
+
+
 def test_haproxy_stats_admin_defaults_off_and_loopback(tmp_path):
     # PR-010: default stats page is read-only and loopback-bound. Options are
     # passed as **kwargs (see generate_config signature).
@@ -243,7 +273,14 @@ def test_haproxy_rejects_inconsistent_replica_route_counts(tmp_path):
         )
 
 
-def test_haproxy_live_multimodel_routing_and_replica_rewrite(tmp_path):
+@pytest.mark.parametrize(
+    ("route_suffix", "expected_path"),
+    [
+        ("_r", "/org--model_r0/v1/models"),
+        ("_g", "/org--model_g0/v1/models"),
+    ],
+)
+def test_haproxy_live_multimodel_routing_and_replica_rewrite(tmp_path, route_suffix, expected_path):
     executable = shutil.which("haproxy")
     if executable is None:
         pytest.skip("HAProxy executable is not installed")
@@ -271,7 +308,14 @@ def test_haproxy_live_multimodel_routing_and_replica_rewrite(tmp_path):
         frontend_port = probe.getsockname()[1]
     config = HAProxyProxy().generate_config(
         [
-            BackendEndpoint("127.0.0.1", servers[0].server_port, "org/model", "/org--model", 1),
+            BackendEndpoint(
+                "127.0.0.1",
+                servers[0].server_port,
+                "org/model",
+                "/org--model",
+                1,
+                route_suffix,
+            ),
             BackendEndpoint("127.0.0.1", servers[1].server_port, "other/model", "/other--model", 0),
         ],
         output_dir=tmp_path,
@@ -306,7 +350,7 @@ def test_haproxy_live_multimodel_routing_and_replica_rewrite(tmp_path):
                 break
             except (OSError, urllib.error.URLError):
                 time.sleep(0.05)
-        assert model_path == "/org--model_r0/v1/models"
+        assert model_path == expected_path
         with opener.open(base + "/other--model/v1/models", timeout=1.0) as response:
             assert response.read().decode() == "/other--model/v1/models"
         with pytest.raises(urllib.error.HTTPError) as excinfo:

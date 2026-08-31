@@ -21,10 +21,13 @@ class BackendEndpoint:
     port: int  # Ray Serve HTTP port, e.g. 8000
     model_id: str  # e.g. "meta-llama/Meta-Llama-3-8B-Instruct"
     path_prefix: str = ""  # e.g. "/meta-llama--Llama-3-1-8B-Instruct" for multi-model
-    # A model with multiple canonical replicas is served as N node-pinned,
-    # single-replica applications at <path_prefix>_r0.._r{N-1}. A positive
-    # value tells the production gateway to distribute over those routes.
+    # A positive value tells the gateway to distribute over N canonical
+    # application routes: single-replica ``_rN`` or equal-sized node groups
+    # ``_gN`` as selected by route_suffix.
     replica_routes: int = 0
+    # Canonical per-replica apps use ``_r``; node-grouped null apps use ``_g``.
+    # It is ignored when replica_routes == 0.
+    route_suffix: str = "_r"
 
 
 def reject_unknown_options(options: dict, allowed: set[str], kind: str) -> None:
@@ -82,6 +85,8 @@ def validate_endpoint(endpoint: BackendEndpoint, kind: str) -> None:
         or endpoint.replica_routes < 0
     ):
         raise ValueError(f"invalid {kind} replica-route count")
+    if endpoint.route_suffix not in {"_r", "_g"}:
+        raise ValueError(f"invalid {kind} replica-route suffix")
 
 
 class ProxyBackend(ABC):

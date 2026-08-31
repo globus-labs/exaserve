@@ -39,7 +39,9 @@ def _run(tmp_path: Path):
         num_nodes=2,
         models=(SimpleNamespace(model_id="m", num_replicas=2, replicas=replicas),),
         receipt_requirements=("a", "b", "c"),
+        runtime=SimpleNamespace(null_compute=True),
         uses_head_only_serve_proxy=lambda: False,
+        node_grouped_null_application_groups=lambda _model: (),
     )
     run_plan = SimpleNamespace(
         deployment_plan_hash="a" * 64,
@@ -66,6 +68,7 @@ def test_startup_trace_and_summary_are_sealed(monkeypatch, tmp_path):
             "expected_model_replicas": 2,
             "expected_serve_applications": 3,
             "expected_receipt_requirements": 3,
+            "serve_application_layout": "per_replica",
             "trace_start": 100.0,
             "trace_start_monotonic": 80.0,
             "trace_end_monotonic": 98.0,
@@ -182,6 +185,7 @@ def test_real_ready_status_capture_flows_into_startup_measurement(tmp_path):
         {
             "num_nodes": 2,
             "validation_mode": True,
+            "runtime": {"null_compute": True},
             "models": [
                 {
                     "model_id": "m",
@@ -319,6 +323,7 @@ def test_real_ready_status_capture_flows_into_startup_measurement(tmp_path):
             "expected_model_replicas": model.num_replicas,
             "expected_serve_applications": len(planned_application_names(plan)),
             "expected_receipt_requirements": len(plan.receipt_requirements),
+            "serve_application_layout": "per_replica",
             "trace_start": __import__("time").time() - 20.0,
             "trace_start_monotonic": trace_start,
             "trace_end_monotonic": trace_start + 15.0,

@@ -212,7 +212,7 @@ def test_missing_null_curve_consumer_pins_two_independent_lifecycles() -> None:
     }
     assert assignments == {
         "SPEC_NAME": "nullcompute_haproxy_scale_to256_v040",
-        "RUN_GROUPS": ("run2", "run3"),
+        "RUN_GROUPS": ("run4", "run5"),
         "NODE_COUNTS": (32, 64, 128, 256),
     }
 

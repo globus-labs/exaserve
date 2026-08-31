@@ -301,9 +301,7 @@ class ExposurePlan:
             or self.request_body_limit_bytes < 1
             or self.request_body_limit_bytes > 1 << 40
         ):
-            raise PlanError(
-                "exposure.request_body_limit_bytes must be null or in 1..1099511627776"
-            )
+            raise PlanError("exposure.request_body_limit_bytes must be null or in 1..1099511627776")
 
 
 # ------------------------------------------------------------ control ---
@@ -1312,6 +1310,58 @@ class DeploymentPlan:
 
     def uses_head_only_serve_proxy(self) -> bool:
         return self.exposure.mode == ExposureMode.RAY_SERVE_HEAD_ONLY.value
+
+    def node_grouped_null_application_groups(
+        self, model: ModelPlan
+    ) -> tuple[tuple[int, tuple[int, ...]], ...]:
+        """Return exact per-rank replica groups for HAProxy null-compute.
+
+        One Serve application per logical replica made the diagnostic control
+        plane itself superlinear (1,536 applications at 128 nodes). TP1/PP1
+        replicas on the same planned rank share one placement template, so a
+        node-pinned multi-replica application preserves every compiled slot
+        while reducing application cardinality to the node count. Each live
+        actor still resolves and attests its exact rank/device/replica identity.
+        """
+        if (
+            not self.runtime.null_compute
+            or self.uses_head_only_serve_proxy()
+            or self.gateway is None
+            or self.gateway.kind != GatewayKind.HAPROXY.value
+            or len(self.models) != 1
+            or model not in self.models
+            or model.num_replicas <= 1
+            or model.num_replicas != self.num_nodes * self.num_gpus_per_node
+            or model.tensor_parallel_size != 1
+            or model.pipeline_parallel_size != 1
+        ):
+            return ()
+        by_rank: dict[int, list[int]] = {}
+        devices_by_rank: dict[int, set[int]] = {}
+        for replica in model.replicas:
+            if len(replica.planned_ranks) != 1 or len(replica.planned_device_ids) != 1:
+                raise PlanError("node-grouped null replica must occupy one planned rank")
+            rank = replica.planned_ranks[0]
+            by_rank.setdefault(rank, []).append(replica.replica_index)
+            devices_by_rank.setdefault(rank, set()).update(replica.planned_device_ids[0])
+        groups = tuple((rank, tuple(sorted(indices))) for rank, indices in sorted(by_rank.items()))
+        expected_devices = set(range(self.num_gpus_per_node))
+        if (
+            [rank for rank, _indices in groups] != list(range(self.num_nodes))
+            or any(len(indices) != self.num_gpus_per_node for _rank, indices in groups)
+            or any(
+                devices_by_rank.get(rank, set()) != expected_devices for rank, _indices in groups
+            )
+        ):
+            # Unequal groups would make HAProxy's uniform group selection skew
+            # per-replica load; partial device coverage cannot be expressed by
+            # one shared Serve placement template. Keep the exact per-replica
+            # layout for every topology except the dense paper/control case.
+            return ()
+        observed = sorted(index for _rank, indices in groups for index in indices)
+        if observed != list(range(model.num_replicas)):
+            raise PlanError("node-grouped null applications do not cover exact replica slots")
+        return groups
 
 
 @dataclass(frozen=True)

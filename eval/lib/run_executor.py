@@ -1067,6 +1067,11 @@ def _capture_startup_measurement(run_plan, launched, *, ready_evidence_path: str
 
     expected_replicas = sum(model.num_replicas for model in plan.models)
     expected_applications = len(planned_application_names(plan))
+    application_layout = (
+        "node_grouped_null"
+        if any(plan.node_grouped_null_application_groups(model) for model in plan.models)
+        else ("native_head_only" if plan.uses_head_only_serve_proxy() else "per_replica")
+    )
     expected_metadata = {
         "deployment_plan_hash": run_plan.deployment_plan_hash,
         "generation": launched.monitor.expected_generation,
@@ -1076,6 +1081,7 @@ def _capture_startup_measurement(run_plan, launched, *, ready_evidence_path: str
         "expected_model_replicas": expected_replicas,
         "expected_serve_applications": expected_applications,
         "expected_receipt_requirements": len(plan.receipt_requirements),
+        "serve_application_layout": application_layout,
     }
     for name, expected in expected_metadata.items():
         if metadata.get(name) != expected:
@@ -1091,7 +1097,7 @@ def _capture_startup_measurement(run_plan, launched, *, ready_evidence_path: str
         raise RuntimeError("canonical plan contains duplicate startup replica slots")
     observed_slots = set()
     null_compute = metadata.get("null_compute")
-    if type(null_compute) is not bool:
+    if type(null_compute) is not bool or null_compute is not plan.runtime.null_compute:
         raise RuntimeError("startup scaling trace null_compute flag is malformed")
     for index, replica in enumerate(replicas):
         if not isinstance(replica, dict):
