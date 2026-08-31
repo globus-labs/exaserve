@@ -32,6 +32,30 @@ _LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
 _IGNORED_METADATA_DIRS = frozenset({".cache", ".git", "__pycache__"})
 
 
+def _model_source_root(model_dir: Path) -> Path:
+    """Return the trusted root that may contain snapshot inputs and HF blobs."""
+    resolved = model_dir.resolve(strict=True)
+    if resolved.parent.name == "snapshots":
+        return resolved.parent.parent
+    return resolved
+
+
+def _resolve_model_input(model_dir: Path, path: Path, *, label: str) -> Path:
+    """Resolve an HF snapshot symlink without permitting arbitrary traversal."""
+    try:
+        resolved = path.resolve(strict=True)
+        allowed = _model_source_root(model_dir)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{label} cannot be resolved safely: {exc}") from exc
+    if not resolved.is_relative_to(allowed) or not resolved.is_file():
+        raise ValueError(f"{label} resolves outside the model repository or is not a file")
+    return resolved
+
+
+def _load_model_json(model_dir: Path, path: Path, *, label: str):
+    return strict_json_load_path(_resolve_model_input(model_dir, path, label=label))
+
+
 def pp_partitions(num_layers: int, pp_size: int, partition_env: str | None = None) -> list[int]:
     """Per-stage layer counts, matching vLLM get_pp_indices: even split, with any
     remainder added to all-but-the-last stage. VLLM_PP_LAYER_PARTITION overrides."""
@@ -125,7 +149,7 @@ def _stage_inputs(model_dir: Path, pp_size: int, stage: int, partition_env: str 
         raise ValueError("pp_size must be a positive integer")
     if type(stage) is not int or not 0 <= stage < pp_size:
         raise ValueError("stage must be an integer in [0, pp_size)")
-    cfg = strict_json_load_path(model_dir / "config.json")
+    cfg = _load_model_json(model_dir, model_dir / "config.json", label="model config.json")
     if not isinstance(cfg, dict):
         raise ValueError("model config.json must be an object")
     num_layers = cfg.get("num_hidden_layers")
@@ -135,7 +159,7 @@ def _stage_inputs(model_dir: Path, pp_size: int, stage: int, partition_env: str 
     if not isinstance(tied, bool):
         raise ValueError("model config tie_word_embeddings must be boolean")
     index_path = _index_path(model_dir)
-    index = strict_json_load_path(index_path)
+    index = _load_model_json(model_dir, index_path, label="safetensors index")
     if (
         not isinstance(index, dict)
         or not set(index) <= {"metadata", "weight_map"}
@@ -152,12 +176,11 @@ def _stage_inputs(model_dir: Path, pp_size: int, stage: int, partition_env: str 
         relative = Path(shard)
         if relative.is_absolute() or ".." in relative.parts or "\x00" in shard:
             raise ValueError(f"safetensors index contains an unsafe shard path: {shard!r}")
-        try:
-            resolved = (model_dir / relative).resolve(strict=True)
-        except OSError as exc:
-            raise ValueError(f"safetensors shard is missing: {shard!r}: {exc}") from exc
-        if not resolved.is_file():
-            raise ValueError(f"safetensors shard is not a regular file: {shard!r}")
+        _resolve_model_input(
+            model_dir,
+            model_dir / relative,
+            label=f"safetensors shard {shard!r}",
+        )
     # Validate a configured manual partition even when the caller only needs
     # the inventory; this prevents a staged bundle from diverging from vLLM.
     pp_partitions(num_layers, pp_size, partition_env)

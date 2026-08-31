@@ -403,8 +403,10 @@ class RayBackendAdapter(BackendAdapter):
                 f"{report.get('errors') or report}"
             )
         components = report.get("components")
-        if not isinstance(components, dict) or not components:
-            raise RuntimeError("shutdown report has no owned-component evidence")
+        if not isinstance(components, dict):
+            raise RuntimeError("shutdown report owned-component evidence must be an object")
+        if not components and expected_terminal_state != "FAILED":
+            raise RuntimeError("successful shutdown report has no owned-component evidence")
         invalid_components = {
             component_id: evidence
             for component_id, evidence in components.items()

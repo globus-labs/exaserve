@@ -655,6 +655,52 @@ def test_ray_backend_stop_requires_clean_terminal_evidence(tmp_path, monkeypatch
             RayBackendAdapter().stop(SimpleNamespace(run_plan=run_plan), launched)
 
 
+def test_failed_prelaunch_cleanup_accepts_an_exact_empty_component_set(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from eval.lib.backends.base import LaunchedBackend
+    from eval.lib.backends.ray import RayBackendAdapter
+
+    plan_hash = "p" * 64
+    generation = 19
+    status_dir = tmp_path / "deployment"
+    status_dir.mkdir()
+    (status_dir / "shutdown_report.json").write_text(
+        json.dumps(
+            {
+                "deployment_plan_hash": plan_hash,
+                "clean": True,
+                "errors": [],
+                "terminal_publication": "not_required",
+                "observed_terminal_state": "FAILED",
+                "components": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "exaserve.status_api.read_deployment_status",
+        lambda _path: SimpleNamespace(
+            deployment_plan_hash=plan_hash,
+            generation=generation,
+            state="FAILED",
+        ),
+    )
+    launched = LaunchedBackend(
+        monitor=SimpleNamespace(
+            status_dir=str(status_dir),
+            expected_generation=generation,
+        )
+    )
+    run_plan = SimpleNamespace(deployment_plan_hash=plan_hash)
+
+    RayBackendAdapter._validate_shutdown_evidence(
+        SimpleNamespace(run_plan=run_plan),
+        launched,
+        expected_terminal_state="FAILED",
+    )
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

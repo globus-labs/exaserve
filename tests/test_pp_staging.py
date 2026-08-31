@@ -78,6 +78,58 @@ def test_stage_bundle_inventory_matches_dereferenced_broadcast(tmp_path):
     )
 
 
+def test_stage_bundle_accepts_huggingface_blob_symlinks_inside_model_repository(tmp_path):
+    repo = tmp_path / "models--org--model"
+    snapshot = repo / "snapshots" / "revision"
+    blobs = repo / "blobs"
+    snapshot.mkdir(parents=True)
+    blobs.mkdir()
+    (blobs / "config").write_text(json.dumps({"num_hidden_layers": 2}))
+    (blobs / "index").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.embed_tokens.weight": "model-00001-of-00001.safetensors",
+                    "model.layers.0.self_attn.q_proj.weight": (
+                        "model-00001-of-00001.safetensors"
+                    ),
+                    "model.layers.1.self_attn.q_proj.weight": (
+                        "model-00001-of-00001.safetensors"
+                    ),
+                    "lm_head.weight": "model-00001-of-00001.safetensors",
+                }
+            }
+        )
+    )
+    (blobs / "weights").write_bytes(b"weights")
+    (snapshot / "config.json").symlink_to("../../blobs/config")
+    (snapshot / "model.safetensors.index.json").symlink_to("../../blobs/index")
+    (snapshot / "model-00001-of-00001.safetensors").symlink_to("../../blobs/weights")
+
+    summary = build_stage_dir(snapshot, 2, 0, tmp_path / "stage")
+    assert summary["shards"] == ["model-00001-of-00001.safetensors"]
+
+
+def test_stage_bundle_rejects_metadata_symlink_outside_model_repository(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"num_hidden_layers": 2}))
+    (source / "config.json").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="outside the model repository"):
+        build_stage_dir(source, 2, 0, tmp_path / "stage")
+
+
+def test_stage_bundle_rejects_metadata_symlink_loop(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").symlink_to("config.json")
+
+    with pytest.raises(ValueError, match="cannot be resolved safely"):
+        build_stage_dir(source, 2, 0, tmp_path / "stage")
+
+
 def test_stage_bundle_excludes_unselected_weights_at_any_depth(tmp_path):
     """Regression for an inventory class exposed by the failed four-node gate.
 
