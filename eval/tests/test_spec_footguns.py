@@ -148,6 +148,7 @@ def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() 
         assert model.tensor_parallel_size == 8
         assert model.pipeline_parallel_size == 2
         assert model.num_replicas == nodes // 2
+        assert model.gpu_memory_utilization == 0.95
         assert variant.spec.client.num_runs == 2
         assert variant.spec.client.stream is False
         assert variant.spec.backend.args["ray"]["proxy"]["type"] == "haproxy"
@@ -187,7 +188,7 @@ def test_missing_pp_curve_plot_is_pinned_to_the_accepted_run_group() -> None:
     assert current == [
         (
             "pp405b_pp2_haproxy_nostream_v040",
-            "run2",
+            "run3",
             "haproxy_nonstream",
             "haproxy",
             "nonstream",

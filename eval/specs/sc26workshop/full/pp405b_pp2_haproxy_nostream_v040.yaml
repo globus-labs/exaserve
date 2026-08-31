@@ -45,7 +45,11 @@ deployment:
     num_replicas: 2
     max_model_len: 4096
     size: 405
-    gpu_memory_utilization: 0.90
+    # 0.90 left effectively zero KV blocks on one otherwise usable Aurora
+    # tile at n16 (6.6 GiB free after the 405B weights/runtime footprint).
+    # The workload uses max_num_seqs=8, so 0.95 supplies a bounded cache margin
+    # without changing the offered-load or parallelism contract.
+    gpu_memory_utilization: 0.95
     enforce_eager: true
     max_num_seqs: 8
   replica_max_ongoing_requests: 16

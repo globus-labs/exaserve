@@ -1403,7 +1403,7 @@ PP405B_VARIANTS = (
     ),
     (
         "pp405b_pp2_haproxy_nostream_v040",
-        "run2",
+        "run3",
         "haproxy_nonstream",
         "haproxy",
         "nonstream",
