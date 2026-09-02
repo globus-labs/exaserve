@@ -169,9 +169,7 @@ def test_tree_manifest_covers_path_size_and_content(tmp_path):
     assert tree_manifest(package)["source_manifest_hash"] != first["source_manifest_hash"]
 
 
-def test_clean_package_snapshot_can_extend_and_remove_read_only_release(
-    tmp_path, monkeypatch
-):
+def test_clean_package_snapshot_can_extend_and_remove_read_only_release(tmp_path, monkeypatch):
     installed = tmp_path / "installed" / "exaserve"
     nested = installed / "nested"
     nested.mkdir(parents=True)

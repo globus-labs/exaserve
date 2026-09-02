@@ -413,9 +413,7 @@ def _clean_package_snapshot(destination: Path, *, vendor: str) -> Path:
                 raise SourceStagingError(
                     f"clean source copy contains an unresolved directory symlink: {directory}"
                 )
-            directory.chmod(
-                directory.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
-            )
+            directory.chmod(directory.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     from .compat.generated_overlay import materialize
     from .compat.profile import default_profile
 

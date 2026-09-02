@@ -32,9 +32,7 @@ class BindingStoreError(RuntimeError):
 class ComponentBindingStore:
     """The composition root's sole durable writer for live slot bindings."""
 
-    def __init__(
-        self, run_dir: str, *, plan, binding, current_publish_batch_size: int = 1
-    ) -> None:
+    def __init__(self, run_dir: str, *, plan, binding, current_publish_batch_size: int = 1) -> None:
         if (
             isinstance(current_publish_batch_size, bool)
             or not isinstance(current_publish_batch_size, int)

@@ -551,9 +551,7 @@ class ControlListener:
         self._out_seq[rank] = seq
         return seq
 
-    async def _write_session_frame(
-        self, writer: asyncio.StreamWriter, envelope: Envelope
-    ) -> bool:
+    async def _write_session_frame(self, writer: asyncio.StreamWriter, envelope: Envelope) -> bool:
         """Write to one rank, treating socket loss as a recoverable disconnect.
 
         EOF/reset has the same session semantics in either direction.  A read

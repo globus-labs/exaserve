@@ -89,10 +89,7 @@ def test_default_aurora_profile_claims_only_qualified_stack_families():
 def test_ray_internal_proxy_watchdog_cannot_preempt_initial_readiness():
     default_limits = ReadinessLimits()
     assert default_limits.serve_proxy_health_check_timeout_s == 3600.0
-    assert (
-        default_limits.serve_proxy_health_check_timeout_s
-        >= default_limits.initial_deadline_s
-    )
+    assert default_limits.serve_proxy_health_check_timeout_s >= default_limits.initial_deadline_s
 
     with pytest.raises(PlanError, match="cannot preempt canonical initial readiness"):
         ReadinessLimits(

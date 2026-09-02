@@ -683,9 +683,7 @@ class ExactReceiptLedger:
             if candidate.plan is not self.plan or candidate.binding is not self.binding:
                 raise ReceiptError("staged receipt ledger belongs to another plan/binding")
             before_rank = {
-                key: receipt
-                for key, receipt in self._by_slot.items()
-                if receipt.owner_rank == rank
+                key: receipt for key, receipt in self._by_slot.items() if receipt.owner_rank == rank
             }
             after_rank = {
                 key: receipt

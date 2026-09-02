@@ -90,12 +90,8 @@ def test_stage_bundle_accepts_huggingface_blob_symlinks_inside_model_repository(
             {
                 "weight_map": {
                     "model.embed_tokens.weight": "model-00001-of-00001.safetensors",
-                    "model.layers.0.self_attn.q_proj.weight": (
-                        "model-00001-of-00001.safetensors"
-                    ),
-                    "model.layers.1.self_attn.q_proj.weight": (
-                        "model-00001-of-00001.safetensors"
-                    ),
+                    "model.layers.0.self_attn.q_proj.weight": ("model-00001-of-00001.safetensors"),
+                    "model.layers.1.self_attn.q_proj.weight": ("model-00001-of-00001.safetensors"),
                     "lm_head.weight": "model-00001-of-00001.safetensors",
                 }
             }

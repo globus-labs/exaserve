@@ -814,8 +814,7 @@ def _compile_exposure(
         raise PlanError("a managed gateway requires deployment.exposure.mode=PROXIED_INTERNAL")
     if kind != GatewayKind.HAPROXY.value and "request_body_limit_bytes" in raw_exposure:
         raise PlanError(
-            "deployment.exposure.request_body_limit_bytes is supported only "
-            "by the HAProxy gateway"
+            "deployment.exposure.request_body_limit_bytes is supported only by the HAProxy gateway"
         )
     exposure = ExposurePlan(
         mode=mode,

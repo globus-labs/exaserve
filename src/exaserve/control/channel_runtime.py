@@ -391,8 +391,7 @@ class HeadChannel:
             if error is not None:
                 with self._state_lock:
                     self.failures.append(
-                        "durable receipt mutation failed: "
-                        f"{type(error).__name__}: {error}"
+                        f"durable receipt mutation failed: {type(error).__name__}: {error}"
                     )
 
         future.add_done_callback(completed)
@@ -609,10 +608,7 @@ class HeadChannel:
             try:
                 await asyncio.wrap_future(future)
             except BaseException as exc:
-                return False, (
-                    "durable snapshot commit failed: "
-                    f"{type(exc).__name__}: {exc}"
-                )
+                return False, (f"durable snapshot commit failed: {type(exc).__name__}: {exc}")
         with self._state_lock:
             for key in [key for key in self._observation_arrivals if key[0] == rank]:
                 self._observation_arrivals.pop(key, None)

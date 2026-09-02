@@ -666,9 +666,7 @@ def test_head_without_a_ledger_does_not_crash(identity):
     assert head.receipt_payloads
 
 
-def test_production_head_queues_slow_durable_receipts_off_the_listener(
-    identity, monkeypatch
-):
+def test_production_head_queues_slow_durable_receipts_off_the_listener(identity, monkeypatch):
     """Shared-filesystem latency must not stall heartbeats/reconnect I/O."""
     import threading
 
