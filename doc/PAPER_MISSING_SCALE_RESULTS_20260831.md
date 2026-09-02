@@ -1,6 +1,6 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress**. This document is an evidence ledger, not a completed
+Status: **in progress; last updated 2026-09-02**. This document is an evidence ledger, not a completed
 paper reproduction claim. A number appears in an accepted table only after the
 immutable run bundle, terminal state, result manifest, readiness evidence, and
 shutdown evidence all pass the repository's fail-closed acceptance checks.
@@ -68,7 +68,7 @@ accepted cell.
 | 8 | 4 | 192/192 | 0 | 1.437971 | 14.579 | 17.412 | accepted |
 | 16 | 8 | 384/384 | 0 | 2.741455 | 14.890 | 24.384 | accepted |
 | 32 | 16 | 768/768 | 0 | 5.339415 | 15.106 | 29.495 | accepted |
-| 64 | 32 | pending | pending | pending | pending | pending | submitted as PBS 8798327 |
+| 64 | 32 | 1,536/1,536 | 0 | 10.750777 | 14.785 | 24.624 | accepted |
 | 128 | 64 | pending | pending | pending | pending | pending | not run |
 | 256 | 128 | pending | pending | pending | pending | pending | not run |
 
@@ -94,6 +94,16 @@ result-manifest hash
 Both 768-request replays completed without errors. Canonical READY contained 48
 Serve applications, 16 PP2 replicas, and 354/354 exact receipt slots; teardown
 published a clean `STOPPED` report after DRAIN and GOODBYE from all 32 ranks.
+
+The accepted n64 cell is PBS job `8798327` (exit 0, walltime 47:29) with
+result-manifest hash
+`ae7e1bf0cf57ed755095f7269a661548ab624fabbd8cefdcb6b3deff9dcedc13`.
+Its warmup replay completed 1,536/1,536 requests with zero errors at 9.287877
+RPS; the reported replay completed 1,536/1,536 with zero errors at 10.750777
+RPS. Canonical READY contained 96 Serve applications, 32 PP2 replicas, and
+706/706 exact receipt slots. Teardown published clean `STOPPED` after DRAIN and
+GOODBYE from all 64 ranks. Reported throughput is 2.013x the accepted n32
+throughput for a 2x node/replica increase.
 
 ## Defects and feasibility decisions exposed by the campaign
 
@@ -147,11 +157,10 @@ published a clean `STOPPED` report after DRAIN and GOODBYE from all 32 ranks.
 
 ## Remaining execution order
 
-1. Complete PP2 n32, then PP2 n64.
-2. Run null-compute n128 twice, then PP2 n128; issue the 128-node partial report.
-3. Run null-compute n256 twice and PP2 n256 in the production queue; issue the
+1. Run null-compute n128 twice, then PP2 n128; issue the 128-node partial report.
+2. Run null-compute n256 twice and PP2 n256 in the production queue; issue the
    256-node partial report.
-4. Render the strict null startup table and full PP2 figure. Both consumers must
+3. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
-5. Replace all `pending` rows in this ledger with sealed evidence or an explicit
+4. Replace all `pending` rows in this ledger with sealed evidence or an explicit
    externally blocked disposition, then run the complete release gate.
