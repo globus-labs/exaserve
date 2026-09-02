@@ -21,6 +21,8 @@ Figures:
 """
 
 from __future__ import annotations
+
+import math
 import os
 import sys
 from pathlib import Path
@@ -42,7 +44,38 @@ P.CACHE_DIR = Path("/tmp/sc26_full_cache")
 # their run group explicitly below; a rerun must never silently replace the
 # data behind a published figure.
 P.RUN_PIN = {}
-PP405B_CURRENT_NODES = frozenset({4, 8, 16, 32, 64, 128, 256})
+
+# Reviewed compatibility contract for the replacement 405B HAProxy/non-stream
+# curve.  The low points predate collision-resistant materialization IDs; the
+# high points use them.  The intervening source changes either affect only the
+# null-compute path (which this consumer independently rejects below) or the
+# materialization-ID scheme, so these two exact snapshots are compatible for
+# this one curve.  No third snapshot or identity scheme is accepted implicitly.
+PP405B_CURRENT_RUN3_SOURCE = "160036b8367213da1d317ca9270de8c5016a471048842daea2ed1d8fe9b64b71"
+PP405B_CURRENT_RUN4_SOURCE = "a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1"
+PP405B_CURRENT_SOURCE_CONTRACTS = {
+    "run3": (PP405B_CURRENT_RUN3_SOURCE, "legacy_truncate_v1"),
+    "run4": (PP405B_CURRENT_RUN4_SOURCE, "bounded_hash_v2"),
+}
+PP405B_CURRENT_RUN_GROUPS = {
+    4: "run3",
+    8: "run3",
+    16: "run3",
+    32: "run4",
+    64: "run4",
+    128: "run4",
+    256: "run4",
+}
+PP405B_CURRENT_SEMANTIC_HASHES = {
+    4: "aa99fc37f5f8246529b8fd8b67acac897ae2f7be9f10607b7936566729bd4331",
+    8: "f29d8e188675c9c6892d8a46b19b010fb454c8d66e758e5dc3cbe4773c0d7c3d",
+    16: "3eb974d794007c02ec8f2947f413bbfa9abf4a5362ecac0bef67af121a9d19df",
+    32: "f5c29a2b31c553d96d22c805385532357e185f7011d3660ed80feca4e515b52b",
+    64: "4d2f4beaf28bf3393ac86ae82b3b473fb4e601085ba32d9950c6f1f59bcacabd",
+    128: "15befb4300fd09d7806dae0ec56dff6cf358be6c4e0e6f7ae79aa44eaa718848",
+    256: "eb8cff673bb7ca390b3b39465690ffa2d6a84982cc31c5a58045dc3fded480b4",
+}
+PP405B_CURRENT_NODES = frozenset(PP405B_CURRENT_RUN_GROUPS)
 
 OUT = Path(__file__).resolve().parent / "output" / "sc26_full" / "iter13"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -1317,6 +1350,165 @@ def _require_complete_current_result(result_path):
     replay_entries = [entry for entry in manifest.entries if entry.logical_id == "replay/default"]
     if len(replay_entries) != 1 or replay_entries[0].path != result_path.name:
         raise RuntimeError(f"paper result manifest does not own result0.json: {cell_dir}")
+    return accepted
+
+
+def _require_current_pp405b_plan(accepted, *, nodes, run_group):
+    """Bind one selected point to the reviewed 405B experimental contract."""
+    expected_group = PP405B_CURRENT_RUN_GROUPS.get(nodes)
+    if expected_group is None:
+        raise RuntimeError(f"current PP=2 paper curve does not select n{nodes}")
+    if run_group != expected_group:
+        raise RuntimeError(f"current PP=2 n{nodes} selects {run_group}, expected {expected_group}")
+    expected_source, expected_id_scheme = PP405B_CURRENT_SOURCE_CONTRACTS[expected_group]
+
+    run_plan = accepted.run_plan
+    semantic = run_plan.semantic_plan
+    deployment = semantic.deployment
+    if len(deployment.models) != 1:
+        raise RuntimeError(
+            f"current PP=2 n{nodes} RunPlan has {len(deployment.models)} models, expected 1"
+        )
+    model = deployment.models[0]
+    gateway_kind = None if deployment.gateway is None else deployment.gateway.kind
+    checks = (
+        ("spec_name", run_plan.spec_name, "pp405b_pp2_haproxy_nostream_v040"),
+        ("run_id", run_plan.run_id, f"n{nodes}"),
+        ("run_group_id", run_plan.run_group_id, expected_group),
+        ("variant_name", run_plan.variant_name, f"n{nodes}"),
+        ("axis_values", run_plan.axis_values, {"num_nodes": nodes}),
+        ("source_snapshot_hash", run_plan.source_snapshot_hash, expected_source),
+        ("deployment_id_scheme", run_plan.deployment_id_scheme, expected_id_scheme),
+        (
+            "run_semantic_hash",
+            run_plan.run_semantic_hash,
+            PP405B_CURRENT_SEMANTIC_HASHES[nodes],
+        ),
+        ("deployment.num_nodes", deployment.num_nodes, nodes),
+        ("scheduler.nodes", semantic.scheduler.nodes, nodes),
+        ("deployment.runtime.null_compute", deployment.runtime.null_compute, False),
+        (
+            "deployment.models[0].model_id",
+            model.model_id,
+            "meta-llama/Llama-3.1-405B-Instruct",
+        ),
+        ("deployment.models[0].tensor_parallel_size", model.tensor_parallel_size, 8),
+        ("deployment.models[0].pipeline_parallel_size", model.pipeline_parallel_size, 2),
+        ("deployment.models[0].num_replicas", model.num_replicas, nodes // 2),
+        ("deployment.models[0].max_model_len", model.max_model_len, 4096),
+        ("deployment.models[0].gpu_memory_utilization", model.gpu_memory_utilization, 0.95),
+        ("deployment.models[0].max_num_seqs", model.max_num_seqs, 8),
+        ("deployment.models[0].enforce_eager", model.enforce_eager, True),
+        ("deployment.gateway.kind", gateway_kind, "haproxy"),
+        ("client.destination", semantic.client.destination, "proxy"),
+        ("client.streaming", semantic.client.streaming, False),
+        ("client.num_runs", semantic.client.num_runs, 2),
+        ("workload.client_dest", semantic.workload.client_dest, "proxy"),
+        ("workload.rate_per_node", semantic.workload.rate_per_node, 0.2),
+        ("workload.duration_s", semantic.workload.duration_s, 120.0),
+    )
+    for field, observed, expected in checks:
+        matches = observed is expected if isinstance(expected, bool) else observed == expected
+        if not matches:
+            raise RuntimeError(
+                f"current PP=2 n{nodes} RunPlan {field} is {observed!r}, expected {expected!r}"
+            )
+
+
+def _require_finite_result_number(record, field, *, context, positive=False):
+    value = record.get(field)
+    valid_type = not isinstance(value, bool) and isinstance(value, (int, float))
+    try:
+        number = float(value) if valid_type else math.nan
+    except (OverflowError, TypeError, ValueError):
+        number = math.nan
+    if not math.isfinite(number) or number < 0 or (positive and number == 0):
+        qualifier = "positive" if positive else "non-negative"
+        raise RuntimeError(f"{context}.{field} must be finite and {qualifier}")
+    return number
+
+
+def _validate_current_pp405b_record(record, *, context, nodes, per_run=False):
+    if not isinstance(record, dict):
+        raise RuntimeError(f"{context} must be an object")
+    expected_completed = 24 * nodes
+    completed = record.get("requests_completed")
+    scheduled = record.get("requests_scheduled")
+    errors = record.get("errors")
+    if type(completed) is not int or completed != expected_completed:
+        raise RuntimeError(
+            f"{context}.requests_completed must be exactly 24*nodes={expected_completed}"
+        )
+    if type(errors) is not int or errors != 0:
+        raise RuntimeError(f"{context}.errors must be exactly 0")
+    if type(scheduled) is not int or scheduled != expected_completed:
+        raise RuntimeError(
+            f"{context}.requests_scheduled must be exactly 24*nodes={expected_completed}"
+        )
+
+    duration = _require_finite_result_number(record, "duration_s", context=context, positive=True)
+    rps = _require_finite_result_number(record, "rps", context=context)
+    p50 = _require_finite_result_number(record, "p50_s", context=context)
+    p99 = _require_finite_result_number(record, "p99_s", context=context)
+    if p99 < p50:
+        raise RuntimeError(f"{context}.p99_s must be greater than or equal to p50_s")
+    expected_rps = completed / duration
+    if not math.isclose(rps, expected_rps, rel_tol=1e-9, abs_tol=1e-12):
+        raise RuntimeError(
+            f"{context}.rps {rps!r} disagrees with requests_completed/duration_s {expected_rps!r}"
+        )
+    if per_run:
+        successes = record.get("successes")
+        if type(successes) is not int or successes != expected_completed:
+            raise RuntimeError(f"{context}.successes must be exactly 24*nodes={expected_completed}")
+        success_rps = _require_finite_result_number(record, "success_rps", context=context)
+        if not math.isclose(success_rps, expected_rps, rel_tol=1e-9, abs_tol=1e-12):
+            raise RuntimeError(
+                f"{context}.success_rps {success_rps!r} disagrees with "
+                f"successes/duration_s {expected_rps!r}"
+            )
+
+
+def _validate_current_pp405b_result(document, *, result_path, nodes):
+    """Reject malformed current-series metrics instead of skipping bad runs."""
+    if not isinstance(document, dict):
+        raise RuntimeError(f"current PP=2 result must be an object: {result_path}")
+    overall = document.get("overall")
+    _validate_current_pp405b_record(overall, context=f"{result_path}:overall", nodes=nodes)
+    per_run = document.get("per_run")
+    if not isinstance(per_run, list) or len(per_run) != 2:
+        raise RuntimeError(f"{result_path}:per_run must contain exactly two runs")
+    indices = []
+    for offset, record in enumerate(per_run):
+        if not isinstance(record, dict):
+            raise RuntimeError(f"{result_path}:per_run[{offset}] must be an object")
+        run_index = record.get("run_index")
+        if type(run_index) is not int or run_index < 0:
+            raise RuntimeError(
+                f"{result_path}:per_run[{offset}].run_index must be a non-negative integer"
+            )
+        indices.append(run_index)
+        _validate_current_pp405b_record(
+            record,
+            context=f"{result_path}:per_run[{offset}]",
+            nodes=nodes,
+            per_run=True,
+        )
+    if indices != [0, 1]:
+        raise RuntimeError(f"{result_path}:per_run indices are {indices}, expected [0, 1]")
+    mirrored_fields = (
+        "requests_completed",
+        "requests_scheduled",
+        "errors",
+        "duration_s",
+        "rps",
+        "p50_s",
+        "p99_s",
+    )
+    mismatches = [field for field in mirrored_fields if overall[field] != per_run[1][field]]
+    if mismatches:
+        raise RuntimeError(f"{result_path}:overall does not mirror per_run[1] fields {mismatches}")
+    return overall, [per_run[1]]
 
 
 def _pp405b_points(stem, run_group, *, require_complete=False):
@@ -1352,13 +1544,24 @@ def _pp405b_points(stem, run_group, *, require_complete=False):
     for result_path in result_paths:
         if not result_path.is_file():
             continue
+        node_match = re.search(r"/n(\d+)/", str(result_path))
+        if node_match is None:
+            raise RuntimeError(f"PP=2 result path has no node identity: {result_path}")
+        n = int(node_match.group(1))
+        selected_group = result_path.parents[2].name
         if require_complete:
-            _require_complete_current_result(result_path)
-        n = int(re.search(r"/n(\d+)/", str(result_path)).group(1))
-        with open(result_path, encoding="utf-8") as handle:
-            d = json.load(handle)
-        o = d.get("overall", {})
-        data_runs = [pr for pr in (d.get("per_run") or []) if int(pr.get("run_index", 0)) >= 1]
+            accepted = _require_complete_current_result(result_path)
+            _require_current_pp405b_plan(accepted, nodes=n, run_group=selected_group)
+        if require_complete:
+            from exaserve.state.atomic import strict_json_load_path
+
+            d = strict_json_load_path(result_path)
+            o, data_runs = _validate_current_pp405b_result(d, result_path=result_path, nodes=n)
+        else:
+            with open(result_path, encoding="utf-8") as handle:
+                d = json.load(handle)
+            o = d.get("overall", {})
+            data_runs = [pr for pr in (d.get("per_run") or []) if int(pr.get("run_index", 0)) >= 1]
         if len(data_runs) < 1:  # single-iteration job: use overall
             data_runs = [o] if o.get("rps") is not None else []
         srps_runs, comp_t, err_t, p50s, p99s = [], 0.0, 0.0, [], []
@@ -1418,7 +1621,7 @@ PP405B_VARIANTS = (
     ),
     (
         "pp405b_pp2_haproxy_nostream_v040",
-        {4: "run3", 8: "run3", 16: "run3", 32: "run4", 64: "run4", 128: "run4", 256: "run4"},
+        PP405B_CURRENT_RUN_GROUPS,
         "haproxy_nonstream",
         "haproxy",
         "nonstream",

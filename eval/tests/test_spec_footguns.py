@@ -172,23 +172,36 @@ def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() 
 def test_missing_pp_curve_plot_is_pinned_to_the_accepted_run_group() -> None:
     import ast
 
+    from eval.plot import sc26_full_figures as figures
+
     source = Path(__file__).parents[1] / "plot" / "sc26_full_figures.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
-    assignment = next(
+    mapping_assignment = next(
         node
         for node in tree.body
         if isinstance(node, ast.Assign)
         and any(
-            isinstance(target, ast.Name) and target.id == "PP405B_VARIANTS"
+            isinstance(target, ast.Name) and target.id == "PP405B_CURRENT_RUN_GROUPS"
             for target in node.targets
         )
     )
-    variants = ast.literal_eval(assignment.value)
-    current = [row for row in variants if row[0] == "pp405b_pp2_haproxy_nostream_v040"]
+    expected_groups = {
+        4: "run3",
+        8: "run3",
+        16: "run3",
+        32: "run4",
+        64: "run4",
+        128: "run4",
+        256: "run4",
+    }
+    assert ast.literal_eval(mapping_assignment.value) == expected_groups
+    current = [
+        row for row in figures.PP405B_VARIANTS if row[0] == "pp405b_pp2_haproxy_nostream_v040"
+    ]
     assert current == [
         (
             "pp405b_pp2_haproxy_nostream_v040",
-            {4: "run3", 8: "run3", 16: "run3", 32: "run4", 64: "run4", 128: "run4", 256: "run4"},
+            expected_groups,
             "haproxy_nonstream",
             "haproxy",
             "nonstream",
@@ -196,6 +209,7 @@ def test_missing_pp_curve_plot_is_pinned_to_the_accepted_run_group() -> None:
             True,
         )
     ]
+    assert current[0][1] is figures.PP405B_CURRENT_RUN_GROUPS
 
 
 def test_missing_null_curve_consumer_pins_two_independent_lifecycles() -> None:
