@@ -79,7 +79,7 @@ accepted cell.
 | 16 | 8 | 384/384 | 0 | 2.741455 | 14.890 | 24.384 | accepted |
 | 32 | 16 | 768/768 | 0 | 5.339415 | 15.106 | 29.495 | accepted |
 | 64 | 32 | 1,536/1,536 | 0 | 10.750777 | 14.785 | 24.624 | accepted |
-| 128 | 64 | pending | pending | pending | pending | pending | not run |
+| 128 | 64 | 3,072/3,072 | 0 | 20.739459 | 15.071 | 31.018 | accepted |
 | 256 | 128 | pending | pending | pending | pending | pending | not run |
 
 The accepted low-node cells are immutable `run3` artifacts from source snapshot
@@ -113,6 +113,16 @@ RPS; the reported replay completed 1,536/1,536 with zero errors at 10.750777
 RPS. Canonical READY contained 96 Serve applications, 32 PP2 replicas, and
 706/706 exact receipt slots. Teardown published clean `STOPPED` after DRAIN and
 GOODBYE from all 64 ranks. Reported throughput is 2.013x the accepted n32
+throughput for a 2x node/replica increase.
+
+The accepted n128 cell is PBS job `8798933` (exit 0, walltime 47:12) with
+result-manifest hash
+`0672c06711b531577965660f58640c7e3346567d137544be181e44a99afd5aa0`.
+Its warmup replay completed 3,072/3,072 requests with zero errors at 21.083153
+RPS; the reported replay completed 3,072/3,072 with zero errors at 20.739459
+RPS. Canonical READY contained 192 Serve applications, 64 PP2 replicas, and
+1,410/1,410 exact receipt slots. Teardown published clean `STOPPED` after DRAIN
+and GOODBYE from all 128 ranks. Reported throughput is 1.929x the accepted n64
 throughput for a 2x node/replica increase.
 
 ## Defects and feasibility decisions exposed by the campaign
@@ -220,10 +230,9 @@ throughput for a 2x node/replica increase.
 
 ## Remaining execution order
 
-1. Complete PP2 n128 and issue the 128-node partial report.
-2. Run null-compute n256 twice and PP2 n256 in the production queue; issue the
+1. Run null-compute n256 twice and PP2 n256 in the production queue; issue the
    256-node partial report.
-3. Render the strict null startup table and full PP2 figure. Both consumers must
+2. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
-4. Replace all `pending` rows in this ledger with sealed evidence or an explicit
+3. Replace all `pending` rows in this ledger with sealed evidence or an explicit
    externally blocked disposition, then run the complete release gate.
