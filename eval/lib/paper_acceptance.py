@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from exaserve.plan.io import load_run_provenance
-from exaserve.state.results import ResultManifest, load_result_manifest
+from exaserve.plan.io import run_provenance_from_dict
+from exaserve.state.atomic import regular_file_reader, strict_json_loads
+from exaserve.state.results import ResultEntry, ResultManifest, load_result_manifest
 from exaserve.state.status import StatusRecord, StatusStore
 
 from .run_planner import load_run_plan
@@ -19,6 +22,30 @@ class AcceptedPaperRun:
     manifest: ResultManifest
     status: StatusRecord
     run_provenance: object
+
+
+def load_authenticated_result_json(cell_dir: str | Path, entry: ResultEntry):
+    """Read, authenticate, and decode one manifest entry from one descriptor."""
+    if type(entry) is not ResultEntry:
+        raise TypeError("authenticated paper result requires a ResultEntry")
+    cell = Path(cell_dir)
+    root = os.path.abspath(cell / "results")
+    candidate = os.path.abspath(os.path.join(root, entry.path))
+    try:
+        if os.path.commonpath((root, candidate)) != root:
+            raise RuntimeError(f"paper result entry escapes its bundle: {entry.path!r}")
+        with regular_file_reader(candidate, binary=True) as handle:
+            payload = handle.read()
+            size = os.fstat(handle.fileno()).st_size
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"paper result entry is unavailable: {candidate}") from exc
+    digest = hashlib.sha256(payload).hexdigest()
+    if size != entry.size_bytes or digest != entry.sha256:
+        raise RuntimeError(f"paper result entry content changed: {candidate}")
+    try:
+        return strict_json_loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"paper result entry is not strict UTF-8 JSON: {candidate}") from exc
 
 
 def require_accepted_paper_run(
@@ -60,7 +87,9 @@ def require_accepted_paper_run(
     ]
     if len(provenance_entries) != 1:
         raise RuntimeError(f"paper result has no unique run provenance: {cell}")
-    provenance = load_run_provenance(str(cell / "results" / provenance_entries[0].path))
+    provenance = run_provenance_from_dict(
+        load_authenticated_result_json(cell, provenance_entries[0])
+    )
     deployment = run_plan.semantic_plan.deployment
     if (
         provenance.run_id != run_plan.run_id

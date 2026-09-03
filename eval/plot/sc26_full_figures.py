@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -36,8 +37,6 @@ import sc26_preview as P
 import plotstyle as ps
 from eval.lib.pp405b_evidence import (
     CurrentPP405BRef,
-    PP405BLoaderKind,
-    PP405B_NODE_COUNTS,
     PP405BSeries,
     load_legacy_pp405b_ledger,
     load_pp405b_points,
@@ -95,12 +94,8 @@ PP405B_CURRENT_REFS = tuple(
 # plans, and producing PBS logs are instead selected by a strict checked-in
 # evidence ledger.
 PP405B_LEGACY_LEDGER_PATH = Path(__file__).with_name("pp405b_legacy_evidence.yaml")
-PP405B_LEGACY_SELECTIONS = load_legacy_pp405b_ledger(PP405B_LEGACY_LEDGER_PATH)
-PP405B_LEGACY_DIRECT_REFS = PP405B_LEGACY_SELECTIONS["direct_stream"]
-PP405B_LEGACY_HAPROXY_REFS = PP405B_LEGACY_SELECTIONS["haproxy_stream"]
 
 OUT = Path(__file__).resolve().parent / "output" / "sc26_full" / "iter13"
-OUT.mkdir(parents=True, exist_ok=True)
 
 # Exact IEEEtran widths (measured: \columnwidth=252pt, \textwidth=516pt) so
 # \includegraphics[width=\columnwidth]{...} does NO scaling and matplotlib point
@@ -442,7 +437,9 @@ def _write_caption(out_png, title, subtitle):
     figure) so it can be lifted into the paper once the plot is approved."""
     subs = [subtitle] if isinstance(subtitle, str) else list(subtitle)
     body = "\n".join([title.replace("\n", " ")] + [str(s) for s in subs])
-    Path(out_png).with_suffix(".txt").write_text(body + "\n")
+    caption_path = Path(out_png).with_suffix(".txt")
+    caption_path.parent.mkdir(parents=True, exist_ok=True)
+    caption_path.write_text(body + "\n")
 
 
 def fig1_proxy_scaling(S, NS, wide=True):
@@ -1356,39 +1353,41 @@ def fig6_sglang_backend(S):
     return ps.finalize(fig, [], OUT / "fig6_sglang_backend.png", rect=(0, 0, 1, panel_top))
 
 
+@lru_cache(maxsize=1)
+def _pp405b_variants():
+    legacy = load_legacy_pp405b_ledger(PP405B_LEGACY_LEDGER_PATH)
+    return (
+        PP405BSeries.legacy(
+            stem="pp405b_pp2_scale_direct",
+            key="direct_stream",
+            proxy="direct",
+            label="Direct",
+            refs=legacy["direct_stream"],
+        ),
+        PP405BSeries.legacy(
+            stem="pp405b_pp2_scale",
+            key="haproxy_stream",
+            proxy="haproxy",
+            label="HAProxy",
+            refs=legacy["haproxy_stream"],
+        ),
+        PP405BSeries.current(
+            stem="pp405b_pp2_haproxy_nostream_v040",
+            key="haproxy_nonstream",
+            proxy="haproxy",
+            label="HAProxy non-stream",
+            refs=PP405B_CURRENT_REFS,
+        ),
+    )
+
+
+@lru_cache(maxsize=None)
+def _cached_pp405b_points(series, runs_root):
+    return tuple(load_pp405b_points(series, runs_root=runs_root))
+
+
 def _pp405b_points(series):
-    return load_pp405b_points(series, runs_root=P.RUNS_ROOT)
-
-
-PP405B_VARIANTS = (
-    PP405BSeries(
-        stem="pp405b_pp2_scale_direct",
-        key="direct_stream",
-        proxy="direct",
-        mode="stream",
-        label="Direct",
-        loader_kind=PP405BLoaderKind.LEGACY_PINNED_V1,
-        legacy_refs=PP405B_LEGACY_DIRECT_REFS,
-    ),
-    PP405BSeries(
-        stem="pp405b_pp2_scale",
-        key="haproxy_stream",
-        proxy="haproxy",
-        mode="stream",
-        label="HAProxy",
-        loader_kind=PP405BLoaderKind.LEGACY_PINNED_V1,
-        legacy_refs=PP405B_LEGACY_HAPROXY_REFS,
-    ),
-    PP405BSeries(
-        stem="pp405b_pp2_haproxy_nostream_v040",
-        key="haproxy_nonstream",
-        proxy="haproxy",
-        mode="nonstream",
-        label="HAProxy non-stream",
-        loader_kind=PP405BLoaderKind.CURRENT_MANIFEST_V2,
-        current_refs=PP405B_CURRENT_REFS,
-    ),
-)
+    return _cached_pp405b_points(series, str(P.RUNS_ROOT))
 
 
 def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
@@ -1396,7 +1395,8 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
     aggregate successful throughput vs cluster size, DIRECT vs HAProxy in
     incremental and non-streaming delivery, against an ideal-linear guide.
     Returns (handles, labels, per_node base rate)."""
-    data = {series.key: _pp405b_points(series) for series in PP405B_VARIANTS}
+    variants = _pp405b_variants()
+    data = {series.key: _pp405b_points(series) for series in variants}
     base = data["direct_stream"][0]
     per_node = base["srps"] / base["nodes"]  # weak-scaling unit rate (per node)
     allnodes = sorted({p["nodes"] for pts in data.values() for p in pts})
@@ -1410,7 +1410,7 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
         label="ideal (linear)",
     )
     sep = " · " if label_fs >= 5 else "\n"
-    for series in PP405B_VARIANTS:
+    for series in variants:
         pts = data[series.key]
         proxy = series.proxy
         mode = series.mode
@@ -1457,7 +1457,9 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
     # PP=2 means one replica spans TWO nodes, so the bracketed replica count is
     # nodes//2 here — not the 12/node of the TP=1 8B deployment.
     _node_axis(a, nodes=tick_nodes or allnodes, per_node=lambda n: n // 2)
-    a.set_xlabel("nodes (PP=2 replicas)" if tick_nodes else "Cluster size: nodes (PP=2 replicas)")
+    a.set_xlabel(
+        "active nodes (PP=2 replicas)" if tick_nodes else "Active serving/Ray nodes (PP=2 replicas)"
+    )
     if ylabel:
         # shortened from "Successful throughput (query/s)": the rotated label is
         # taller than the iter11 axes box, which clipped it at both ends
@@ -1470,10 +1472,15 @@ def _pp405b_caption(per_node):
     return (
         "Shard-aware pipeline-parallel weak scaling: Llama-3.1-405B (TP=8 × PP=2)",
         [
-            "one replica per 2 nodes · 4–256 nodes (2–128 PP=2 replicas) · fixed offered rate/replica",
+            "one replica per 2 active serving/Ray nodes · 4–256 active nodes "
+            "(2–128 PP=2 replicas) · fixed offered rate/replica",
             "successful throughput; HAProxy solid = incremental, dashed = non-stream; "
             "point labels = throughput and weak-scaling efficiency "
             f"vs the 4-node base ({per_node:.2f} query/s/node)",
+            "mixed campaigns, not a controlled causal delivery-mode ablation: legacy streaming "
+            "uses older revisions, GPU util. 0.90, HAProxy maxconn 50k, some nodefile-subset "
+            "allocations, and <=0.39% errors; hardened non-stream uses GPU util. 0.95 and "
+            "HAProxy maxconn 8k",
         ],
     )
 
@@ -1636,6 +1643,11 @@ def main():
     if "--only" in sys.argv:
         only = sys.argv[sys.argv.index("--only") + 1]
     idxs = [i for i, (fn, _) in enumerate(_RENDER_JOBS) if only is None or only in fn.__name__]
+    if any(_RENDER_JOBS[i][0] in {fig_pp405b, fig_pp_engines} for i in idxs):
+        # Both PP figures use the same evidence. Load it once in the parent so
+        # forked render workers inherit the authenticated points copy-on-write.
+        for series in _pp405b_variants():
+            _pp405b_points(series)
 
     if serial or len(idxs) == 1:
         results = [_render_job(i) for i in idxs]

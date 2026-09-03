@@ -170,6 +170,7 @@ def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() 
 
 
 def test_pp_curves_use_explicit_complete_evidence_contracts() -> None:
+    from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
     expected_groups = {
@@ -182,16 +183,16 @@ def test_pp_curves_use_explicit_complete_evidence_contracts() -> None:
         256: "run4",
     }
     assert figures.PP405B_CURRENT_RUN_GROUPS == expected_groups
-    variants = {series.key: series for series in figures.PP405B_VARIANTS}
+    variants = {series.key: series for series in figures._pp405b_variants()}
     current = variants["haproxy_nonstream"]
-    assert current.loader_kind is figures.PP405BLoaderKind.CURRENT_MANIFEST_V2
+    assert current.loader_kind is evidence.PP405BLoaderKind.CURRENT_MANIFEST_V2
     assert {ref.nodes: ref.run_group_id for ref in current.current_refs} == expected_groups
     assert current.legacy_refs == ()
 
     for key in ("direct_stream", "haproxy_stream"):
         legacy = variants[key]
-        assert legacy.loader_kind is figures.PP405BLoaderKind.LEGACY_PINNED_V1
-        assert [ref.nodes for ref in legacy.legacy_refs] == list(figures.PP405B_NODE_COUNTS)
+        assert legacy.loader_kind is evidence.PP405BLoaderKind.LEGACY_PINNED_V1
+        assert [ref.nodes for ref in legacy.legacy_refs] == list(evidence.PP405B_NODE_COUNTS)
         assert [ref.nodes // 2 for ref in legacy.legacy_refs] == [2, 4, 8, 16, 32, 64, 128]
         assert legacy.current_refs == ()
         assert all(".bak" not in ref.result_name for ref in legacy.legacy_refs)
@@ -201,6 +202,65 @@ def test_pp_curves_use_explicit_complete_evidence_contracts() -> None:
     assert direct[64].result_name == "result1.json"
     assert haproxy[32].result_name == "result1.json"
     assert haproxy[64].result_name == "result1.json"
+    _, caption_lines = figures._pp405b_caption(0.1)
+    assert "active serving/Ray nodes" in caption_lines[0]
+    qualification = caption_lines[2]
+    for phrase in (
+        "mixed campaigns",
+        "not a controlled causal delivery-mode ablation",
+        "GPU util. 0.90",
+        "GPU util. 0.95",
+        "maxconn 50k",
+        "maxconn 8k",
+        "nodefile-subset allocations",
+        "<=0.39% errors",
+    ):
+        assert phrase in qualification
+
+
+def test_pp_legacy_ledger_and_output_directory_are_lazy() -> None:
+    import ast
+
+    source = Path(__file__).parents[1] / "plot" / "sc26_full_figures.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    top_level_calls = [
+        node
+        for statement in tree.body
+        for node in ast.walk(statement)
+        if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and isinstance(node, ast.Call)
+    ]
+    assert not any(
+        isinstance(call.func, ast.Name) and call.func.id == "load_legacy_pp405b_ledger"
+        for call in top_level_calls
+    )
+    assert not any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "OUT"
+        and call.func.attr == "mkdir"
+        for call in top_level_calls
+    )
+
+
+def test_pp_point_cache_reuses_parent_process_extraction(monkeypatch) -> None:
+    from eval.plot import sc26_full_figures as figures
+
+    series = figures._pp405b_variants()[0]
+    calls = []
+
+    def load(selected, *, runs_root):
+        calls.append((selected, runs_root))
+        return [{"nodes": 4}]
+
+    figures._cached_pp405b_points.cache_clear()
+    monkeypatch.setattr(figures, "load_pp405b_points", load)
+    try:
+        assert figures._pp405b_points(series) == ({"nodes": 4},)
+        assert figures._pp405b_points(series) == ({"nodes": 4},)
+        assert len(calls) == 1
+    finally:
+        figures._cached_pp405b_points.cache_clear()
 
 
 def test_legacy_pp_evidence_map_hash_and_corrected_arrays_are_frozen() -> None:
@@ -208,43 +268,71 @@ def test_legacy_pp_evidence_map_hash_and_corrected_arrays_are_frozen() -> None:
     import json
     from dataclasses import asdict
 
+    from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
+    variants = {series.key: series for series in figures._pp405b_variants()}
+    legacy_selections = {
+        key: variants[key].legacy_refs for key in ("direct_stream", "haproxy_stream")
+    }
     selections = {
-        key: [(ref.nodes, ref.run_group_id, ref.result_name, ref.pbs_job_id) for ref in refs]
-        for key, refs in figures.PP405B_LEGACY_SELECTIONS.items()
+        key: [
+            (
+                ref.allocated_nodes,
+                ref.active_nodes,
+                ref.subset_method.value,
+                None if ref.evidence_marker is None else ref.evidence_marker.value,
+                ref.run_group_id,
+                ref.result_name,
+                ref.pbs_job_id,
+            )
+            for ref in refs
+        ]
+        for key, refs in legacy_selections.items()
     }
     assert selections == {
         "direct_stream": [
-            (4, "run1", "result0.json", 8654870),
-            (8, "run1", "result0.json", 8654871),
-            (16, "run3", "result0.json", 8662386),
-            (32, "run1", "result0.json", 8654872),
-            (64, "run3", "result1.json", 8726613),
-            (128, "run0", "result0.json", 8641122),
-            (256, "run0", "result0.json", 8640747),
+            (4, 4, "exact", None, "run1", "result0.json", 8654870),
+            (8, 8, "exact", None, "run1", "result0.json", 8654871),
+            (16, 16, "exact", None, "run3", "result0.json", 8662386),
+            (32, 32, "exact", None, "run1", "result0.json", 8654872),
+            (256, 64, "nodefile_subset", "allocfix", "run3", "result1.json", 8726613),
+            (128, 128, "exact", None, "run0", "result0.json", 8641122),
+            (256, 256, "exact", None, "run0", "result0.json", 8640747),
         ],
         "haproxy_stream": [
-            (4, "run3", "result0.json", 8655141),
-            (8, "run3", "result0.json", 8655160),
-            (16, "run3", "result0.json", 8655268),
-            (32, "run5", "result1.json", 8726612),
-            (64, "run5", "result1.json", 8702358),
-            (128, "run5", "result0.json", 8686262),
-            (256, "run5", "result0.json", 8662385),
+            (4, 4, "exact", None, "run3", "result0.json", 8655141),
+            (8, 8, "exact", None, "run3", "result0.json", 8655160),
+            (16, 16, "exact", None, "run3", "result0.json", 8655268),
+            (256, 32, "nodefile_subset", "allocfix", "run5", "result1.json", 8726612),
+            (256, 64, "nodefile_subset", "allocfix", "run5", "result1.json", 8702358),
+            (256, 128, "nodefile_subset", "prod256", "run5", "result0.json", 8686262),
+            (256, 256, "exact", None, "run5", "result0.json", 8662385),
         ],
     }
     snapshot = [
-        (key, [asdict(ref) for ref in refs])
-        for key, refs in figures.PP405B_LEGACY_SELECTIONS.items()
+        (
+            key,
+            [
+                {
+                    **asdict(ref),
+                    "subset_method": ref.subset_method.value,
+                    "evidence_marker": (
+                        None if ref.evidence_marker is None else ref.evidence_marker.value
+                    ),
+                }
+                for ref in refs
+            ],
+        )
+        for key, refs in legacy_selections.items()
     ]
     canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
     assert hashlib.sha256(canonical).hexdigest() == (
-        "803024d4e31a4ba5eddad7bc853e9779378db236d7576ce4a9fbbeba69d1a8f1"
+        "09a22688dbe6fc9c2e329e384f82c920947758e95f70bf0a4596fb733b389ee4"
     )
 
-    direct = [ref.expected_successful_rps for ref in figures.PP405B_LEGACY_DIRECT_REFS]
-    haproxy = [ref.expected_successful_rps for ref in figures.PP405B_LEGACY_HAPROXY_REFS]
+    direct = [ref.expected_successful_rps for ref in legacy_selections["direct_stream"]]
+    haproxy = [ref.expected_successful_rps for ref in legacy_selections["haproxy_stream"]]
     assert direct == pytest.approx(
         [
             0.7194176497627154,
@@ -270,11 +358,11 @@ def test_legacy_pp_evidence_map_hash_and_corrected_arrays_are_frozen() -> None:
     base_per_node = direct[0] / 4
     direct_efficiency = [
         100 * rps / (base_per_node * nodes)
-        for rps, nodes in zip(direct, figures.PP405B_NODE_COUNTS)
+        for rps, nodes in zip(direct, evidence.PP405B_NODE_COUNTS)
     ]
     haproxy_efficiency = [
         100 * rps / (base_per_node * nodes)
-        for rps, nodes in zip(haproxy, figures.PP405B_NODE_COUNTS)
+        for rps, nodes in zip(haproxy, evidence.PP405B_NODE_COUNTS)
     ]
     assert direct_efficiency == pytest.approx(
         [100.0, 96.985954, 92.433950, 84.853974, 89.476310, 81.651994, 67.430304],

@@ -120,7 +120,9 @@ def _legacy_pp_document(*, nodes, errors=(0, 0), destination="direct"):
     }
 
 
-def _legacy_pp_plan(*, stem, nodes, run_group, source_commit, proxy="direct", runs=2):
+def _legacy_pp_plan(
+    *, stem, nodes, run_group, source_commit, proxy="direct", runs=2, bundle_root=None
+):
     destination = "direct" if proxy == "direct" else "proxy"
     gateway = "none" if proxy == "direct" else "haproxy"
     proxy_config = {"type": gateway}
@@ -136,6 +138,7 @@ def _legacy_pp_plan(*, stem, nodes, run_group, source_commit, proxy="direct", ru
         "run_group_id": run_group,
         "repo_root": f"/snapshots/{source_commit}",
         "snapshot_root": f"/snapshots/{source_commit}",
+        "bundle": {"root_dir": bundle_root or f"/runs/{stem}/{run_group}/n{nodes}"},
         "spec_name": stem,
         "variant_name": f"n{nodes}",
         "axis_values": {"num_nodes": nodes},
@@ -195,7 +198,8 @@ def _write_legacy_pp_cell(
     proxy="direct",
     result_name="result0.json",
     errors=(0, 0),
-    requires_allocfix=False,
+    allocated_nodes=None,
+    evidence_marker=None,
 ):
     import yaml
 
@@ -213,6 +217,7 @@ def _write_legacy_pp_cell(
         source_commit=source_commit,
         proxy=proxy,
         runs=len(errors),
+        bundle_root=str(cell),
     )
     plan_path = cell / "run.yaml"
     plan_path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
@@ -225,23 +230,50 @@ def _write_legacy_pp_cell(
         / f"{pbs_job_id}.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov.OU"
     )
     stdout_path.parent.mkdir(parents=True)
+    allocated_nodes = nodes if allocated_nodes is None else allocated_nodes
+    subset_method = (
+        evidence.AllocationSubsetMethod.EXACT
+        if evidence_marker is None
+        else evidence.AllocationSubsetMethod.NODEFILE_SUBSET
+    )
     stdout_lines = []
-    if requires_allocfix:
-        stdout_lines.append(
-            f"[allocfix] Ray cluster truncated to {nodes} nodes to match the deployment:"
+    if subset_method is not evidence.AllocationSubsetMethod.EXACT:
+        prefix = evidence_marker.value
+        if prefix == "allocfix":
+            header = f"[allocfix] Ray cluster truncated to {nodes} nodes to match the deployment:"
+        else:
+            header = f"[prod256] truncated allocation to {nodes} nodes for the n{nodes} deployment:"
+        stdout_lines.extend(
+            [
+                header,
+                f"{allocated_nodes:5d} /var/spool/pbs/aux/{pbs_job_id}.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov",
+                f"{nodes:5d} {cell / f'nodefile_{nodes}.txt'}",
+                f"{allocated_nodes + nodes:5d} total",
+            ]
         )
+    stage0 = [f"host-{index:03d}" for index in range(nodes // 2)]
+    stage1 = [f"host-{index:03d}" for index in range(nodes // 2, nodes)]
     stdout_lines.extend(
         [
             f"[System] Total Nodes: {nodes}",
             f"[AuroraServe] Wrote {nodes} Ray node IP(s) -> {cell / 'runtime' / 'ray_node_ips.txt'}",
+            f"[pp_stage] bcast stage 0 (96 shards, 1.0 GiB) -> {nodes // 2} node(s): {stage0!r}",
+            f"[pp_stage] bcast stage 1 (96 shards, 1.0 GiB) -> {nodes // 2} node(s): {stage1!r}",
             "  - meta-llama/Llama-3.1-405B-Instruct: "
             f"requested={nodes // 2}, assigned={nodes // 2}",
+            *[
+                f"    replica {index}: nodes={['10.0.0.' + str(2 * index + 1), '10.0.0.' + str(2 * index + 2)]!r} (TP=8, PP=2)"
+                for index in range(nodes // 2)
+            ],
             f">>> [REPLAY] Saved results to {result_path}",
         ]
     )
     stdout_path.write_text("\n".join(stdout_lines) + "\n", encoding="utf-8")
     return evidence.LegacyPP405BRef(
-        nodes=nodes,
+        allocated_nodes=allocated_nodes,
+        active_nodes=nodes,
+        subset_method=subset_method,
+        evidence_marker=evidence_marker,
         run_group_id=run_group,
         result_name=result_name,
         result_sha256=hashlib.sha256(result_path.read_bytes()).hexdigest(),
@@ -250,7 +282,6 @@ def _write_legacy_pp_cell(
         pbs_job_id=pbs_job_id,
         stdout_sha256=hashlib.sha256(stdout_path.read_bytes()).hexdigest(),
         errors_by_run=errors,
-        requires_allocfix=requires_allocfix,
         expected_successful_rps=sum(
             (24 * nodes - run_errors) / (120.0 + index)
             for index, run_errors in enumerate(errors)
@@ -271,18 +302,17 @@ def _legacy_pp_series(root, evidence, *, error_node=None):
             run_group=f"run{index}",
             result_name=("result1.json" if nodes == 64 else "result0.json"),
             errors=((0, 3) if nodes == error_node else (0, 0)),
-            requires_allocfix=nodes == 64,
+            allocated_nodes=(256 if nodes == 64 else nodes),
+            evidence_marker=(evidence.AllocationEvidenceMarker.ALLOCFIX if nodes == 64 else None),
         )
         for index, nodes in enumerate(evidence.PP405B_NODE_COUNTS)
     )
-    return evidence.PP405BSeries(
+    return evidence.PP405BSeries.legacy(
         stem=stem,
         key="legacy_test",
         proxy="direct",
-        mode="stream",
         label="legacy",
-        loader_kind=evidence.PP405BLoaderKind.LEGACY_PINNED_V1,
-        legacy_refs=refs,
+        refs=refs,
     )
 
 
@@ -345,7 +375,8 @@ def test_paper_acceptance_binds_status_manifest_provenance_and_plan(tmp_path, mo
         "run",
         lambda _path: SimpleNamespace(load=lambda: status),
     )
-    monkeypatch.setattr(acceptance, "load_run_provenance", lambda _path: provenance)
+    monkeypatch.setattr(acceptance, "load_authenticated_result_json", lambda *_args: {})
+    monkeypatch.setattr(acceptance, "run_provenance_from_dict", lambda _payload: provenance)
 
     accepted = acceptance.require_accepted_paper_run(
         tmp_path, required_result_ids={"replay/default", "run_provenance"}
@@ -364,6 +395,28 @@ def test_paper_acceptance_binds_status_manifest_provenance_and_plan(tmp_path, mo
         acceptance.require_accepted_paper_run(
             tmp_path, required_result_ids={"replay/default", "run_provenance"}
         )
+
+
+def test_authenticated_manifest_entry_rejects_replacement_after_acceptance(tmp_path):
+    from eval.lib.paper_acceptance import load_authenticated_result_json
+    from exaserve.state.results import ResultEntry
+
+    results = tmp_path / "results"
+    results.mkdir()
+    path = results / "result.json"
+    original = b'{"value":1}'
+    path.write_bytes(original)
+    entry = ResultEntry(
+        logical_id="replay/default",
+        path=path.name,
+        size_bytes=len(original),
+        sha256=hashlib.sha256(original).hexdigest(),
+    )
+    assert load_authenticated_result_json(tmp_path, entry) == {"value": 1}
+
+    path.write_bytes(b'{"value":2}')
+    with pytest.raises(RuntimeError, match="content changed"):
+        load_authenticated_result_json(tmp_path, entry)
 
 
 def test_legacy_pp_reader_uses_exact_refs_and_keeps_declared_errors(tmp_path):
@@ -389,13 +442,13 @@ def test_legacy_pp_reader_requires_the_exact_seven_node_ladder(mutation):
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    refs = figures.PP405B_LEGACY_DIRECT_REFS
+    refs = figures._pp405b_variants()[0].legacy_refs
     if mutation == "missing":
         refs = refs[:-1]
     else:
         refs = (refs[0], refs[0], *refs[2:])
     series = replace(
-        figures.PP405B_VARIANTS[0],
+        figures._pp405b_variants()[0],
         legacy_refs=refs,
     )
     with pytest.raises(RuntimeError, match="must select exactly nodes"):
@@ -419,6 +472,7 @@ def test_legacy_pp_json_is_hashed_before_strict_parsing(tmp_path):
 
 def test_legacy_pp_yaml_errors_are_normalized(tmp_path):
     from eval.lib import pp405b_evidence as evidence
+    from eval.plot import sc26_full_figures as figures
 
     duplicate = tmp_path / "duplicate.yaml"
     duplicate.write_text("schema_version: 1\nschema_version: 2\n", encoding="utf-8")
@@ -429,13 +483,19 @@ def test_legacy_pp_yaml_errors_are_normalized(tmp_path):
     with pytest.raises(RuntimeError, match="pinned legacy plan is not strict YAML"):
         evidence._load_sha_bound_yaml(duplicate, digest, label="legacy plan")
 
+    obsolete = tmp_path / "v1.yaml"
+    current = figures.PP405B_LEGACY_LEDGER_PATH.read_text(encoding="utf-8")
+    obsolete.write_text(current.replace("schema_version: 2", "schema_version: 1", 1))
+    with pytest.raises(RuntimeError, match="schema_version.*expected 2"):
+        evidence.load_legacy_pp405b_ledger(obsolete)
+
 
 def test_legacy_pp_plan_binds_source_run_and_serving_semantics():
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    ref = figures.PP405B_LEGACY_DIRECT_REFS[0]
-    series = figures.PP405B_VARIANTS[0]
+    series = figures._pp405b_variants()[0]
+    ref = series.legacy_refs[0]
     plan = _legacy_pp_plan(
         stem=series.stem,
         nodes=ref.nodes,
@@ -485,8 +545,8 @@ def test_legacy_haproxy_plan_binds_worker_and_balance_contract():
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    ref = figures.PP405B_LEGACY_HAPROXY_REFS[0]
-    series = figures.PP405B_VARIANTS[1]
+    series = figures._pp405b_variants()[1]
+    ref = series.legacy_refs[0]
     plan = _legacy_pp_plan(
         stem=series.stem,
         nodes=ref.nodes,
@@ -522,56 +582,138 @@ def test_legacy_haproxy_plan_binds_worker_and_balance_contract():
 
 
 @pytest.mark.parametrize(
-    "replacement",
+    ("line_index", "replacement"),
     [
-        "[System] Total Nodes: 256",
-        "[AuroraServe] Wrote 256 Ray node IP(s) -> /wrong/ray_node_ips.txt",
-        "  - meta-llama/Llama-3.1-405B-Instruct: requested=32, assigned=31",
-        ">>> [REPLAY] Saved results to /wrong/result0.json",
+        (0, "[System] Total Nodes: 256"),
+        (1, "[AuroraServe] Wrote 256 Ray node IP(s) -> /wrong/ray_node_ips.txt"),
+        (4, "  - meta-llama/Llama-3.1-405B-Instruct: requested=32, assigned=31"),
+        (-1, ">>> [REPLAY] Saved results to /wrong/result0.json"),
     ],
 )
-def test_legacy_pp_stdout_rejects_tamper_and_allocation_mismatch(tmp_path, replacement):
+def test_legacy_pp_stdout_rejects_tamper_and_allocation_mismatch(tmp_path, line_index, replacement):
     from eval.lib import pp405b_evidence as evidence
 
     series = _legacy_pp_series(tmp_path, evidence)
     ref = series.legacy_refs[0]
     cell = tmp_path / series.stem / ref.run_group_id / ref.run_id
-    result_path = cell / "results" / ref.result_name
     stdout_path = cell / "logs" / "pbs" / "stdout" / ref.stdout_name
     lines = stdout_path.read_text(encoding="utf-8").splitlines()
-    lines[0] = replacement
+    lines[line_index] = replacement
     payload = ("\n".join(lines) + "\n").encode()
     with pytest.raises(RuntimeError, match="must contain exactly one"):
         evidence._validate_producing_stdout(
             payload,
             path=stdout_path,
-            result_path=result_path,
+            original_cell=cell,
             ref=ref,
         )
 
 
-def test_legacy_pp_stdout_requires_allocfix_only_when_declared(tmp_path):
+def test_legacy_pp_stdout_requires_typed_subset_only_when_declared(tmp_path):
     from eval.lib import pp405b_evidence as evidence
 
     series = _legacy_pp_series(tmp_path, evidence)
     ref = series.legacy_refs[4]
     cell = tmp_path / series.stem / ref.run_group_id / ref.run_id
-    result_path = cell / "results" / ref.result_name
     stdout_path = cell / "logs" / "pbs" / "stdout" / ref.stdout_name
     payload = stdout_path.read_bytes()
     evidence._validate_producing_stdout(
         payload,
         path=stdout_path,
-        result_path=result_path,
+        original_cell=cell,
         ref=ref,
     )
-    with pytest.raises(RuntimeError, match="unexpected allocfix"):
+    with pytest.raises(RuntimeError, match="unexpected allocation-subset"):
         evidence._validate_producing_stdout(
             payload,
             path=stdout_path,
-            result_path=result_path,
-            ref=replace(ref, requires_allocfix=False),
+            original_cell=cell,
+            ref=replace(
+                ref,
+                allocated_nodes=ref.active_nodes,
+                subset_method=evidence.AllocationSubsetMethod.EXACT,
+                evidence_marker=None,
+            ),
         )
+
+
+def test_legacy_pp_stdout_accepts_and_binds_prod256_subset(tmp_path):
+    from eval.lib import pp405b_evidence as evidence
+
+    ref = _write_legacy_pp_cell(
+        tmp_path,
+        evidence,
+        stem="legacy_proxy",
+        nodes=128,
+        run_group="run5",
+        proxy="haproxy",
+        allocated_nodes=256,
+        evidence_marker=evidence.AllocationEvidenceMarker.PROD256,
+    )
+    cell = tmp_path / "legacy_proxy" / "run5" / "n128"
+    stdout_path = cell / "logs" / "pbs" / "stdout" / ref.stdout_name
+    payload = stdout_path.read_bytes()
+    evidence._validate_producing_stdout(
+        payload,
+        path=stdout_path,
+        original_cell=cell,
+        ref=ref,
+    )
+    with pytest.raises(RuntimeError, match="requires a 256-node allocation"):
+        evidence._validate_legacy_ref(
+            replace(ref, allocated_nodes=512),
+            context="prod256",
+        )
+    with pytest.raises(RuntimeError, match="invalid subset evidence"):
+        evidence._validate_producing_stdout(
+            payload.replace(b"  256 /var/spool", b"  255 /var/spool"),
+            path=stdout_path,
+            original_cell=cell,
+            ref=ref,
+        )
+
+
+def test_legacy_pp_stdout_requires_exact_disjoint_stage_and_replica_placement(tmp_path):
+    from eval.lib import pp405b_evidence as evidence
+
+    series = _legacy_pp_series(tmp_path, evidence)
+    ref = series.legacy_refs[0]
+    cell = tmp_path / series.stem / ref.run_group_id / ref.run_id
+    stdout_path = cell / "logs" / "pbs" / "stdout" / ref.stdout_name
+    lines = stdout_path.read_text(encoding="utf-8").splitlines()
+
+    duplicate_stage = list(lines)
+    duplicate_stage[3] = duplicate_stage[3].replace("host-002", "host-000")
+    with pytest.raises(RuntimeError, match="stage xnames are not exact and disjoint"):
+        evidence._validate_producing_stdout(
+            ("\n".join(duplicate_stage) + "\n").encode(),
+            path=stdout_path,
+            original_cell=cell,
+            ref=ref,
+        )
+
+    missing_replica = [line for line in lines if "replica 1:" not in line]
+    with pytest.raises(RuntimeError, match="incomplete PP replica indices"):
+        evidence._validate_producing_stdout(
+            ("\n".join(missing_replica) + "\n").encode(),
+            path=stdout_path,
+            original_cell=cell,
+            ref=ref,
+        )
+
+
+def test_legacy_pp_saved_path_is_relocatable(tmp_path):
+    import shutil
+
+    from eval.lib import pp405b_evidence as evidence
+
+    original = tmp_path / "original"
+    relocated = tmp_path / "relocated"
+    series = _legacy_pp_series(original, evidence)
+    shutil.copytree(original / series.stem, relocated / series.stem)
+
+    points = evidence.load_pp405b_points(series, runs_root=relocated)
+    assert [point["nodes"] for point in points] == list(evidence.PP405B_NODE_COUNTS)
 
 
 def test_legacy_pp_loader_rejects_stdout_byte_tamper(tmp_path):
@@ -590,13 +732,16 @@ def test_legacy_pp_accounting_accepts_only_the_declared_nonzero_errors():
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    base = figures.PP405B_LEGACY_HAPROXY_REFS[4]
+    base = figures._pp405b_variants()[1].legacy_refs[4]
     ref = replace(
         base,
-        nodes=4,
+        allocated_nodes=4,
+        active_nodes=4,
+        subset_method=evidence.AllocationSubsetMethod.EXACT,
+        evidence_marker=None,
         errors_by_run=(2, 3),
     )
-    series = replace(figures.PP405B_VARIANTS[1], legacy_refs=(ref,))
+    series = replace(figures._pp405b_variants()[1], legacy_refs=(ref,))
     document = _legacy_pp_document(nodes=4, errors=ref.errors_by_run, destination="proxy")
     _, data_runs = evidence._validate_legacy_result(
         document,
@@ -631,26 +776,21 @@ def test_pp_loader_dispatch_rejects_unknown_kinds(tmp_path):
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    legacy = figures.PP405B_VARIANTS[0]
-    with pytest.raises(RuntimeError, match="unsupported PP=2 loader kind"):
-        evidence.load_pp405b_points(
-            replace(legacy, loader_kind="legacy-ish"),
-            runs_root=tmp_path,
-        )
+    legacy = figures._pp405b_variants()[0]
+    with pytest.raises(ValueError, match="unsupported PP=2 loader kind"):
+        replace(legacy, loader_kind="legacy-ish")
 
 
 def test_current_pp_reader_rejects_a_truncated_node_ladder(tmp_path):
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    series = evidence.PP405BSeries(
+    series = evidence.PP405BSeries.current(
         stem="pp405b_pp2_haproxy_nostream_v040",
         key="current",
         proxy="haproxy",
-        mode="nonstream",
         label="current",
-        loader_kind=evidence.PP405BLoaderKind.CURRENT_MANIFEST_V2,
-        current_refs=(figures.PP405B_CURRENT_REFS[0],),
+        refs=(figures.PP405B_CURRENT_REFS[0],),
     )
     with pytest.raises(RuntimeError, match=r"exactly nodes \[4, 8, 16, 32, 64, 128, 256\]"):
         evidence.load_pp405b_points(series, runs_root=tmp_path)
@@ -660,8 +800,9 @@ def test_current_pp_loader_succeeds_through_the_manifest_path(tmp_path, monkeypa
     from eval.lib import pp405b_evidence as evidence
     from eval.lib import paper_acceptance
     from eval.plot import sc26_full_figures as figures
+    from exaserve.state.results import ResultEntry
 
-    series = figures.PP405B_VARIANTS[2]
+    series = figures._pp405b_variants()[2]
     accepted_paths = []
 
     def accept(cell, *, required_result_ids):
@@ -675,16 +816,24 @@ def test_current_pp_loader_succeeds_through_the_manifest_path(tmp_path, monkeypa
         nodes = int(Path(cell).name.removeprefix("n"))
         accepted = _current_pp_accepted(figures, nodes)
         accepted.manifest = SimpleNamespace(
-            entries=(SimpleNamespace(logical_id="replay/default", path="result0.json"),)
+            entries=(
+                ResultEntry(
+                    logical_id="replay/default",
+                    path="result0.json",
+                    size_bytes=0,
+                    sha256="0" * 64,
+                ),
+            )
         )
         return accepted
 
-    def load(result_path):
-        nodes = int(Path(result_path).parents[1].name.removeprefix("n"))
+    def load(cell, _entry):
+        assert (_entry.logical_id, _entry.path) == ("replay/default", "result0.json")
+        nodes = int(Path(cell).name.removeprefix("n"))
         return _current_pp_document(nodes=nodes)
 
     monkeypatch.setattr(paper_acceptance, "require_accepted_paper_run", accept)
-    monkeypatch.setattr(evidence, "strict_json_load_path", load)
+    monkeypatch.setattr(paper_acceptance, "load_authenticated_result_json", load)
     points = evidence.load_pp405b_points(series, runs_root=tmp_path)
 
     assert [point["nodes"] for point in points] == list(evidence.PP405B_NODE_COUNTS)
@@ -699,7 +848,7 @@ def test_current_pp_plan_accepts_only_the_reviewed_node_to_source_mapping():
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    series = figures.PP405B_VARIANTS[2]
+    series = figures._pp405b_variants()[2]
     for ref in series.current_refs:
         accepted = _current_pp_accepted(figures, ref.nodes)
         evidence._validate_current_plan(accepted, series=series, ref=ref)
@@ -770,7 +919,7 @@ def test_current_pp_plan_rejects_semantic_drift(path, value, field):
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    series = figures.PP405B_VARIANTS[2]
+    series = figures._pp405b_variants()[2]
     ref = series.current_refs[0]
     accepted = _current_pp_accepted(figures, 4)
     _set_nested(accepted, path, value)
@@ -789,7 +938,7 @@ def test_current_pp_plan_rejects_any_unreviewed_source(nodes, replacement, field
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    series = figures.PP405B_VARIANTS[2]
+    series = figures._pp405b_variants()[2]
     ref = next(item for item in series.current_refs if item.nodes == nodes)
     accepted = _current_pp_accepted(figures, nodes)
     accepted.run_plan.source_snapshot_hash = replacement
@@ -805,7 +954,7 @@ def test_current_pp_plan_rejects_wrong_materialization_identity_scheme(nodes, re
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    series = figures.PP405B_VARIANTS[2]
+    series = figures._pp405b_variants()[2]
     ref = next(item for item in series.current_refs if item.nodes == nodes)
     accepted = _current_pp_accepted(figures, nodes)
     accepted.run_plan.deployment_id_scheme = replacement
@@ -818,7 +967,7 @@ def test_current_pp_plan_rejects_unreviewed_semantic_hash(nodes):
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
 
-    series = figures.PP405B_VARIANTS[2]
+    series = figures._pp405b_variants()[2]
     ref = next(item for item in series.current_refs if item.nodes == nodes)
     accepted = _current_pp_accepted(figures, nodes)
     accepted.run_plan.run_semantic_hash = "f" * 64

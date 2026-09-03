@@ -6,12 +6,17 @@ file hashes, legacy plan semantics, and the producing PBS stdout.  Current
 campaign points continue to use the canonical manifest/provenance acceptance
 path.  Keeping both contracts here prevents plotting code from weakening one
 to accommodate the other.
+
+This is deliberately a paper-only adapter for a closed historical dataset. It
+is not a runtime contract pattern and must not be used to qualify deployments.
 """
 
 from __future__ import annotations
 
 import hashlib
 import math
+import re
+from ast import literal_eval
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -20,10 +25,15 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from exaserve.state.atomic import regular_file_reader, strict_json_load_path, strict_json_loads
+from exaserve.state.atomic import regular_file_reader, strict_json_loads
 
 PP405B_NODE_COUNTS = (4, 8, 16, 32, 64, 128, 256)
 _PBS_STDOUT_SUFFIX = "aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov.OU"
+_PBS_SERVER = "aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov"
+_STAGE_HOSTS = re.compile(
+    r"^\[pp_stage\] bcast stage ([01]) \([^)]*\) -> (\d+) node\(s\): (\[.*\])$"
+)
+_REPLICA_PAIR = re.compile(r"^\s+replica (\d+): nodes=(\[.*\]) \(TP=8, PP=2\)$")
 
 
 class PP405BLoaderKind(Enum):
@@ -33,11 +43,24 @@ class PP405BLoaderKind(Enum):
     CURRENT_MANIFEST_V2 = "current_manifest_v2"
 
 
+class AllocationSubsetMethod(Enum):
+    EXACT = "exact"
+    NODEFILE_SUBSET = "nodefile_subset"
+
+
+class AllocationEvidenceMarker(Enum):
+    ALLOCFIX = "allocfix"
+    PROD256 = "prod256"
+
+
 @dataclass(frozen=True)
 class LegacyPP405BRef:
     """One immutable selection from the pre-manifest experiment store."""
 
-    nodes: int
+    allocated_nodes: int
+    active_nodes: int
+    subset_method: AllocationSubsetMethod
+    evidence_marker: AllocationEvidenceMarker | None
     run_group_id: str
     result_name: str
     result_sha256: str
@@ -46,12 +69,16 @@ class LegacyPP405BRef:
     pbs_job_id: int
     stdout_sha256: str
     errors_by_run: tuple[int, ...]
-    requires_allocfix: bool
     expected_successful_rps: float
 
     @property
     def run_id(self) -> str:
-        return f"n{self.nodes}"
+        return f"n{self.active_nodes}"
+
+    @property
+    def nodes(self) -> int:
+        """Active serving/Ray nodes represented by the paper x-axis."""
+        return self.active_nodes
 
     @property
     def expected_requests_per_run(self) -> int:
@@ -89,6 +116,44 @@ class PP405BSeries:
     loader_kind: PP405BLoaderKind
     legacy_refs: tuple[LegacyPP405BRef, ...] = ()
     current_refs: tuple[CurrentPP405BRef, ...] = ()
+
+    def __post_init__(self) -> None:
+        legacy = self.loader_kind is PP405BLoaderKind.LEGACY_PINNED_V1
+        current = self.loader_kind is PP405BLoaderKind.CURRENT_MANIFEST_V2
+        if not (legacy or current):
+            raise ValueError(f"unsupported PP=2 loader kind {self.loader_kind!r}")
+        if legacy and (not self.legacy_refs or self.current_refs):
+            raise ValueError("legacy PP=2 series must contain only legacy refs")
+        if current and (not self.current_refs or self.legacy_refs):
+            raise ValueError("current PP=2 series must contain only current refs")
+
+    @classmethod
+    def legacy(
+        cls, *, stem: str, key: str, proxy: str, label: str, refs: tuple[LegacyPP405BRef, ...]
+    ) -> "PP405BSeries":
+        return cls(
+            stem=stem,
+            key=key,
+            proxy=proxy,
+            mode="stream",
+            label=label,
+            loader_kind=PP405BLoaderKind.LEGACY_PINNED_V1,
+            legacy_refs=refs,
+        )
+
+    @classmethod
+    def current(
+        cls, *, stem: str, key: str, proxy: str, label: str, refs: tuple[CurrentPP405BRef, ...]
+    ) -> "PP405BSeries":
+        return cls(
+            stem=stem,
+            key=key,
+            proxy=proxy,
+            mode="nonstream",
+            label=label,
+            loader_kind=PP405BLoaderKind.CURRENT_MANIFEST_V2,
+            current_refs=refs,
+        )
 
 
 def _is_lower_hex(value: object, length: int) -> bool:
@@ -148,29 +213,49 @@ def load_legacy_pp405b_ledger(path: str | Path) -> Mapping[str, tuple[LegacyPP40
         document = load_yaml_mapping(path)
     except (OSError, UnicodeError, TypeError, ValueError, yaml.YAMLError) as exc:
         raise RuntimeError(f"legacy PP=2 evidence ledger is not strict YAML: {path}") from exc
-    _require_exact_keys(document, {"schema_version", "node_counts", "series"}, context=str(path))
-    _require_exact_fields(
-        (("schema_version", document["schema_version"], 1),),
+    _require_exact_keys(
+        document,
+        {"schema_version", "active_node_counts", "series"},
         context=str(path),
     )
-    node_counts = document["node_counts"]
+    _require_exact_fields(
+        (("schema_version", document["schema_version"], 2),),
+        context=str(path),
+    )
+    node_counts = document["active_node_counts"]
     if (
         not isinstance(node_counts, list)
         or any(type(nodes) is not int for nodes in node_counts)
         or tuple(node_counts) != PP405B_NODE_COUNTS
     ):
         raise RuntimeError(
-            f"{path}.node_counts must be exactly the ordered ladder {list(PP405B_NODE_COUNTS)}"
+            f"{path}.active_node_counts must be exactly the ordered ladder "
+            f"{list(PP405B_NODE_COUNTS)}"
         )
     raw_series = _require_mapping(document["series"], context=f"{path}.series")
     expected_series = {
-        "direct_stream": ("pp405b_pp2_scale_direct", "direct", {64}),
-        "haproxy_stream": ("pp405b_pp2_scale", "haproxy", {32, 64}),
+        "direct_stream": (
+            "pp405b_pp2_scale_direct",
+            "direct",
+            {64: AllocationEvidenceMarker.ALLOCFIX},
+        ),
+        "haproxy_stream": (
+            "pp405b_pp2_scale",
+            "haproxy",
+            {
+                32: AllocationEvidenceMarker.ALLOCFIX,
+                64: AllocationEvidenceMarker.ALLOCFIX,
+                128: AllocationEvidenceMarker.PROD256,
+            },
+        ),
     }
     _require_exact_keys(raw_series, set(expected_series), context=f"{path}.series")
     parsed: dict[str, tuple[LegacyPP405BRef, ...]] = {}
     point_keys = {
-        "nodes",
+        "allocated_nodes",
+        "active_nodes",
+        "subset_method",
+        "evidence_marker",
         "run_group_id",
         "result_name",
         "result_sha256",
@@ -179,10 +264,9 @@ def load_legacy_pp405b_ledger(path: str | Path) -> Mapping[str, tuple[LegacyPP40
         "pbs_job_id",
         "stdout_sha256",
         "errors_by_run",
-        "requires_allocfix",
         "expected_successful_rps",
     }
-    for key, (expected_stem, expected_proxy, allocfix_nodes) in expected_series.items():
+    for key, (expected_stem, expected_proxy, subset_overrides) in expected_series.items():
         raw = _require_mapping(raw_series[key], context=f"{path}.series.{key}")
         _require_exact_keys(raw, {"stem", "proxy", "points"}, context=f"{path}.series.{key}")
         _require_exact_fields(
@@ -197,20 +281,36 @@ def load_legacy_pp405b_ledger(path: str | Path) -> Mapping[str, tuple[LegacyPP40
             context = f"{path}.series.{key}.points[{offset}]"
             point = _require_mapping(point_value, context=context)
             _require_exact_keys(point, point_keys, context=context)
-            nodes = point["nodes"]
+            allocated_nodes = point["allocated_nodes"]
+            active_nodes = point["active_nodes"]
             errors = point["errors_by_run"]
-            if type(nodes) is not int or nodes <= 0:
-                raise RuntimeError(f"{context}.nodes must be a positive integer")
+            if type(active_nodes) is not int or active_nodes <= 0:
+                raise RuntimeError(f"{context}.active_nodes must be a positive integer")
             if (
                 not isinstance(errors, list)
                 or len(errors) < 2
                 or any(
-                    type(value) is not int or value < 0 or value > 24 * nodes for value in errors
+                    type(value) is not int or value < 0 or value > 24 * active_nodes
+                    for value in errors
                 )
             ):
                 raise RuntimeError(f"{context}.errors_by_run is invalid")
+            try:
+                subset_method = AllocationSubsetMethod(point["subset_method"])
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"{context}.subset_method is invalid") from exc
+            marker_value = point["evidence_marker"]
+            try:
+                evidence_marker = (
+                    None if marker_value is None else AllocationEvidenceMarker(marker_value)
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"{context}.evidence_marker is invalid") from exc
             ref = LegacyPP405BRef(
-                nodes=nodes,
+                allocated_nodes=allocated_nodes,
+                active_nodes=active_nodes,
+                subset_method=subset_method,
+                evidence_marker=evidence_marker,
                 run_group_id=point["run_group_id"],
                 result_name=point["result_name"],
                 result_sha256=point["result_sha256"],
@@ -219,7 +319,6 @@ def load_legacy_pp405b_ledger(path: str | Path) -> Mapping[str, tuple[LegacyPP40
                 pbs_job_id=point["pbs_job_id"],
                 stdout_sha256=point["stdout_sha256"],
                 errors_by_run=tuple(errors),
-                requires_allocfix=point["requires_allocfix"],
                 expected_successful_rps=point["expected_successful_rps"],
             )
             _validate_legacy_ref(ref, context=context)
@@ -228,19 +327,37 @@ def load_legacy_pp405b_ledger(path: str | Path) -> Mapping[str, tuple[LegacyPP40
             raise RuntimeError(
                 f"{path}.series.{key} must select exactly nodes {list(PP405B_NODE_COUNTS)}"
             )
-        observed_allocfix = {ref.nodes for ref in refs if ref.requires_allocfix}
-        if observed_allocfix != allocfix_nodes:
+        observed_subsets = {
+            ref.nodes: ref.evidence_marker
+            for ref in refs
+            if ref.subset_method is not AllocationSubsetMethod.EXACT
+        }
+        if observed_subsets != subset_overrides:
             raise RuntimeError(
-                f"{path}.series.{key} allocfix nodes are {sorted(observed_allocfix)}, "
-                f"expected {sorted(allocfix_nodes)}"
+                f"{path}.series.{key} allocation subsets are {observed_subsets}, "
+                f"expected {subset_overrides}"
             )
         parsed[key] = tuple(refs)
     return MappingProxyType(parsed)
 
 
 def _validate_legacy_ref(ref: LegacyPP405BRef, *, context: str) -> None:
-    if type(ref.nodes) is not int or ref.nodes <= 0:
-        raise RuntimeError(f"{context}.nodes must be a positive integer")
+    if type(ref.allocated_nodes) is not int or ref.allocated_nodes <= 0:
+        raise RuntimeError(f"{context}.allocated_nodes must be a positive integer")
+    if type(ref.active_nodes) is not int or ref.active_nodes <= 0 or ref.active_nodes % 2:
+        raise RuntimeError(f"{context}.active_nodes must be a positive even integer")
+    if type(ref.subset_method) is not AllocationSubsetMethod:
+        raise RuntimeError(f"{context}.subset_method must be typed")
+    if ref.subset_method is AllocationSubsetMethod.EXACT:
+        if ref.allocated_nodes != ref.active_nodes or ref.evidence_marker is not None:
+            raise RuntimeError(f"{context} exact allocation sizes disagree")
+    elif (
+        ref.allocated_nodes <= ref.active_nodes
+        or type(ref.evidence_marker) is not AllocationEvidenceMarker
+    ):
+        raise RuntimeError(f"{context} nodefile subset evidence is incomplete")
+    if ref.evidence_marker is AllocationEvidenceMarker.PROD256 and ref.allocated_nodes != 256:
+        raise RuntimeError(f"{context} prod256 evidence requires a 256-node allocation")
     if not isinstance(ref.run_group_id, str) or not (
         ref.run_group_id.startswith("run") and ref.run_group_id[3:].isdigit()
     ):
@@ -254,8 +371,6 @@ def _validate_legacy_ref(ref: LegacyPP405BRef, *, context: str) -> None:
         raise RuntimeError(f"{context}.source_commit must be a lowercase Git commit")
     if type(ref.pbs_job_id) is not int or ref.pbs_job_id <= 0:
         raise RuntimeError(f"{context}.pbs_job_id must be a positive integer")
-    if type(ref.requires_allocfix) is not bool:
-        raise RuntimeError(f"{context}.requires_allocfix must be boolean")
     if (
         type(ref.errors_by_run) is not tuple
         or len(ref.errors_by_run) < 2
@@ -329,7 +444,7 @@ def _load_sha_bound_yaml(path: str | Path, expected_sha256: str, *, label: str) 
 
 def _validate_legacy_plan(
     document: object, *, path: Path, series: PP405BSeries, ref: LegacyPP405BRef
-) -> None:
+) -> Path:
     context = f"{path}:legacy RunPlan"
     plan = _require_mapping(document, context=context)
     deployment = _require_mapping(
@@ -488,10 +603,21 @@ def _validate_legacy_plan(
             raise RuntimeError(
                 f"{context}.{field} does not name pinned source commit {ref.source_commit}"
             )
+    bundle_root = _mapping_at(plan, ("bundle", "root_dir"), context=context)
+    if not isinstance(bundle_root, str) or not Path(bundle_root).is_absolute():
+        raise RuntimeError(f"{context}.bundle.root_dir must be an absolute path")
+    original_cell = Path(bundle_root)
+    if original_cell.parts[-3:] != (series.stem, ref.run_group_id, ref.run_id):
+        raise RuntimeError(f"{context}.bundle.root_dir disagrees with the selected run")
+    return original_cell
 
 
 def _validate_producing_stdout(
-    payload: bytes, *, path: Path, result_path: Path, ref: LegacyPP405BRef
+    payload: bytes,
+    *,
+    path: Path,
+    original_cell: Path,
+    ref: LegacyPP405BRef,
 ) -> None:
     try:
         lines = payload.decode("utf-8").splitlines()
@@ -500,23 +626,98 @@ def _validate_producing_stdout(
     expected = (
         f"[System] Total Nodes: {ref.nodes}",
         f"[AuroraServe] Wrote {ref.nodes} Ray node IP(s) -> "
-        f"{result_path.parents[1] / 'runtime' / 'ray_node_ips.txt'}",
+        f"{original_cell / 'runtime' / 'ray_node_ips.txt'}",
         "  - meta-llama/Llama-3.1-405B-Instruct: "
         f"requested={ref.nodes // 2}, assigned={ref.nodes // 2}",
-        f">>> [REPLAY] Saved results to {result_path}",
+        f">>> [REPLAY] Saved results to {original_cell / 'results' / ref.result_name}",
     )
     for marker in expected:
         if lines.count(marker) != 1:
             raise RuntimeError(
                 f"pinned legacy PBS stdout must contain exactly one {marker!r}: {path}"
             )
-    allocfix_lines = [line for line in lines if line.startswith("[allocfix]")]
-    allocfix = f"[allocfix] Ray cluster truncated to {ref.nodes} nodes to match the deployment:"
-    if ref.requires_allocfix:
-        if allocfix_lines != [allocfix]:
-            raise RuntimeError(f"pinned legacy PBS stdout has invalid allocfix evidence: {path}")
-    elif allocfix_lines:
-        raise RuntimeError(f"unexpected allocfix evidence in pinned legacy PBS stdout: {path}")
+    subset_headers = [
+        line for line in lines if line.startswith("[allocfix]") or line.startswith("[prod256]")
+    ]
+    if ref.subset_method is AllocationSubsetMethod.EXACT:
+        if subset_headers:
+            raise RuntimeError(f"unexpected allocation-subset evidence in legacy stdout: {path}")
+    else:
+        if ref.evidence_marker is AllocationEvidenceMarker.ALLOCFIX:
+            header = (
+                f"[allocfix] Ray cluster truncated to {ref.active_nodes} nodes "
+                "to match the deployment:"
+            )
+        elif ref.evidence_marker is AllocationEvidenceMarker.PROD256:
+            header = (
+                f"[prod256] truncated allocation to {ref.active_nodes} nodes "
+                f"for the n{ref.active_nodes} deployment:"
+            )
+        else:  # guarded by _validate_legacy_ref; keep this helper fail-closed
+            raise RuntimeError(f"pinned legacy PBS stdout has no typed subset marker: {path}")
+        subset_path = original_cell / f"nodefile_{ref.active_nodes}.txt"
+        counts = [
+            header,
+            f"{ref.allocated_nodes:5d} /var/spool/pbs/aux/{ref.pbs_job_id}.{_PBS_SERVER}",
+            f"{ref.active_nodes:5d} {subset_path}",
+            f"{ref.allocated_nodes + ref.active_nodes:5d} total",
+        ]
+        if lines[:4] != counts or subset_headers != [header]:
+            raise RuntimeError(f"pinned legacy PBS stdout has invalid subset evidence: {path}")
+
+    stage_xnames: dict[int, tuple[str, ...]] = {}
+    for line in lines:
+        match = _STAGE_HOSTS.fullmatch(line)
+        if match is None:
+            continue
+        stage = int(match.group(1))
+        try:
+            hosts = literal_eval(match.group(3))
+        except (SyntaxError, ValueError) as exc:
+            raise RuntimeError(f"invalid PP stage xname list in legacy stdout: {path}") from exc
+        if (
+            stage in stage_xnames
+            or not isinstance(hosts, list)
+            or any(not isinstance(host, str) or not host for host in hosts)
+        ):
+            raise RuntimeError(f"invalid PP stage xname list in legacy stdout: {path}")
+        declared_count = int(match.group(2))
+        if declared_count != ref.active_nodes // 2 or len(hosts) != declared_count:
+            raise RuntimeError(f"PP stage xname count disagrees with active nodes: {path}")
+        stage_xnames[stage] = tuple(hosts)
+    if set(stage_xnames) != {0, 1}:
+        raise RuntimeError(f"legacy stdout has incomplete PP stage xname evidence: {path}")
+    stage0, stage1 = stage_xnames[0], stage_xnames[1]
+    if (
+        len(set(stage0)) != len(stage0)
+        or len(set(stage1)) != len(stage1)
+        or set(stage0) & set(stage1)
+        or len(set(stage0) | set(stage1)) != ref.active_nodes
+    ):
+        raise RuntimeError(f"legacy stdout PP stage xnames are not exact and disjoint: {path}")
+
+    replica_pairs = []
+    for line in lines:
+        match = _REPLICA_PAIR.fullmatch(line)
+        if match is None:
+            continue
+        try:
+            pair = literal_eval(match.group(2))
+        except (SyntaxError, ValueError) as exc:
+            raise RuntimeError(f"invalid PP replica pair in legacy stdout: {path}") from exc
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(not isinstance(node, str) or not node for node in pair)
+        ):
+            raise RuntimeError(f"invalid PP replica pair in legacy stdout: {path}")
+        replica_pairs.append((int(match.group(1)), tuple(pair)))
+    expected_replicas = ref.active_nodes // 2
+    if [index for index, _ in replica_pairs] != list(range(expected_replicas)):
+        raise RuntimeError(f"legacy stdout has incomplete PP replica indices: {path}")
+    replica_ips = [node for _, pair in replica_pairs for node in pair]
+    if len(set(replica_ips)) != ref.active_nodes:
+        raise RuntimeError(f"legacy stdout PP replica IP pairs are not exact and disjoint: {path}")
 
 
 def _finite_number(record: Mapping[str, Any], field: str, *, context: str, positive=False) -> float:
@@ -632,6 +833,7 @@ def _validate_legacy_result(
 
 def _require_current_result(result_path: Path):
     from eval.lib.paper_acceptance import require_accepted_paper_run
+    from exaserve.state.results import ResultEntry
 
     required = {
         "replay/default",
@@ -641,11 +843,11 @@ def _require_current_result(result_path: Path):
     }
     accepted = require_accepted_paper_run(result_path.parents[1], required_result_ids=required)
     replay = [entry for entry in accepted.manifest.entries if entry.logical_id == "replay/default"]
-    if len(replay) != 1 or replay[0].path != result_path.name:
+    if len(replay) != 1 or type(replay[0]) is not ResultEntry or replay[0].path != result_path.name:
         raise RuntimeError(
             f"paper result manifest does not own result0.json: {result_path.parents[1]}"
         )
-    return accepted
+    return accepted, replay[0]
 
 
 def _validate_current_plan(
@@ -808,12 +1010,12 @@ def load_pp405b_points(series: PP405BSeries, *, runs_root: str | Path) -> list[d
             result_path = cell / "results" / ref.result_name
             stdout_path = cell / "logs" / "pbs" / "stdout" / ref.stdout_name
             plan = _load_sha_bound_yaml(plan_path, ref.run_yaml_sha256, label="legacy run.yaml")
-            _validate_legacy_plan(plan, path=plan_path, series=series, ref=ref)
+            original_cell = _validate_legacy_plan(plan, path=plan_path, series=series, ref=ref)
             stdout = _sha_bound_bytes(stdout_path, ref.stdout_sha256, label="legacy PBS stdout")
             _validate_producing_stdout(
                 stdout,
                 path=stdout_path,
-                result_path=result_path,
+                original_cell=original_cell,
                 ref=ref,
             )
             result = _load_sha_bound_json(result_path, ref.result_sha256, label="legacy result")
@@ -841,12 +1043,11 @@ def load_pp405b_points(series: PP405BSeries, *, runs_root: str | Path) -> list[d
         result_path = (
             root / series.stem / ref.run_group_id / ref.run_id / "results" / "result0.json"
         )
-        accepted = _require_current_result(result_path)
+        accepted, replay_entry = _require_current_result(result_path)
         _validate_current_plan(accepted, series=series, ref=ref)
-        try:
-            document = strict_json_load_path(result_path)
-        except (OSError, ValueError) as exc:
-            raise RuntimeError(f"current PP=2 result is not strict JSON: {result_path}") from exc
+        from eval.lib.paper_acceptance import load_authenticated_result_json
+
+        document = load_authenticated_result_json(result_path.parents[1], replay_entry)
         _, data_runs = _validate_current_result(document, result_path=result_path, nodes=ref.nodes)
         points.append(_summarize_point(nodes=ref.nodes, data_runs=data_runs))
     return points

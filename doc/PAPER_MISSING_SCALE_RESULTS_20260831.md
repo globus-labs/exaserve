@@ -38,13 +38,21 @@ string or proxy liveness check.
 |---:|---:|---:|---:|---:|---:|---|
 | 32 | 384 | 57.237, 67.018 | 62.127 ± 6.916 | 7.242, 7.362 | 11.622, 11.843 | accepted |
 | 64 | 768 | 86.021, 83.724 | 84.872 ± 1.624 | 20.286, 20.009 | 25.805, 25.416 | accepted |
-| 128 | 1,536 | pending | pending | pending | pending | not run in final group |
+| 128 | 1,536 | 238.008, 137.568 | 187.788 ± 71.022 | 103.956, 102.644 | 111.648, 110.328 | accepted |
 | 256 | 3,072 | pending | pending | pending | pending | not run in final group |
 
 Every accepted 32-node trial has exactly 64 Serve applications and 450 receipt
 requirements. Every accepted 64-node trial has exactly 128 Serve applications
-and 898 receipt requirements. All four manifests are complete and all ranks
-acknowledged DRAIN and GOODBYE before a clean `STOPPED` terminal publication.
+and 898 receipt requirements. Every accepted 128-node trial has exactly 256
+Serve applications, 1,536 replica measurements, and 1,794 receipt requirements.
+All six manifests are complete and all ranks acknowledged DRAIN and GOODBYE
+before a clean `STOPPED` terminal publication.
+
+The two 128-node deploy phases agree within 1.32 seconds, while their canonical
+READY times differ by 100.44 seconds. The difference is post-deploy distributed
+receipt convergence: trial A took roughly 125 seconds after its child trace,
+versus roughly 26 seconds in trial B. Both waited for and sealed the complete
+1,794/1,794 set; neither value is discarded as an outlier.
 
 | Trial | PBS job | Result-manifest SHA-256 |
 |---|---|---|
@@ -52,6 +60,8 @@ acknowledged DRAIN and GOODBYE before a clean `STOPPED` terminal publication.
 | run7/n32 | 8793071 | `6b1f76f5273e85575aaa7ed1a67962aa0f2053f2f1354853d15d5d96510e551c` |
 | run6/n64 | 8793087 | `3320cff6e7d3e4301d5a453ad32ce2255ec8fc835f2a62e7a1edb4b3ccc98f6f` |
 | run7/n64 | 8793098 | `6dce8249dbb42473d9c485ea08f59caffec664ffdf9a536fbdab6f8e7bd5bb9a` |
+| run6/n128 | 8798655 | `5b5c4fdff5c14e172d7236069ea14959775a5b4f147a999cf6c24923b45f2adf` |
+| run7/n128 | 8798839 | `d4f2250283fb1162902e85bfd5f3d4c9a43e762fa791d54d9463cf00e31350b0` |
 
 These trials share source snapshot
 `a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1`
@@ -145,16 +155,43 @@ throughput for a 2x node/replica increase.
    chose the numerically newest `run*/n*/result0.json` at render time. A later
    hardening edit pinned both streaming baselines to `run0`, which silently
    reduced the direct curve to four node counts and the HAProxy curve to one.
-   The generator now names one immutable result per node, binds its result,
-   legacy-plan, and producing-PBS-stdout SHA-256 values, validates source/run/
-   allocation/accounting, and requires the exact 4/8/16/32/64/128/256 ladder.
+   The generator now names one immutable result per active serving/Ray node
+   count, binds its result, legacy run plan, and producing PBS stdout by
+   SHA-256, validates the recorded allocation subset, exact disjoint stage-xname
+   sets, and exact disjoint replica-IP pairs/indices, and requires the
+   4/8/16/32/64/128/256 ladder. The Figure 7 x-axis
+   is therefore **active serving/Ray nodes**, not necessarily the containing PBS
+   allocation: direct n64 and HAProxy n32/n64 used explicit 256-node `allocfix`
+   subsets, while HAProxy n128 job `8686262` used the explicit 256-to-128
+   `prod256` subset. All other selected legacy points used exact-size
+   allocations.
+
+   This is limited historical provenance, not current qualification. It proves
+   the selected result bytes, legacy `run.yaml`, producing stdout, active-node
+   cardinality, the independent stage-xname cardinality/disjointness claim, and
+   the independent replica-IP index/cardinality/disjointness claim. The
+   historical stdout does not record an xname-to-IP mapping, so it cannot prove
+   that each staged xname is the same machine as a particular replica IP. It
+   also does **not** provide a saved submission wrapper, a content hash for the
+   historical source tree named by that plan, a current ResultManifest/
+   RunProvenance chain, or current terminal/cleanup qualification. Figure 7 is
+   consequently a deliberate mixed-contract overlay: historical streaming
+   points use source revisions `d997b696`, `933a9d23`, and `2a447fb9`, GPU
+   utilization 0.90, and
+   HAProxy `maxconn=50000`; the new HAProxy non-stream curve uses the reviewed
+   `run3`/`run4` current snapshots, GPU utilization 0.95, and `maxconn=8000`.
+   Those differences must remain explicit in the paper rather than being
+   described as one homogeneous rerun.
+
    The corrected post-allocation reruns are explicitly `result1.json`: direct
    n64 is job `8726613` at 10.299334 successful RPS (89.476% efficiency),
    HAProxy n32 is job `8726612` at 4.682119 RPS (81.353%), and HAProxy n64 is
-   job `8702358` at 8.665885 RPS (75.286%). Historical nonzero request errors
-   reduce successful-throughput values only when their exact per-run counts are
-   declared by the evidence pin; Figure 7 does not display an error-fraction
-   series. The existing rendered
+   job `8702358` at 8.665885 RPS (75.286%). Historical HAProxy streaming error
+   rates over reported (non-warmup) iterations are exactly 0% through n32,
+   29/7,680 = 0.377604% at n64, 60/15,360 = 0.390625% at n128, and 77/30,720 =
+   0.250651% at n256; all historical direct points are 0%. These errors reduce
+   successful throughput, but Figure 7 does not display an error-fraction
+   series. The existing paper prose and rendered
    `eval/plot/output/sc26_full/iter13/fig7_pp405b.pdf`, its adjacent caption
    text, and `doc/figures/fig7_pp405b.png` remain stale until the final
    current-infrastructure n128/n256 cells exist and the figure is deliberately
@@ -183,7 +220,7 @@ throughput for a 2x node/replica increase.
 
 ## Remaining execution order
 
-1. Run null-compute n128 twice, then PP2 n128; issue the 128-node partial report.
+1. Complete PP2 n128 and issue the 128-node partial report.
 2. Run null-compute n256 twice and PP2 n256 in the production queue; issue the
    256-node partial report.
 3. Render the strict null startup table and full PP2 figure. Both consumers must
