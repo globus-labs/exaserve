@@ -141,6 +141,26 @@ throughput for a 2x node/replica increase.
    about 48 minutes, largely because of cold model staging. A timeout at larger
    scale will be classified as a walltime/queue feasibility result; the paper
    workload will not be silently shortened to manufacture a number.
+8. **The historical PP2 figure selection had drifted.** The original figure
+   chose the numerically newest `run*/n*/result0.json` at render time. A later
+   hardening edit pinned both streaming baselines to `run0`, which silently
+   reduced the direct curve to four node counts and the HAProxy curve to one.
+   The generator now names one immutable result per node, binds its result,
+   legacy-plan, and producing-PBS-stdout SHA-256 values, validates source/run/
+   allocation/accounting, and requires the exact 4/8/16/32/64/128/256 ladder.
+   The corrected post-allocation reruns are explicitly `result1.json`: direct
+   n64 is job `8726613` at 10.299334 successful RPS (89.476% efficiency),
+   HAProxy n32 is job `8726612` at 4.682119 RPS (81.353%), and HAProxy n64 is
+   job `8702358` at 8.665885 RPS (75.286%). Historical nonzero request errors
+   reduce successful-throughput values only when their exact per-run counts are
+   declared by the evidence pin; Figure 7 does not display an error-fraction
+   series. The existing rendered
+   `eval/plot/output/sc26_full/iter13/fig7_pp405b.pdf`, its adjacent caption
+   text, and `doc/figures/fig7_pp405b.png` remain stale until the final
+   current-infrastructure n128/n256 cells exist and the figure is deliberately
+   rerendered. The corrected generator reads the reviewed selections from
+   `eval/plot/pp405b_legacy_evidence.yaml`; fixing that generator does not by
+   itself update any checked-in or copied paper artifact.
 
 ## Rejected evidence that must not enter the paper
 
@@ -154,6 +174,12 @@ throughput for a 2x node/replica increase.
   has no accepted result.
 - PP2 `run2` 4- and 8-node successes use the superseded 0.90 setting; the final
   low-node values come from `run3` at 0.95.
+- Three historical streaming PP2 cells were produced while their nominal
+  32/64-node deployment was attached to a 256-node Ray cluster and must never
+  enter the figure: direct `run3/n64` job `8669337`, HAProxy `run5/n32` job
+  `8660044`, and HAProxy `run5/n64` job `8669336`. Their pre-fix result bytes are
+  retained only as `result0.json.preallocfix_20260726T014708Z.bak` evidence; the
+  strict ledger cannot select a `*.bak` filename.
 
 ## Remaining execution order
 

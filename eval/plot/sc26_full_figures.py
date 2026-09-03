@@ -34,23 +34,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np
 import sc26_preview as P
 import plotstyle as ps
+from eval.lib.pp405b_evidence import (
+    CurrentPP405BRef,
+    PP405BLoaderKind,
+    PP405B_NODE_COUNTS,
+    PP405BSeries,
+    load_legacy_pp405b_ledger,
+    load_pp405b_points,
+)
 from eval.site_config import get_runs_root
 
 # Retarget the extraction to the full sweep (separate cache from validation).
 P.RUNS_ROOT = get_runs_root() / "sc26workshop/full"
 P.CACHE_DIR = Path("/tmp/sc26_full_cache")
 
-# The original full paper campaign is frozen to run0. Replacement series name
-# their run group explicitly below; a rerun must never silently replace the
-# data behind a published figure.
+# Every paper series below owns explicit run selections; a rerun must never
+# silently replace the data behind a published figure.
 P.RUN_PIN = {}
 
 # Reviewed compatibility contract for the replacement 405B HAProxy/non-stream
-# curve.  The low points predate collision-resistant materialization IDs; the
-# high points use them.  The intervening source changes either affect only the
-# null-compute path (which this consumer independently rejects below) or the
-# materialization-ID scheme, so these two exact snapshots are compatible for
-# this one curve.  No third snapshot or identity scheme is accepted implicitly.
+# curve. The low points predate collision-resistant materialization IDs; the
+# high points use them. No third snapshot or identity scheme is accepted
+# implicitly.
 PP405B_CURRENT_RUN3_SOURCE = "160036b8367213da1d317ca9270de8c5016a471048842daea2ed1d8fe9b64b71"
 PP405B_CURRENT_RUN4_SOURCE = "a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1"
 PP405B_CURRENT_SOURCE_CONTRACTS = {
@@ -75,7 +80,24 @@ PP405B_CURRENT_SEMANTIC_HASHES = {
     128: "15befb4300fd09d7806dae0ec56dff6cf358be6c4e0e6f7ae79aa44eaa718848",
     256: "eb8cff673bb7ca390b3b39465690ffa2d6a84982cc31c5a58045dc3fded480b4",
 }
-PP405B_CURRENT_NODES = frozenset(PP405B_CURRENT_RUN_GROUPS)
+PP405B_CURRENT_REFS = tuple(
+    CurrentPP405BRef(
+        nodes=nodes,
+        run_group_id=run_group,
+        source_snapshot_hash=PP405B_CURRENT_SOURCE_CONTRACTS[run_group][0],
+        deployment_id_scheme=PP405B_CURRENT_SOURCE_CONTRACTS[run_group][1],
+        run_semantic_hash=PP405B_CURRENT_SEMANTIC_HASHES[nodes],
+    )
+    for nodes, run_group in PP405B_CURRENT_RUN_GROUPS.items()
+)
+
+# The old campaign has no canonical ResultManifest. Its exact results, legacy
+# plans, and producing PBS logs are instead selected by a strict checked-in
+# evidence ledger.
+PP405B_LEGACY_LEDGER_PATH = Path(__file__).with_name("pp405b_legacy_evidence.yaml")
+PP405B_LEGACY_SELECTIONS = load_legacy_pp405b_ledger(PP405B_LEGACY_LEDGER_PATH)
+PP405B_LEGACY_DIRECT_REFS = PP405B_LEGACY_SELECTIONS["direct_stream"]
+PP405B_LEGACY_HAPROXY_REFS = PP405B_LEGACY_SELECTIONS["haproxy_stream"]
 
 OUT = Path(__file__).resolve().parent / "output" / "sc26_full" / "iter13"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -1334,299 +1356,37 @@ def fig6_sglang_backend(S):
     return ps.finalize(fig, [], OUT / "fig6_sglang_backend.png", rect=(0, 0, 1, panel_top))
 
 
-def _require_complete_current_result(result_path):
-    """Fail closed before a current-infrastructure result reaches a figure."""
-    from eval.lib.paper_acceptance import require_accepted_paper_run
-
-    cell_dir = result_path.parents[1]
-    required = {
-        "replay/default",
-        "deployment_ready_evidence",
-        "compatibility_receipts",
-        "run_provenance",
-    }
-    accepted = require_accepted_paper_run(cell_dir, required_result_ids=required)
-    manifest = accepted.manifest
-    replay_entries = [entry for entry in manifest.entries if entry.logical_id == "replay/default"]
-    if len(replay_entries) != 1 or replay_entries[0].path != result_path.name:
-        raise RuntimeError(f"paper result manifest does not own result0.json: {cell_dir}")
-    return accepted
-
-
-def _require_current_pp405b_plan(accepted, *, nodes, run_group):
-    """Bind one selected point to the reviewed 405B experimental contract."""
-    expected_group = PP405B_CURRENT_RUN_GROUPS.get(nodes)
-    if expected_group is None:
-        raise RuntimeError(f"current PP=2 paper curve does not select n{nodes}")
-    if run_group != expected_group:
-        raise RuntimeError(f"current PP=2 n{nodes} selects {run_group}, expected {expected_group}")
-    expected_source, expected_id_scheme = PP405B_CURRENT_SOURCE_CONTRACTS[expected_group]
-
-    run_plan = accepted.run_plan
-    semantic = run_plan.semantic_plan
-    deployment = semantic.deployment
-    if len(deployment.models) != 1:
-        raise RuntimeError(
-            f"current PP=2 n{nodes} RunPlan has {len(deployment.models)} models, expected 1"
-        )
-    model = deployment.models[0]
-    gateway_kind = None if deployment.gateway is None else deployment.gateway.kind
-    checks = (
-        ("spec_name", run_plan.spec_name, "pp405b_pp2_haproxy_nostream_v040"),
-        ("run_id", run_plan.run_id, f"n{nodes}"),
-        ("run_group_id", run_plan.run_group_id, expected_group),
-        ("variant_name", run_plan.variant_name, f"n{nodes}"),
-        ("axis_values", run_plan.axis_values, {"num_nodes": nodes}),
-        ("source_snapshot_hash", run_plan.source_snapshot_hash, expected_source),
-        ("deployment_id_scheme", run_plan.deployment_id_scheme, expected_id_scheme),
-        (
-            "run_semantic_hash",
-            run_plan.run_semantic_hash,
-            PP405B_CURRENT_SEMANTIC_HASHES[nodes],
-        ),
-        ("deployment.num_nodes", deployment.num_nodes, nodes),
-        ("scheduler.nodes", semantic.scheduler.nodes, nodes),
-        ("deployment.runtime.null_compute", deployment.runtime.null_compute, False),
-        (
-            "deployment.models[0].model_id",
-            model.model_id,
-            "meta-llama/Llama-3.1-405B-Instruct",
-        ),
-        ("deployment.models[0].tensor_parallel_size", model.tensor_parallel_size, 8),
-        ("deployment.models[0].pipeline_parallel_size", model.pipeline_parallel_size, 2),
-        ("deployment.models[0].num_replicas", model.num_replicas, nodes // 2),
-        ("deployment.models[0].max_model_len", model.max_model_len, 4096),
-        ("deployment.models[0].gpu_memory_utilization", model.gpu_memory_utilization, 0.95),
-        ("deployment.models[0].max_num_seqs", model.max_num_seqs, 8),
-        ("deployment.models[0].enforce_eager", model.enforce_eager, True),
-        ("deployment.gateway.kind", gateway_kind, "haproxy"),
-        ("client.destination", semantic.client.destination, "proxy"),
-        ("client.streaming", semantic.client.streaming, False),
-        ("client.num_runs", semantic.client.num_runs, 2),
-        ("workload.client_dest", semantic.workload.client_dest, "proxy"),
-        ("workload.rate_per_node", semantic.workload.rate_per_node, 0.2),
-        ("workload.duration_s", semantic.workload.duration_s, 120.0),
-    )
-    for field, observed, expected in checks:
-        matches = observed is expected if isinstance(expected, bool) else observed == expected
-        if not matches:
-            raise RuntimeError(
-                f"current PP=2 n{nodes} RunPlan {field} is {observed!r}, expected {expected!r}"
-            )
-
-
-def _require_finite_result_number(record, field, *, context, positive=False):
-    value = record.get(field)
-    valid_type = not isinstance(value, bool) and isinstance(value, (int, float))
-    try:
-        number = float(value) if valid_type else math.nan
-    except (OverflowError, TypeError, ValueError):
-        number = math.nan
-    if not math.isfinite(number) or number < 0 or (positive and number == 0):
-        qualifier = "positive" if positive else "non-negative"
-        raise RuntimeError(f"{context}.{field} must be finite and {qualifier}")
-    return number
-
-
-def _validate_current_pp405b_record(record, *, context, nodes, per_run=False):
-    if not isinstance(record, dict):
-        raise RuntimeError(f"{context} must be an object")
-    expected_completed = 24 * nodes
-    completed = record.get("requests_completed")
-    scheduled = record.get("requests_scheduled")
-    errors = record.get("errors")
-    if type(completed) is not int or completed != expected_completed:
-        raise RuntimeError(
-            f"{context}.requests_completed must be exactly 24*nodes={expected_completed}"
-        )
-    if type(errors) is not int or errors != 0:
-        raise RuntimeError(f"{context}.errors must be exactly 0")
-    if type(scheduled) is not int or scheduled != expected_completed:
-        raise RuntimeError(
-            f"{context}.requests_scheduled must be exactly 24*nodes={expected_completed}"
-        )
-
-    duration = _require_finite_result_number(record, "duration_s", context=context, positive=True)
-    rps = _require_finite_result_number(record, "rps", context=context)
-    p50 = _require_finite_result_number(record, "p50_s", context=context)
-    p99 = _require_finite_result_number(record, "p99_s", context=context)
-    if p99 < p50:
-        raise RuntimeError(f"{context}.p99_s must be greater than or equal to p50_s")
-    expected_rps = completed / duration
-    if not math.isclose(rps, expected_rps, rel_tol=1e-9, abs_tol=1e-12):
-        raise RuntimeError(
-            f"{context}.rps {rps!r} disagrees with requests_completed/duration_s {expected_rps!r}"
-        )
-    if per_run:
-        successes = record.get("successes")
-        if type(successes) is not int or successes != expected_completed:
-            raise RuntimeError(f"{context}.successes must be exactly 24*nodes={expected_completed}")
-        success_rps = _require_finite_result_number(record, "success_rps", context=context)
-        if not math.isclose(success_rps, expected_rps, rel_tol=1e-9, abs_tol=1e-12):
-            raise RuntimeError(
-                f"{context}.success_rps {success_rps!r} disagrees with "
-                f"successes/duration_s {expected_rps!r}"
-            )
-
-
-def _validate_current_pp405b_result(document, *, result_path, nodes):
-    """Reject malformed current-series metrics instead of skipping bad runs."""
-    if not isinstance(document, dict):
-        raise RuntimeError(f"current PP=2 result must be an object: {result_path}")
-    overall = document.get("overall")
-    _validate_current_pp405b_record(overall, context=f"{result_path}:overall", nodes=nodes)
-    per_run = document.get("per_run")
-    if not isinstance(per_run, list) or len(per_run) != 2:
-        raise RuntimeError(f"{result_path}:per_run must contain exactly two runs")
-    indices = []
-    for offset, record in enumerate(per_run):
-        if not isinstance(record, dict):
-            raise RuntimeError(f"{result_path}:per_run[{offset}] must be an object")
-        run_index = record.get("run_index")
-        if type(run_index) is not int or run_index < 0:
-            raise RuntimeError(
-                f"{result_path}:per_run[{offset}].run_index must be a non-negative integer"
-            )
-        indices.append(run_index)
-        _validate_current_pp405b_record(
-            record,
-            context=f"{result_path}:per_run[{offset}]",
-            nodes=nodes,
-            per_run=True,
-        )
-    if indices != [0, 1]:
-        raise RuntimeError(f"{result_path}:per_run indices are {indices}, expected [0, 1]")
-    mirrored_fields = (
-        "requests_completed",
-        "requests_scheduled",
-        "errors",
-        "duration_s",
-        "rps",
-        "p50_s",
-        "p99_s",
-    )
-    mismatches = [field for field in mirrored_fields if overall[field] != per_run[1][field]]
-    if mismatches:
-        raise RuntimeError(f"{result_path}:overall does not mirror per_run[1] fields {mismatches}")
-    return overall, [per_run[1]]
-
-
-def _pp405b_points(stem, run_group, *, require_complete=False):
-    """Pinned results for a 405B PP=2 sweep variant → list of dicts
-    (rep, srps=successful throughput, srps_std, p50, p99, errfrac), sorted by
-    replica count.
-
-    srps is the MEAN over the job's data iterations (run_index >= 1, dropping the
-    run0 warmup) with srps_std their standard deviation, matching the v2 protocol
-    and the mean+-std the cached 8B cells use (sc26_preview.extract_cell). The
-    "overall" block is NOT used for the rate: it holds only the LAST iteration
-    (verified: direct n256 per_run [26.43, 31.05] -> overall 31.05), so reading it
-    reported one iteration out of six and admitted no error bars. Falls back to
-    "overall" when per_run is absent.
-    """
-    import json
-    import re
-
-    if isinstance(run_group, str):
-        result_paths = (P.RUNS_ROOT / stem / run_group).glob("n*/results/result0.json")
-    elif isinstance(run_group, dict) and all(
-        type(nodes) is int and isinstance(group, str) and group
-        for nodes, group in run_group.items()
-    ):
-        result_paths = (
-            P.RUNS_ROOT / stem / group / f"n{nodes}" / "results" / "result0.json"
-            for nodes, group in sorted(run_group.items())
-        )
-    else:
-        raise TypeError("PP=2 run pin must be a run group or node-to-group mapping")
-
-    points = {}
-    for result_path in result_paths:
-        if not result_path.is_file():
-            continue
-        node_match = re.search(r"/n(\d+)/", str(result_path))
-        if node_match is None:
-            raise RuntimeError(f"PP=2 result path has no node identity: {result_path}")
-        n = int(node_match.group(1))
-        selected_group = result_path.parents[2].name
-        if require_complete:
-            accepted = _require_complete_current_result(result_path)
-            _require_current_pp405b_plan(accepted, nodes=n, run_group=selected_group)
-        if require_complete:
-            from exaserve.state.atomic import strict_json_load_path
-
-            d = strict_json_load_path(result_path)
-            o, data_runs = _validate_current_pp405b_result(d, result_path=result_path, nodes=n)
-        else:
-            with open(result_path, encoding="utf-8") as handle:
-                d = json.load(handle)
-            o = d.get("overall", {})
-            data_runs = [pr for pr in (d.get("per_run") or []) if int(pr.get("run_index", 0)) >= 1]
-        if len(data_runs) < 1:  # single-iteration job: use overall
-            data_runs = [o] if o.get("rps") is not None else []
-        srps_runs, comp_t, err_t, p50s, p99s = [], 0.0, 0.0, [], []
-        for pr in data_runs:
-            c = float(pr.get("requests_completed") or 0)
-            e = float(pr.get("errors") or 0)
-            dur = float(pr.get("duration_s") or 0)
-            if dur <= 0 or c <= 0:
-                continue
-            srps_runs.append((c - e) / dur)  # successful throughput, per iteration
-            comp_t += c
-            err_t += e
-            if pr.get("p50_s") is not None:
-                p50s.append(float(pr["p50_s"]))
-            if pr.get("p99_s") is not None:
-                p99s.append(float(pr["p99_s"]))
-        if not srps_runs:
-            continue
-        a = np.asarray(srps_runs, float)
-        rec = dict(
-            rep=n // 2,
-            nodes=n,
-            srps=float(a.mean()),
-            srps_std=float(a.std()),
-            n_iters=len(srps_runs),
-            p50=(float(np.mean(p50s)) if p50s else o.get("p50_s")),
-            p99=(float(np.mean(p99s)) if p99s else o.get("p99_s")),
-            errfrac=(err_t / comp_t if comp_t else 0.0),
-        )
-        points[n] = rec
-    if require_complete and set(points) != PP405B_CURRENT_NODES:
-        raise RuntimeError(
-            f"current PP=2 paper curve has nodes {sorted(points)}, "
-            f"expected {sorted(PP405B_CURRENT_NODES)}"
-        )
-    return [points[n] for n in sorted(points)]
+def _pp405b_points(series):
+    return load_pp405b_points(series, runs_root=P.RUNS_ROOT)
 
 
 PP405B_VARIANTS = (
-    (
-        "pp405b_pp2_scale_direct",
-        "run0",
-        "direct_stream",
-        "direct",
-        "stream",
-        "Direct",
-        False,
+    PP405BSeries(
+        stem="pp405b_pp2_scale_direct",
+        key="direct_stream",
+        proxy="direct",
+        mode="stream",
+        label="Direct",
+        loader_kind=PP405BLoaderKind.LEGACY_PINNED_V1,
+        legacy_refs=PP405B_LEGACY_DIRECT_REFS,
     ),
-    (
-        "pp405b_pp2_scale",
-        "run0",
-        "haproxy_stream",
-        "haproxy",
-        "stream",
-        "HAProxy",
-        False,
+    PP405BSeries(
+        stem="pp405b_pp2_scale",
+        key="haproxy_stream",
+        proxy="haproxy",
+        mode="stream",
+        label="HAProxy",
+        loader_kind=PP405BLoaderKind.LEGACY_PINNED_V1,
+        legacy_refs=PP405B_LEGACY_HAPROXY_REFS,
     ),
-    (
-        "pp405b_pp2_haproxy_nostream_v040",
-        PP405B_CURRENT_RUN_GROUPS,
-        "haproxy_nonstream",
-        "haproxy",
-        "nonstream",
-        "HAProxy non-stream",
-        True,
+    PP405BSeries(
+        stem="pp405b_pp2_haproxy_nostream_v040",
+        key="haproxy_nonstream",
+        proxy="haproxy",
+        mode="nonstream",
+        label="HAProxy non-stream",
+        loader_kind=PP405BLoaderKind.CURRENT_MANIFEST_V2,
+        current_refs=PP405B_CURRENT_REFS,
     ),
 )
 
@@ -1636,10 +1396,7 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
     aggregate successful throughput vs cluster size, DIRECT vs HAProxy in
     incremental and non-streaming delivery, against an ideal-linear guide.
     Returns (handles, labels, per_node base rate)."""
-    data = {
-        key: _pp405b_points(stem, run_group, require_complete=require_complete)
-        for stem, run_group, key, _, _, _, require_complete in PP405B_VARIANTS
-    }
+    data = {series.key: _pp405b_points(series) for series in PP405B_VARIANTS}
     base = data["direct_stream"][0]
     per_node = base["srps"] / base["nodes"]  # weak-scaling unit rate (per node)
     allnodes = sorted({p["nodes"] for pts in data.values() for p in pts})
@@ -1653,8 +1410,11 @@ def _draw_pp405b(a, *, label_fs=5, tick_nodes=None, ylabel=True):
         label="ideal (linear)",
     )
     sep = " · " if label_fs >= 5 else "\n"
-    for _, _, key, proxy, mode, lab, _ in PP405B_VARIANTS:
-        pts = data[key]
+    for series in PP405B_VARIANTS:
+        pts = data[series.key]
+        proxy = series.proxy
+        mode = series.mode
+        lab = series.label
         ps.line(
             a,
             [p["nodes"] for p in pts],

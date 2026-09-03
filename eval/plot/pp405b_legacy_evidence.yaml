@@ -1,0 +1,165 @@
+schema_version: 1
+node_counts: [4, 8, 16, 32, 64, 128, 256]
+series:
+  direct_stream:
+    stem: pp405b_pp2_scale_direct
+    proxy: direct
+    points:
+      - nodes: 4
+        run_group_id: run1
+        result_name: result0.json
+        result_sha256: a7023e862032586e2610867323db2716dc3b79d89b8d5b2d46381d2fb61258bd
+        run_yaml_sha256: 667420ab87b11c6813037ca7b09b9a648cd1f8a99f79276890d2bf017497e386
+        source_commit: d997b69692ecd0096c61f61ed62e0a9d67edcd0f
+        pbs_job_id: 8654870
+        stdout_sha256: 975576fcbbd95a51ab263eb4fe477aeb82c3051ca4b9af23ea21b8e2a3bb2ff1
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 0.7194176497627154
+      - nodes: 8
+        run_group_id: run1
+        result_name: result0.json
+        result_sha256: 3eb2adbd2b3f160f98464f4df5f089846acfb723e00d048eac75f665d113425a
+        run_yaml_sha256: cfbc4824a01cd517265c7ef57feff379106656096f0931f20806c391c1eee6d2
+        source_commit: d997b69692ecd0096c61f61ed62e0a9d67edcd0f
+        pbs_job_id: 8654871
+        stdout_sha256: 23662e4013cec2040304f8abf0a3cec5c33c42b3111fe9edcf50cbbe1c6101ce
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 1.3954681407695033
+      - nodes: 16
+        run_group_id: run3
+        result_name: result0.json
+        result_sha256: 6e6b162c8053e21095c14a5af5728366fc20a4148f45c863f8238d48b292db12
+        run_yaml_sha256: bcfaf8aaf83707f29a72993c7ce655d6f59215d8a8c3dc07ef9fd0d042bc4148
+        source_commit: 933a9d23bc6d81039c09de0a1e007093124f71e1
+        pbs_job_id: 8662386
+        stdout_sha256: 04b27c6bea6ea5788c1a8aaf10e63954ebb72674d289a9149a5557e7f8468c23
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 2.6599445991497053
+      - nodes: 32
+        run_group_id: run1
+        result_name: result0.json
+        result_sha256: 8e88ab4432d89db173b8c74462e8cc6bb59522e17d972a0ee6c967e1c8f0f3f2
+        run_yaml_sha256: c71a45f03d6e1c1b6fac91ab94495d9eb140667139274e0add592688edc285ad
+        source_commit: d997b69692ecd0096c61f61ed62e0a9d67edcd0f
+        pbs_job_id: 8654872
+        stdout_sha256: b18abf446bb84ce0cfcd68fd58879799423b6607a91122d2012be84d2b1f456a
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 4.883635710316778
+      - nodes: 64
+        run_group_id: run3
+        result_name: result1.json
+        result_sha256: b0dd1a8a14fd99174087e9cab373aabff0a5d6e8887d5df7eebcf03273d9478f
+        run_yaml_sha256: e0e2bec69ca2f73f6dd1505cda976195571c7ac4de56b58351ce67212e804226
+        source_commit: 933a9d23bc6d81039c09de0a1e007093124f71e1
+        pbs_job_id: 8726613
+        stdout_sha256: 3576ae9c6fbd5b0a67b664cb25dc16521564dca1d28c4a9d48d7496bea282166
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: true
+        expected_successful_rps: 10.29933385964368
+      - nodes: 128
+        run_group_id: run0
+        result_name: result0.json
+        result_sha256: 6049928f9079ca08474f3441e066c2c75433415185c664685f9c5cb078c3c145
+        run_yaml_sha256: dff2eb07cb99a286ac97b73350d9c116605d558ad7cc323cd65b46d3fb61203d
+        source_commit: 2a447fb9f9ad5f4bbf00dd097aefa6d930d604e1
+        pbs_job_id: 8641122
+        stdout_sha256: cd96506c3e3fad62674ebb55e263e36e25337f9edd0ff4e3a965047d7d680fa1
+        errors_by_run: [0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 18.797403417647807
+      - nodes: 256
+        run_group_id: run0
+        result_name: result0.json
+        result_sha256: 4f65aa8fe096754b015ec63917083eccf8cf877c8adc3a389e2a91ef01bf25dd
+        run_yaml_sha256: 0ba5dbd6b2beb37191e129d9b63e078bad42223d5f7c613a5a59e7c7ae7f0c87
+        source_commit: 2a447fb9f9ad5f4bbf00dd097aefa6d930d604e1
+        pbs_job_id: 8640747
+        stdout_sha256: 5612047a74aba07c4b50fde320973f4143dd137da60ee589bcb74885203201f4
+        errors_by_run: [0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 31.046752640361486
+  haproxy_stream:
+    stem: pp405b_pp2_scale
+    proxy: haproxy
+    points:
+      - nodes: 4
+        run_group_id: run3
+        result_name: result0.json
+        result_sha256: a903a1173becb31f1513268416834bfbccd610c6c02019fa9f28a0e00e52379a
+        run_yaml_sha256: 08408e3b4186c09c8808b16ad3c764b69aacf6d2f05e39f5a990491fc2eedf20
+        source_commit: d997b69692ecd0096c61f61ed62e0a9d67edcd0f
+        pbs_job_id: 8655141
+        stdout_sha256: c013891151f67eeaefb09828c8ca54b6ac8b187fe466c84246408ec435b6e506
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 0.6963688544063671
+      - nodes: 8
+        run_group_id: run3
+        result_name: result0.json
+        result_sha256: 7e5efbfb7370fc40233487e6607f3042f41ec9bb2499da7e1fedaff90783c8ed
+        run_yaml_sha256: 16f2b8534c6c2550b35d8e931317af4bb8c2b749375bd02df31a8b888adac9c6
+        source_commit: d997b69692ecd0096c61f61ed62e0a9d67edcd0f
+        pbs_job_id: 8655160
+        stdout_sha256: bebd4130f121eb7d8f64da6f1c73e101e066ef2aa98a4c4ad0a80219c614fcb0
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 1.3457169030043798
+      - nodes: 16
+        run_group_id: run3
+        result_name: result0.json
+        result_sha256: e9386052053e86b1e2b2e49f7daa554a8d976a78b108be4345005ec4c802c61b
+        run_yaml_sha256: 979f83c59053bdb38e7767b76f632c628fbe8485a5b94638e7e22f0384baf0eb
+        source_commit: d997b69692ecd0096c61f61ed62e0a9d67edcd0f
+        pbs_job_id: 8655268
+        stdout_sha256: f6aa314f8fcfcf82c258f27eb0304aabeae250b88d5b4d0df1186713dc9e4804
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: false
+        expected_successful_rps: 2.5223592373921706
+      - nodes: 32
+        run_group_id: run5
+        result_name: result1.json
+        result_sha256: c65cf6a655fd991b703aca2e580078595a4530ac1f4b542b9da081e4fc6b6cb0
+        run_yaml_sha256: 0e79669c16f600712ce03601e1ddfa5946b04bbbefb6f0015bfbd2ad913ff2e5
+        source_commit: 933a9d23bc6d81039c09de0a1e007093124f71e1
+        pbs_job_id: 8726612
+        stdout_sha256: 8667fd28f9f09fb7ee65a33411e550a02f74083822c64a657e647ef010f6f9a7
+        errors_by_run: [0, 0, 0, 0, 0, 0]
+        requires_allocfix: true
+        expected_successful_rps: 4.68211907345158
+      - nodes: 64
+        run_group_id: run5
+        result_name: result1.json
+        result_sha256: 328271a87c9e740aa86358249f1e450dd48d98471b26d7ef357d40390878413c
+        run_yaml_sha256: e0f5cbc17784056b16c621b7f4f0113628dcf2d87362a6d5cfc70302d099c695
+        source_commit: 933a9d23bc6d81039c09de0a1e007093124f71e1
+        pbs_job_id: 8702358
+        stdout_sha256: f77497bd434ee008db0168bef68a64cc535a324fd859242dcc728d6dd016e707
+        errors_by_run: [2, 1, 11, 0, 14, 3]
+        requires_allocfix: true
+        expected_successful_rps: 8.665885405226787
+      - nodes: 128
+        run_group_id: run5
+        result_name: result0.json
+        result_sha256: b32317f8f414304045db7c0b452806613b3d6dd94d6d8ceca57f6b2be34f93db
+        run_yaml_sha256: ff0a7ef6682e322806a487cabce66e7e4ae97c6081b3755e68bcaf1c91d855b6
+        source_commit: 933a9d23bc6d81039c09de0a1e007093124f71e1
+        pbs_job_id: 8686262
+        stdout_sha256: f44963274ba5c174ca687d2db886ac33f03fd6301b6f42b87191c2e5b0bfa27b
+        errors_by_run: [9, 13, 16, 13, 2, 16]
+        requires_allocfix: false
+        expected_successful_rps: 11.872853632075806
+      - nodes: 256
+        run_group_id: run5
+        result_name: result0.json
+        result_sha256: adf44e938929030b1fee0204c51de78b7035829daa70dd088912bb5180405a0d
+        run_yaml_sha256: 65fa0b13882816bcd2fcffd8f1a9461827cfadf7aec95897920d444a4e1f31df
+        source_commit: 933a9d23bc6d81039c09de0a1e007093124f71e1
+        pbs_job_id: 8662385
+        stdout_sha256: b50009af9c691002ddea12b10ecffe9d7f1a427cb39f014a7ed7d0db510a7556
+        errors_by_run: [15, 15, 15, 16, 16, 15]
+        requires_allocfix: false
+        expected_successful_rps: 22.91585531588077

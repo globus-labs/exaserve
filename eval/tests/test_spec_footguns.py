@@ -169,22 +169,9 @@ def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() 
             )
 
 
-def test_missing_pp_curve_plot_is_pinned_to_the_accepted_run_group() -> None:
-    import ast
-
+def test_pp_curves_use_explicit_complete_evidence_contracts() -> None:
     from eval.plot import sc26_full_figures as figures
 
-    source = Path(__file__).parents[1] / "plot" / "sc26_full_figures.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    mapping_assignment = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "PP405B_CURRENT_RUN_GROUPS"
-            for target in node.targets
-        )
-    )
     expected_groups = {
         4: "run3",
         8: "run3",
@@ -194,22 +181,109 @@ def test_missing_pp_curve_plot_is_pinned_to_the_accepted_run_group() -> None:
         128: "run4",
         256: "run4",
     }
-    assert ast.literal_eval(mapping_assignment.value) == expected_groups
-    current = [
-        row for row in figures.PP405B_VARIANTS if row[0] == "pp405b_pp2_haproxy_nostream_v040"
+    assert figures.PP405B_CURRENT_RUN_GROUPS == expected_groups
+    variants = {series.key: series for series in figures.PP405B_VARIANTS}
+    current = variants["haproxy_nonstream"]
+    assert current.loader_kind is figures.PP405BLoaderKind.CURRENT_MANIFEST_V2
+    assert {ref.nodes: ref.run_group_id for ref in current.current_refs} == expected_groups
+    assert current.legacy_refs == ()
+
+    for key in ("direct_stream", "haproxy_stream"):
+        legacy = variants[key]
+        assert legacy.loader_kind is figures.PP405BLoaderKind.LEGACY_PINNED_V1
+        assert [ref.nodes for ref in legacy.legacy_refs] == list(figures.PP405B_NODE_COUNTS)
+        assert [ref.nodes // 2 for ref in legacy.legacy_refs] == [2, 4, 8, 16, 32, 64, 128]
+        assert legacy.current_refs == ()
+        assert all(".bak" not in ref.result_name for ref in legacy.legacy_refs)
+
+    direct = {ref.nodes: ref for ref in variants["direct_stream"].legacy_refs}
+    haproxy = {ref.nodes: ref for ref in variants["haproxy_stream"].legacy_refs}
+    assert direct[64].result_name == "result1.json"
+    assert haproxy[32].result_name == "result1.json"
+    assert haproxy[64].result_name == "result1.json"
+
+
+def test_legacy_pp_evidence_map_hash_and_corrected_arrays_are_frozen() -> None:
+    import hashlib
+    import json
+    from dataclasses import asdict
+
+    from eval.plot import sc26_full_figures as figures
+
+    selections = {
+        key: [(ref.nodes, ref.run_group_id, ref.result_name, ref.pbs_job_id) for ref in refs]
+        for key, refs in figures.PP405B_LEGACY_SELECTIONS.items()
+    }
+    assert selections == {
+        "direct_stream": [
+            (4, "run1", "result0.json", 8654870),
+            (8, "run1", "result0.json", 8654871),
+            (16, "run3", "result0.json", 8662386),
+            (32, "run1", "result0.json", 8654872),
+            (64, "run3", "result1.json", 8726613),
+            (128, "run0", "result0.json", 8641122),
+            (256, "run0", "result0.json", 8640747),
+        ],
+        "haproxy_stream": [
+            (4, "run3", "result0.json", 8655141),
+            (8, "run3", "result0.json", 8655160),
+            (16, "run3", "result0.json", 8655268),
+            (32, "run5", "result1.json", 8726612),
+            (64, "run5", "result1.json", 8702358),
+            (128, "run5", "result0.json", 8686262),
+            (256, "run5", "result0.json", 8662385),
+        ],
+    }
+    snapshot = [
+        (key, [asdict(ref) for ref in refs])
+        for key, refs in figures.PP405B_LEGACY_SELECTIONS.items()
     ]
-    assert current == [
-        (
-            "pp405b_pp2_haproxy_nostream_v040",
-            expected_groups,
-            "haproxy_nonstream",
-            "haproxy",
-            "nonstream",
-            "HAProxy non-stream",
-            True,
-        )
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(canonical).hexdigest() == (
+        "803024d4e31a4ba5eddad7bc853e9779378db236d7576ce4a9fbbeba69d1a8f1"
+    )
+
+    direct = [ref.expected_successful_rps for ref in figures.PP405B_LEGACY_DIRECT_REFS]
+    haproxy = [ref.expected_successful_rps for ref in figures.PP405B_LEGACY_HAPROXY_REFS]
+    assert direct == pytest.approx(
+        [
+            0.7194176497627154,
+            1.3954681407695033,
+            2.6599445991497053,
+            4.883635710316778,
+            10.29933385964368,
+            18.797403417647807,
+            31.046752640361486,
+        ]
+    )
+    assert haproxy == pytest.approx(
+        [
+            0.6963688544063671,
+            1.3457169030043798,
+            2.5223592373921706,
+            4.68211907345158,
+            8.665885405226787,
+            11.872853632075806,
+            22.91585531588077,
+        ]
+    )
+    base_per_node = direct[0] / 4
+    direct_efficiency = [
+        100 * rps / (base_per_node * nodes)
+        for rps, nodes in zip(direct, figures.PP405B_NODE_COUNTS)
     ]
-    assert current[0][1] is figures.PP405B_CURRENT_RUN_GROUPS
+    haproxy_efficiency = [
+        100 * rps / (base_per_node * nodes)
+        for rps, nodes in zip(haproxy, figures.PP405B_NODE_COUNTS)
+    ]
+    assert direct_efficiency == pytest.approx(
+        [100.0, 96.985954, 92.433950, 84.853974, 89.476310, 81.651994, 67.430304],
+        abs=1e-6,
+    )
+    assert haproxy_efficiency == pytest.approx(
+        [96.796187, 93.528210, 87.652813, 81.352589, 75.285592, 51.573196, 49.770844],
+        abs=1e-6,
+    )
 
 
 def test_missing_null_curve_consumer_pins_two_independent_lifecycles() -> None:
