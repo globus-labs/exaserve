@@ -1,6 +1,6 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress; last updated 2026-09-02**. This document is an evidence ledger, not a completed
+Status: **in progress; last updated 2026-09-03**. This document is an evidence ledger, not a completed
 paper reproduction claim. A number appears in an accepted table only after the
 immutable run bundle, terminal state, result manifest, readiness evidence, and
 shutdown evidence all pass the repository's fail-closed acceptance checks.
@@ -39,7 +39,7 @@ string or proxy liveness check.
 | 32 | 384 | 57.237, 67.018 | 62.127 ± 6.916 | 7.242, 7.362 | 11.622, 11.843 | accepted |
 | 64 | 768 | 86.021, 83.724 | 84.872 ± 1.624 | 20.286, 20.009 | 25.805, 25.416 | accepted |
 | 128 | 1,536 | 238.008, 137.568 | 187.788 ± 71.022 | 103.956, 102.644 | 111.648, 110.328 | accepted |
-| 256 | 3,072 | pending | pending | pending | pending | not run in final group |
+| 256 | 3,072 | pending | pending | pending | pending | trial A queued as PBS 8799035 |
 
 Every accepted 32-node trial has exactly 64 Serve applications and 450 receipt
 requirements. Every accepted 64-node trial has exactly 128 Serve applications
@@ -230,7 +230,12 @@ throughput for a 2x node/replica increase.
 
 ## Remaining execution order
 
-1. Run null-compute n256 twice and PP2 n256 in the production queue; issue the
+PBS job `8799035` is the exact `run6/n256` null-compute trial A bundle. Aurora
+routed the materialized `prod` request to `small` (256 nodes, 03:00:00); it is
+eligible and unheld, but has not started because 256 exclusive nodes are not
+currently free. It must be monitored rather than duplicate-submitted.
+
+1. Complete null-compute n256 trial A, then submit trial B; run PP2 n256 last and issue the
    256-node partial report.
 2. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
