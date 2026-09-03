@@ -39,14 +39,16 @@ string or proxy liveness check.
 | 32 | 384 | 57.237, 67.018 | 62.127 ± 6.916 | 7.242, 7.362 | 11.622, 11.843 | accepted |
 | 64 | 768 | 86.021, 83.724 | 84.872 ± 1.624 | 20.286, 20.009 | 25.805, 25.416 | accepted |
 | 128 | 1,536 | 238.008, 137.568 | 187.788 ± 71.022 | 103.956, 102.644 | 111.648, 110.328 | accepted |
-| 256 | 3,072 | pending | pending | pending | pending | trial A queued as PBS 8799035 |
+| 256 | 3,072 | 582.279, pending | pending (two trials required) | 553.095, pending | 565.570, pending | trial A accepted; trial B queued as PBS 8800730 |
 
 Every accepted 32-node trial has exactly 64 Serve applications and 450 receipt
 requirements. Every accepted 64-node trial has exactly 128 Serve applications
 and 898 receipt requirements. Every accepted 128-node trial has exactly 256
 Serve applications, 1,536 replica measurements, and 1,794 receipt requirements.
-All six manifests are complete and all ranks acknowledged DRAIN and GOODBYE
-before a clean `STOPPED` terminal publication.
+The accepted 256-node trial A has exactly 512 Serve applications, 3,072 replica
+measurements, and 3,586 receipt requirements. All seven accepted manifests are
+complete and all ranks acknowledged DRAIN and GOODBYE before a clean `STOPPED`
+terminal publication.
 
 The two 128-node deploy phases agree within 1.32 seconds, while their canonical
 READY times differ by 100.44 seconds. The difference is post-deploy distributed
@@ -62,10 +64,19 @@ versus roughly 26 seconds in trial B. Both waited for and sealed the complete
 | run7/n64 | 8793098 | `6dce8249dbb42473d9c485ea08f59caffec664ffdf9a536fbdab6f8e7bd5bb9a` |
 | run6/n128 | 8798655 | `5b5c4fdff5c14e172d7236069ea14959775a5b4f147a999cf6c24923b45f2adf` |
 | run7/n128 | 8798839 | `d4f2250283fb1162902e85bfd5f3d4c9a43e762fa791d54d9463cf00e31350b0` |
+| run6/n256 | 8799035 | `c2b54ceb793e1b14b11012c10a6a714c403b8c666a82f550f3c927c1e024b3d5` |
 
 These trials share source snapshot
 `a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1`
 from commit `4d009c1` and use collision-resistant deployment identities.
+
+The accepted n256 trial A started after 13:14:55 of eligible queue time and
+completed as PBS job `8799035` (exit 0, walltime 16:54). Its canonical READY
+time is 582.279 seconds, including a 553.095-second `serve.run_many` phase and a
+565.570-second canonical deploy phase. The complete manifest binds all seven
+expected artifacts; teardown published clean `STOPPED` after DRAIN and GOODBYE
+from all 256 ranks. Trial B remains required before a mean or sample standard
+deviation is reported.
 
 ### HAProxy non-streaming TP8 x PP2
 
@@ -230,13 +241,14 @@ throughput for a 2x node/replica increase.
 
 ## Remaining execution order
 
-PBS job `8799035` is the exact `run6/n256` null-compute trial A bundle. Aurora
-routed the materialized `prod` request to `small` (256 nodes, 03:00:00); it is
-eligible and unheld, but has not started because 256 exclusive nodes are not
-currently free. It must be monitored rather than duplicate-submitted.
+PBS job `8799035`, the exact `run6/n256` null-compute trial A bundle, completed
+successfully and is accepted above. PBS job `8800730` is the independently
+materialized `run7/n256` trial B bundle. Aurora routed its `prod` request to
+`small` (256 nodes, 03:00:00); it is queued, eligible, and unheld. It must be
+monitored rather than duplicate-submitted.
 
-1. Complete null-compute n256 trial A, then submit trial B; run PP2 n256 last and issue the
-   256-node partial report.
+1. Complete null-compute n256 trial B; run PP2 n256 last and issue the 256-node
+   partial report.
 2. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
 3. Replace all `pending` rows in this ledger with sealed evidence or an explicit
