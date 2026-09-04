@@ -1,9 +1,10 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress; last updated 2026-09-03**. This document is an evidence ledger, not a completed
-paper reproduction claim. A number appears in an accepted table only after the
-immutable run bundle, terminal state, result manifest, readiness evidence, and
-shutdown evidence all pass the repository's fail-closed acceptance checks.
+Status: **in progress; last updated 2026-09-04**. This document is an evidence
+ledger, not a completed paper reproduction claim. A number appears in an
+accepted table only after the immutable run bundle, terminal state, result
+manifest, readiness evidence, and shutdown evidence all pass the repository's
+fail-closed acceptance checks.
 
 ## Requested scope
 
@@ -39,7 +40,7 @@ string or proxy liveness check.
 | 32 | 384 | 57.237, 67.018 | 62.127 ± 6.916 | 7.242, 7.362 | 11.622, 11.843 | accepted |
 | 64 | 768 | 86.021, 83.724 | 84.872 ± 1.624 | 20.286, 20.009 | 25.805, 25.416 | accepted |
 | 128 | 1,536 | 238.008, 137.568 | 187.788 ± 71.022 | 103.956, 102.644 | 111.648, 110.328 | accepted |
-| 256 | 3,072 | 582.279, pending | pending (two trials required) | 553.095, pending | 565.570, pending | trial A accepted; trial B queued as PBS 8800730 |
+| 256 | 3,072 | 582.279, no result | pending (two accepted trials required) | 553.095, no result | 565.570, no result | trial A accepted; `run7` trial B rejected |
 
 Every accepted 32-node trial has exactly 64 Serve applications and 450 receipt
 requirements. Every accepted 64-node trial has exactly 128 Serve applications
@@ -219,6 +220,22 @@ throughput for a 2x node/replica increase.
    rerendered. The corrected generator reads the reviewed selections from
    `eval/plot/pp405b_legacy_evidence.yaml`; fixing that generator does not by
    itself update any checked-in or copied paper artifact.
+9. **The 256-node pre-START control path is load-sensitive.** Null-compute
+   `run7/n256` (PBS `8800730`) used the same sealed plan and control limits as
+   accepted `run6/n256`, but source distribution took 43.9 seconds instead of
+   9.8 seconds and durable supervisor registration took 69.9 seconds for only
+   238 ranks instead of 21.8 seconds for all 256. The first 75 established
+   ranks then exhausted their 30-second pre-START heartbeat lease while the
+   plan still allowed 300 seconds for registration. Rank 17 exited first and
+   PALS terminated its peers. Code inspection identifies a concrete starvation
+   path: the listener synchronously stages a snapshot under the receipt-ledger
+   lock while the durable writer can hold that same lock across a Lustre event
+   file and directory `fsync`. A deterministic slow-store/concurrent-snapshot
+   test is required before selecting the fix; merely retrying could cherry-pick
+   a favorable filesystem interval. The eval adapter also misreported the
+   already-terminal deployment as a readiness timeout because cleanup was still
+   in progress. Both availability and terminal-cause propagation must be fixed
+   and qualified before another 256-node attempt.
 
 ## Rejected evidence that must not enter the paper
 
@@ -230,6 +247,13 @@ throughput for a 2x node/replica increase.
   cancelled before walltime; it has no paper result.
 - PP2 `run2/n16` deterministically failed KV-cache initialization at 0.90 and
   has no accepted result.
+- Null-compute `run7/n256`, PBS job `8800730`, failed before Ray startup. Its
+  exact 256-node allocation and source staging were valid, but only 238/256
+  supervisor bindings were ever journaled, 75 established ranks reported
+  pre-START heartbeat timeouts, and `results/` is empty. Its clean shutdown
+  report proves bounded failure cleanup only: it has no DRAIN, GOODBYE,
+  canonical READY, startup metric, or result manifest and contributes no paper
+  number.
 - PP2 `run2` 4- and 8-node successes use the superseded 0.90 setting; the final
   low-node values come from `run3` at 0.95.
 - Three historical streaming PP2 cells were produced while their nominal
@@ -242,14 +266,19 @@ throughput for a 2x node/replica increase.
 ## Remaining execution order
 
 PBS job `8799035`, the exact `run6/n256` null-compute trial A bundle, completed
-successfully and is accepted above. PBS job `8800730` is the independently
-materialized `run7/n256` trial B bundle. Aurora routed its `prod` request to
-`small` (256 nodes, 03:00:00); it is queued, eligible, and unheld. It must be
-monitored rather than duplicate-submitted.
+successfully and is accepted above. PBS job `8800730`, the independently
+materialized `run7/n256` trial B bundle, failed before Ray startup and is
+rejected above. The failed bundle is immutable negative evidence and must not
+be reset, resubmitted, or silently replaced in the paper consumer.
 
-1. Complete null-compute n256 trial B; run PP2 n256 last and issue the 256-node
-   partial report.
-2. Render the strict null startup table and full PP2 figure. Both consumers must
+1. Reproduce and fix the shared-lock/durable-registration starvation path, add
+   a scale-aware slow-store regression, and preserve the canonical terminal
+   cause through the eval adapter.
+2. Materialize two fresh null-compute n256 lifecycles from one fixed snapshot.
+   A fixed-code retry cannot be paired with `run6` as a homogeneous two-trial
+   result; retain `run6` as prior accepted evidence and `run7` as rejected
+   evidence. Run PP2 n256 last and issue the 256-node partial report.
+3. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
-3. Replace all `pending` rows in this ledger with sealed evidence or an explicit
+4. Replace all `pending` rows in this ledger with sealed evidence or an explicit
    externally blocked disposition, then run the complete release gate.
