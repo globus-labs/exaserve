@@ -232,7 +232,10 @@ throughput for a 2x node/replica increase.
    lock while the durable writer can hold that same lock across a Lustre event
    file and directory `fsync`. A deterministic slow-store/concurrent-snapshot
    test is required before selecting the fix; merely retrying could cherry-pick
-   a favorable filesystem interval. The eval adapter also misreported the
+   a favorable filesystem interval. The subsequent repository-wide audit in
+   `doc/SHARED_FILESYSTEM_FANOUT_AUDIT_20260904.md` found several other active
+   worker/shared-storage paths, so this lock race is credible but is not claimed
+   as the sole cause. The eval adapter also misreported the
    already-terminal deployment as a readiness timeout because cleanup was still
    in progress. Both availability and terminal-cause propagation must be fixed
    and qualified before another 256-node attempt.
@@ -271,13 +274,17 @@ materialized `run7/n256` trial B bundle, failed before Ray startup and is
 rejected above. The failed bundle is immutable negative evidence and must not
 be reset, resubmitted, or silently replaced in the paper consumer.
 
-1. Reproduce and fix the shared-lock/durable-registration starvation path, add
-   a scale-aware slow-store regression, and preserve the canonical terminal
-   cause through the eval adapter.
-2. Materialize two fresh null-compute n256 lifecycles from one fixed snapshot.
-   A fixed-code retry cannot be paired with `run6` as a homogeneous two-trial
-   result; retain `run6` as prior accepted evidence and `run7` as rejected
-   evidence. Run PP2 n256 last and issue the 256-node partial report.
+1. Resolve every release-blocking shared-filesystem fan-out in
+   `doc/SHARED_FILESYSTEM_FANOUT_AUDIT_20260904.md`, including the control-lock
+   path, worker plan/environment reads, MPI staging receipts, PP roots, replay,
+   and terminal-cause propagation. Pass the new negative shared-open gates.
+2. Treat all currently accepted measurements as preserved prior-campaign
+   evidence. The runtime/environment/storage rewrite is material to startup and
+   may affect serving behavior; corrected n256 points cannot be silently added
+   to the old curves. For homogeneous final curves, rerun null-compute
+   n32/n64/n128/n256 twice and the PP2 n4/n8/n16/n32/n64/n128/n256 ladder from
+   one corrected snapshot. Otherwise label the output explicitly as a
+   mixed-campaign comparison. PP2 n256 remains last.
 3. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
 4. Replace all `pending` rows in this ledger with sealed evidence or an explicit

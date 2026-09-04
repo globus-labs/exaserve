@@ -404,6 +404,96 @@ receipts/result manifests; zero exit without the declared result is failure.
 The migration therefore moves ownership into Python without rewriting a sound
 native distribution algorithm merely to avoid a subprocess.
 
+**Non-head shared-filesystem prohibition (product-owner decision,
+2026-09-04)**
+
+Only explicitly head-owned processes running on the allocation-head node may
+read or write a SiteProfile-declared shared project or home filesystem. Each
+input has one designated shared reader; it may be an MPI global-rank-0 staging
+helper after that process proves it is allocation-binding rank 0 on the head
+node. No worker rank or worker descendant may open, stat, list, execute, import,
+memory-map, create, rename, or poll a path on those filesystems. This is a
+correctness and support invariant, not a performance preference. A successful
+run during a favorable metadata interval does not waive it.
+
+`SiteProfile` must therefore enumerate normalized shared roots and qualified
+node-local/site-local roots together with the filesystem identities used to
+verify them at runtime. The current descriptive `filesystem_semantics` mapping
+is not an enforcement boundary and is insufficient by itself.
+
+The prohibition covers source and scripts, `DeploymentPlan`, `RunPlan`,
+`SiteProfile`, `AllocationBinding`, compatibility overlays/manifests, Python or
+other project environments, model/tokenizer content, native and Go helper
+binaries, trace/config inputs, logs, diagnostics, receipts, shards, and result
+files. In particular:
+
+1. One supervised allocation-wide distribution transaction maps MPI global
+   rank 0 to allocation-binding rank 0, makes that process the only shared
+   source reader, and transfers content-addressed artifacts to verified
+   generation-scoped node-local candidates. Every node verifies and atomically
+   publishes its local result before any long-lived child starts. Verification
+   is performed by the already-qualified site-local bootstrap; code from an
+   unverified candidate cannot certify that candidate. The head assembles any
+   run-specific archive in head-local storage rather than copy and rehash a
+   temporary source tree beneath the shared run directory.
+2. The transaction carries the canonical plan/site/binding artifacts, ExaServe
+   and eval code, compatibility content, required scripts/native/Go tools, and
+   the exact non-site runtime environment. The relocatable base runtime is
+   prebuilt, content-addressed, and qualified during release/materialization;
+   the allocation head verifies and streams it rather than repackaging an
+   active environment. Worker argv, executable, `cwd`, `PYTHONPATH`, `HOME`,
+   `TMPDIR`, cache, plan, model, log, and result paths resolve only to the
+   published local capsule or an explicitly qualified site-local root.
+   Inherited shared fallbacks and Python user site-packages are forbidden.
+3. Model and PP distribution remain rooted at global allocation rank 0. Each
+   file/chunk has a compiled recipient-rank set, so PP stages may receive
+   different content without making a stage-subset worker the shared reader.
+   Single-replica PP may not fall back to loading weights from shared storage.
+4. Source/model/cache/publication receipts use MPI gather/reduction and only
+   rank 0 persists the aggregate. A blocking collective alone is not a bounded
+   failure protocol: gathering uses a supervised collective or nonblocking
+   point-to-point transfer with an absolute deadline, rank-completeness
+   evidence, and bounded abort. Replay initializes its communicator before
+   reading inputs: rank 0 validates the plan, nodefile/topology, and trace once,
+   distributes local trace partitions and client tools, and gathers results
+   through the same bounded rules. Independent rank files and root polling on
+   shared storage are forbidden.
+5. Rank diagnostics are produced locally and gathered by one bounded
+   head-owned transaction, or omitted under an explicit diagnostics policy.
+   A worker never writes an archive or manifest directly to the shared run.
+6. A path called “local” must be contained beneath a SiteProfile-declared local
+   root at compilation and validated against its filesystem identity at
+   runtime after resolving every component. Descendant symlinks, bind mounts,
+   or other escapes to a shared root fail closed. Absolute-path or `/tmp`
+   spelling alone is not evidence. Content caches include the immutable
+   artifact/model manifest hash in their identity rather than only a display
+   name.
+7. The head's own durable state writer must batch/group-commit cardinality-
+   dependent evidence. No event-loop thread may acquire a lock that another
+   thread holds across shared-filesystem I/O, and READY refresh must reference
+   immutable detailed manifests rather than repeatedly rewrite the full fleet
+   projection.
+
+The only possible worker-side filesystem exception is a versioned immutable
+site bootstrap proven by SiteProfile evidence to be node-local (for example a
+read-only image mounted independently on each node). A path merely present on
+every node is not sufficient. First test whether the scheduler/PALS provides
+verified executable staging; otherwise qualify the smallest site-local
+bootstrap needed to enter the MPI distribution transaction. Any shared
+bootstrap executable requires a new explicit product-owner exception and is not
+an implicit fallback.
+
+Acceptance additionally requires: static rejection of shared paths in every
+worker launch descriptor; a clean-interpreter proof with user site disabled; a
+two-node syscall trace beginning at managed-process creation and showing zero
+non-head opens beneath declared shared roots (or prior proof that the complete
+bootstrap/loader chain is site-local); injected extraction/hash/rank-loss
+failures; PP proof that global rank 0 is the only shared model reader; replay
+proof with no shared worker shards; and scale telemetry whose own collection
+does not access shared storage from workers. `AC-DIST-01` must be extended or
+accompanied by a new gate carrying these negative-access proofs before any
+scale/release claim.
+
 Acceptance requires a static/fake-launcher test proving that the shell starts
 no lifecycle child, has no path after the final `exec`, and contains no
 staging/readiness/cleanup decision. Bind, staging, helper, or result-validation
