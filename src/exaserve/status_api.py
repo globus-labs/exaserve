@@ -50,8 +50,10 @@ from .state.status import (
 from .state.clock import system_boot_id
 
 STATUS_FILENAME = "deployment_status.json"
+READY_LEASE_FILENAME = "deployment_ready_lease.json"
 ALLOCATION_BINDING_FILENAME = "allocation_binding.json"
 DEPLOYMENT_STATUS_SCHEMA_VERSION = 2
+READY_LEASE_SCHEMA_VERSION = 1
 
 
 class DeploymentNotReady(RuntimeError):
@@ -60,6 +62,10 @@ class DeploymentNotReady(RuntimeError):
 
 class StatusPublicationError(RuntimeError):
     """The authoritative lifecycle record could not be durably advanced."""
+
+
+class ReadyEvidenceChanged(StatusPublicationError):
+    """A compact lease cannot represent a changed detailed READY predicate."""
 
 
 class InvalidDeploymentStatus(RuntimeError):
@@ -331,6 +337,68 @@ def status_path(run_dir: str) -> str:
     return os.path.join(run_dir, STATUS_FILENAME)
 
 
+def ready_lease_path(run_dir: str) -> str:
+    return os.path.join(run_dir, READY_LEASE_FILENAME)
+
+
+def _load_ready_lease(run_dir: str, provenance: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Load one compact READY lease, or None for a legacy inline-only status."""
+    path = ready_lease_path(run_dir)
+    try:
+        from .state.atomic import strict_json_load_path
+
+        payload = strict_json_load_path(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise InvalidDeploymentStatus(f"READY lease artifact is invalid: {exc}") from exc
+    expected_fields = {
+        "schema_version",
+        "deployment_id",
+        "generation",
+        "deployment_plan_hash",
+        "allocation_binding_hash",
+        "lease_revision",
+        "lease_expires_at",
+        "lease_expires_monotonic",
+        "lease_clock_boot_id",
+        "lease_hash",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
+        raise InvalidDeploymentStatus("READY lease artifact has invalid fields")
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != READY_LEASE_SCHEMA_VERSION
+    ):
+        raise InvalidDeploymentStatus("READY lease artifact schema is unsupported")
+    from .plan.contracts import canonical_hash
+
+    declared_hash = payload.get("lease_hash")
+    unhashed = {key: value for key, value in payload.items() if key != "lease_hash"}
+    if not isinstance(declared_hash, str) or declared_hash != canonical_hash(unhashed):
+        raise InvalidDeploymentStatus("READY lease artifact hash mismatch")
+    expected_identity = {
+        "deployment_id": provenance.get("deployment_id"),
+        "generation": provenance.get("generation"),
+        "deployment_plan_hash": provenance.get("deployment_plan_hash"),
+        "allocation_binding_hash": provenance.get("allocation_binding_hash"),
+    }
+    if any(payload.get(key) != value for key, value in expected_identity.items()):
+        raise InvalidDeploymentStatus("READY lease artifact belongs to another deployment")
+    revision = payload.get("lease_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise InvalidDeploymentStatus("READY lease revision is invalid")
+    evidence = {
+        key: payload[key]
+        for key in (
+            "lease_expires_at",
+            "lease_expires_monotonic",
+            "lease_clock_boot_id",
+        )
+    }
+    return evidence
+
+
 class DeploymentStatusPublisher:
     """Writer side. One per generation, owned by the composition root."""
 
@@ -346,6 +414,7 @@ class DeploymentStatusPublisher:
         clock: Optional[StatusClock] = None,
     ) -> None:
         self.path = status_path(run_dir)
+        self.ready_lease_path = ready_lease_path(run_dir)
         self.store = StatusStore.deployment(self.path)
         self.plan = plan
         self.binding = binding
@@ -355,6 +424,8 @@ class DeploymentStatusPublisher:
         self._clock = clock or _SYSTEM_STATUS_CLOCK
         self._state = DeploymentState.PLANNED
         self._revision = -1
+        self._record: Optional[StatusRecord] = None
+        self._lease_revision = 0
 
     # -- lifecycle ---------------------------------------------------------
     def initialize(self) -> StatusRecord:
@@ -399,6 +470,7 @@ class DeploymentStatusPublisher:
             ) from exc
         self._state = DeploymentState.PLANNED
         self._revision = record.revision
+        self._record = record
         return record
 
     def advance(
@@ -475,6 +547,11 @@ class DeploymentStatusPublisher:
                     plan=self.plan,
                 )
                 data["readiness_snapshot"] = snapshot
+                # Lease renewal is a compact, independent atomic artifact.
+                # Publish it before READY: a later status-CAS failure leaves an
+                # ignored lease next to a non-READY record, while the reverse
+                # order could briefly expose READY without a renewable lease.
+                self._publish_ready_lease(snapshot)
             else:
                 snapshot = data.get("readiness_snapshot")
                 if not isinstance(snapshot, dict):
@@ -514,12 +591,32 @@ class DeploymentStatusPublisher:
             ) from exc
         self._state = DeploymentState(new)
         self._revision = record.revision
+        self._record = record
         return record
 
     def _ready_lease_evidence(self) -> dict[str, Any]:
         interval = float(self.plan.readiness.validation_interval_s)
         freshness = float(self.plan.readiness.observation_freshness_s)
         return _lease_evidence(self._clock, max(freshness, 3.0 * interval))
+
+    def _publish_ready_lease(self, snapshot: dict[str, Any]) -> None:
+        from .plan.contracts import canonical_hash
+        from .state.atomic import atomic_write_json
+
+        self._lease_revision += 1
+        payload = {
+            "schema_version": READY_LEASE_SCHEMA_VERSION,
+            "deployment_id": self.plan.deployment_id,
+            "generation": self.generation,
+            "deployment_plan_hash": self.plan.deployment_plan_hash,
+            "allocation_binding_hash": self.binding.allocation_binding_hash,
+            "lease_revision": self._lease_revision,
+            "lease_expires_at": snapshot["lease_expires_at"],
+            "lease_expires_monotonic": snapshot["lease_expires_monotonic"],
+            "lease_clock_boot_id": snapshot["lease_clock_boot_id"],
+        }
+        payload["lease_hash"] = canonical_hash(payload)
+        atomic_write_json(self.ready_lease_path, payload)
 
     def refresh_ready(
         self,
@@ -534,7 +631,7 @@ class DeploymentStatusPublisher:
             raise StatusPublicationError(
                 f"cannot refresh READY while publisher state is {self._state.value}"
             )
-        current = self.store.load()
+        current = self._record or self.store.load()
         if current is None:
             raise StatusPublicationError("READY status disappeared before refresh")
         previous = dict(current.data.get("readiness_snapshot", {}))
@@ -567,26 +664,43 @@ class DeploymentStatusPublisher:
             )
         except ValueError as exc:
             raise StatusPublicationError(f"READY heartbeat payload is invalid: {exc}") from exc
-        try:
-            record = self.store.update(
-                DeploymentState.READY,
-                reason_code="READINESS_HEARTBEAT",
-                data_update={
-                    "readiness_snapshot": snapshot,
-                    "model_map": model_map,
-                    "capability_map": capability_map,
-                    "receipt_hashes": receipt_hashes,
-                },
-                expected_revision=self._revision,
-                # Lease renewals advance CAS identity and updated_at but are
-                # not lifecycle transitions. Keeping each one in the status
-                # history would make a long-lived deployment grow forever.
-                record_history=False,
+        # The compact lease contains only liveness clocks. It may renew the
+        # detailed READY evidence already stored in the status record, but it
+        # must never bless a different receipt set, capability/model map, or
+        # topology while readers continue to see the old immutable manifest.
+        # A genuine evidence replacement must first move through the normal
+        # VALIDATING -> READY publication path, which writes the full record.
+        volatile_snapshot_fields = {
+            "observed_at",
+            "lease_expires_at",
+            "lease_expires_monotonic",
+            "lease_clock_boot_id",
+        }
+        previous_semantic = {
+            key: value for key, value in previous.items() if key not in volatile_snapshot_fields
+        }
+        refreshed_semantic = {
+            key: value for key, value in snapshot.items() if key not in volatile_snapshot_fields
+        }
+        changed = []
+        if refreshed_semantic != previous_semantic:
+            changed.append("readiness_snapshot")
+        if model_map != current.data.get("model_map"):
+            changed.append("model_map")
+        if capability_map != current.data.get("capability_map"):
+            changed.append("capability_map")
+        if receipt_hashes != previous.get("receipt_hashes"):
+            changed.append("receipt_hashes")
+        if changed:
+            raise ReadyEvidenceChanged(
+                "READY evidence changed during compact lease renewal; "
+                "republish through VALIDATING -> READY: " + ", ".join(changed)
             )
-        except (StatusConflict, OSError, ValueError) as exc:
+        try:
+            self._publish_ready_lease(snapshot)
+        except (OSError, ValueError) as exc:
             raise StatusPublicationError(f"READY heartbeat publication failed: {exc}") from exc
-        self._revision = record.revision
-        return record
+        return current
 
     def advance_through(
         self, *states: DeploymentState, reason_code: str, detail: str = "", **data: Any
@@ -770,6 +884,9 @@ def read_deployment_status(
         )
     snapshot = dict(data.get("readiness_snapshot", {}))
     if record.state == DeploymentState.READY.value:
+        compact_lease = _load_ready_lease(run_dir, provenance)
+        if compact_lease is not None:
+            snapshot.update(compact_lease)
         try:
             _validate_ready_payload(
                 snapshot,

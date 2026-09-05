@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -172,6 +173,10 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
                     topology_arm=arm,
                     log_name=f"replay_{arm}.log",
                     backend_process=launched.monitor.process,
+                    runtime_capsule_manifest_path=os.path.join(
+                        launched.monitor.status_dir, "source_staging_manifest.json"
+                    ),
+                    runtime_generation=launched.monitor.expected_generation,
                 )
                 print(f"[run_executor] arm {arm} exited {rc}", flush=True)
                 if rc != 0:
@@ -186,6 +191,10 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
                 run_plan,
                 base_urls,
                 backend_process=launched.monitor.process,
+                runtime_capsule_manifest_path=os.path.join(
+                    launched.monitor.status_dir, "source_staging_manifest.json"
+                ),
+                runtime_generation=launched.monitor.expected_generation,
             )
         heartbeat.ensure_held()
         if exit_code == 0:
@@ -575,6 +584,149 @@ def _submit_run_once(run_plan, scheduler, *, submit_attempt: int) -> tuple[str, 
             raise heartbeat_error
 
 
+@lru_cache(maxsize=16)
+def _validated_replay_capsule_environment(
+    manifest_path: str,
+    deployment_id: str,
+    generation: int,
+    deployment_plan_hash: str,
+    site_profile_hash: str,
+    expected_ranks: int,
+) -> tuple[tuple[str, str], ...]:
+    """Read the head-published capsule receipt once and bind its local paths."""
+    from exaserve.source_staging import (
+        runtime_paths_from_result,
+        validate_source_staging_result,
+    )
+    from exaserve.state.atomic import strict_json_load_path
+
+    result = validate_source_staging_result(
+        strict_json_load_path(manifest_path),
+        expected_deployment_id=deployment_id,
+        expected_generation=generation,
+        expected_plan_hash=deployment_plan_hash,
+        expected_site_profile_hash=site_profile_hash,
+    )
+    if len(result["rank_receipts"]) != expected_ranks:
+        raise RuntimeError("source capsule receipt rank count disagrees with the replay allocation")
+    if result["local_eval_manifest"] is None or result["local_run_plan"] is None:
+        raise RuntimeError("source capsule omitted required local evaluation artifacts")
+    paths = runtime_paths_from_result(result)
+    environment = {
+        "EXASERVE_LOCAL_RUNTIME_ROOT": str(paths.root),
+        "EXASERVE_LOCAL_STATE_ROOT": str(paths.state_root),
+        "EXASERVE_LOCAL_GO_DISPATCH": str(paths.go_dispatch_path),
+        "EXASERVE_LOCAL_EVAL_MANIFEST": str(paths.eval_manifest_path),
+        "EXASERVE_LOCAL_RUN_PLAN_PATH": str(paths.run_plan_path),
+        "EXASERVE_LOCAL_PLAN_PATH": str(paths.plan_path),
+        "EXASERVE_LOCAL_SITE_PROFILE_PATH": str(paths.site_profile_path),
+        "EXASERVE_LOCAL_BINDING_PATH": str(paths.binding_path),
+        "EXASERVE_QUALIFIED_PYTHON": result["qualified_python"],
+        "EXASERVE_QUALIFIED_PYTHON_SHA256": result["qualified_python_sha256"],
+        "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH": site_profile_hash,
+        "EXASERVE_COMPAT_SOURCES_NODE_PROFILE": result["compatibility_profile_id"],
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST": result["compatibility_manifest_hash"],
+    }
+    return tuple(sorted(environment.items()))
+
+
+def _closed_replay_worker_environment(run_plan, capsule_environment: dict[str, str]) -> dict:
+    from exaserve.plan.runtime_environment import (
+        SHARED_ROOTS_ENV,
+        RuntimePaths,
+        closed_runtime_environment,
+    )
+
+    from exaserve.plan.io import load_site_profile
+
+    plan = run_plan.semantic_plan.deployment
+    profile = load_site_profile(
+        os.path.join(capsule_environment["EXASERVE_LOCAL_RUNTIME_ROOT"], "run", "site.profile.json")
+    )
+    if (
+        profile.site_id != plan.site_profile_id
+        or profile.site_profile_hash != plan.site_profile_hash
+    ):
+        raise RuntimeError("replay capsule SiteProfile does not match DeploymentPlan")
+    paths = RuntimePaths.from_roots(
+        capsule_environment["EXASERVE_LOCAL_RUNTIME_ROOT"],
+        capsule_environment["EXASERVE_LOCAL_STATE_ROOT"],
+        policy=profile,
+        require_runtime=True,
+    )
+    paths.verify_capsule(policy=profile)
+    paths.prepare_state(policy=profile)
+    base = os.environ.copy()
+    base.update(capsule_environment)
+    selected = closed_runtime_environment(plan, paths=paths, base_environment=base, policy=profile)
+    selected["PYTHONSAFEPATH"] = "1"
+    # Replay consumes only local paths. The general runtime guard's declaration
+    # of shared roots is intentionally not inherited by this closed client.
+    selected.pop(SHARED_ROOTS_ENV, None)
+    exact_names = {
+        "PATH",
+        "LD_LIBRARY_PATH",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "IPYTHONDIR",
+        "JUPYTER_CONFIG_DIR",
+        "NUMBA_CACHE_DIR",
+        "TORCH_EXTENSIONS_DIR",
+        "MPLCONFIGDIR",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+        "TORCH_HOME",
+        "TRITON_CACHE_DIR",
+        "VLLM_CACHE_ROOT",
+        "RAY_TMPDIR",
+        "PYTHONPATH",
+        "PYTHONNOUSERSITE",
+        "PYTHONSAFEPATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONPYCACHEPREFIX",
+        "PMIX_MCA_mca_base_param_files",
+        "PMIX_MCA_mca_base_component_path",
+        "EXASERVE_QUALIFIED_PYTHON",
+        "EXASERVE_QUALIFIED_PYTHON_SHA256",
+        "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH",
+        "EXASERVE_PLAN_PATH",
+        "EXASERVE_SITE_PROFILE_PATH",
+        "EXASERVE_ALLOCATION_BINDING_PATH",
+        "EXASERVE_RUN_LOG_DIR",
+        "EXASERVE_COMPAT_PROFILE_ID",
+        "EXASERVE_COMPAT_OVERLAY_ROOT",
+        "EXASERVE_COMPAT_SOURCES_NODE_PROFILE",
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
+    }
+    filtered = {
+        name: value
+        for name, value in selected.items()
+        if name in exact_names
+        or name.startswith("EXASERVE_LOCAL_")
+        or name.startswith(("FI_", "MPICH_"))
+    }
+    shared_values = {
+        name: value
+        for name, value in filtered.items()
+        if any(root in value for root in ("/home/", "/lus/flare/"))
+    }
+    if shared_values:
+        raise RuntimeError(
+            f"closed replay worker environment retains shared paths: {sorted(shared_values)}"
+        )
+    return filtered
+
+
 def _run_replay_client(
     run_plan,
     base_urls: Iterable[str],
@@ -582,19 +734,118 @@ def _run_replay_client(
     topology_arm: str | None = None,
     log_name: str = "replay.log",
     backend_process: subprocess.Popen | None = None,
+    runtime_capsule_manifest_path: str | None = None,
+    runtime_generation: int | None = None,
 ) -> int:
     env = os.environ.copy()
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = run_plan.repo_root + (
-        os.pathsep + existing_pythonpath if existing_pythonpath else ""
-    )
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONSAFEPATH"] = "1"
+    replay_python = sys.executable
+    replay_cwd = run_plan.repo_root
+    runtime_root = env.get("EXASERVE_LOCAL_RUNTIME_ROOT")
+    if run_plan.client.num_nodes > 1:
+        required_capsule_env = {
+            "EXASERVE_LOCAL_RUNTIME_ROOT",
+            "EXASERVE_LOCAL_GO_DISPATCH",
+            "EXASERVE_LOCAL_STATE_ROOT",
+            "EXASERVE_LOCAL_EVAL_MANIFEST",
+            "EXASERVE_LOCAL_RUN_PLAN_PATH",
+            "EXASERVE_LOCAL_PLAN_PATH",
+            "EXASERVE_QUALIFIED_PYTHON",
+            "EXASERVE_QUALIFIED_PYTHON_SHA256",
+            "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH",
+            "EXASERVE_COMPAT_SOURCES_NODE_PROFILE",
+            "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
+        }
+        if runtime_capsule_manifest_path is not None and runtime_generation is not None:
+            capsule_env = dict(
+                _validated_replay_capsule_environment(
+                    os.path.abspath(runtime_capsule_manifest_path),
+                    run_plan.semantic_plan.deployment.deployment_id,
+                    runtime_generation,
+                    run_plan.deployment_plan_hash,
+                    run_plan.semantic_plan.deployment.site_profile_hash,
+                    run_plan.scheduler.nodes,
+                )
+            )
+            env = _closed_replay_worker_environment(run_plan, capsule_env)
+            runtime_root = env.get("EXASERVE_LOCAL_RUNTIME_ROOT")
+        elif not required_capsule_env <= set(env):
+            if runtime_capsule_manifest_path is None or runtime_generation is None:
+                missing = sorted(required_capsule_env - set(env))
+                raise RuntimeError(
+                    "multi-rank replay has no validated runtime capsule receipt; "
+                    f"missing environment {missing}"
+                )
+        else:
+            env = _closed_replay_worker_environment(
+                run_plan, {name: env[name] for name in required_capsule_env}
+            )
+            runtime_root = env.get("EXASERVE_LOCAL_RUNTIME_ROOT")
+        if not runtime_root or not os.path.isabs(runtime_root):
+            raise RuntimeError("multi-rank replay requires EXASERVE_LOCAL_RUNTIME_ROOT")
+        runtime_root = os.path.realpath(runtime_root)
+        python_root = os.path.realpath(os.path.join(runtime_root, "python"))
+        go_binary = env.get("EXASERVE_LOCAL_GO_DISPATCH")
+        state_root = env.get("EXASERVE_LOCAL_STATE_ROOT")
+        qualified_python = env.get("EXASERVE_QUALIFIED_PYTHON")
+        for name, path in (
+            ("runtime Python tree", python_root),
+            ("local Go replay binary", go_binary),
+        ):
+            if not path or not os.path.isabs(path):
+                raise RuntimeError(f"multi-rank replay requires an absolute {name}")
+            resolved = os.path.realpath(path)
+            if os.path.commonpath((runtime_root, resolved)) != runtime_root:
+                raise RuntimeError(f"{name} escapes EXASERVE_LOCAL_RUNTIME_ROOT")
+        if not os.path.isdir(python_root):
+            raise RuntimeError("local runtime Python tree is missing")
+        go_binary = os.path.realpath(go_binary)
+        if not os.path.isfile(go_binary) or not os.access(go_binary, os.X_OK):
+            raise RuntimeError("local Go replay binary is missing or not executable")
+        if not state_root or not os.path.isabs(state_root) or not os.path.isdir(state_root):
+            raise RuntimeError("multi-rank replay requires an existing EXASERVE_LOCAL_STATE_ROOT")
+        if (
+            not qualified_python
+            or not os.path.isabs(qualified_python)
+            or not os.path.isfile(qualified_python)
+            or not os.access(qualified_python, os.X_OK)
+        ):
+            raise RuntimeError("multi-rank replay requires an executable EXASERVE_QUALIFIED_PYTHON")
+        replay_python = os.path.realpath(qualified_python)
+        replay_cwd = python_root
+        env["PYTHONPATH"] = python_root
+        resolved_state = os.path.realpath(state_root)
+        for name in ("HOME", "TMPDIR", "XDG_CACHE_HOME", "HF_HOME"):
+            value = env.get(name)
+            if (
+                not value
+                or not os.path.isabs(value)
+                or os.path.commonpath((resolved_state, os.path.realpath(value))) != resolved_state
+            ):
+                raise RuntimeError(f"multi-rank replay {name} is not under local state root")
+    else:
+        # A staged runtime is preferred for one rank as well, but preserve the
+        # head-only compatibility path for local diagnostics/materializations.
+        if runtime_root and os.path.isdir(os.path.join(runtime_root, "python")):
+            replay_cwd = os.path.realpath(os.path.join(runtime_root, "python"))
+            env["PYTHONPATH"] = replay_cwd
+            qualified_python = env.get("EXASERVE_QUALIFIED_PYTHON")
+            if qualified_python:
+                replay_python = os.path.realpath(qualified_python)
+        else:
+            env["PYTHONPATH"] = run_plan.repo_root
     timeout_s = _replay_process_timeout_s(run_plan)
     replay_cmd = [
-        sys.executable,
+        replay_python,
         "-m",
         "eval.replay_client",
         "--config",
-        run_plan.runtime_manifest_path,
+        (
+            env["EXASERVE_LOCAL_EVAL_MANIFEST"]
+            if run_plan.client.num_nodes > 1
+            else run_plan.runtime_manifest_path
+        ),
         "--base-urls",
         ",".join(base_urls),
     ]
@@ -612,6 +863,11 @@ def _run_replay_client(
     if run_plan.client.num_nodes > 1:
         hostfile = _build_hostfile(run_plan.client.num_nodes)
         try:
+            _validate_replay_hostfile_binding(
+                hostfile,
+                binding_path=env.get("EXASERVE_ALLOCATION_BINDING_PATH", ""),
+                run_plan=run_plan,
+            )
             # Fan the load generator out to `client.num_nodes` client nodes.
             # PBS/PALS uses mpiexec --hostfile; Slurm uses srun --nodelist
             # (Cray/Slurm sites have no mpiexec).
@@ -625,12 +881,19 @@ def _run_replay_client(
                     f"--nodes={run_plan.client.num_nodes}",
                     "--ntasks-per-node=1",
                     "--cpu-bind=none",
+                    f"--export=NONE,{','.join(sorted(env))}",
+                    f"--chdir={replay_cwd}",
                     f"--nodelist={','.join(_nodes)}",
                     *replay_cmd,
                 ]
             else:
                 command = [
                     "mpiexec",
+                    "--genvnone",
+                    "--envnone",
+                    "--shared",
+                    "--envlist",
+                    ",".join(sorted(env)),
                     "-n",
                     str(run_plan.client.num_nodes),
                     "--ppn",
@@ -639,13 +902,15 @@ def _run_replay_client(
                     "none",
                     "--hostfile",
                     hostfile,
+                    "--wdir",
+                    replay_cwd,
                     *replay_cmd,
                 ]
             result = _run_command_with_tee(
                 command,
                 log_path=os.path.join(run_plan.bundle.logs_dir, log_name),
-                cwd=run_plan.repo_root,
-                env=env,
+                cwd=replay_cwd,
+                env={**os.environ, **env},
                 timeout_s=timeout_s,
                 abort_check=backend_exit_reason,
             )
@@ -673,7 +938,7 @@ def _run_replay_client(
     return _run_command_with_tee(
         replay_cmd,
         log_path=os.path.join(run_plan.bundle.logs_dir, log_name),
-        cwd=run_plan.repo_root,
+        cwd=replay_cwd,
         env=env,
         timeout_s=timeout_s,
         abort_check=backend_exit_reason,
@@ -696,11 +961,40 @@ def _build_hostfile(client_nodes: int) -> str:
         raise RuntimeError(
             f"Requested {client_nodes} replay client nodes, but only found {len(nodes)} in PBS_NODEFILE"
         )
-    fd, path = tempfile.mkstemp(prefix="exaserve_eval_hosts_", text=True)
+    fd, path = tempfile.mkstemp(prefix="exaserve_eval_hosts_", text=True, dir="/tmp")
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         for node in nodes[:client_nodes]:
             handle.write(node + "\n")
     return path
+
+
+def _validate_replay_hostfile_binding(hostfile: str, *, binding_path: str, run_plan) -> None:
+    """Bind PALS/Slurm rank order to the canonical allocation rank order."""
+    if not binding_path or not os.path.isabs(binding_path):
+        raise RuntimeError("multi-node replay requires a local AllocationBinding path")
+    from exaserve.plan.contracts import same_node
+    from exaserve.plan.io import load_allocation_binding
+    from exaserve.state.atomic import regular_file_reader
+
+    binding = load_allocation_binding(binding_path)
+    if (
+        binding.deployment_plan_hash != run_plan.deployment_plan_hash
+        or binding.site_profile_hash != run_plan.semantic_plan.deployment.site_profile_hash
+    ):
+        raise RuntimeError("replay AllocationBinding belongs to another deployment")
+    with regular_file_reader(hostfile) as handle:
+        nodes = [line.strip() for line in handle if line.strip()]
+    expected_count = run_plan.client.num_nodes
+    expected = [binding.node_for(rank) for rank in range(expected_count)]
+    if (
+        len(nodes) != expected_count
+        or any(not node for node in expected)
+        or any(not same_node(observed, planned) for observed, planned in zip(nodes, expected))
+    ):
+        raise RuntimeError(
+            "replay hostfile rank order disagrees with canonical AllocationBinding: "
+            f"observed={nodes}, expected={expected}"
+        )
 
 
 def _replay_process_timeout_s(run_plan) -> float:
@@ -716,6 +1010,8 @@ def _replay_process_timeout_s(run_plan) -> float:
     dispatch_s = max(0.0, float(run_plan.workload.duration))
     warmup_s = max(0.0, float(run_plan.client.warmup_duration_s))
     request_timeout_s = float(run_plan.client.request_timeout_s)
+    # The canonical field retains its v2 name for manifest compatibility; it
+    # now bounds supervised MPI result transfer/reduction, not file shards.
     shard_timeout_s = float(run_plan.client.shard_timeout_s)
     for name, value in (
         ("client.request_timeout_s", request_timeout_s),
@@ -997,7 +1293,7 @@ def _valid_gather_evidence(gather, expected_ranks: int) -> bool:
             or not isinstance(digest, str)
             or len(digest) != 64
             or any(char not in "0123456789abcdef" for char in digest)
-            or shard.get("transport") not in {"in_memory", "shared_file"}
+            or shard.get("transport") not in {"in_memory", "mpi_chunked", "mpi_reduce"}
         ):
             return False
         seen.append(rank)

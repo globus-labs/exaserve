@@ -20,7 +20,12 @@ import re
 import sys
 from typing import Iterable
 
-from .profile import CompatibilityProfile, ProfileMismatch, default_profile
+from .profile import (
+    CompatibilityProfile,
+    ProfileMismatch,
+    default_profile,
+    verify_installed_sources_once,
+)
 
 SCHEMA_VERSION = 2
 ROOT_ENV = "EXASERVE_COMPAT_OVERLAY_ROOT"
@@ -375,6 +380,13 @@ def _verified_base_sources(entries: list[dict]) -> dict[str, Path]:
             raise GeneratedOverlayError(
                 f"overlay base source escapes {entry['distribution']}"
             ) from exc
+        if os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT"):
+            from ..plan.runtime_environment import require_non_shared_path
+
+            require_non_shared_path(
+                source,
+                name=f"compatibility base source for {entry['distribution']}",
+            )
         try:
             base_data = _read_regular_bytes(source)
         except (OSError, ValueError) as exc:
@@ -445,12 +457,14 @@ class _OverlayFinder(importlib.abc.MetaPathFinder):
         root: Path,
         entries: list[dict],
         base_sources: dict[str, Path],
+        manifest: dict,
     ) -> None:
         self._exaserve_overlay_profile_id = profile.profile_id
         self.profile = profile
         self.root = root
         self.entries = {entry["module"]: entry for entry in entries}
         self.base_sources = base_sources
+        self.manifest = manifest
 
     def find_spec(self, fullname, path=None, target=None):
         del path, target
@@ -489,13 +503,10 @@ def install(
 ) -> dict:
     """Verify and install one overlay finder; never replace a loaded target."""
     root_path = Path(root).resolve()
-    manifest = load_manifest(profile, root_path)
-    base_sources = _verified_base_sources(manifest["entries"])
     role = role or os.environ.get("EXASERVE_COMPAT_ROLE", "")
     if not role:
         raise GeneratedOverlayError("EXASERVE_COMPAT_ROLE is required to install the overlay")
     relevant_ids = _required_patch_ids(profile, role)
-    entries = [entry for entry in manifest["entries"] if relevant_ids & set(entry["patch_ids"])]
     existing = [
         finder
         for finder in sys.meta_path
@@ -508,6 +519,8 @@ def install(
             or existing[0].root != root_path
         ):
             raise GeneratedOverlayError("a different compatibility overlay is already installed")
+        manifest = existing[0].manifest
+        entries = [entry for entry in manifest["entries"] if relevant_ids & set(entry["patch_ids"])]
         wrong_source = []
         expected_paths = {
             entry["module"]: (root_path / entry["relative_path"]).resolve() for entry in entries
@@ -535,6 +548,9 @@ def install(
                 f"distribution: {sorted(wrong_source)}"
             )
         return manifest
+    manifest = load_manifest(profile, root_path)
+    base_sources = _verified_base_sources(manifest["entries"])
+    entries = [entry for entry in manifest["entries"] if relevant_ids & set(entry["patch_ids"])]
     target_modules = {entry["module"] for entry in entries}
     already_loaded = sorted(target_modules & set(sys.modules))
     if already_loaded:
@@ -546,7 +562,13 @@ def install(
     # a generic worker interpreter, provided no affected target was imported.
     sys.meta_path.insert(
         0,
-        _OverlayFinder(profile, root_path, manifest["entries"], base_sources),
+        _OverlayFinder(
+            profile,
+            root_path,
+            manifest["entries"],
+            base_sources,
+            manifest,
+        ),
     )
     return manifest
 
@@ -570,7 +592,7 @@ def install_from_environment() -> dict | None:
                 "vllm": __import__("importlib.metadata", fromlist=["version"]).version("vllm"),
             }
         )
-        profile.verify_installed_sources()
+        verify_installed_sources_once(profile)
     except ProfileMismatch as exc:
         raise GeneratedOverlayError(str(exc)) from exc
     return install(profile, root, role=os.environ.get("EXASERVE_COMPAT_ROLE", ""))
@@ -598,9 +620,18 @@ def activate_patch_ids(profile: CompatibilityProfile, patch_ids: Iterable[str]) 
         importlib.import_module(module)
 
 
-def overlay_root_for(profile_id: str) -> str:
+def overlay_root_for(profile_id: str, *, runtime_root: str | os.PathLike | None = None) -> str:
     if not isinstance(profile_id, str) or not _SHA256.fullmatch(profile_id):
         raise GeneratedOverlayError("profile_id must be SHA-256")
+    root = runtime_root or os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT", "")
+    if root:
+        runtime = Path(root)
+        if not runtime.is_absolute():
+            raise GeneratedOverlayError("EXASERVE_LOCAL_RUNTIME_ROOT must be absolute")
+        return str(runtime / "python" / "exaserve" / "_compat_runtime" / profile_id)
+    # Materialization and portable planner tests run before a runtime capsule
+    # exists.  The legacy spelling remains only at that pre-publication seam;
+    # managed descendants call this with the required local runtime root.
     return f"/tmp/exaserve_src/exaserve/_compat_runtime/{profile_id}"
 
 

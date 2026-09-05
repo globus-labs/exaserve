@@ -12,7 +12,7 @@ from exaserve.plan import PlanError, compile_deployment_plan
 def _raw(**overrides):
     raw = {
         "num_nodes": 2,
-        "model_storage_path": "/lus/models",
+        "model_storage_path": "/lus/flare/models",
         "validation_mode": True,
         "exposure": {"mode": "DIRECT_VALIDATION"},
         "gateway": None,

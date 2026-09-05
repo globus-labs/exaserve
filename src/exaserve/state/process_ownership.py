@@ -15,6 +15,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -49,6 +50,176 @@ def runtime_ownership_root() -> str:
     return os.path.abspath(override or f"/tmp/xr-{os.getuid()}")
 
 
+def _runtime_site_profile():
+    site_path = os.environ.get("EXASERVE_SITE_PROFILE_PATH", "").strip()
+    if not site_path:
+        runtime_root = os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT", "").strip()
+        if runtime_root:
+            site_path = os.path.join(runtime_root, "run", "site.profile.json")
+    if not site_path:
+        return None
+    from ..plan.io import load_site_profile
+    from ..site import require_complete_filesystem_policy
+
+    profile = load_site_profile(site_path)
+    require_complete_filesystem_policy(profile)
+    return profile
+
+
+def _approved_local_root(candidate: Path, profile) -> Path:
+    if profile is not None:
+        roots = [
+            Path(key.removeprefix("local_root:"))
+            for key, _value in profile.filesystem_semantics
+            if key.startswith("local_root:")
+        ]
+        matches = [root for root in roots if candidate == root or root in candidate.parents]
+        if not matches:
+            raise ProcessOwnershipError(
+                f"ownership path is outside SiteProfile local roots: {candidate}"
+            )
+        return max(matches, key=lambda item: len(item.parts))
+    # Standalone unit/tool callers have no runtime SiteProfile. Keep their
+    # scratch boundary narrow; managed ranks always take the profile branch.
+    tmp = Path("/tmp")
+    if candidate == tmp or tmp in candidate.parents:
+        return tmp
+    parent = candidate.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    return parent
+
+
+def _lexically_shared(candidate: Path, profile) -> bool:
+    from ..plan.runtime_environment import shared_roots
+
+    return any(candidate == root or root in candidate.parents for root in shared_roots(profile))
+
+
+def _open_private_directory_chain(candidate: Path, *, local_root: Path, create: bool) -> None:
+    """Open/create without following any component or crossing the local mount."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(candidate.anchor, flags)
+    current = Path(candidate.anchor)
+    local_device = None
+    try:
+        for part in candidate.parts[1:]:
+            current /= part
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create or local_device is None:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+                child = os.open(part, flags, dir_fd=descriptor)
+            except OSError as exc:
+                raise ProcessOwnershipError(
+                    f"ownership directory contains an unsafe component {current}: {exc}"
+                ) from exc
+            metadata = os.fstat(child)
+            if not stat.S_ISDIR(metadata.st_mode):
+                os.close(child)
+                raise ProcessOwnershipError(
+                    f"ownership directory component is not a directory: {current}"
+                )
+            if current == local_root:
+                local_device = metadata.st_dev
+            elif local_device is not None:
+                if metadata.st_dev != local_device:
+                    os.close(child)
+                    raise ProcessOwnershipError(
+                        f"ownership directory crosses a filesystem boundary: {current}"
+                    )
+                if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+                    os.close(child)
+                    raise ProcessOwnershipError(
+                        f"ownership directory is not private to this uid: {current}"
+                    )
+            os.close(descriptor)
+            descriptor = child
+        if local_device is None:
+            raise ProcessOwnershipError(
+                f"ownership directory is not beneath its approved local root: {candidate}"
+            )
+    finally:
+        os.close(descriptor)
+
+
+def _prepare_private_local_directory(path: str | os.PathLike, *, create: bool) -> str:
+    candidate = Path(os.path.abspath(os.fspath(path)))
+    if (
+        not candidate.is_absolute()
+        or candidate == Path(candidate.anchor)
+        or ".." in candidate.parts
+        or "\x00" in str(candidate)
+    ):
+        raise ProcessOwnershipError(f"ownership directory path is unsafe: {candidate}")
+    profile = _runtime_site_profile()
+    local_root = _approved_local_root(candidate, profile)
+    if (
+        candidate == local_root
+        or _lexically_shared(candidate, profile)
+        or _lexically_shared(local_root, profile)
+    ):
+        raise ProcessOwnershipError(f"ownership directory is not a private local path: {candidate}")
+    if profile is not None:
+        # Verify the already-existing declared root before creating a single
+        # child. Otherwise a wrongly mounted /tmp could receive one mkdir
+        # before the post-creation identity check rejected it.
+        from ..plan.runtime_environment import RuntimePathError, validate_declared_filesystem
+
+        try:
+            _open_private_directory_chain(local_root, local_root=local_root, create=False)
+            if (
+                validate_declared_filesystem(
+                    local_root,
+                    policy=profile,
+                    root_kind="local_root",
+                )
+                is None
+            ):
+                raise RuntimePathError("ownership local root has no filesystem identity")
+        except RuntimePathError as exc:
+            raise ProcessOwnershipError(str(exc)) from exc
+    _open_private_directory_chain(candidate, local_root=local_root, create=create)
+    if profile is not None:
+        from ..plan.runtime_environment import (
+            require_contained_local_path,
+            validate_declared_filesystem,
+        )
+
+        try:
+            if (
+                validate_declared_filesystem(
+                    candidate,
+                    policy=profile,
+                    root_kind="local_root",
+                )
+                is None
+            ):
+                raise RuntimePathError("ownership directory has no filesystem identity")
+            require_contained_local_path(
+                candidate,
+                local_root,
+                policy=profile,
+                name="ownership directory",
+                require_exists=True,
+            )
+        except RuntimePathError as exc:
+            raise ProcessOwnershipError(str(exc)) from exc
+    return str(candidate)
+
+
+def prepare_ownership_root(*, create: bool = True) -> str:
+    return _prepare_private_local_directory(ownership_root(), create=create)
+
+
+def prepare_runtime_ownership_root(*, create: bool = True) -> str:
+    return _prepare_private_local_directory(runtime_ownership_root(), create=create)
+
+
 def generation_runtime_root(deployment_id: str, generation: int, rank: int) -> str:
     token = canonical_hash(
         {
@@ -57,13 +228,33 @@ def generation_runtime_root(deployment_id: str, generation: int, rank: int) -> s
             "rank": rank,
         }
     )[:20]
-    return os.path.join(runtime_ownership_root(), token)
+    root = prepare_runtime_ownership_root()
+    candidate = os.path.join(root, token)
+    return _prepare_private_local_directory(candidate, create=True)
 
 
-def _is_owned_temp_path(path: str) -> bool:
+def _is_owned_temp_path(
+    path: str,
+    *,
+    deployment_id: str | None = None,
+    generation: int | None = None,
+) -> bool:
     absolute = os.path.abspath(path)
     for root in (ownership_root(), runtime_ownership_root()):
         if os.path.commonpath((root, absolute)) == root and absolute != root:
+            return True
+    if deployment_id is not None and generation is not None:
+        from types import SimpleNamespace
+
+        from ..plan.runtime_environment import default_local_state_root
+
+        expected = default_local_state_root(
+            SimpleNamespace(deployment_id=deployment_id), generation
+        )
+        # State ownership is intentionally exact, not "anything under /tmp".
+        # The receipt's deployment/generation fields cryptographically bind
+        # this one directory and stale cleanup re-derives the same path.
+        if absolute == os.path.abspath(expected):
             return True
     return False
 
@@ -168,7 +359,11 @@ class ProcessOwnershipReceipt:
         for path in self.temp_paths:
             if not isinstance(path, str) or not path:
                 raise ProcessOwnershipError("owned temp path is invalid")
-            if not _is_owned_temp_path(path):
+            if not _is_owned_temp_path(
+                path,
+                deployment_id=self.deployment_id,
+                generation=self.generation,
+            ):
                 raise ProcessOwnershipError(f"owned temp path escapes ownership root: {path}")
         if not isinstance(self.receipt_hash, str) or (
             self.receipt_hash and not _SHA256.fullmatch(self.receipt_hash)
@@ -192,9 +387,10 @@ class ProcessOwnershipRegistry:
         self.deployment_id = deployment_id
         self.generation = generation
         self.rank = rank
-        self.directory = os.path.join(ownership_root(), "receipts")
-        os.makedirs(self.directory, mode=0o700, exist_ok=True)
-        os.chmod(self.directory, 0o700)
+        root = prepare_ownership_root()
+        self.directory = _prepare_private_local_directory(
+            os.path.join(root, "receipts"), create=True
+        )
         self._owned: dict[str, tuple[str, str]] = {}
 
     def record(
@@ -257,9 +453,31 @@ class ProcessOwnershipRegistry:
         self._owned.pop(component_id, None)
 
 
+def _validate_receipt_file(path: str) -> str:
+    root = prepare_ownership_root(create=False)
+    directory = _prepare_private_local_directory(os.path.join(root, "receipts"), create=False)
+    candidate = os.path.abspath(path)
+    if os.path.dirname(candidate) != directory:
+        raise ProcessOwnershipError("ownership receipt escapes the private receipt directory")
+    try:
+        metadata = os.lstat(candidate)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ProcessOwnershipError(f"ownership receipt cannot be inspected safely: {exc}") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or _mount_identity(candidate) != _mount_identity(directory)
+    ):
+        raise ProcessOwnershipError("ownership receipt is not a same-filesystem owned regular file")
+    return candidate
+
+
 def load_process_ownership(path: str) -> ProcessOwnershipReceipt:
     try:
-        raw = strict_json_load_path(path)
+        raw = strict_json_load_path(_validate_receipt_file(path))
     except FileNotFoundError:
         # Absence is an ordinary idempotency state for release callers.  Keep
         # it distinguishable from a present-but-malformed security receipt.
@@ -362,22 +580,173 @@ def _group_alive(pgid: int) -> bool:
         return True
 
 
+def _mount_identity(path: str | os.PathLike) -> tuple[str, str, str]:
+    """Return the kernel mount ID/point/type covering one existing path.
+
+    Overlayfs may report different ``st_dev`` values for a regular file and
+    its parent directory even though both belong to the same mount. Linux
+    mountinfo is the authoritative namespace identity for containment.
+    """
+
+    try:
+        resolved = Path(path).resolve(strict=True)
+        lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ProcessOwnershipError(f"cannot inspect ownership mount identity: {exc}") from exc
+    matches: list[tuple[int, tuple[str, str, str]]] = []
+    for line in lines:
+        try:
+            left, right = line.split(" - ", 1)
+            left_fields = left.split()
+            right_fields = right.split()
+            mount_text = left_fields[4]
+            for encoded, decoded in (
+                ("\\040", " "),
+                ("\\011", "\t"),
+                ("\\012", "\n"),
+                ("\\134", "\\"),
+            ):
+                mount_text = mount_text.replace(encoded, decoded)
+            mount_point = Path(mount_text)
+            if resolved != mount_point and mount_point not in resolved.parents:
+                continue
+            identity = (left_fields[0], str(mount_point), right_fields[0])
+            matches.append((len(mount_point.parts), identity))
+        except (IndexError, ValueError):
+            continue
+    if not matches:
+        raise ProcessOwnershipError(f"no mountinfo entry covers ownership path: {resolved}")
+    return max(matches, key=lambda item: item[0])[1]
+
+
 def _remove_owned_paths(receipt: ProcessOwnershipReceipt) -> None:
     failures = []
     for path in receipt.temp_paths:
         absolute = os.path.abspath(path)
-        if not _is_owned_temp_path(absolute):
+        if not _is_owned_temp_path(
+            absolute,
+            deployment_id=receipt.deployment_id,
+            generation=receipt.generation,
+        ):
             failures.append(f"unsafe path {absolute}")
             continue
         try:
-            if os.path.islink(absolute) or os.path.isfile(absolute):
+            parent = _prepare_private_local_directory(os.path.dirname(absolute), create=False)
+            metadata = os.lstat(absolute)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ProcessOwnershipError(f"owned path is a symlink: {absolute}")
+            if stat.S_ISREG(metadata.st_mode):
+                if metadata.st_uid != os.getuid() or _mount_identity(absolute) != _mount_identity(
+                    parent
+                ):
+                    raise ProcessOwnershipError(f"owned file is not local/private: {absolute}")
                 os.unlink(absolute)
-            elif os.path.isdir(absolute):
+            elif stat.S_ISDIR(metadata.st_mode):
+                _prepare_private_local_directory(absolute, create=False)
                 shutil.rmtree(absolute)
+            else:
+                raise ProcessOwnershipError(f"owned path has an unsupported type: {absolute}")
+        except FileNotFoundError:
+            continue
+        except ProcessOwnershipError as exc:
+            failures.append(str(exc))
         except OSError as exc:
             failures.append(f"{absolute}: {exc}")
     if failures:
         raise ProcessOwnershipError("owned runtime cleanup failed: " + "; ".join(failures))
+
+
+def _terminate_owned_group(receipt: ProcessOwnershipReceipt, *, deadline: float) -> None:
+    if not _group_alive(receipt.pgid):
+        return
+    try:
+        os.killpg(receipt.pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    term_deadline = min(deadline, time.monotonic() + 5.0)
+    while time.monotonic() < term_deadline and _group_alive(receipt.pgid):
+        time.sleep(0.05)
+    if _group_alive(receipt.pgid):
+        try:
+            os.killpg(receipt.pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+    while time.monotonic() < deadline and _group_alive(receipt.pgid):
+        time.sleep(0.05)
+    if _group_alive(receipt.pgid):
+        raise ProcessOwnershipError(f"owned process group {receipt.pgid} survived cleanup")
+
+
+def _existing_receipt_directory() -> Path | None:
+    try:
+        root = prepare_ownership_root(create=False)
+        directory = _prepare_private_local_directory(os.path.join(root, "receipts"), create=False)
+    except FileNotFoundError:
+        return None
+    return Path(directory)
+
+
+def cleanup_owned_component_processes(
+    *,
+    deployment_id: str,
+    generation: int,
+    rank: int,
+    component_id: str,
+    deadline_s: float,
+) -> int:
+    """Reap exact current-generation child groups after their guardian dies."""
+
+    if not all(isinstance(value, str) and value for value in (deployment_id, component_id)):
+        raise ProcessOwnershipError("owned component cleanup identity is invalid")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (generation, rank)
+    ):
+        raise ProcessOwnershipError("owned component cleanup generation/rank is invalid")
+    if (
+        isinstance(deadline_s, bool)
+        or not isinstance(deadline_s, (int, float))
+        or not math.isfinite(float(deadline_s))
+        or deadline_s <= 0
+    ):
+        raise ProcessOwnershipError("owned component cleanup deadline must be finite and positive")
+    directory = _existing_receipt_directory()
+    if directory is None:
+        return 0
+    deadline = time.monotonic() + float(deadline_s)
+    cleaned = 0
+    receipts = [
+        (path, load_process_ownership(str(path))) for path in sorted(directory.glob("*.json"))
+    ]
+    if component_id == "ray_child" and any(
+        receipt.uid == os.getuid()
+        and receipt.hostname == socket.gethostname()
+        and receipt.deployment_id == deployment_id
+        and receipt.generation == generation
+        and receipt.rank == rank
+        and receipt.component_id == "ray"
+        and _same_process(receipt)
+        for _path, receipt in receipts
+    ):
+        raise ProcessOwnershipError(
+            "refusing child fallback cleanup while its exact guardian is still live"
+        )
+    for path, receipt in receipts:
+        if (
+            receipt.uid != os.getuid()
+            or receipt.hostname != socket.gethostname()
+            or receipt.deployment_id != deployment_id
+            or receipt.generation != generation
+            or receipt.rank != rank
+            or receipt.component_id != component_id
+        ):
+            continue
+        _terminate_owned_group(receipt, deadline=deadline)
+        _remove_owned_paths(receipt)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+        cleaned += 1
+    return cleaned
 
 
 def cleanup_stale_owned_processes(
@@ -398,12 +767,12 @@ def cleanup_stale_owned_processes(
         raise ProcessOwnershipError("stale cleanup deadline must be numeric")
     if not math.isfinite(float(deadline_s)) or not deadline_s > 0:
         raise ProcessOwnershipError("stale cleanup deadline must be finite and positive")
-    directory = os.path.join(ownership_root(), "receipts")
-    if not os.path.isdir(directory):
+    directory = _existing_receipt_directory()
+    if directory is None:
         return 0
     deadline = time.monotonic() + max(0.0, deadline_s)
     cleaned = 0
-    for path in sorted(Path(directory).glob("*.json")):
+    for path in sorted(directory.glob("*.json")):
         receipt = load_process_ownership(str(path))
         if receipt.uid != os.getuid() or receipt.hostname != socket.gethostname():
             continue
@@ -418,24 +787,7 @@ def cleanup_stale_owned_processes(
                     f"live {relationship} generation {receipt.generation} already owns "
                     f"process group {receipt.pgid} for deployment {deployment_id!r}"
                 )
-            try:
-                os.killpg(receipt.pgid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            term_deadline = min(deadline, time.monotonic() + 5.0)
-            while time.monotonic() < term_deadline and _group_alive(receipt.pgid):
-                time.sleep(0.05)
-            if _group_alive(receipt.pgid):
-                try:
-                    os.killpg(receipt.pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            while time.monotonic() < deadline and _group_alive(receipt.pgid):
-                time.sleep(0.05)
-            if _group_alive(receipt.pgid):
-                raise ProcessOwnershipError(
-                    f"owned stale process group {receipt.pgid} survived cleanup"
-                )
+            _terminate_owned_group(receipt, deadline=deadline)
         _remove_owned_paths(receipt)
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)

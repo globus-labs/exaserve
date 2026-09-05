@@ -172,6 +172,19 @@ def test_lease_directory_symlink_is_rejected_without_writing_target(tmp_path):
     assert list(target.iterdir()) == []
 
 
+def test_lease_directory_intermediate_symlink_is_rejected_before_creation(tmp_path):
+    local = tmp_path / "local"
+    target = tmp_path / "target"
+    local.mkdir()
+    target.mkdir()
+    (local / "escape").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(PortUnavailable, match="lease directory"):
+        reserve_port(_free_base(), lease_dir=str(local / "escape" / "leases"))
+
+    assert not (target / "leases").exists()
+
+
 def test_guard_symlink_is_rejected_without_modifying_victim(tmp_path):
     base = _free_base()
     victim = tmp_path / "victim"

@@ -59,10 +59,12 @@ def test_scheduler_unsets_site_environment_after_bootstrap():
         )
     )
     source_at = script.index("source /tmp/env_aurora")
+    no_user_site_at = script.index("export PYTHONNOUSERSITE=1", source_at)
+    safe_path_at = script.index("export PYTHONSAFEPATH=1", source_at)
     unset_at = script.index("unset ONEAPI_DEVICE_SELECTOR")
     nounset_at = script.index("set -u")
     exec_at = script.index("exec python3")
-    assert source_at < unset_at < nounset_at < exec_at
+    assert source_at < no_user_site_at < safe_path_at < unset_at < nounset_at < exec_at
     assert script.index("set -eo pipefail") < source_at
 
 
@@ -163,9 +165,27 @@ def test_eval_body_quotes_and_validates():
         )
     )
     assert "cd /tmp/repo" in script
+    assert script.index("export PYTHONNOUSERSITE=1") < script.index("source /tmp/env")
+    assert script.index(
+        "export PYTHONNOUSERSITE=1", script.index("source /tmp/env")
+    ) < script.index("exec python3")
     assert "export PYTHONDONTWRITEBYTECODE=1" in script
     assert "PYTHONPYCACHEPREFIX" in script
     assert "exec python3 -m eval.cli run execute /tmp/run.yaml" in script
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"environment": {"PYTHONNOUSERSITE": "0"}},
+        {"environment_unset": ("PYTHONNOUSERSITE",)},
+        {"environment": {"PYTHONSAFEPATH": "0"}},
+        {"environment_unset": ("PYTHONSAFEPATH",)},
+    ],
+)
+def test_scheduler_cannot_disable_python_user_site_isolation(override):
+    with pytest.raises(ValueError, match="PYTHON"):
+        _spec(**override)
 
 
 def test_eval_body_never_expands_metacharacters_in_paths():

@@ -10,6 +10,7 @@ mode the audit found.
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import os
 import socket
@@ -100,6 +101,19 @@ def test_local_hop_delivers_one_payload_unchanged(tmp_path):
     finally:
         ingress.stop()
     assert drained == [payload]
+
+
+def test_local_ingress_never_creates_through_intermediate_symlink(tmp_path):
+    local = tmp_path / "local"
+    shared = tmp_path / "shared-like"
+    local.mkdir()
+    shared.mkdir()
+    (local / "escape").symlink_to(shared, target_is_directory=True)
+    path = str(local / "escape" / "new" / "receipts.sock")
+
+    ingress = LocalReceiptIngress(path, log=lambda _message: None)
+    assert not ingress.start()
+    assert not (shared / "new").exists()
 
 
 def test_local_hop_socket_is_private_and_generation_scoped(tmp_path):
@@ -284,6 +298,56 @@ def test_receipt_provenance_hashes_fail_closed_without_coercion(tmp_path):
     assert producers.file_hash(str(executable)) != first
 
 
+def test_preverified_python_hash_cannot_bypass_writable_filesystem_check(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from exaserve.plan import runtime_environment
+
+    executable = tmp_path / "python"
+    executable.write_bytes(b"actual")
+    executable.chmod(0o755)
+    monkeypatch.setenv("EXASERVE_LOCAL_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", str(executable))
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SHA256", "f" * 64)
+    monkeypatch.setenv("EXASERVE_SITE_PROFILE_HASH", "a" * 64)
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH", "a" * 64)
+    monkeypatch.setattr(
+        runtime_environment,
+        "filesystem_identity",
+        lambda _path: runtime_environment.FilesystemIdentity(Path("/tmp"), "tmpfs", False, 7),
+    )
+    assert producers.file_hash(str(executable)) == hashlib.sha256(b"actual").hexdigest()
+
+
+def test_preverified_python_hash_avoids_rehash_on_qualified_readonly_image(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from exaserve.plan import runtime_environment
+
+    executable = tmp_path / "python"
+    executable.write_bytes(b"actual")
+    executable.chmod(0o755)
+    expected = "e" * 64
+    monkeypatch.setenv("EXASERVE_LOCAL_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", str(executable))
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SHA256", expected)
+    monkeypatch.setenv("EXASERVE_SITE_PROFILE_HASH", "a" * 64)
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH", "a" * 64)
+    monkeypatch.setattr(
+        runtime_environment,
+        "filesystem_identity",
+        lambda _path: runtime_environment.FilesystemIdentity(
+            Path("/opt/aurora/frameworks"), "squashfs", True, 99
+        ),
+    )
+    monkeypatch.setattr(
+        producers.os,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("qualified Python was re-opened"),
+    )
+    assert producers.file_hash(str(executable)) == expected
+
+
 def test_prepared_environment_hash_excludes_the_channel_secret(monkeypatch):
     monkeypatch.setenv("EXASERVE_VENDOR", "xpu")
     monkeypatch.setenv("EXASERVE_CONTROL_SECRET", "aa" * 16)
@@ -297,6 +361,30 @@ def test_environment_hash_moves_with_a_deployment_relevant_change(monkeypatch):
     first = producers.prepared_environment_hash()
     monkeypatch.setenv("EXASERVE_VENDOR", "cuda")
     assert producers.prepared_environment_hash() != first
+
+
+def test_environment_hash_binds_pmix_search_controls_but_not_rank_state():
+    first = producers.prepared_environment_hash(
+        {
+            "PMIX_MCA_mca_base_param_files": "/etc/pmix-mca-params.conf",
+            "PMIX_RANK": "1",
+            "PALS_RANKID": "1",
+        }
+    )
+    assert first != producers.prepared_environment_hash(
+        {
+            "PMIX_MCA_mca_base_param_files": "/etc/other.conf",
+            "PMIX_RANK": "1",
+            "PALS_RANKID": "1",
+        }
+    )
+    assert first == producers.prepared_environment_hash(
+        {
+            "PMIX_MCA_mca_base_param_files": "/etc/pmix-mca-params.conf",
+            "PMIX_RANK": "99",
+            "PALS_RANKID": "99",
+        }
+    )
 
 
 # -- head-side adjudication ----------------------------------------------

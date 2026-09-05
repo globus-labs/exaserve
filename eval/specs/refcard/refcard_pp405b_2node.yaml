@@ -4,11 +4,12 @@ name: refcard_pp405b_2node
 # stage has ~420 GiB usable -> 756 GB needs PP>=2. Config: TP=8 x PP=2 = one
 # replica spanning 2 whole nodes (8/12 tiles each).
 #
-# STAGING: no broadcast. 756 GB exceeds node tmpfs; model_storage_path ==
-# local_stage_path points at Lustre so vLLM loads weights directly from
-# Lustre. Expect a long engine load (16 workers x ~47 GB from Lustre).
+# STAGING: the allocation head reads the shared model and streams the two PP
+# stage views through the allocation-wide MPI distributor. Each node receives
+# only its ~380 GiB stage under node-local tmpfs; no engine reads Lustre.
 #
-# EDIT model_storage_path/local_stage_path to your own Lustre model dir.
+# EDIT model_storage_path to your own shared source model directory. Keep
+# local_stage_path on node-local storage.
 matrix:
   name_template: '{num_nodes}_nodes'
   axes:
@@ -30,7 +31,7 @@ workload:
 deployment:
   validation_mode: true
   model_storage_path: /lus/flare/projects/<PROJECT>/<user>/models
-  local_stage_path: /lus/flare/projects/<PROJECT>/<user>/models
+  local_stage_path: /tmp/pp405b_shard
   models:
   - model_id: meta-llama/Llama-3.1-405B-Instruct
     tensor_parallel_size: 8

@@ -20,6 +20,7 @@ matching stdout.
 
 from __future__ import annotations
 
+import re
 import shlex
 from types import MappingProxyType
 from typing import Optional, Sequence
@@ -31,8 +32,16 @@ class RankLaunchError(RuntimeError):
     pass
 
 
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def resolve_launch_prefix(
-    node_count: int, *, scheduler: str = "pbs", override: Optional[str] = None
+    node_count: int,
+    *,
+    scheduler: str = "pbs",
+    override: Optional[str] = None,
+    application_env_names: Sequence[str] = (),
+    application_cwd: Optional[str] = None,
 ) -> list[str]:
     """One task per node; an explicit caller override is validation-only."""
     if isinstance(node_count, bool) or not isinstance(node_count, int) or node_count < 1:
@@ -40,15 +49,36 @@ def resolve_launch_prefix(
     if not isinstance(scheduler, str) or not scheduler:
         raise RankLaunchError("scheduler must be non-empty text")
     if override is not None:
+        if scheduler != "test":
+            raise RankLaunchError("custom launch overrides are permitted only for test scheduler")
         if not isinstance(override, str) or not override:
             raise RankLaunchError("launch override must be null or non-empty text")
         parsed = shlex.split(override)
         if not parsed:
             raise RankLaunchError("launch override produced an empty argument vector")
         return parsed
+    names = tuple(application_env_names)
+    if any(not isinstance(name, str) or _ENV_NAME.fullmatch(name) is None for name in names):
+        raise RankLaunchError("application environment names must be valid identifiers")
+    if len(names) != len(set(names)):
+        raise RankLaunchError("application environment names must be unique")
+    if application_cwd is not None and (
+        not isinstance(application_cwd, str) or not application_cwd.startswith("/")
+    ):
+        raise RankLaunchError("application cwd must be an absolute path")
     if scheduler == "slurm":
-        return ["srun", f"--nodes={node_count}", "--ntasks-per-node=1", "--cpu-bind=none"]
-    return ["mpiexec", "-n", str(node_count), "-ppn", "1", "--cpu-bind", "none"]
+        prefix = ["srun", f"--nodes={node_count}", "--ntasks-per-node=1", "--cpu-bind=none"]
+        exports = "NONE" + (f",{','.join(sorted(names))}" if names else "")
+        prefix.append(f"--export={exports}")
+        if application_cwd is not None:
+            prefix.append(f"--chdir={application_cwd}")
+        return prefix
+    prefix = ["mpiexec", "--genvnone", "--envnone"]
+    if names:
+        prefix.extend(("--envlist", ",".join(sorted(names))))
+    if application_cwd is not None:
+        prefix.extend(("--wdir", application_cwd))
+    return [*prefix, "-n", str(node_count), "-ppn", "1", "--cpu-bind", "none"]
 
 
 class RankLauncher:
@@ -62,6 +92,7 @@ class RankLauncher:
         scheduler: str = "pbs",
         launch_prefix: Optional[Sequence[str]] = None,
         env: Optional[dict] = None,
+        application_env: Optional[dict] = None,
         cwd: Optional[str] = None,
         stdout=None,
         component_id: str = "rank_launcher",
@@ -75,7 +106,36 @@ class RankLauncher:
             not isinstance(item, str) or not item or "\x00" in item for item in rank_items
         ):
             raise RankLaunchError("rank_argv must contain non-empty string arguments")
+        if application_env is not None:
+            if not isinstance(application_env, dict) or any(
+                not isinstance(key, str)
+                or _ENV_NAME.fullmatch(key) is None
+                or not isinstance(value, str)
+                or "\x00" in key
+                or "\x00" in value
+                for key, value in application_env.items()
+            ):
+                raise RankLaunchError(
+                    "rank application environment must be a string mapping without NUL"
+                )
+            from ..site import AURORA_PMIX_PREPARED_ENVIRONMENT
+
+            qualified_pmix = dict(AURORA_PMIX_PREPARED_ENVIRONMENT)
+            invalid_transport = sorted(
+                key
+                for key, value in application_env.items()
+                if key.startswith(("PBS_", "SLURM_", "PALS_", "PMI_", "PMIX_", "OMPI_"))
+                and qualified_pmix.get(key) != value
+            )
+            if invalid_transport:
+                raise RankLaunchError(
+                    "rank application environment contains launcher-only state: "
+                    f"{invalid_transport}"
+                )
+            application_env = MappingProxyType(dict(application_env))
         if launch_prefix is not None:
+            if scheduler != "test":
+                raise RankLaunchError("custom launch_prefix is permitted only for test scheduler")
             if isinstance(launch_prefix, (str, bytes)):
                 raise RankLaunchError("launch_prefix must be an argument vector")
             prefix_items = tuple(launch_prefix)
@@ -84,18 +144,30 @@ class RankLauncher:
             ):
                 raise RankLaunchError("launch_prefix must contain non-empty string arguments")
         else:
-            prefix_items = tuple(resolve_launch_prefix(node_count, scheduler=scheduler))
+            prefix_items = tuple(
+                resolve_launch_prefix(
+                    node_count,
+                    scheduler=scheduler,
+                    application_env_names=tuple((application_env or {}).keys()),
+                    application_cwd=cwd,
+                )
+            )
         if env is not None:
             if not isinstance(env, dict) or any(
                 not isinstance(key, str)
                 or not key
+                or "=" in key
                 or not isinstance(value, str)
                 or "\x00" in key
                 or "\x00" in value
                 for key, value in env.items()
             ):
                 raise RankLaunchError("rank environment must be a string mapping without NUL")
-            env = MappingProxyType(dict(env))
+            launcher_environment = dict(env)
+            launcher_environment.update(application_env or {})
+            env = MappingProxyType(launcher_environment)
+        elif application_env:
+            env = MappingProxyType(dict(application_env))
         if cwd is not None and (not isinstance(cwd, str) or not cwd):
             raise RankLaunchError("rank cwd must be null or non-empty text")
         if not isinstance(component_id, str) or not component_id:
@@ -104,6 +176,7 @@ class RankLauncher:
         self.rank_argv = list(rank_items)
         self.launch_prefix = list(prefix_items)
         self.env = env
+        self.application_env = application_env
         self.cwd = cwd
         self.stdout = stdout
         self.component_id = component_id
@@ -134,6 +207,8 @@ class RankLauncher:
             "node_count": self.node_count,
             "launch_prefix": self.launch_prefix,
             "rank_argv": self.rank_argv,
+            "application_env_names": sorted((self.application_env or {}).keys()),
+            "application_cwd": self.cwd,
         }
 
 

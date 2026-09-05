@@ -5,7 +5,10 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from eval.lib.backends.base import BackendProcessHandle
+from eval.lib.backends.ray import RayBackendAdapter
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import build_allocation_binding
 from exaserve.site import default_site_profile
@@ -135,6 +138,23 @@ def test_terminal_status_fails_the_wait_immediately(tmp_path):
     publisher, _ = _publisher(tmp_path)
     publisher.advance(DeploymentState.FAILED, reason_code="BOOM")
     assert _handle(tmp_path).wait_for_ready(timeout_s=1) is False
+
+
+def test_ray_adapter_preserves_terminal_status_cause_during_cleanup(tmp_path):
+    publisher, _ = _publisher(tmp_path)
+    publisher.advance(
+        DeploymentState.FAILED,
+        reason_code="FIRST_CAUSE",
+        detail="rank 17 pre-start heartbeat expired",
+    )
+    monitor = SimpleNamespace(
+        wait_for_ready=lambda _timeout: False,
+        status_dir=str(tmp_path),
+        process=SimpleNamespace(poll=lambda: None),
+        recent_lines=[],
+    )
+    with pytest.raises(RuntimeError, match="rank 17 pre-start heartbeat expired"):
+        RayBackendAdapter().wait_ready(SimpleNamespace(), SimpleNamespace(monitor=monitor))
 
 
 def test_status_from_another_generation_cannot_declare_ready(tmp_path):

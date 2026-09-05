@@ -2,14 +2,14 @@ name: pp405b_pp2_scale
 # PP weak-scaling: Llama-3.1-405B-Instruct TP=8 x PP=2 (one replica spans 2
 # whole nodes), num_replicas scaled with the cluster so each replica gets a
 # fixed per-replica offered load -> ideal = aggregate throughput grows linearly
-# with replica count. Same deployment + Lustre-symlink staging as
-# smokes/pp405b_verify_2node (NO bcast: 756 GB > tmpfs; model_storage_path ==
-# local_stage_path -> vLLM reads weights directly from Lustre).
+# with replica count. The allocation-wide distributor keeps global rank 0 as
+# the sole shared-model reader and sends each ~380 GiB PP stage only to its
+# recipient ranks; engines load exclusively from node-local tmpfs.
 #
 # SPARSE VALIDATION SWEEP first: [4, 64, 256] nodes = [2, 32, 128] replicas,
 # num_runs=2. Confirm the extremes serve before committing the dense sweep.
-# Expect a long bring-up (~21 min weights/replica from Lustre; at 256n that is
-# 2048 workers reading ~47 GB each off Lustre at once) -> generous walltime.
+# Expect a long distribution and engine bring-up for the 756 GB source model;
+# large points retain generous walltime.
 matrix:
   name_template: 'n{num_nodes}'
   axes:
@@ -43,8 +43,8 @@ deployment:
   num_nodes: 4
   # Shard-aware PP (EXASERVE_PP_SHARD_AWARE=1): model_storage_path = Lustre SOURCE
   # (full 405B via flat-form symlink); local_stage_path = NODE-LOCAL tmpfs dest.
-  # The driver two-group-bcasts each PP stage (~380 GiB) to its node group, so
-  # each node holds only its stage in /tmp — only seed nodes read Lustre.
+  # Global rank 0 streams each PP stage (~380 GiB) only to its recipient ranks,
+  # so every node holds its own stage in /tmp and no worker reads Lustre.
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
   local_stage_path: /tmp/pp405b_shard
   models:

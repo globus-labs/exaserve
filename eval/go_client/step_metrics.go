@@ -1,24 +1,28 @@
 package main
 
+import "math"
+
 // StepResult holds the outcome of a single saturation measurement step.
 type StepResult struct {
-	TargetRate   int      `json:"target_rate"`
-	AchievedRate float64  `json:"achieved_rate"`
-	Duration     float64  `json:"duration_s"`
-	Completed    uint64   `json:"completed"`
-	Failed       uint64   `json:"failed"`
-	ErrorRate    float64  `json:"error_rate"`
-	P50Latency   float64  `json:"p50_latency_s"`
-	P99Latency   float64  `json:"p99_latency_s"`
-	MeanLatency  float64  `json:"mean_latency_s"`
-	P50TTFT      float64  `json:"p50_ttft_s,omitempty"`
-	P99TTFT      float64  `json:"p99_ttft_s,omitempty"`
-	MeanTTFT     float64  `json:"mean_ttft_s,omitempty"`
-	NewConns     uint64   `json:"new_connections"`
-	ReusedConns  uint64   `json:"reused_connections"`
-	MaxActive    int64    `json:"max_observed_active"`
-	Healthy      bool     `json:"healthy"`
-	FailReasons  []string `json:"fail_reasons,omitempty"`
+	TargetRate       int                `json:"target_rate"`
+	AchievedRate     float64            `json:"achieved_rate"`
+	Duration         float64            `json:"duration_s"`
+	Completed        uint64             `json:"completed"`
+	Failed           uint64             `json:"failed"`
+	ErrorRate        float64            `json:"error_rate"`
+	P50Latency       float64            `json:"p50_latency_s"`
+	P99Latency       float64            `json:"p99_latency_s"`
+	MeanLatency      float64            `json:"mean_latency_s"`
+	LatencyHistogram histogramSnapshot  `json:"latency_histogram"`
+	P50TTFT          float64            `json:"p50_ttft_s,omitempty"`
+	P99TTFT          float64            `json:"p99_ttft_s,omitempty"`
+	MeanTTFT         float64            `json:"mean_ttft_s,omitempty"`
+	TTFTHistogram    *histogramSnapshot `json:"ttft_histogram,omitempty"`
+	NewConns         uint64             `json:"new_connections"`
+	ReusedConns      uint64             `json:"reused_connections"`
+	MaxActive        int64              `json:"max_observed_active"`
+	Healthy          bool               `json:"healthy"`
+	FailReasons      []string           `json:"fail_reasons,omitempty"`
 }
 
 // SnapshotStepResult reads atomic counters from a metricsCollector and computes
@@ -55,25 +59,27 @@ func SnapshotStepResult(mc *metricsCollector, targetRate int, measureStartNs int
 	ttftSnap := mc.ttftHist.Snapshot()
 
 	result := &StepResult{
-		TargetRate:   targetRate,
-		AchievedRate: achievedRate,
-		Duration:     duration,
-		Completed:    succeeded,
-		Failed:       failed,
-		ErrorRate:    errorRate,
-		P50Latency:   PercentileFromHistogram(&tthSnap, 0.50),
-		P99Latency:   PercentileFromHistogram(&tthSnap, 0.99),
-		MeanLatency:  histogramMeanS(&tthSnap),
-		NewConns:     mc.newConnections.Load(),
-		ReusedConns:  mc.reusedConnections.Load(),
-		MaxActive:    mc.maxObservedActive.Load(),
-		Healthy:      true, // caller evaluates SLO
+		TargetRate:       targetRate,
+		AchievedRate:     achievedRate,
+		Duration:         duration,
+		Completed:        succeeded,
+		Failed:           failed,
+		ErrorRate:        errorRate,
+		P50Latency:       PercentileFromHistogram(&tthSnap, 0.50),
+		P99Latency:       PercentileFromHistogram(&tthSnap, 0.99),
+		MeanLatency:      histogramMeanS(&tthSnap),
+		LatencyHistogram: tthSnap,
+		NewConns:         mc.newConnections.Load(),
+		ReusedConns:      mc.reusedConnections.Load(),
+		MaxActive:        mc.maxObservedActive.Load(),
+		Healthy:          true, // caller evaluates SLO
 	}
 	// Populate TTFT fields only when streaming data is available.
 	if ttftSnap.Count > 0 {
 		result.P50TTFT = PercentileFromHistogram(&ttftSnap, 0.50)
 		result.P99TTFT = PercentileFromHistogram(&ttftSnap, 0.99)
 		result.MeanTTFT = histogramMeanS(&ttftSnap)
+		result.TTFTHistogram = &ttftSnap
 	}
 	return result
 }
@@ -84,7 +90,7 @@ func PercentileFromHistogram(snap *histogramSnapshot, p float64) float64 {
 	if snap.Count == 0 {
 		return 0.0
 	}
-	threshold := uint64(float64(snap.Count) * p)
+	threshold := uint64(math.Ceil(float64(snap.Count) * p))
 	if threshold == 0 {
 		threshold = 1
 	}
@@ -94,10 +100,12 @@ func PercentileFromHistogram(snap *histogramSnapshot, p float64) float64 {
 		cumulative += count
 		if cumulative >= threshold {
 			upper := snap.BucketUpperBoundsS[i]
-			// Last bucket (overflow) has upper bound -1; use sum/count as estimate.
+			// The overflow bucket has no finite upper bound. Returning the global
+			// mean can understate a tail percentile by orders of magnitude, so use
+			// the final finite boundary as a conservative lower bound.
 			if upper < 0 {
-				if snap.Count > 0 {
-					return snap.SumS / float64(snap.Count)
+				if i > 0 {
+					return snap.BucketUpperBoundsS[i-1]
 				}
 				return 0.0
 			}
@@ -115,9 +123,12 @@ func PercentileFromHistogram(snap *histogramSnapshot, p float64) float64 {
 			return lower + fraction*(upper-lower)
 		}
 	}
-	// Should not reach here; fall back to mean.
-	if snap.Count > 0 {
-		return snap.SumS / float64(snap.Count)
+	// A malformed/incomplete bucket vector must not understate the tail with
+	// the global mean. Return the greatest finite lower bound available.
+	for i := len(snap.BucketUpperBoundsS) - 1; i >= 0; i-- {
+		if snap.BucketUpperBoundsS[i] >= 0 {
+			return snap.BucketUpperBoundsS[i]
+		}
 	}
 	return 0.0
 }

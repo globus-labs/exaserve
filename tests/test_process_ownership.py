@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import subprocess
 import sys
 import threading
@@ -24,7 +25,8 @@ def _sleeping_child():
 
 
 def test_ray_runtime_path_is_compact_enough_for_linux_unix_sockets(monkeypatch):
-    monkeypatch.delenv("EXASERVE_RUNTIME_OWNERSHIP_ROOT", raising=False)
+    test_root = f"/tmp/xt-{os.getpid()}"
+    monkeypatch.setenv("EXASERVE_RUNTIME_OWNERSHIP_ROOT", test_root)
     root = generation_runtime_root("deployment-name-that-may-be-eighty-characters-long", 10**20, 63)
     # Ray 2.49 appends a timestamp/pid session name and its longest critical
     # socket suffix. Leave margin below Linux's 107-byte sockaddr_un limit.
@@ -36,6 +38,71 @@ def test_ray_runtime_path_is_compact_enough_for_linux_unix_sockets(monkeypatch):
         "plasma_store",
     )
     assert len(representative.encode()) < 107
+    Path(root).rmdir()
+    Path(test_root).rmdir()
+
+
+def test_ownership_roots_reject_intermediate_symlinks_without_touching_target(
+    tmp_path, monkeypatch
+):
+    shared_target = tmp_path / "simulated-shared"
+    shared_target.mkdir()
+    sentinel = shared_target / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+
+    receipt_link = tmp_path / "owned-link"
+    receipt_link.symlink_to(shared_target, target_is_directory=True)
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(receipt_link))
+    with pytest.raises(ProcessOwnershipError, match="unsafe component"):
+        ProcessOwnershipRegistry(deployment_id="d", generation=1, rank=0)
+
+    runtime_link = tmp_path / "runtime-link"
+    runtime_link.symlink_to(shared_target, target_is_directory=True)
+    monkeypatch.setenv("EXASERVE_RUNTIME_OWNERSHIP_ROOT", str(runtime_link))
+    with pytest.raises(ProcessOwnershipError, match="unsafe component"):
+        generation_runtime_root("d", 1, 0)
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert sorted(path.name for path in shared_target.iterdir()) == ["sentinel"]
+
+
+def test_ownership_root_rejects_declared_shared_path_before_creation(tmp_path, monkeypatch):
+    candidate = f"/home/{os.getuid()}-must-not-create-exaserve-ownership"
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", candidate)
+    with pytest.raises(ProcessOwnershipError, match="not a private local path"):
+        ProcessOwnershipRegistry(deployment_id="d", generation=1, rank=0)
+    assert not os.path.lexists(candidate)
+
+
+def test_release_never_follows_intermediate_owned_path_symlink(tmp_path, monkeypatch):
+    root = tmp_path / "owned"
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(root))
+    registry = ProcessOwnershipRegistry(deployment_id="d", generation=1, rank=0)
+    runtime_parent = root / "runtime"
+    runtime = runtime_parent / "generation"
+    runtime.mkdir(parents=True)
+    child = _sleeping_child()
+    receipt = registry.record(
+        "ray",
+        pid=child.pid,
+        pgid=os.getpgid(child.pid),
+        argv=child.args,
+        temp_paths=(str(runtime),),
+    )
+    os.killpg(os.getpgid(child.pid), 15)
+    child.wait(timeout=5)
+
+    runtime_parent.rename(root / "runtime-original")
+    simulated_shared = tmp_path / "simulated-shared-cleanup"
+    redirected = simulated_shared / "generation"
+    redirected.mkdir(parents=True)
+    sentinel = redirected / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    runtime_parent.symlink_to(simulated_shared, target_is_directory=True)
+
+    with pytest.raises(ProcessOwnershipError, match="unsafe component"):
+        registry.release("ray")
+    assert Path(receipt).is_file()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_compact_runtime_root_remains_receipt_owned(tmp_path, monkeypatch):
@@ -43,7 +110,7 @@ def test_compact_runtime_root_remains_receipt_owned(tmp_path, monkeypatch):
     monkeypatch.setenv("EXASERVE_RUNTIME_OWNERSHIP_ROOT", str(tmp_path / "runtime"))
     child = _sleeping_child()
     runtime = generation_runtime_root("d", 1, 0)
-    os.makedirs(runtime)
+    os.makedirs(runtime, exist_ok=True)
     registry = ProcessOwnershipRegistry(deployment_id="d", generation=1, rank=0)
     receipt = registry.record(
         "ray",
@@ -90,6 +157,35 @@ def test_stale_cleanup_reaps_only_an_exact_owned_process_group(tmp_path, monkeyp
         if owned.poll() is None:
             os.killpg(os.getpgid(owned.pid), 9)
             owned.wait(timeout=5)
+
+
+def test_stale_cleanup_removes_the_exact_generation_local_state(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from exaserve.plan import runtime_environment
+
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(tmp_path / "owned"))
+
+    def local_state(plan, generation, rank=0):
+        del rank
+        return str(tmp_path / "state" / plan.deployment_id / f"g{generation}")
+
+    monkeypatch.setattr(runtime_environment, "default_local_state_root", local_state)
+    owned = _sleeping_child()
+    state = local_state(SimpleNamespace(deployment_id="current"), 1)
+    os.makedirs(state)
+    registry = ProcessOwnershipRegistry(deployment_id="current", generation=1, rank=0)
+    registry.record(
+        "ray",
+        pid=owned.pid,
+        pgid=os.getpgid(owned.pid),
+        argv=owned.args,
+        temp_paths=(state,),
+    )
+    os.killpg(os.getpgid(owned.pid), 15)
+    owned.wait(timeout=5)
+    assert cleanup_stale_owned_processes(deployment_id="current", generation=2, deadline_s=2) == 1
+    assert not os.path.exists(state)
 
 
 def test_stale_cleanup_never_reaps_another_live_deployment(tmp_path, monkeypatch):

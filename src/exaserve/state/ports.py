@@ -97,13 +97,21 @@ def _lease_dir() -> str:
 
 def _secure_lease_dir(directory: str) -> None:
     """Require a private, user-owned, non-symlink lease namespace."""
-    os.makedirs(directory, mode=0o700, exist_ok=True)
+    from ..model_staging import ensure_node_local_directory
+
+    try:
+        ensure_node_local_directory(
+            directory,
+            mode=0o700,
+            enforce_mode=True,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise OSError(f"port lease directory is unsafe: {exc}") from exc
     metadata = os.lstat(directory)
     if not stat.S_ISDIR(metadata.st_mode):
         raise OSError(f"port lease path {directory!r} is not a directory")
     if metadata.st_uid != os.getuid():
         raise OSError(f"port lease directory {directory!r} is not owned by this user")
-    os.chmod(directory, 0o700)
 
 
 def _pid_alive(pid: int) -> bool:

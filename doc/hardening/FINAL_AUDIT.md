@@ -1,5 +1,11 @@
 # Final audit — final43 evidence and release-v0.4.0 successor
 
+> **Superseded for current-code qualification on 2026-09-04.** The architectural
+> shared-filesystem/runtime-capsule cutover invalidates this audit's harness and
+> candidate hashes. Preserve the evidence below as historical; use
+> `doc/SHARED_FILESYSTEM_FANOUT_AUDIT_20260904.md` for current remediation and
+> release-gate status.
+
 **Audit date:** 2026-08-09; successor reconciliation 2026-08-30
 
 **Verdict:** final43 implementation pass at one and two Aurora nodes;

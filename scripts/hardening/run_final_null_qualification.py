@@ -478,45 +478,54 @@ def _process_group_exists(process_group: int) -> bool:
         return True
 
 
-def _ssh_argv(node: str, *remote_argv: str) -> list[str]:
-    if not node or any(character.isspace() for character in node):
-        raise ValueError(f"unsafe SSH node identity {node!r}")
-    executable = shutil.which("ssh")
-    if not executable:
-        raise RuntimeError("ssh is required for allocated-worker fault injection")
+def _pals_argv(
+    nodes: tuple[str, ...],
+    executable: str,
+    *application_argv: str,
+    application_environment: dict[str, str] | None = None,
+    working_directory: str = "/tmp",
+) -> list[str]:
+    if not nodes or any(not node or any(char.isspace() for char in node) for node in nodes):
+        raise ValueError("PALS qualification nodes are invalid")
+    if not os.path.isabs(executable) or not os.path.isabs(working_directory):
+        raise ValueError("PALS qualification executable/cwd must be absolute")
+    environment = dict(application_environment or {})
+    # PMIx consults HOME/.pmix before the application bootstrap can clear its
+    # own environment. Keep that pre-exec lookup on node-local scratch even
+    # for capsule helpers whose Python code later installs a narrower HOME.
+    environment.setdefault("HOME", "/tmp")
+    environment.setdefault("TMPDIR", "/tmp")
+    from exaserve.site import AURORA_PMIX_PREPARED_ENVIRONMENT
+
+    for name, expected in AURORA_PMIX_PREPARED_ENVIRONMENT:
+        if name in environment and environment[name] != expected:
+            raise ValueError(f"PALS qualification {name} is not Aurora-qualified")
+        environment[name] = expected
+    prefix = ["mpiexec", "--genvnone", "--envnone", "--shared"]
+    for name, value in sorted(environment.items()):
+        if (
+            not name
+            or not name.replace("_", "a").isalnum()
+            or not isinstance(value, str)
+            or "\x00" in value
+        ):
+            raise ValueError("PALS qualification environment is invalid")
+        prefix.extend(("--genv", f"{name}={value}"))
     return [
+        *prefix,
+        "-n",
+        str(len(nodes)),
+        "--ppn",
+        "1",
+        "--cpu-bind",
+        "none",
+        "--hosts",
+        ",".join(nodes),
+        "--wdir",
+        working_directory,
         executable,
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "--",
-        node,
-        *remote_argv,
+        *application_argv,
     ]
-
-
-def _run_remote_signal(node: str, pid: int, signal_name: str) -> dict[str, object]:
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        raise ValueError(f"remote signal requires a positive PID, observed {pid!r}")
-    if signal_name not in {"TERM", "KILL"}:
-        raise ValueError(f"unsupported remote signal {signal_name!r}")
-    argv = _ssh_argv(node, "/bin/kill", f"-{signal_name}", "--", str(pid))
-    completed = subprocess.run(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=30.0,
-        check=False,
-    )
-    return {
-        "argv": argv,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout[-4000:],
-        "stderr": completed.stderr[-4000:],
-    }
 
 
 def _signal_local_generation_pid(
@@ -561,6 +570,108 @@ def _signal_local_generation_pid(
     }
 
 
+_REMOTE_CAPSULE_BOOTSTRAP = r"""
+import os, runpy, sys
+python_root, state_root = sys.argv[1:3]
+os.chdir(python_root)
+os.environ.clear()
+os.environ.update({
+    "PATH": "/usr/bin:/bin",
+    "PYTHONPATH": python_root,
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "HOME": state_root + "/home",
+    "TMPDIR": state_root + "/tmp",
+    "XDG_CACHE_HOME": state_root + "/cache",
+    "EXASERVE_LOCAL_RUNTIME_ROOT": os.path.dirname(python_root),
+    "EXASERVE_LOCAL_STATE_ROOT": state_root,
+})
+sys.path.insert(0, python_root)
+sys.argv = ["exaserve.state.qualification_process", *sys.argv[3:]]
+runpy.run_module("exaserve.state.qualification_process", run_name="__main__")
+""".strip()
+
+
+def _runtime_capsule_context(
+    run_dir: Path, *, deployment_id: str, generation: int, plan_hash: str
+) -> dict[str, str]:
+    from exaserve.source_staging import validate_source_staging_result
+
+    manifest_path = run_dir / "source_staging_manifest.json"
+    result = validate_source_staging_result(
+        _read_json(manifest_path),
+        expected_deployment_id=deployment_id,
+        expected_generation=generation,
+        expected_plan_hash=plan_hash,
+    )
+    context = {
+        "python_root": result["local_python_root"],
+        "state_root": result["local_state_root"],
+        "qualified_python": result["qualified_python"],
+    }
+    for name, value in context.items():
+        if not isinstance(value, str) or not os.path.isabs(value):
+            raise RuntimeError(f"runtime capsule {name} is not absolute")
+        resolved = os.path.realpath(value)
+        if (
+            resolved == "/home"
+            or resolved.startswith("/home/")
+            or resolved == "/lus"
+            or resolved.startswith("/lus/")
+        ):
+            raise RuntimeError(f"runtime capsule {name} resolves on shared storage")
+        context[name] = resolved
+    return context
+
+
+def _remote_capsule_argv(node: str, context: dict[str, str], *arguments: str) -> list[str]:
+    return _pals_argv(
+        (node,),
+        context["qualified_python"],
+        "-I",
+        "-s",
+        "-c",
+        _REMOTE_CAPSULE_BOOTSTRAP,
+        context["python_root"],
+        context["state_root"],
+        *arguments,
+        application_environment={
+            "HOME": context["state_root"] + "/home",
+            "TMPDIR": context["state_root"] + "/tmp",
+        },
+        working_directory="/tmp",
+    )
+
+
+def _run_remote_json(
+    argv: list[str], *, node: str, activity: str, timeout: float
+) -> dict[str, object]:
+    completed = subprocess.run(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"{activity} failed on {node}: returncode={completed.returncode}, "
+            f"stderr={completed.stderr[-2000:]}"
+        )
+    try:
+        report = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"{activity} returned invalid evidence on {node}: {completed.stdout[-2000:]}"
+        ) from exc
+    if not isinstance(report, dict):
+        raise RuntimeError(f"{activity} evidence is not an object on {node}")
+    return report
+
+
 def _run_remote_generation_signal(
     node: str,
     pid: int,
@@ -570,55 +681,49 @@ def _run_remote_generation_signal(
     generation: int,
     plan_hash: str,
     run_dir: Path,
+    owner_rank: int,
+    requirement_id: str,
+    role: str,
 ) -> dict[str, object]:
-    """Perform an identity-fenced fault injection on one allocated node."""
-    helper = str(Path(__file__).resolve())
-    argv = _ssh_argv(
+    """Run one pidfd-fenced signal helper from the node-local runtime capsule."""
+    context = _runtime_capsule_context(
+        run_dir,
+        deployment_id=deployment_id,
+        generation=generation,
+        plan_hash=plan_hash,
+    )
+    argv = _remote_capsule_argv(
         node,
-        sys.executable,
-        "-u",
-        helper,
-        "--signal-generation-pid",
+        context,
+        "signal",
+        "--pid",
+        str(pid),
+        "--signal",
+        signal_name,
+        "--owner-rank",
+        str(owner_rank),
+        "--requirement-id",
+        requirement_id,
+        "--role",
+        role,
         "--deployment-id",
         deployment_id,
         "--generation",
         str(generation),
         "--plan-hash",
         plan_hash,
-        "--run-dir",
-        str(run_dir.resolve()),
-        "--pid",
-        str(pid),
-        "--signal",
-        signal_name,
     )
-    completed = subprocess.run(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=30.0,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"exact generation signal failed on {node}: returncode={completed.returncode}, "
-            f"stderr={completed.stderr[-2000:]}"
-        )
-    try:
-        report = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"exact generation signal returned invalid evidence on {node}: "
-            f"{completed.stdout[-2000:]}"
-        ) from exc
+    report = _run_remote_json(argv, node=node, activity="exact generation signal", timeout=30.0)
+    from exaserve.plan.contracts import same_node
+
     if (
-        not isinstance(report, dict)
+        not same_node(str(report.get("hostname", "")), node)
         or report.get("deployment_id") != deployment_id
         or report.get("generation") != generation
         or report.get("deployment_plan_hash") != plan_hash
         or report.get("signal") != signal_name
+        or report.get("owner_rank") != owner_rank
+        or report.get("requirement_id") != requirement_id
         or int(report.get("process", {}).get("pid", 0)) != pid
     ):
         raise RuntimeError(f"exact generation signal evidence is invalid on {node}: {report}")
@@ -826,69 +931,127 @@ def _cleanup_generation_on_nodes(
     plan_hash: str,
     run_dir: Path,
 ) -> list[dict[str, object]]:
-    """Run exact-identity fallback cleanup concurrently on allocated nodes."""
-    helper = str(Path(__file__).resolve())
-    processes: list[tuple[str, subprocess.Popen[str], list[str]]] = []
+    """Run capsule-local exact-generation cleanup on every allocated node."""
+    context = _runtime_capsule_context(
+        run_dir,
+        deployment_id=deployment_id,
+        generation=generation,
+        plan_hash=plan_hash,
+    )
+    argv = _pals_argv(
+        nodes,
+        context["qualified_python"],
+        "-I",
+        "-s",
+        "-c",
+        _REMOTE_CAPSULE_BOOTSTRAP,
+        context["python_root"],
+        context["state_root"],
+        "cleanup",
+        "--timeout",
+        "8",
+        "--deployment-id",
+        deployment_id,
+        "--generation",
+        str(generation),
+        "--plan-hash",
+        plan_hash,
+        application_environment={
+            "HOME": context["state_root"] + "/home",
+            "TMPDIR": context["state_root"] + "/tmp",
+        },
+        working_directory="/tmp",
+    )
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=20.0)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=5.0)
+        raise RuntimeError("allocation-wide exact generation cleanup timed out") from exc
+    if process.returncode != 0:
+        raise RuntimeError(
+            "allocation-wide exact generation cleanup failed: "
+            f"returncode={process.returncode}, stderr={stderr[-4000:]}"
+        )
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if len(lines) != len(nodes):
+        raise RuntimeError(
+            f"exact generation cleanup returned {len(lines)}/{len(nodes)} report lines"
+        )
+    try:
+        reports = [json.loads(line) for line in lines]
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"exact generation cleanup returned invalid evidence: {stdout[-4000:]}"
+        ) from exc
+    from exaserve.plan.contracts import same_node
+
+    ordered = []
+    used = set()
     for node in nodes:
-        argv = _ssh_argv(
-            node,
-            sys.executable,
-            "-u",
-            helper,
-            "--cleanup-generation",
-            "--deployment-id",
-            deployment_id,
-            "--generation",
-            str(generation),
-            "--plan-hash",
-            plan_hash,
-            "--run-dir",
-            str(run_dir),
-        )
-        processes.append(
-            (
-                node,
-                subprocess.Popen(
-                    argv,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                ),
-                argv,
-            )
-        )
-    deadline = time.monotonic() + 20.0
-    reports = []
-    for node, process, argv in processes:
-        try:
-            stdout, stderr = process.communicate(timeout=max(0.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate(timeout=5.0)
-            raise RuntimeError(f"exact generation cleanup timed out on {node}")
-        if process.returncode != 0:
-            raise RuntimeError(
-                f"exact generation cleanup failed on {node}: returncode={process.returncode}, "
-                f"stderr={stderr[-1000:]}"
-            )
-        try:
-            report = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"exact generation cleanup returned invalid evidence on {node}: {stdout[-1000:]}"
-            ) from exc
+        matches = [
+            (index, report)
+            for index, report in enumerate(reports)
+            if index not in used
+            and isinstance(report, dict)
+            and same_node(str(report.get("hostname", "")), node)
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(f"exact generation cleanup has no unique report for {node}")
+        index, report = matches[0]
+        used.add(index)
         if (
-            not isinstance(report, dict)
+            report.get("deployment_id") != deployment_id
             or report.get("generation") != generation
-            or report.get("deployment_id") != deployment_id
             or report.get("deployment_plan_hash") != plan_hash
             or report.get("survivors") != []
         ):
             raise RuntimeError(f"exact generation cleanup evidence is invalid on {node}: {report}")
         report["argv"] = argv
-        reports.append(report)
-    return reports
+        ordered.append(report)
+    return ordered
+
+
+_REMOTE_PORT_HOLDER_CODE = r"""
+import json, os, signal, socket, sys
+host = sys.argv[1]
+port = int(sys.argv[2])
+stopping = False
+def stop(_signal, _frame):
+    global stopping
+    stopping = True
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(signum, stop)
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind((host, port))
+    listener.listen(8)
+    listener.settimeout(0.5)
+    print(json.dumps({"schema_version": 1, "state": "READY", "hostname": socket.gethostname(), "bind_host": host, "port": port, "pid": os.getpid()}, sort_keys=True), flush=True)
+    while not stopping:
+        try:
+            connection, _peer = listener.accept()
+        except TimeoutError:
+            continue
+        connection.close()
+"""
+
+
+def _qualified_remote_python(site_profile) -> str:
+    """Bind the pre-capsule bootstrap to the declared immutable site image."""
+    from exaserve.site import qualify_site_local_bootstrap
+
+    return qualify_site_local_bootstrap(os.path.realpath(sys.executable), site_profile)
 
 
 class _RemotePortHolder:
@@ -916,25 +1079,29 @@ class _RemotePortHolder:
 
     @classmethod
     def start(
-        cls, *, node: str, port: int, helper_path: Path, evidence_path: Path
+        cls, *, node: str, port: int, evidence_path: Path, site_profile
     ) -> "_RemotePortHolder":
         from exaserve.plan.contracts import same_node
         from exaserve.state.atomic import strict_json_loads
 
         if not 1 <= port <= 65535:
             raise ValueError(f"remote port must be in 1..65535, observed {port!r}")
-        helper_path = helper_path.resolve()
-        if not helper_path.is_file() or helper_path.is_symlink():
-            raise RuntimeError(f"remote port helper must be a regular non-symlink: {helper_path}")
-        argv = _ssh_argv(
-            node,
-            sys.executable,
+        argv = _pals_argv(
+            (node,),
+            _qualified_remote_python(site_profile),
+            "-I",
             "-u",
-            str(helper_path),
-            "--host",
+            "-c",
+            _REMOTE_PORT_HOLDER_CODE,
             "0.0.0.0",
-            "--port",
             str(port),
+            application_environment={
+                "HOME": "/tmp",
+                "TMPDIR": "/tmp",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONSAFEPATH": "1",
+            },
+            working_directory="/tmp",
         )
         process = subprocess.Popen(
             argv,
@@ -1029,35 +1196,32 @@ class _RemotePortHolder:
                 "handshake": self.handshake,
                 "signals": self.signals,
                 "stopped": stopped,
-                "ssh_returncode": self.process.poll(),
+                "pals_returncode": self.process.poll(),
             },
         )
 
     def stop(self) -> None:
         if self.process.poll() is None:
-            term = _run_remote_signal(self.node, self.pid, "TERM")
-            self.signals.append(term)
-            if term["returncode"] != 0:
-                raise RuntimeError(f"could not terminate exact remote port holder: {term}")
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+                self.signals.append(
+                    {"owner_pid": self.process.pid, "signal": "TERM", "transport": "pals"}
+                )
+            except ProcessLookupError:
+                pass
             try:
                 self.process.wait(timeout=10.0)
             except subprocess.TimeoutExpired:
-                killed = _run_remote_signal(self.node, self.pid, "KILL")
-                self.signals.append(killed)
-                if killed["returncode"] != 0:
-                    raise RuntimeError(f"could not kill exact remote port holder: {killed}")
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                    self.signals.append(
+                        {"owner_pid": self.process.pid, "signal": "KILL", "transport": "pals"}
+                    )
+                except ProcessLookupError:
+                    pass
                 self.process.wait(timeout=10.0)
-        probe = subprocess.run(
-            _ssh_argv(self.node, "/bin/kill", "-0", "--", str(self.pid)),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=30.0,
-            check=False,
-        )
-        if probe.returncode == 0:
-            raise RuntimeError(f"remote port-holder PID {self.pid} survived cleanup on {self.node}")
+        if self.process.poll() is None:
+            raise RuntimeError("PALS port-holder process group survived bounded cleanup")
         self._publish(stopped=True)
 
 
@@ -1703,6 +1867,7 @@ def _launch_scenario(
     root: Path,
     plan_path: Path,
     site_path: Path,
+    site_profile,
     generation: int,
     fault: str,
     ready_timeout_s: float,
@@ -1746,8 +1911,8 @@ def _launch_scenario(
         remote_holder = _RemotePortHolder.start(
             node=nodes[1],
             port=plan.gateway.backend_port,
-            helper_path=Path(__file__).with_name("hold_port.py"),
             evidence_path=fault_evidence_path,
+            site_profile=site_profile,
         )
         precondition = {
             "kind": "remote_worker_proxy_port_holder",
@@ -1971,6 +2136,9 @@ def _launch_scenario(
                 generation=generation,
                 plan_hash=plan.deployment_plan_hash,
                 run_dir=run_dir,
+                owner_rank=target["rank"],
+                requirement_id=target["receipt_requirement_id"],
+                role="ray_worker",
             )
             fault_injection = {
                 "kind": "owned_ray_worker_death",
@@ -2003,6 +2171,9 @@ def _launch_scenario(
                 generation=generation,
                 plan_hash=plan.deployment_plan_hash,
                 run_dir=run_dir,
+                owner_rank=target["rank"],
+                requirement_id=target["receipt_requirement_id"],
+                role="replica",
             )
             fault_injection = {
                 "kind": "owned_serve_replica_death",
@@ -2467,12 +2638,10 @@ def main() -> int:
             "harness": str(Path(__file__).resolve()),
             "harness_sha256": _sha256_file(Path(__file__).resolve()),
             "port_holder_helper": (
-                str(Path(__file__).with_name("hold_port.py").resolve())
-                if args.scenario_profile == "two_node"
-                else None
+                "inline-stdlib-python" if args.scenario_profile == "two_node" else None
             ),
             "port_holder_helper_sha256": (
-                _sha256_file(Path(__file__).with_name("hold_port.py"))
+                hashlib.sha256(_REMOTE_PORT_HOLDER_CODE.encode()).hexdigest()
                 if args.scenario_profile == "two_node"
                 else None
             ),
@@ -2488,6 +2657,7 @@ def main() -> int:
                     root=output,
                     plan_path=plan_path,
                     site_path=site_path,
+                    site_profile=profile,
                     generation=base_generation + offset,
                     fault=fault,
                     ready_timeout_s=args.ready_timeout,

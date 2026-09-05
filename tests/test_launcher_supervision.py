@@ -33,6 +33,23 @@ def test_the_legacy_shell_lifecycle_no_longer_exists():
     assert "EXASERVE_LEGACY_SHELL_LIFECYCLE" not in source
 
 
+def test_launcher_rejects_a_python_that_already_loaded_usercustomize(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
+    monkeypatch.setitem(sys.modules, "usercustomize", SimpleNamespace(__file__="/home/u/x.py"))
+    with pytest.raises(ValueError, match="usercustomize was loaded"):
+        launcher._require_clean_python_bootstrap()
+
+
+def test_launcher_requires_no_user_site_to_be_set_before_python(monkeypatch):
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+    with pytest.raises(ValueError, match="before the first Python"):
+        launcher._require_clean_python_bootstrap()
+
+
 def test_cli_launch_cluster_delegates_to_the_composition_root():
     import inspect
 

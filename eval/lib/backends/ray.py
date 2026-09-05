@@ -203,6 +203,7 @@ class RayBackendAdapter(BackendAdapter):
                 "EXASERVE_SOURCE_SNAPSHOT_HASH": run_plan.source_snapshot_hash,
                 "EXASERVE_SITE_PROFILE_PATH": run_plan.site_profile_path,
                 "EXASERVE_RUN_PLAN_PATH": run_plan.semantic_plan_path,
+                "EXASERVE_EVAL_MANIFEST_PATH": run_plan.runtime_manifest_path,
                 "EXASERVE_OUTPUT_LOCATIONS": run_plan.bundle.results_dir,
             }
         )
@@ -244,6 +245,15 @@ class RayBackendAdapter(BackendAdapter):
     def wait_ready(self, run_ctx: BackendRunContext, launched: LaunchedBackend) -> None:
         if launched.monitor.wait_for_ready(self.ready_timeout_s):
             return
+        from exaserve.status_api import read_deployment_status
+
+        status = read_deployment_status(launched.monitor.status_dir)
+        if status is not None and status.terminal:
+            detail = status.detail or "no terminal detail"
+            reason = status.reason_code or "TERMINAL"
+            raise RuntimeError(
+                f"Ray backend became {status.state} before READY ({reason}: {detail})"
+            )
         process = launched.monitor.process
         if process is not None and process.poll() is not None:
             tail = "\n".join(launched.monitor.recent_lines)

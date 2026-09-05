@@ -9,7 +9,7 @@ import re
 import stat
 import tarfile
 import tempfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from ..exception_notes import add_exception_note
 from .atomic import atomic_create_json
@@ -164,9 +164,23 @@ def collect_node_diagnostics(
         raise DiagnosticsError("diagnostics bounds/identity are invalid")
     source = os.path.abspath(source_root)
     destination = os.path.join(os.path.abspath(run_dir), "per_node")
-    from .atomic import ensure_owned_directory
+    from ..model_staging import ensure_node_local_directory, validate_node_local_root
 
-    ensure_owned_directory(destination)
+    try:
+        source = str(validate_node_local_root(source))
+        ensure_node_local_directory(
+            destination,
+            mode=0o700,
+            enforce_mode=True,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise DiagnosticsError(f"diagnostics paths are not proven node-local: {exc}") from exc
+    from .mounts import MountBoundaryError, nested_mount_points
+
+    try:
+        nested_mounts = nested_mount_points(source)
+    except MountBoundaryError as exc:
+        raise DiagnosticsError(str(exc)) from exc
     archive_path = os.path.join(destination, f"rank-{rank:05d}.tar.gz")
     manifest_path = os.path.join(destination, f"rank-{rank:05d}.manifest.json")
     if os.path.lexists(archive_path) or os.path.lexists(manifest_path):
@@ -177,7 +191,21 @@ def collect_node_diagnostics(
     total = 0
     if os.path.isdir(source):
         for root, dirs, names in os.walk(source, followlinks=False):
-            dirs[:] = sorted(name for name in dirs if not os.path.islink(os.path.join(root, name)))
+            if Path(root) in nested_mounts:
+                raise DiagnosticsError(f"diagnostics source crosses a filesystem mount: {root}")
+            retained_dirs = []
+            for name in sorted(dirs):
+                directory = os.path.join(root, name)
+                metadata = os.lstat(directory)
+                if stat.S_ISLNK(metadata.st_mode):
+                    skipped += 1
+                    continue
+                if Path(directory) in nested_mounts:
+                    raise DiagnosticsError(
+                        f"diagnostics source crosses a filesystem mount: {directory}"
+                    )
+                retained_dirs.append(name)
+            dirs[:] = retained_dirs
             for name in sorted(names):
                 path = os.path.join(root, name)
                 try:

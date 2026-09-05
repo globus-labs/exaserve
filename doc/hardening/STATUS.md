@@ -1,5 +1,12 @@
 # ExaServe production-hardening status
 
+> **2026-09-04 supersession:** the non-head shared-filesystem cutover changes
+> runtime, harness, model-manifest, and result identities. The final43 and
+> release-v0.4.0-rc2 evidence below remains historical but cannot qualify the
+> current tree. Code remediation and the still-open live gates are tracked in
+> `doc/SHARED_FILESYSTEM_FANOUT_AUDIT_20260904.md`; do not update old artifact
+> hashes to make them match new code.
+
 **Status date:** 2026-08-30
 
 **Verdict:** `SUCCESSOR_SOURCE_READY_SCALE_PENDING` — the

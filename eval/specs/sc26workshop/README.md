@@ -26,16 +26,17 @@ resolver falls back to flat `runs/<name>/` for anything never relocated.
 Invariant: `runs/sc26workshop/` contains only folders that mirror this spec
 tree, and a folder there means real data from that suite stage.
 
-All `validation/` and `full/` specs set `launch.clean_stage: true`: the Python
-staging transaction removes each plan-owned node-local model publication and
-its abandoned candidate/quarantine paths on every bound rank before broadcast.
-Every rank must return a validated cleanup receipt. This makes Phase-2 model
-staging a cold start whether cells use fresh PBS jobs or a reused allocation,
-without broadly deleting unrelated `/tmp` state. Source/runtime artifacts use
-their own content-addressed, generation-scoped lifecycle. Serving metrics are
-unaffected (staging precedes replay; the in-group warm-up protocol is
-unchanged). `calibration/` and most `smokes/` leave clean stage off for iteration
-speed.
+All `validation/` and `full/` specs set `launch.clean_stage: true`. Under the
+current immutable-cache contract this is a non-destructive, all-rank
+reconciliation barrier: every rank returns a cleanup receipt, but normal
+startup never deletes a content-addressed cache or ambiguously owned debris
+that another concurrent deployment could still use. Only the exact owner of a
+uniquely named failed attempt removes that candidate. Consequently,
+`clean_stage` alone is no longer a claim of cold model bytes. A cold-start
+experiment must use a fresh allocation/local cache root and record that fact in
+its run evidence. Source/runtime artifacts use their own content-addressed,
+generation-scoped lifecycle. `calibration/` and most `smokes/` leave the
+barrier off for iteration speed.
 
 ## Suite contents (mirror of plan_exp.md §9)
 
@@ -116,7 +117,7 @@ measured per-cell cost before the full sweep. Kept for provenance; the figures r
 | `nullcompute_smoke_1node` | 1 | null-compute + instrumentation probes | ✓ |
 | `pp405b_verify_2node` | 2 (PP) | multi-node-PP demo: 30/30 streaming | ✓ |
 | `pp2_verify_2node` / `pp2_serve_2node` | 2 | small-TP multi-replica PP (serves post per-GPU-bundle fix `17b88be`) | ✓ |
-| `clean_stage_check_1node` | 1 | clean-stage flag (wipe→fresh broadcast→READY) | ✓ |
+| `clean_stage_check_1node` | 1 | non-destructive all-rank reconciliation receipt → READY | re-run required |
 | `serverstats_ttft_{on,off}delay_1node`, `_ondelay_2node` | 1,2 | `http-no-delay` TBT + server-stats collector | ✓ (added for the no-delay study) |
 
 ## Machine-time estimate (coarse, queue wait excluded)

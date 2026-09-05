@@ -33,6 +33,10 @@ from .plan.contracts import (
 )
 
 AURORA_SITE_ID = "alcf-aurora"
+AURORA_PMIX_PREPARED_ENVIRONMENT = (
+    ("PMIX_MCA_mca_base_component_path", "/usr/lib64/pmix"),
+    ("PMIX_MCA_mca_base_param_files", "/etc/pmix-mca-params.conf"),
+)
 
 
 def local_account_name() -> str:
@@ -73,6 +77,11 @@ _AURORA_PREPARED_ENVIRONMENT = (
     ("NUMEXPR_NUM_THREADS", "1"),
     ("OMP_NUM_THREADS", "1"),
     ("OPENBLAS_NUM_THREADS", "1"),
+    *AURORA_PMIX_PREPARED_ENVIRONMENT,
+    # Must be present before the first Python process and is repeated in every
+    # closed child environment.  Aurora user homes are Lustre-backed; importing
+    # usercustomize from there would violate the worker shared-open boundary.
+    ("PYTHONNOUSERSITE", "1"),
     ("PYTHONUNBUFFERED", "1"),
     ("RAYON_NUM_THREADS", "1"),
     ("RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT", "200"),
@@ -173,7 +182,17 @@ def default_site_profile(site_id: str = "") -> SiteProfile:
         control=ControlLimits(),  # evidence_backed=False by construction
         readiness=ReadinessLimits(),  # likewise awaits WP12 measurements
         launcher_capabilities=("mpi", "pbs", "ray_serve.run_many"),
-        filesystem_semantics=(("shared", "lustre"), ("local_stage", "node_local")),
+        filesystem_semantics=(
+            ("local_root:/tmp", "node_local;fstype=tmpfs;readonly=false"),
+            ("local_stage", "node_local"),
+            ("shared", "lustre"),
+            ("shared_root:/home", "shared;fstype=lustre;readonly=false"),
+            ("shared_root:/lus/flare", "shared;fstype=lustre;readonly=false"),
+            (
+                "site_root:/opt/aurora",
+                "immutable_read_only_site;fstype=squashfs;readonly=true",
+            ),
+        ),
         accelerator_inventory=("pvc",),
         network_boundary="trusted_allocation",
         environment_profile_ref=profile.profile_id,
@@ -209,6 +228,206 @@ def apply_site_profile_environment(
             )
         resource.setrlimit(resource.RLIMIT_STACK, (wanted, hard))
     return target
+
+
+def declared_site_local_roots(profile: SiteProfile) -> tuple[Path, ...]:
+    """Return roots explicitly qualified as immutable site-local bootstrap."""
+
+    roots = []
+    from .plan.runtime_environment import parse_filesystem_expectation
+
+    for key, value in profile.filesystem_semantics:
+        if key.startswith("site_root:") and (
+            parse_filesystem_expectation(value).kind == "immutable_read_only_site"
+        ):
+            root = Path(key.removeprefix("site_root:"))
+            if not root.is_absolute():
+                raise RuntimeError(f"SiteProfile site root is not absolute: {root}")
+            roots.append(root)
+    return tuple(sorted(set(roots), key=str))
+
+
+def require_complete_filesystem_policy(profile: SiteProfile) -> None:
+    """Require executable SiteProfiles to classify every runtime root exactly.
+
+    Older artifacts remain parseable for provenance/audit use.  Crossing an
+    execution or staging boundary requires the newer hash-bearing root,
+    filesystem-type, and read-only contract.
+    """
+
+    from .plan.runtime_environment import RuntimePathError, parse_filesystem_expectation
+
+    if getattr(profile, "site_id", "") == AURORA_SITE_ID:
+        prepared = dict(getattr(profile, "prepared_environment", ()))
+        mismatched = {
+            name: prepared.get(name)
+            for name, expected in AURORA_PMIX_PREPARED_ENVIRONMENT
+            if prepared.get(name) != expected
+        }
+        if mismatched:
+            raise RuntimeError(
+                f"executable Aurora SiteProfile is missing exact PMIx search controls: {mismatched}"
+            )
+    by_kind: dict[str, list[tuple[Path, object]]] = {
+        "local_root": [],
+        "shared_root": [],
+        "site_root": [],
+    }
+    for key, value in profile.filesystem_semantics:
+        for root_kind in by_kind:
+            prefix = f"{root_kind}:"
+            if not key.startswith(prefix):
+                continue
+            try:
+                expectation = parse_filesystem_expectation(value)
+            except RuntimePathError as exc:
+                raise RuntimeError(f"SiteProfile filesystem policy is invalid: {exc}") from exc
+            if not expectation.fstype or expectation.readonly is None:
+                raise RuntimeError(
+                    f"executable SiteProfile root {key!r} must declare fstype and readonly"
+                )
+            by_kind[root_kind].append((Path(key.removeprefix(prefix)), expectation))
+            break
+    missing = sorted(kind for kind, entries in by_kind.items() if not entries)
+    if missing:
+        raise RuntimeError(
+            f"executable SiteProfile is missing hash-bearing filesystem roots: {missing}"
+        )
+    model_path = Path(profile.model_storage_path)
+    if not any(
+        model_path == root or root in model_path.parents for root, _ in by_kind["shared_root"]
+    ):
+        raise RuntimeError("SiteProfile model_storage_path is outside declared shared roots")
+    local_path = Path(profile.local_stage_path)
+    if not any(
+        local_path == root or root in local_path.parents for root, _ in by_kind["local_root"]
+    ):
+        raise RuntimeError("SiteProfile local_stage_path is outside declared local roots")
+
+
+def qualify_site_local_bootstrap(path: str, profile: SiteProfile) -> str:
+    """Prove an executable belongs to a declared, read-only site image.
+
+    Scheduler/PALS executable transfer is preferred.  This function exists for
+    the narrow fallback where a worker must execute an immutable site-provided
+    interpreter or loader before the local capsule is available.
+    """
+
+    require_complete_filesystem_policy(profile)
+    from .plan.runtime_environment import (
+        RuntimePathError,
+        require_non_shared_path,
+        validate_declared_filesystem,
+    )
+
+    try:
+        candidate = Path(require_non_shared_path(path, policy=profile, name="site bootstrap"))
+    except RuntimePathError as exc:
+        raise RuntimeError(str(exc)) from exc
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"site bootstrap is unavailable: {candidate}: {exc}") from exc
+    if not resolved.is_file():
+        raise RuntimeError(f"site bootstrap is not a regular file: {resolved}")
+    roots = declared_site_local_roots(profile)
+    if not any(resolved == root or root in resolved.parents for root in roots):
+        raise RuntimeError(
+            f"site bootstrap {resolved} is outside qualified site roots "
+            f"{[str(item) for item in roots]}"
+        )
+    try:
+        identity = validate_declared_filesystem(
+            resolved,
+            policy=profile,
+            root_kind="site_root",
+        )
+    except RuntimePathError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if identity is None:
+        raise RuntimeError("SiteProfile does not carry site bootstrap filesystem identity")
+    return str(resolved)
+
+
+def validate_local_stage_policy(plan, profile: SiteProfile) -> str:
+    """Reject a model destination that can resolve onto shared storage."""
+
+    from .plan.runtime_environment import (
+        RuntimePathError,
+        require_non_shared_path,
+        validate_declared_filesystem,
+    )
+
+    require_complete_filesystem_policy(profile)
+    if (
+        plan.site_profile_id != profile.site_id
+        or plan.site_profile_hash != profile.site_profile_hash
+    ):
+        raise RuntimeError("DeploymentPlan and SiteProfile identities do not match")
+    try:
+        candidate = require_non_shared_path(
+            plan.local_stage_path,
+            policy=profile,
+            name="DeploymentPlan local_stage_path",
+        )
+    except RuntimePathError as exc:
+        raise RuntimeError(str(exc)) from exc
+    declared = [
+        Path(key.removeprefix("local_root:"))
+        for key, _value in profile.filesystem_semantics
+        if key.startswith("local_root:")
+    ]
+    candidate_path = Path(os.path.normpath(candidate))
+    if declared and not any(
+        candidate_path == root or root in candidate_path.parents for root in declared
+    ):
+        raise RuntimeError(
+            "DeploymentPlan local_stage_path is outside SiteProfile-declared "
+            f"local roots: {candidate!r}"
+        )
+    if declared:
+        try:
+            validate_declared_filesystem(
+                candidate,
+                policy=profile,
+                root_kind="local_root",
+            )
+        except RuntimePathError as exc:
+            raise RuntimeError(str(exc)) from exc
+    return candidate
+
+
+def qualify_declared_shared_filesystems(profile: SiteProfile) -> tuple[dict[str, object], ...]:
+    """Materialize head-side identity evidence for every declared shared root."""
+
+    from .plan.runtime_environment import RuntimePathError, validate_declared_filesystem
+
+    require_complete_filesystem_policy(profile)
+    evidence = []
+    for key, _value in profile.filesystem_semantics:
+        if not key.startswith("shared_root:"):
+            continue
+        root = key.removeprefix("shared_root:")
+        try:
+            identity = validate_declared_filesystem(
+                root,
+                policy=profile,
+                root_kind="shared_root",
+            )
+        except RuntimePathError as exc:
+            raise RuntimeError(f"shared filesystem qualification failed for {root}: {exc}") from exc
+        if identity is None:
+            raise RuntimeError(f"shared filesystem {root} has no hash-bearing identity contract")
+        evidence.append(
+            {
+                "root": root,
+                "mount_point": str(identity.mount_point),
+                "fstype": identity.fstype,
+                "readonly": identity.readonly,
+                "device": identity.device,
+            }
+        )
+    return tuple(evidence)
 
 
 def resolve_allocation_node_address(node: str, *, site_id: str) -> str:
@@ -253,6 +472,17 @@ def prepare_runtime_site(plan, path: str | None = None) -> SiteProfile:
     resolved_path = path or os.environ.get("EXASERVE_SITE_PROFILE_PATH", "")
     if not resolved_path:
         raise RuntimeError("EXASERVE_SITE_PROFILE_PATH is required at runtime")
+    local_runtime_root = os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT", "")
+    if local_runtime_root:
+        from .plan.runtime_environment import require_contained_local_path
+
+        require_contained_local_path(
+            resolved_path,
+            local_runtime_root,
+            policy=plan,
+            name="runtime SiteProfile",
+            require_exists=True,
+        )
     profile = load_site_profile(resolved_path)
     if (
         profile.site_id != plan.site_profile_id
@@ -263,6 +493,8 @@ def prepare_runtime_site(plan, path: str | None = None) -> SiteProfile:
         raise RuntimeError(
             "runtime SiteProfile compatibility profile does not match DeploymentPlan"
         )
+    require_complete_filesystem_policy(profile)
+    validate_local_stage_policy(plan, profile)
     apply_site_profile_environment(profile)
     return profile
 
@@ -293,6 +525,7 @@ def require_execution_qualification(plan, profile: SiteProfile) -> bool:
     for an explicit validation execution.  Otherwise it raises before any job
     or child process can be created.
     """
+    require_complete_filesystem_policy(profile)
     if (
         plan.site_profile_id != profile.site_id
         or plan.site_profile_hash != profile.site_profile_hash

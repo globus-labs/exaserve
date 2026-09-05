@@ -78,7 +78,7 @@ SCALE_PLAN_FIELDS = {
     "scope_approval",
     "gates",
 }
-SCALE_SUPPORT_FIELDS = {"lifecycle", "port_holder"}
+SCALE_SUPPORT_FIELDS = {"lifecycle"}
 SCALE_CODE_FIELDS = {"path", "sha256"}
 SCALE_GATE_FIELDS = {
     "gate_id",
@@ -937,9 +937,6 @@ def _verify_scale_result(
         or result.get("lifecycle_support")
         != str(_repository_path(support["lifecycle"]["path"], "scale.support.lifecycle"))
         or result.get("lifecycle_support_sha256") != support["lifecycle"]["sha256"]
-        or result.get("port_holder_helper")
-        != str(_repository_path(support["port_holder"]["path"], "scale.support.port_holder"))
-        or result.get("port_holder_helper_sha256") != support["port_holder"]["sha256"]
         or result.get("scope_approval")
         != str(_repository_path(approval["path"], "scale.scope_approval"))
         or result.get("scope_approval_sha256") != approval["sha256"]

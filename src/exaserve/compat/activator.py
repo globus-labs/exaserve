@@ -19,7 +19,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable, Mapping, Optional
 
-from .profile import CompatibilityProfile, ProfileMismatch, default_profile
+from .profile import (
+    CompatibilityProfile,
+    ProfileMismatch,
+    default_profile,
+    verify_installed_sources_once,
+)
 
 
 class ActivationError(RuntimeError):
@@ -227,7 +232,7 @@ class CompatibilityActivator:
                     pass
             try:
                 self.profile.verify_environment(observed)
-                self.profile.verify_installed_sources()
+                verify_installed_sources_once(self.profile)
             except ProfileMismatch as exc:
                 raise ActivationError(str(exc)) from exc
 

@@ -63,6 +63,7 @@ class StagingStep:
     result_paths: tuple = ()
     deadline_s: float = 1800.0
     env: Optional[dict] = None
+    cwd: Optional[str] = None
     result_validator: Optional[Callable[[], tuple[bool, str]]] = None
 
     def validate_result(self) -> tuple[bool, str]:
@@ -85,6 +86,7 @@ class CompositionRoot:
         run_dir: str,
         log: Callable[[str], None] = print,
         production_qualified: bool = False,
+        site_profile=None,
     ) -> None:
         if not isinstance(production_qualified, bool):
             raise TypeError("production_qualified must be a bool")
@@ -95,6 +97,7 @@ class CompositionRoot:
         self.run_dir = run_dir
         self._log = log
         self.production_qualified = production_qualified
+        self.site_profile = site_profile
         self.supervisor = RuntimeSupervisor(poll_interval_s=2.0)
         self.binding = None
         self.binding_path = ""
@@ -116,6 +119,7 @@ class CompositionRoot:
         self._head_address: Optional[str] = None
         self.first_cause: Optional[str] = None
         self._staging_done: list = []
+        self.local_runtime_paths = None
         self.status = None  # the shared DeploymentStatus writer
         self._validation_loss_started: Optional[float] = None
         self._last_live_validation = 0.0
@@ -411,11 +415,36 @@ class CompositionRoot:
             }
             started = time.monotonic()
             component_id = f"staging/{step.name}"
+            step_env = step.env or os.environ.copy()
+            step_cwd = step.cwd
+            if step.name != "distribute_source" and self.local_runtime_paths is not None:
+                # Later staging phases execute local code and launch local
+                # verifier children, while this explicitly head-owned process
+                # retains the one shared result directory it publishes into.
+                from .plan.runtime_environment import closed_runtime_environment
+
+                closed_utility_env = closed_runtime_environment(
+                    self.plan,
+                    paths=self.local_runtime_paths,
+                    base_environment=step_env,
+                    policy=self.site_profile or self.plan,
+                )
+                # The utility itself is allocation-head-owned and needs the
+                # live PBS/PALS state to create its nested MPI transaction.
+                # mpi_launch_prefix separately exports NONE plus its explicit
+                # local application environment to remote ranks.
+                head_utility_env = dict(step_env)
+                head_utility_env.update(closed_utility_env)
+                step_env = head_utility_env
+                step_env["EXASERVE_RUN_LOG_DIR"] = self.run_dir
+                step_env["EXASERVE_COMPAT_ROLE"] = "utility"
+                step_cwd = str(self.local_runtime_paths.python_root)
             component = self.supervisor.register(
                 ManagedComponent(
                     component_id=component_id,
                     argv=list(step.argv),
-                    env=step.env or os.environ.copy(),
+                    env=step_env,
+                    cwd=step_cwd,
                     long_lived=False,
                 )
             )
@@ -501,7 +530,65 @@ class CompositionRoot:
                 # Zero exit without the declared result is failure (§3.2.1).
                 raise CompositionError(f"staging step {step.name!r} exited 0 but {detail}")
             self._staging_done.append(step.name)
+            if step.name == "distribute_source":
+                self.activate_runtime_capsule(step.result_paths[0])
             self._log(f"[Composition] staging: {step.name} ok ({time.monotonic() - started:.1f}s)")
+
+    def activate_runtime_capsule(self, manifest_path: str) -> None:
+        """Bind children to the already-validated node-local capsule layout."""
+
+        from .plan.io import (
+            load_allocation_binding,
+            load_deployment_plan,
+            load_site_profile,
+        )
+        from .plan.runtime_environment import (
+            COMPAT_SOURCE_MANIFEST_ENV,
+            COMPAT_SOURCE_PROFILE_ENV,
+            LOCAL_RUNTIME_ROOT_ENV,
+            LOCAL_STATE_ROOT_ENV,
+            QUALIFIED_PYTHON_ENV,
+            QUALIFIED_PYTHON_HASH_ENV,
+            QUALIFIED_PYTHON_PROFILE_ENV,
+            RuntimePathError,
+        )
+        from .source_staging import SourceStagingError, runtime_paths_from_result
+        from .state.atomic import strict_json_load_path
+
+        try:
+            manifest = strict_json_load_path(manifest_path)
+            paths = runtime_paths_from_result(manifest)
+            qualified = os.environ.get(QUALIFIED_PYTHON_ENV, "")
+            if not qualified or os.path.realpath(manifest["qualified_python"]) != os.path.realpath(
+                qualified
+            ):
+                raise RuntimePathError(
+                    "capsule qualified Python disagrees with the SiteProfile-qualified executable"
+                )
+            paths.verify_capsule(policy=self.site_profile or self.plan)
+            paths.prepare_state(policy=self.site_profile or self.plan)
+            local_plan = load_deployment_plan(paths.plan_path)
+            local_site = load_site_profile(paths.site_profile_path)
+            local_binding = load_allocation_binding(paths.binding_path)
+            if local_plan.deployment_plan_hash != self.plan.deployment_plan_hash:
+                raise RuntimePathError("capsule DeploymentPlan identity mismatch")
+            if local_site.site_profile_hash != self.plan.site_profile_hash:
+                raise RuntimePathError("capsule SiteProfile identity mismatch")
+            if (
+                self.binding is None
+                or local_binding.allocation_binding_hash != self.binding.allocation_binding_hash
+            ):
+                raise RuntimePathError("capsule AllocationBinding identity mismatch")
+        except (OSError, TypeError, ValueError, RuntimePathError, SourceStagingError) as exc:
+            raise CompositionError(f"runtime capsule rejected: {exc}") from exc
+        self.local_runtime_paths = paths
+        os.environ[LOCAL_RUNTIME_ROOT_ENV] = str(paths.root)
+        os.environ[LOCAL_STATE_ROOT_ENV] = str(paths.state_root)
+        os.environ[QUALIFIED_PYTHON_HASH_ENV] = manifest["qualified_python_sha256"]
+        os.environ[QUALIFIED_PYTHON_PROFILE_ENV] = self.plan.site_profile_hash
+        os.environ[COMPAT_SOURCE_PROFILE_ENV] = manifest["compatibility_profile_id"]
+        os.environ[COMPAT_SOURCE_MANIFEST_ENV] = manifest["compatibility_manifest_hash"]
+        self._log(f"[Composition] node-local runtime capsule {paths.root}")
 
     def default_staging_steps(self, plan_path: str, *, python_exec: Optional[str] = None) -> list:
         """The staging the shell used to own, as OWNED finite components.
@@ -518,7 +605,7 @@ class CompositionRoot:
         if self.binding is None or not self.binding_path:
             raise CompositionError("source staging requires a persisted AllocationBinding")
         clean_env = os.environ.copy()
-        from .plan.runtime_environment import runtime_environment, staged_pythonpath
+        from .plan.runtime_environment import runtime_environment
 
         clean_env.update(runtime_environment(self.plan))
         clean_env["EXASERVE_RUN_LOG_DIR"] = self.run_dir
@@ -530,10 +617,6 @@ class CompositionRoot:
             if entry and entry not in {"/tmp/exaserve_src", "/tmp/exaserve_overlay"}
         ]
         clean_env["PYTHONPATH"] = os.pathsep.join(python_path)
-        staged_env = dict(clean_env)
-        staged_env["PYTHONPATH"] = staged_pythonpath(self.plan, clean_env.get("PYTHONPATH", ""))
-        staged_env["EXASERVE_COMPAT_ROLE"] = "utility"
-
         source_result = os.path.join(self.run_dir, "source_staging_manifest.json")
         steps: list = [
             StagingStep(
@@ -579,7 +662,7 @@ class CompositionRoot:
                         os.path.join(self.run_dir, "model_bcast_timing.json"), kind="model"
                     ),
                     deadline_s=3600.0,
-                    env=staged_env,
+                    env=clean_env,
                 )
             )
         return steps
@@ -659,11 +742,21 @@ class CompositionRoot:
     ):
         from .control.rank_launcher import RankLauncher, rank_result_check
 
-        env = os.environ.copy()
-        from .plan.runtime_environment import runtime_environment, staged_pythonpath
+        if self.local_runtime_paths is None:
+            raise CompositionError("rank launch requires a validated node-local runtime capsule")
+        from .plan.runtime_environment import (
+            RuntimePathError,
+            assert_worker_launch_is_local,
+            closed_runtime_environment,
+        )
 
-        env.update(runtime_environment(self.plan))
-        env["PYTHONPATH"] = staged_pythonpath(self.plan, env.get("PYTHONPATH", ""))
+        self.local_runtime_paths.prepare_state(policy=self.site_profile or self.plan)
+        env = closed_runtime_environment(
+            self.plan,
+            paths=self.local_runtime_paths,
+            base_environment=os.environ,
+            policy=self.site_profile or self.plan,
+        )
         env["EXASERVE_COMPAT_ROLE"] = "node_supervisor"
         if self.head_channel is not None:
             env.update(self.head_channel.env(reachable_host=self.head_address()))
@@ -672,23 +765,30 @@ class CompositionRoot:
         # The shell used to resolve it and MUTATE the runtime config to
         # communicate it, which made a config file a channel between processes.
         env["EXASERVE_HEAD_IP"] = self.head_address()
-        # The run directory is where every durable artifact of this generation
-        # lands (readiness snapshot, traces, per-node archives). The shell used
-        # to export it; the root owns it now, so it must pass it on or the
-        # snapshot ends up in /tmp where no consumer looks for it.
-        env["EXASERVE_RUN_LOG_DIR"] = self.run_dir
-        env.setdefault("EXASERVE_RUN_LOG_ROOT", os.path.dirname(self.run_dir) or self.run_dir)
         env["EXASERVE_ALLOCATION_BINDING_HASH"] = self.binding.allocation_binding_hash
-        env["EXASERVE_ALLOCATION_BINDING_PATH"] = self.binding_path
         env["EXASERVE_SITE_PROFILE_HASH"] = self.plan.site_profile_hash
         env["EXASERVE_VENDOR"] = self.plan.vendor
         env["EXASERVE_NUM_GPUS_PER_NODE"] = str(self.plan.num_gpus_per_node)
+        rank_argv = list(rank_argv)
+        try:
+            assert_worker_launch_is_local(
+                argv=rank_argv,
+                cwd=self.local_runtime_paths.python_root,
+                environment=env,
+                policy=self.site_profile or self.plan,
+            )
+        except RuntimePathError as exc:
+            raise CompositionError(f"rank launch descriptor rejected: {exc}") from exc
+        launcher_env = os.environ.copy()
+        launcher_env.update(env)
         launcher = RankLauncher(
             node_count=self.plan.num_nodes,
             rank_argv=rank_argv,
             scheduler=scheduler,
             launch_prefix=launch_prefix,
-            env=env,
+            env=launcher_env,
+            application_env=env,
+            cwd=str(self.local_runtime_paths.python_root),
         )
         component = self.supervisor.register(launcher.component())
         # Launcher aggregation and authenticated rank observations are the two
@@ -739,8 +839,17 @@ class CompositionRoot:
             if reason:
                 raise CompositionError(reason)
             if self.sessions.all_registered():
+                # Snapshot ACKs establish the in-memory control barrier. Cross
+                # the head's group-commit barrier before START so a crash can
+                # never leave long-lived children running from receipts that
+                # were accepted but not durably recorded.
+                self.head_channel.flush_durable_evidence(
+                    timeout=float(self.plan.control.registration_deadline_s)
+                )
+                self.raise_if_termination("durable rank registration interrupted")
                 self._log(
-                    "[Composition] every planned rank established; Ray children remain fenced"
+                    "[Composition] every planned rank durably established; "
+                    "Ray children remain fenced"
                 )
                 return
             try:
@@ -791,6 +900,8 @@ class CompositionRoot:
         """
         if self.head_channel is None or self.binding is None:
             raise CompositionError("Ray startup requires control and allocation bindings")
+        if self.local_runtime_paths is None:
+            raise CompositionError("Ray startup requires a validated local runtime capsule")
         poll_s = (
             float(self.plan.readiness.validation_interval_s) if poll_s is None else float(poll_s)
         )
@@ -843,9 +954,17 @@ class CompositionRoot:
 
         output_path = os.path.join(self.run_dir, "ray_cluster.snapshot.json")
         attempt_path = os.path.join(
-            self.run_dir, f".ray_cluster.probe.{os.getpid()}.{time.time_ns()}.json"
+            self.local_runtime_paths.logs,
+            f".ray_cluster.probe.{os.getpid()}.{time.time_ns()}.json",
         )
-        env = os.environ.copy()
+        from .plan.runtime_environment import closed_runtime_environment
+
+        env = closed_runtime_environment(
+            self.plan,
+            paths=self.local_runtime_paths,
+            base_environment=os.environ,
+            policy=self.site_profile or self.plan,
+        )
         for key in (
             "EXASERVE_CONTROL_HOST",
             "EXASERVE_CONTROL_PORT",
@@ -854,13 +973,13 @@ class CompositionRoot:
             env.pop(key, None)
         remaining = max(0.1, deadline - time.monotonic())
         argv = [
-            sys.executable,
+            env["EXASERVE_QUALIFIED_PYTHON"],
             "-m",
             "exaserve.control.ray_cluster_probe",
             "--plan",
             os.path.abspath(plan_path),
             "--binding",
-            os.path.abspath(self.binding_path),
+            str(self.local_runtime_paths.binding_path),
             "--address",
             f"{self.head_address()}:{self.plan.ray_port}",
             "--output",
@@ -875,6 +994,7 @@ class CompositionRoot:
                 argv,
                 timeout_s=remaining + 15.0,
                 env=env,
+                cwd=self.local_runtime_paths.python_root,
                 termination_grace_s=min(10.0, max(1.0, remaining / 10)),
                 cancel_requested=self.termination_requested,
             )
@@ -931,16 +1051,22 @@ class CompositionRoot:
         )
         from .control.deployment_observer import DeploymentObserver
         from .control.ray_runtime import server_argv
-        from .plan.runtime_environment import runtime_environment, staged_pythonpath
+        from .plan.runtime_environment import closed_runtime_environment
+
+        if self.local_runtime_paths is None:
+            raise CompositionError("deployment start requires a validated local runtime capsule")
 
         socket_path = deployment_socket_path_for(self.plan.deployment_id, self.generation)
         ingress = DeploymentObservationIngress(socket_path, log=self._log)
         if not ingress.start():
             raise CompositionError("required deployment observation IPC could not bind")
 
-        child_env = dict(os.environ if env is None else env)
-        child_env.update(runtime_environment(self.plan))
-        child_env["PYTHONPATH"] = staged_pythonpath(self.plan, child_env.get("PYTHONPATH", ""))
+        child_env = closed_runtime_environment(
+            self.plan,
+            paths=self.local_runtime_paths,
+            base_environment=(os.environ if env is None else env),
+            policy=self.site_profile or self.plan,
+        )
         for key in (
             "EXASERVE_CONTROL_HOST",
             "EXASERVE_CONTROL_PORT",
@@ -955,10 +1081,14 @@ class CompositionRoot:
                 "EXASERVE_PLAN_HASH": self.plan.deployment_plan_hash,
                 "EXASERVE_SITE_PROFILE_HASH": self.plan.site_profile_hash,
                 "EXASERVE_ALLOCATION_BINDING_HASH": (self.binding.allocation_binding_hash),
-                "EXASERVE_PLAN_PATH": os.path.abspath(plan_path),
-                "EXASERVE_ALLOCATION_BINDING_PATH": self.binding_path,
+                "EXASERVE_PLAN_PATH": str(self.local_runtime_paths.plan_path),
+                "EXASERVE_ALLOCATION_BINDING_PATH": str(self.local_runtime_paths.binding_path),
+                # This child is explicitly allocation-head-owned and is the
+                # sole producer of the paper startup trace. Actors do not
+                # inherit this key; their runtime_env has only node-local
+                # paths. Keeping this one head writer preserves the durable
+                # result contract without worker filesystem fan-out.
                 "EXASERVE_RUN_LOG_DIR": self.run_dir,
-                "EXASERVE_RUN_LOG_ROOT": os.path.dirname(self.run_dir) or self.run_dir,
                 # Rank zero owns this node-local exact-receipt hop.  The path is
                 # deterministic and the receiving rank validates every receipt.
                 RECEIPT_SOCKET_ENV: receipt_socket_path_for(
@@ -970,11 +1100,24 @@ class CompositionRoot:
                 "EXASERVE_COMPAT_ROLE": "deployment",
             }
         )
+        if not self.plan.runtime.null_compute:
+            model_result = os.path.join(self.run_dir, "model_bcast_timing.json")
+            if not os.path.isfile(model_result):
+                ingress.stop(timeout_s=1.0)
+                raise CompositionError(
+                    "deployment start requires the validated model staging result"
+                )
+            # This shared path is consumed once by the allocation-head-owned
+            # deployment driver. build_actor_runtime_env deliberately omits it;
+            # replicas receive only the validated node-local path mapping.
+            child_env["EXASERVE_MODEL_BCAST_RESULT"] = model_result
+        deployment_argv = server_argv(str(self.local_runtime_paths.plan_path))
         component = self.supervisor.register(
             ManagedComponent(
                 component_id="deployment",
-                argv=server_argv(plan_path),
+                argv=deployment_argv,
                 env=child_env,
+                cwd=str(self.local_runtime_paths.python_root),
                 long_lived=True,
             )
         )
@@ -1972,12 +2115,35 @@ class CompositionRoot:
                     raise CompositionError("revalidation predicate changed before READY commit")
                 self._log("[Readiness] validation recovered; READY re-persisted")
             elif self.status is not None:
-                self.status.refresh_ready(
-                    readiness_snapshot=verdict.to_dict(),
-                    model_map=verdict.model_map,
-                    capability_map=verdict.capability_map,
-                    receipt_hashes=list(verdict.receipt_hashes),
-                )
+                from .status_api import ReadyEvidenceChanged
+
+                try:
+                    self.status.refresh_ready(
+                        readiness_snapshot=verdict.to_dict(),
+                        model_map=verdict.model_map,
+                        capability_map=verdict.capability_map,
+                        receipt_hashes=list(verdict.receipt_hashes),
+                    )
+                except ReadyEvidenceChanged as exc:
+                    # A compact heartbeat cannot bind a new receipt/topology
+                    # set. Cross a visible validation boundary, persist a new
+                    # immutable receipt manifest, and then publish a full READY
+                    # record. This is rare (for example a fast actor restart)
+                    # and avoids both stale evidence and periodic 4 MiB writes.
+                    from .state.status import DeploymentState
+
+                    changed = verdict.to_dict()
+                    self.status.advance(
+                        DeploymentState.VALIDATING,
+                        reason_code="READY_EVIDENCE_CHANGED",
+                        detail=str(exc),
+                        readiness_snapshot=changed,
+                        model_map=verdict.model_map,
+                        capability_map=verdict.capability_map,
+                        receipt_hashes=list(verdict.receipt_hashes),
+                    )
+                    self.publish_ready(verdict)
+                    self._log("[Readiness] READY evidence changed; full manifest republished")
             self._validation_loss_started = None
             return None
 

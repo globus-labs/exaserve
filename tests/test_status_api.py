@@ -10,13 +10,14 @@ an endpoint for a deployment that is not READY.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
 
 from clientlab.targets import exaserve_target
 from exaserve.plan.compiler import compile_deployment_plan
-from exaserve.plan.contracts import build_allocation_binding
+from exaserve.plan.contracts import build_allocation_binding, canonical_hash
 from exaserve.plan.io import write_allocation_binding
 from exaserve.site import default_site_profile
 from exaserve.state.status import DeploymentState
@@ -402,7 +403,7 @@ def _fake_status_clock(state, *, boot_id="boot-a"):
     )
 
 
-def test_ready_evidence_uses_monotonic_expiry_and_refresh_is_cas_published(tmp_path):
+def test_ready_evidence_uses_monotonic_expiry_and_compact_refresh(tmp_path):
     state = {"wall": 2_000_000_000.0, "monotonic": 100.0}
     clock = _fake_status_clock(state)
     pub, _, _ = _publisher(tmp_path, clock=clock)
@@ -429,7 +430,9 @@ def test_ready_evidence_uses_monotonic_expiry_and_refresh_is_cas_published(tmp_p
         receipt_hashes=list(status.receipt_hashes),
     )
     refreshed = read_deployment_status(str(tmp_path), clock=clock)
-    assert refreshed.revision == revision + 1
+    # Heartbeats update only the compact lease artifact; the multi-megabyte
+    # immutable READY evidence is not rewritten on every validation cadence.
+    assert refreshed.revision == revision
     assert refreshed.state_revision == state_revision
     assert refreshed.state_changed_at == state_changed_at
     assert refreshed.state_changed_monotonic == state_changed_monotonic
@@ -524,7 +527,7 @@ def test_ready_lease_survives_reader_restart_on_same_boot_and_expires_on_boot_ch
         require_ready_endpoint(str(tmp_path), clock=rebooted_reader_clock)
 
 
-def test_ready_heartbeats_do_not_grow_transition_history_without_bound(tmp_path):
+def test_ready_heartbeats_do_not_rewrite_status_or_grow_history(tmp_path):
     pub, _, _ = _publisher(tmp_path)
     _walk_to_ready(pub)
     status = read_deployment_status(str(tmp_path))
@@ -542,9 +545,45 @@ def test_ready_heartbeats_do_not_grow_transition_history_without_bound(tmp_path)
 
     after = pub.store.load()
     assert after is not None
-    assert after.revision == before.revision + 25
+    assert after.revision == before.revision
     assert len(after.history) == history_length
-    assert after.reason_code == "READINESS_HEARTBEAT"
+    assert after.reason_code == before.reason_code
+    lease = json.loads((tmp_path / "deployment_ready_lease.json").read_text())
+    assert lease["lease_revision"] == 26  # initial READY plus 25 refreshes
+
+
+def test_compact_ready_lease_cannot_renew_changed_receipt_evidence(tmp_path):
+    pub, _, _ = _publisher(tmp_path)
+    _walk_to_ready(pub)
+    status = read_deployment_status(str(tmp_path))
+    lease_path = tmp_path / "deployment_ready_lease.json"
+    before = json.loads(lease_path.read_text())
+
+    with pytest.raises(StatusPublicationError, match="READY evidence changed"):
+        pub.refresh_ready(
+            readiness_snapshot=status.readiness_snapshot,
+            model_map=status.model_map,
+            capability_map=status.capability_map,
+            receipt_hashes=["f" * 64],
+        )
+
+    assert json.loads(lease_path.read_text()) == before
+
+
+@pytest.mark.parametrize("schema_version", [True, 999])
+def test_ready_lease_rejects_unknown_schema_even_with_matching_hash(tmp_path, schema_version):
+    pub, _, _ = _publisher(tmp_path)
+    _walk_to_ready(pub)
+    lease_path = tmp_path / "deployment_ready_lease.json"
+    lease = json.loads(lease_path.read_text())
+    lease["schema_version"] = schema_version
+    lease["lease_hash"] = canonical_hash(
+        {key: value for key, value in lease.items() if key != "lease_hash"}
+    )
+    lease_path.write_text(json.dumps(lease))
+
+    with pytest.raises(InvalidDeploymentStatus, match="schema is unsupported"):
+        read_deployment_status(str(tmp_path))
 
 
 # -- ClientLab consumer ---------------------------------------------------

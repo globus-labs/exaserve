@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
+from importlib import resources
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,19 +15,21 @@ from exaserve.model_bcast import bcast_models, validate_model_bcast_result
 from exaserve.model_staging import (
     COMPLETION_MARKER,
     MODEL_WEIGHT_SUFFIXES,
+    build_model_manifest,
     check_model_exists,
     write_completion_marker,
 )
 from exaserve.pp_stage import (
     _validate_pp_receipt,
     assign_pp_nodes,
+    bcast_cmd,
+    stage_pp_sharded,
     stage_node_groups,
-    subset_launch_prefix,
 )
-from exaserve.shard_prune import build_stage_dir
+from exaserve.shard_prune import build_stage_dir, write_stage_manifest
 
 
-def test_stage_bundle_inventory_matches_dereferenced_broadcast(tmp_path):
+def test_stage_bundle_inventory_matches_dereferenced_broadcast(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()
     (source / "config.json").write_text(json.dumps({"num_hidden_layers": 2}))
@@ -56,9 +61,26 @@ def test_stage_bundle_inventory_matches_dereferenced_broadcast(tmp_path):
     (source / "unused.bin").write_text("unused-weight")
     write_completion_marker(source)
 
+    source_manifest = build_model_manifest(source, source_identity="test-source")
     stage = tmp_path / "stage"
     summary = build_stage_dir(source, 2, 0, stage)
-    write_completion_marker(stage, source_identity="test-source#pp2/stage0")
+    from exaserve.model_staging import _hash_inventory_file
+
+    hashed_paths = []
+
+    def record_generated_hash(path):
+        hashed_paths.append(Path(path).relative_to(stage).as_posix())
+        return _hash_inventory_file(path)
+
+    monkeypatch.setattr("exaserve.model_staging._hash_inventory_file", record_generated_hash)
+    write_stage_manifest(
+        source,
+        stage,
+        source_manifest,
+        source_identity="test-source#pp2/stage0",
+    )
+    assert hashed_paths == ["model.safetensors.index.json"]
+    monkeypatch.setattr("exaserve.model_staging._hash_inventory_file", _hash_inventory_file)
 
     assert summary["shards"] == [shard0]
     assert (stage / shard0).is_symlink()
@@ -224,7 +246,75 @@ def test_pp_node_assignment_is_exact_replica_major_order():
         (1, 1, "n1"),
     ]
     assert stage_node_groups(nodes, 2, 2) == {0: ["n2", "n3"], 1: ["n0", "n1"]}
-    assert subset_launch_prefix(["n2", "n3"], "pbs")[-1] == "n2,n3"
+    command = bcast_cmd(
+        "/tmp/bcast",
+        "/tmp/head-only-stage",
+        "/tmp/candidate",
+        num_nodes=4,
+        recipient_ranks=[0, 2],
+        root_host="n0",
+        application_cwd="/tmp/runtime/python",
+    )
+    assert command[:7] == [
+        "mpiexec",
+        "--genvnone",
+        "--envnone",
+        "-n",
+        "4",
+        "-ppn",
+        "1",
+    ]
+    assert command[command.index("--recipients") + 1] == "0,2"
+    assert "--hosts" not in command
+
+
+def test_pp_dry_run_uses_allocation_world_and_head_local_source_argv(tmp_path):
+    source = tmp_path / "shared-model"
+    source.mkdir()
+    (source / "config.json").write_text(json.dumps({"num_hidden_layers": 2}))
+    (source / "stage0.safetensors").write_text("zero")
+    (source / "stage1.safetensors").write_text("one")
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.layers.0.weight": "stage0.safetensors",
+                    "model.layers.1.weight": "stage1.safetensors",
+                }
+            }
+        )
+    )
+    local = tmp_path / "node-local"
+    binding = SimpleNamespace(rank_to_node=((0, "n0"), (1, "n1"), (2, "n2"), (3, "n3")))
+    plan = stage_pp_sharded(
+        source,
+        "org--model",
+        "/lus/flare/prohibited-legacy-stage",
+        local,
+        2,
+        ["n2", "n0", "n3", "n1"],
+        2,
+        "/tmp/bcast",
+        dry_run=True,
+        binding=binding,
+    )
+    assert [item["recipient_ranks"] for item in plan] == [[2, 3], [0, 1]]
+    for item in plan:
+        command = item["command"]
+        assert command[command.index("-n") + 1] == "4"
+        assert command[command.index("--expected-root-host") + 1] == "n0"
+        source_argv = Path(command[-2])
+        assert source_argv.is_relative_to(local)
+        assert not str(source_argv).startswith("/lus/flare")
+
+
+def test_native_broadcast_splits_root_and_recipient_communicator():
+    source = (resources.files("exaserve.resources") / "bcast.c").read_text()
+    assert "MPI_Comm_split(MPI_COMM_WORLD" in source
+    assert "MPI_Bcast(&kind, 1, MPI_INT, 0, communicator)" in source
+    assert "MPI_Bcast(context->buffer, (int)wanted, MPI_BYTE, 0, context->communicator)" in source
+    assert "MPI_Bcast(buffer, (int)wanted, MPI_BYTE, 0, communicator)" in source
+    assert "MPI_Bcast(buffer, (int)wanted, MPI_BYTE, 0, MPI_COMM_WORLD)" not in source
 
 
 def test_pp_receipt_rejects_coercible_node_identity():
@@ -240,6 +330,8 @@ def test_pp_receipt_rejects_coercible_node_identity():
         "file_count": 2,
         "total_bytes": 3,
         "target": "/tmp/model",
+        "model_device_id": 7,
+        "model_fs_type": "tmpfs",
         "verification_duration_s": 0.1,
         "pp_stage": 0,
     }
@@ -277,16 +369,21 @@ def test_broadcast_uses_plan_ranks_not_binding_prefix(tmp_path, monkeypatch):
     )
     deployment = SimpleNamespace(models=(canonical_model,))
     observed = {}
+    run_logs = tmp_path / "run-logs"
+    run_logs.mkdir()
+    monkeypatch.setenv("EXASERVE_RUN_LOG_DIR", str(run_logs))
 
-    monkeypatch.setattr("exaserve.model_bcast.compile_bcast", lambda: tmp_path / "bcast")
+    monkeypatch.setattr(
+        "exaserve.model_bcast.resolve_bcast_executable", lambda **_kwargs: tmp_path / "bcast"
+    )
     monkeypatch.setattr(
         "exaserve.model_bcast.stage_models",
         lambda _models, _storage: {model_id: str(source)},
     )
     monkeypatch.setattr(
         "exaserve.model_bcast.clean_model_caches",
-        lambda local, models, nodes, **kwargs: observed.update(
-            clean=(local, list(models), nodes, kwargs["binding"])
+        lambda local, models, nodes, **kwargs: (
+            observed.update(clean=(local, list(models), nodes, kwargs["binding"])) or []
         ),
     )
 
@@ -346,8 +443,8 @@ def test_shard_aware_aggregate_contract_binds_every_stage_to_planned_nodes():
         rank_to_node=((0, "n0"), (1, "n1"), (2, "n2"), (3, "n3")),
     )
     receipts = []
-    for stage, nodes in enumerate((("n0", "n2"), ("n1", "n3"))):
-        for rank, node in enumerate(nodes):
+    for stage, rank_nodes in enumerate((((0, "n0"), (2, "n2")), ((1, "n1"), (3, "n3")))):
+        for rank, node in rank_nodes:
             receipts.append(
                 {
                     "schema_version": 1,
@@ -360,20 +457,23 @@ def test_shard_aware_aggregate_contract_binds_every_stage_to_planned_nodes():
                     "manifest_hash": stage_hashes[stage],
                     "file_count": 2,
                     "total_bytes": 3,
-                    "target": "/tmp/models/org--pp",
+                    "target": f"/tmp/models/org--pp.{manifest_hash}",
+                    "model_device_id": 7,
+                    "model_fs_type": "tmpfs",
                     "verification_duration_s": 0.1,
                     "pp_stage": stage,
                 }
             )
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "deployment_id": "deployment",
         "generation": 9,
         "deployment_plan_hash": "c" * 64,
         "site_profile_hash": "d" * 64,
         "allocation_binding_hash": "e" * 64,
         "model_bcast_total_s": 1.0,
-        "model_paths": {model_id: "/tmp/models/org--pp"},
+        "cleanup_receipts": [],
+        "model_paths": {model_id: f"/tmp/models/org--pp.{manifest_hash}"},
         "models": [
             {
                 "model_id": model_id,
@@ -388,6 +488,79 @@ def test_shard_aware_aggregate_contract_binds_every_stage_to_planned_nodes():
     }
 
     assert validate_model_bcast_result(result, plan=plan, binding=binding) is result
-    result["models"][0]["rank_receipts"][1]["node"] = "n1"
+
+
+def test_single_replica_pp2_is_shard_aware_and_uses_global_rank_receipts():
+    model_id = "org/pp-single"
+    stage_hashes = ["1" * 64, "2" * 64]
+    aggregate_hash = hashlib.sha256(
+        json.dumps(stage_hashes, separators=(",", ":")).encode()
+    ).hexdigest()
+    target = f"/tmp/models/org--pp-single.{aggregate_hash}"
+    model = SimpleNamespace(
+        model_id=model_id,
+        pipeline_parallel_size=2,
+        num_replicas=1,
+        replicas=(SimpleNamespace(planned_ranks=(0, 1)),),
+    )
+    plan = SimpleNamespace(
+        deployment_id="deployment",
+        deployment_plan_hash="a" * 64,
+        site_profile_hash="b" * 64,
+        local_stage_path="/tmp/models",
+        num_nodes=2,
+        models=(model,),
+        runtime=SimpleNamespace(pp_shard_aware=True),
+    )
+    binding = SimpleNamespace(
+        generation=3,
+        allocation_binding_hash="c" * 64,
+        rank_to_node=((0, "n0"), (1, "n1")),
+    )
+    receipts = []
+    for stage, (rank, node) in enumerate(binding.rank_to_node):
+        receipts.append(
+            {
+                "schema_version": 1,
+                "attempt_id": f"{'d' * 32}-stage{stage}",
+                "result_id": f"{rank + 1:032x}",
+                "rank": rank,
+                "node": node,
+                "generation": 3,
+                "model_id": model_id,
+                "manifest_hash": stage_hashes[stage],
+                "file_count": 2,
+                "total_bytes": 3,
+                "target": target,
+                "model_device_id": 7,
+                "model_fs_type": "tmpfs",
+                "verification_duration_s": 0.1,
+                "pp_stage": stage,
+            }
+        )
+    result = {
+        "schema_version": 2,
+        "deployment_id": "deployment",
+        "generation": 3,
+        "deployment_plan_hash": "a" * 64,
+        "site_profile_hash": "b" * 64,
+        "allocation_binding_hash": "c" * 64,
+        "model_bcast_total_s": 1.0,
+        "cleanup_receipts": [],
+        "model_paths": {model_id: target},
+        "models": [
+            {
+                "model_id": model_id,
+                "cache_reused": False,
+                "shard_aware": True,
+                "manifest_hash": aggregate_hash,
+                "stage_manifest_hashes": stage_hashes,
+                "rank_receipts": receipts,
+                "duration_s": 0.5,
+            }
+        ],
+    }
+    assert validate_model_bcast_result(result, plan=plan, binding=binding) is result
+    result["models"][0]["rank_receipts"][1]["node"] = "wrong"
     with pytest.raises(RuntimeError, match="topology/identity is invalid"):
         validate_model_bcast_result(result, plan=plan, binding=binding)

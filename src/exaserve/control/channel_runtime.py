@@ -374,6 +374,13 @@ class HeadChannel:
         with self._durable_lock:
             if self._durable_closed:
                 raise RuntimeError("durable receipt writer is closed")
+            # Completion callbacks normally retire these entries immediately,
+            # but a waiter may observe a finished tail before its callback has
+            # acquired this lock. Do not reject the shutdown/barrier flush on
+            # account of already-complete work.
+            self._durable_pending = {
+                pending for pending in self._durable_pending if not pending.done()
+            }
             if len(self._durable_pending) >= self._durable_limit:
                 raise ContractError(
                     "durable receipt queue capacity exhausted; refusing unbounded evidence"
@@ -563,14 +570,37 @@ class HeadChannel:
         ):
             return False, f"required supervisor receipt {supervisor_id!r} is missing"
 
-        # All incrementals preceding this replacement snapshot must be durable
-        # before its exact rank-owned set is staged.  Awaiting the worker future
-        # yields the listener loop, so other ranks' heartbeats and REGISTER
-        # frames continue to make progress.
-        ok, detail = await self._await_durable_tail()
-        if not ok:
-            return False, detail
-        ok, detail, staged_ledger = self._decode_snapshot_receipts(rank, receipt_payloads)
+        from .contracts import validate_observation
+
+        staged_observations = {
+            (obs.component_id, obs.instance_id): obs
+            for obs in (validate_observation(payload) for payload in observation_payloads)
+        }
+        for obs in staged_observations.values():
+            reason = self._observation_contract_reason(rank, obs)
+            if reason is not None:
+                return False, reason
+
+        # Parse and stage the replacement on the one ordered durability worker
+        # before advancing the session state machine. Invalid receipt content
+        # must not leave the rank in SNAPSHOT_ACK_PENDING. Keeping this work on
+        # the ordered worker also prevents the listener thread from taking the
+        # ledger lock behind a shared-filesystem write.
+        def stage_rank_receipts():
+            return self._decode_snapshot_receipts(rank, receipt_payloads)
+
+        if getattr(self, "_durable_executor", None) is None:
+            # Isolated tests that construct a HeadChannel without its executor
+            # retain synchronous semantics.
+            ok, detail, staged_ledger = stage_rank_receipts()
+            future = None
+        else:
+            future = self._submit_durable(stage_rank_receipts)
+        if future is not None:
+            try:
+                ok, detail, staged_ledger = await asyncio.wrap_future(future)
+            except BaseException as exc:
+                return False, (f"snapshot receipt staging failed: {type(exc).__name__}: {exc}")
         if not ok:
             self.receipt_rejections.append(f"rank {rank}: {detail}")
             return False, detail
@@ -587,28 +617,25 @@ class HeadChannel:
             if not ok:
                 return False, detail
 
-        from .contracts import validate_observation
+        # The coordinator has accepted the complete set. Commit the staged
+        # rank-owned subset behind all earlier mutations. Other ranks may
+        # append while this coroutine yields; commit_rank_snapshot merges only
+        # this rank, so those unrelated receipts cannot be clobbered.
+        if staged_ledger is not None:
 
-        staged_observations = {
-            (obs.component_id, obs.instance_id): obs
-            for obs in (validate_observation(payload) for payload in observation_payloads)
-        }
-        for obs in staged_observations.values():
-            reason = self._observation_contract_reason(rank, obs)
-            if reason is not None:
-                return False, reason
-        with self._state_lock:
-            if staged_ledger is not None:
-                future = self._submit_durable(
-                    lambda: self.ledger.commit_rank_snapshot(rank, staged_ledger)
-                )
-            else:
+            def commit_rank_receipts() -> None:
+                self.ledger.commit_rank_snapshot(rank, staged_ledger)
+
+            if getattr(self, "_durable_executor", None) is None:
+                commit_rank_receipts()
                 future = None
-        if future is not None:
-            try:
-                await asyncio.wrap_future(future)
-            except BaseException as exc:
-                return False, (f"durable snapshot commit failed: {type(exc).__name__}: {exc}")
+            else:
+                future = self._submit_durable(commit_rank_receipts)
+            if future is not None:
+                try:
+                    await asyncio.wrap_future(future)
+                except BaseException as exc:
+                    return False, (f"durable snapshot commit failed: {type(exc).__name__}: {exc}")
         with self._state_lock:
             for key in [key for key in self._observation_arrivals if key[0] == rank]:
                 self._observation_arrivals.pop(key, None)
@@ -1052,6 +1079,32 @@ class HeadChannel:
             )
         return received
 
+    def flush_durable_evidence(self, timeout: float = 30.0) -> None:
+        """Cross the ordered binding barrier without blocking the listener.
+
+        Registration snapshots may be acknowledged from the in-memory ledger,
+        but no START or READY boundary may depend on them until the head's one
+        writer has group-committed the corresponding batch segment. Queue the
+        flush behind every earlier receipt mutation and wait only from the
+        allocation-head orchestration thread, never the asyncio listener.
+        """
+        timeout = _require_positive_timeout(timeout, label="durable evidence flush timeout")
+        binding_store = getattr(self.ledger, "binding_store", None)
+        if binding_store is None:
+            return
+        if getattr(self, "_durable_executor", None) is None:
+            binding_store.flush()
+            return
+        future = self._submit_durable(binding_store.flush)
+        if future is None:
+            return
+        try:
+            future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            raise TimeoutError(
+                f"durable evidence flush exceeded its {timeout:g}s deadline"
+            ) from exc
+
     def stop(self, *, timeout: float = 15.0, deadline: Optional[float] = None) -> bool:
         with self._stop_lock:
             if self._stopped:
@@ -1080,9 +1133,16 @@ class HeadChannel:
                     f"control listener cleanup failed: {type(exc).__name__}: {exc}"
                 )
             executor = getattr(self, "_durable_executor", None)
-            durable_writer_clean = True
+            binding_store = getattr(self.ledger, "binding_store", None)
             if executor is not None:
                 try:
+                    # Queue the group-commit while the ordered writer is still
+                    # open. Waiting for this new tail proves every earlier
+                    # receipt mutation and the final projection are durable;
+                    # a direct flush after executor shutdown could otherwise
+                    # block the orchestration thread outside its deadline.
+                    if binding_store is not None:
+                        self._submit_durable(binding_store.flush)
                     with self._durable_lock:
                         self._durable_closed = True
                         tail = self._durable_tail
@@ -1090,7 +1150,6 @@ class HeadChannel:
                         tail.result(timeout=remaining())
                     executor.shutdown(wait=True, cancel_futures=False)
                 except Exception as exc:
-                    durable_writer_clean = False
                     clean = False
                     self.failures.append(
                         f"durable receipt writer cleanup failed: {type(exc).__name__}: {exc}"
@@ -1103,8 +1162,10 @@ class HeadChannel:
                     # already-running write.
                     executor.shutdown(wait=False, cancel_futures=True)
             try:
-                binding_store = getattr(self.ledger, "binding_store", None)
-                if binding_store is not None and durable_writer_clean:
+                # Isolated tests may construct a HeadChannel without the
+                # production writer. Preserve their synchronous barrier; the
+                # production path was flushed above under the shared deadline.
+                if binding_store is not None and executor is None:
                     binding_store.flush()
             except Exception as exc:
                 clean = False

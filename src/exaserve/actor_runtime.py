@@ -9,6 +9,7 @@ entire serving stack.
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 from .compat.collector import deployment_scope
@@ -22,6 +23,40 @@ from .compat.profile import (
 
 _INHERITED_ACTOR_ENV = (
     "PYTHONPATH",
+    "PYTHONNOUSERSITE",
+    "PYTHONSAFEPATH",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONPYCACHEPREFIX",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "IPYTHONDIR",
+    "JUPYTER_CONFIG_DIR",
+    "NUMBA_CACHE_DIR",
+    "TORCH_EXTENSIONS_DIR",
+    "MPLCONFIGDIR",
+    "HF_HOME",
+    "HF_HUB_OFFLINE",
+    "HF_DATASETS_OFFLINE",
+    "TRANSFORMERS_OFFLINE",
+    "HF_HUB_CACHE",
+    "HUGGINGFACE_HUB_CACHE",
+    "TRANSFORMERS_CACHE",
+    "TORCH_HOME",
+    "TRITON_CACHE_DIR",
+    "VLLM_CACHE_ROOT",
+    "RAY_TMPDIR",
+    "EXASERVE_LOCAL_RUNTIME_ROOT",
+    "EXASERVE_LOCAL_STATE_ROOT",
+    "EXASERVE_QUALIFIED_PYTHON",
+    "EXASERVE_QUALIFIED_PYTHON_SHA256",
+    "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH",
+    "EXASERVE_COMPAT_OVERLAY_ROOT",
     PP_PATCH_GATE,
     RAY_WORKER_PATCH_GATE,
     MULTIPROC_WORKER_PATCH_GATE,
@@ -45,6 +80,8 @@ _INHERITED_ACTOR_ENV = (
     "EXASERVE_ALLOCATION_BINDING_HASH",
     "EXASERVE_COMPAT_PROFILE_ID",
     "EXASERVE_COMPAT_MANIFEST_HASH",
+    "EXASERVE_COMPAT_SOURCES_NODE_PROFILE",
+    "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
     "EXASERVE_PLAN_PATH",
     "EXASERVE_ALLOCATION_BINDING_PATH",
     SOCKET_ENV,
@@ -52,6 +89,41 @@ _INHERITED_ACTOR_ENV = (
 
 _PROTECTED_ACTOR_ENV = frozenset(
     {
+        "PYTHONPATH",
+        "PYTHONNOUSERSITE",
+        "PYTHONSAFEPATH",
+        "PYTHONPYCACHEPREFIX",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "IPYTHONDIR",
+        "JUPYTER_CONFIG_DIR",
+        "NUMBA_CACHE_DIR",
+        "TORCH_EXTENSIONS_DIR",
+        "MPLCONFIGDIR",
+        "HF_HOME",
+        "HF_HUB_OFFLINE",
+        "HF_DATASETS_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+        "TORCH_HOME",
+        "TRITON_CACHE_DIR",
+        "VLLM_CACHE_ROOT",
+        "RAY_TMPDIR",
+        "EXASERVE_LOCAL_RUNTIME_ROOT",
+        "EXASERVE_LOCAL_STATE_ROOT",
+        "EXASERVE_SHARED_ROOTS",
+        "EXASERVE_QUALIFIED_PYTHON",
+        "EXASERVE_QUALIFIED_PYTHON_SHA256",
+        "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH",
+        "EXASERVE_COMPAT_OVERLAY_ROOT",
         "EXASERVE_DEPLOYMENT_ID",
         "EXASERVE_GENERATION",
         "EXASERVE_VENDOR",
@@ -61,6 +133,8 @@ _PROTECTED_ACTOR_ENV = frozenset(
         "EXASERVE_ALLOCATION_BINDING_HASH",
         "EXASERVE_COMPAT_PROFILE_ID",
         "EXASERVE_COMPAT_MANIFEST_HASH",
+        "EXASERVE_COMPAT_SOURCES_NODE_PROFILE",
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
         "EXASERVE_PLAN_PATH",
         "EXASERVE_ALLOCATION_BINDING_PATH",
         "EXASERVE_COMPAT_ROLE",
@@ -89,6 +163,76 @@ def build_actor_runtime_env(
         raise ValueError("dynamic receipt ownership cannot also declare receipt_owner_rank")
 
     env_vars = {key: value for key in _INHERITED_ACTOR_ENV if (value := os.environ.get(key))}
+    from .plan.runtime_environment import (
+        LOCAL_RUNTIME_ROOT_ENV,
+        QUALIFIED_PYTHON_HASH_ENV,
+        QUALIFIED_PYTHON_PROFILE_ENV,
+        RuntimePathError,
+        path_is_shared,
+        shared_path_tokens,
+    )
+
+    runtime_root = env_vars.get(LOCAL_RUNTIME_ROOT_ENV, "")
+    if not runtime_root:
+        raise RuntimeError(
+            f"actor runtime requires published {LOCAL_RUNTIME_ROOT_ENV}; "
+            "shared-repository fallback is forbidden"
+        )
+    if env_vars.get("PYTHONNOUSERSITE") != "1":
+        raise RuntimeError("actor runtime requires PYTHONNOUSERSITE=1")
+    if env_vars.get("PYTHONSAFEPATH") != "1":
+        raise RuntimeError("actor runtime requires PYTHONSAFEPATH=1")
+    if re.fullmatch(r"[0-9a-f]{64}", env_vars.get(QUALIFIED_PYTHON_HASH_ENV, "")) is None:
+        raise RuntimeError("actor runtime requires qualified Python hash evidence")
+    if env_vars.get(QUALIFIED_PYTHON_PROFILE_ENV) != env_vars.get("EXASERVE_SITE_PROFILE_HASH"):
+        raise RuntimeError("actor qualified Python evidence belongs to another SiteProfile")
+    if env_vars.get("EXASERVE_COMPAT_SOURCES_NODE_PROFILE") != env_vars.get(
+        "EXASERVE_COMPAT_PROFILE_ID"
+    ):
+        raise RuntimeError("actor compatibility source proof has the wrong profile")
+    if env_vars.get("EXASERVE_COMPAT_SOURCES_NODE_MANIFEST") != env_vars.get(
+        "EXASERVE_COMPAT_MANIFEST_HASH"
+    ):
+        raise RuntimeError("actor compatibility source proof has the wrong manifest")
+    path_keys = {
+        "PYTHONPATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "IPYTHONDIR",
+        "JUPYTER_CONFIG_DIR",
+        "NUMBA_CACHE_DIR",
+        "TORCH_EXTENSIONS_DIR",
+        "MPLCONFIGDIR",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+        "TORCH_HOME",
+        "TRITON_CACHE_DIR",
+        "VLLM_CACHE_ROOT",
+        "RAY_TMPDIR",
+        "EXASERVE_LOCAL_RUNTIME_ROOT",
+        "EXASERVE_LOCAL_STATE_ROOT",
+        "EXASERVE_QUALIFIED_PYTHON",
+        "EXASERVE_COMPAT_OVERLAY_ROOT",
+        "EXASERVE_SITE_PROFILE_PATH",
+        "EXASERVE_PLAN_PATH",
+        "EXASERVE_ALLOCATION_BINDING_PATH",
+    }
+    try:
+        for key in path_keys:
+            value = env_vars.get(key, "")
+            for item in value.split(os.pathsep) if key == "PYTHONPATH" else (value,):
+                if item and item.startswith("/") and path_is_shared(item):
+                    raise RuntimePathError(f"actor environment {key} names shared storage: {item}")
+    except RuntimePathError as exc:
+        raise RuntimeError(str(exc)) from exc
     if dynamic_receipt_owner:
         # A native multi-replica Serve deployment lets Serve place each actor.
         # Do not leak the deployment driver's rank-zero socket into those
@@ -109,6 +253,18 @@ def build_actor_runtime_env(
                 f"extra actor environment cannot override canonical identity fields: {protected}"
             )
         env_vars.update(extra_env_vars)
+
+    # Future engine options must not bypass the explicit protected list by
+    # inventing another name for a shared path.
+    try:
+        for key, value in env_vars.items():
+            shared = shared_path_tokens(value)
+            if shared:
+                raise RuntimePathError(
+                    f"actor environment {key} names shared storage: {list(shared)}"
+                )
+    except RuntimePathError as exc:
+        raise RuntimeError(str(exc)) from exc
 
     # The scope and role used by the head are authoritative.  Do not preserve
     # a raw, differently-normalized ambient spelling or let an extra option

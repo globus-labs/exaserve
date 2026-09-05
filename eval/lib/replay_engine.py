@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from contextlib import ExitStack
 import glob
 import hashlib
 import json
@@ -12,18 +11,16 @@ import pathlib
 import re
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from eval.lib.manifest import EvalManifest, load_eval_manifest
+from eval.lib.manifest import EvalManifest, ReplayClientConfig, load_eval_manifest
 from exaserve.control.process_handshake import (
     prepare_ready_handshake,
     ready_handshake_args,
@@ -31,6 +28,7 @@ from exaserve.control.process_handshake import (
 )
 from exaserve.exception_notes import add_exception_note
 from exaserve.go_result_contract import (
+    LATENCY_QUANTILE_METHOD,
     read_go_result_stream,
     validate_go_summary as _validate_go_summary,
 )
@@ -49,7 +47,27 @@ def _init_mpi():
     # planners, tests, and analysis tools remain safe on a login node.
     try:
         from mpi4py import MPI
-    except ImportError:  # pragma: no cover - optional dependency
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        launcher_sizes = []
+        for name in ("PMI_SIZE", "PMIX_SIZE", "OMPI_COMM_WORLD_SIZE", "SLURM_NTASKS"):
+            raw = os.environ.get(name, "")
+            if raw:
+                try:
+                    launcher_sizes.append(int(raw))
+                except ValueError:
+                    raise RuntimeError(f"launcher {name} is not an integer: {raw!r}") from exc
+        launcher_rank_names = (
+            "PALS_RANKID",
+            "PMI_RANK",
+            "PMIX_RANK",
+            "OMPI_COMM_WORLD_RANK",
+            "SLURM_PROCID",
+        )
+        launcher_rank_present = any(name in os.environ for name in launcher_rank_names)
+        if launcher_rank_present or any(size > 1 for size in launcher_sizes):
+            raise RuntimeError(
+                "multi-rank replay requires mpi4py; refusing independent roots"
+            ) from exc
         return None, 0, 1
     comm = MPI.COMM_WORLD
     return comm, comm.Get_rank(), comm.Get_size()
@@ -72,46 +90,130 @@ def _mpi_gather(comm, value, root=0):
     return [value]
 
 
-def _gather_results_via_shards(
+_RESULT_TAG = 27181
+_RESULT_CHUNK_BYTES = 1 << 20
+_TRACE_BATCH_BYTES = 1 << 20
+_TRACE_ROW_BYTES = 16 << 20
+
+
+def _request_test(request):
+    outcome = request.test()
+    if isinstance(outcome, tuple) and len(outcome) == 2:
+        return bool(outcome[0]), outcome[1]
+    return bool(outcome), None
+
+
+def _cancel_requests(requests) -> None:
+    for request in requests:
+        cancel = getattr(request, "cancel", None) or getattr(request, "Cancel", None)
+        if cancel is not None:
+            try:
+                cancel()
+            except Exception:
+                pass
+
+
+def _wait_request(request, *, deadline: float, label: str):
+    while time.monotonic() < deadline:
+        complete, value = _request_test(request)
+        if complete:
+            return value
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    _cancel_requests([request])
+    raise RuntimeError(f"{label} exceeded its absolute MPI deadline")
+
+
+def _result_record(item, *, index: int) -> dict:
+    if not isinstance(item, (tuple, list)) or len(item) != 13:
+        raise ValueError(f"gather result {index} must contain 13 fields")
+    request = item[0]
+    if not isinstance(request, TraceRequest):
+        raise TypeError(f"gather result {index} request is not TraceRequest")
+    return {
+        "request": {
+            "timestamp": request.timestamp,
+            "model": request.model,
+            "prompt": request.prompt,
+            "input_len": request.input_len,
+            "output_len": request.output_len,
+            "tensor_parallel_size": request.tensor_parallel_size,
+            "req_id": request.req_id,
+            "mode": request.mode,
+        },
+        "measurements": list(item[1:]),
+    }
+
+
+def _iter_result_chunks(results, *, max_chunk_bytes: int = _RESULT_CHUNK_BYTES):
+    if isinstance(max_chunk_bytes, bool) or not isinstance(max_chunk_bytes, int):
+        raise ValueError("MPI result chunk bound must be an integer")
+    if max_chunk_bytes < 1024:
+        raise ValueError("MPI result chunk bound must be at least 1024 bytes")
+    chunk = bytearray()
+    for index, item in enumerate(results):
+        encoded = (
+            json.dumps(
+                _result_record(item, index=index),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if len(encoded) > max_chunk_bytes:
+            raise ValueError(
+                f"gather result {index} exceeds the {max_chunk_bytes}-byte MPI chunk bound"
+            )
+        if chunk and len(chunk) + len(encoded) > max_chunk_bytes:
+            yield bytes(chunk)
+            chunk.clear()
+        chunk.extend(encoded)
+    if chunk:
+        yield bytes(chunk)
+
+
+def _decode_result_chunk(content: bytes):
+    if not isinstance(content, bytes) or len(content) > _RESULT_CHUNK_BYTES:
+        raise ValueError("MPI result chunk is missing or exceeds its bound")
+    from exaserve.state.atomic import strict_json_loads
+
+    records = []
+    for index, line in enumerate(content.splitlines()):
+        if not line:
+            raise ValueError("MPI result chunk contains an empty row")
+        record = strict_json_loads(line.decode("utf-8"))
+        records.extend(
+            _decode_gather_payload(
+                (
+                    json.dumps(
+                        {"schema_version": 1, "kind": "records", "records": [record]},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+        )
+    return records
+
+
+def _gather_raw_results_via_mpi(
     comm,
     local_results,
     *,
     run_index,
-    shard_dir,
     rank,
     mpi_size,
     is_root,
     timeout_s=600.0,
 ):
-    """Robust replacement for a single-root MPI collective gather of large
-    per-request result sets (dest=direct, multi-node).
+    """Transfer raw records in bounded, sequenced MPI messages.
 
-    The collective ``comm.gather`` pickles every rank's records onto root in
-    one all-ranks operation; at 64 nodes (~hundreds of thousands of records)
-    it is slow, memory-heavy on root, and — being a barrier — hangs forever if
-    any node slows or drops ("Application not found"), so root never writes
-    results. Instead, each rank writes its shard to shared storage
-    independently (atomic rename, no collective), and root polls for the
-    shards, reading whatever arrives within ``timeout_s`` and logging any
-    ranks that never showed (their data is dropped, not the whole run).
-
-    For ``mpi_size <= 1`` (proxy mode: single client) this is a no-op that
-    returns ``[local_results]`` — identical to the old path.
-
-    Design note — why not reuse ``gather.c`` (the log-archive gather): it is a
-    standalone MPI binary (``mpiexec gather ...``) intended for a separate,
-    supervised post-replay step. It cannot be called here because this gather
-    runs INSIDE the replay, which is itself ``mpiexec -n N python
-    replay_client``, and PALS does not support nested mpiexec (a likely source
-    of the original "Application not found"). The replay client also holds no
-    Ray handle, so the scaling-trace collection path (Ray, server-side) is
-    unavailable. This shard write therefore reproduces gather.c's own
-    sanctioned data path — per its header, "rank -> Lustre (N concurrent
-    distinct-name creates; MDS handles this fine); no rank-0 buffer
-    collection" — using the replay's existing ranks instead of a fresh,
-    un-nestable mpiexec. Keep it this way unless results are restructured into
-    a post-replay gather.c artifact (which would move merge/summary out of
-    replay_engine into a new post-finalize step).
+    Only rank 0 retains the merged records.  Each sender has at most one
+    nonblocking message in flight, and root has at most one posted receive per
+    rank.  A missing, malformed, duplicate, or late terminal message rejects
+    the whole run; partial request sets are never published.
     """
     if (
         isinstance(timeout_s, bool)
@@ -119,7 +221,7 @@ def _gather_results_via_shards(
         or not math.isfinite(float(timeout_s))
         or timeout_s <= 0
     ):
-        raise ValueError("result shard timeout must be finite and positive")
+        raise ValueError("MPI result deadline must be finite and positive")
     if (
         isinstance(run_index, bool)
         or not isinstance(run_index, int)
@@ -131,7 +233,7 @@ def _gather_results_via_shards(
         or mpi_size < 1
         or not 0 <= rank < mpi_size
     ):
-        raise ValueError("result shard rank/run identity is invalid")
+        raise ValueError("MPI result rank/run identity is invalid")
     _LAST_GATHER_META.clear()
     if comm is None or mpi_size <= 1:
         encoded = _encode_gather_payload(local_results)
@@ -154,89 +256,420 @@ def _gather_results_via_shards(
         )
         return [local_results]
 
-    os.makedirs(shard_dir, mode=0o700, exist_ok=True)
-    directory_metadata = os.lstat(shard_dir)
-    if not stat.S_ISDIR(directory_metadata.st_mode) or directory_metadata.st_uid != os.getuid():
-        raise RuntimeError("replay shard directory must be a user-owned real directory")
-    os.chmod(shard_dir, 0o700)
-    shard = os.path.join(shard_dir, f"run{run_index}_rank{rank}.json")
-    encoded = _encode_gather_payload(local_results)
-    from exaserve.state.atomic import atomic_create_bytes
-
-    atomic_create_bytes(shard, encoded)
-
+    deadline = time.monotonic() + timeout_s
     if not is_root:
+        digest = hashlib.sha256()
+        size_bytes = 0
+        chunk_count = 0
+        for sequence, content in enumerate(_iter_result_chunks(local_results)):
+            request = comm.isend(("data", run_index, sequence, content), dest=0, tag=_RESULT_TAG)
+            _wait_request(
+                request,
+                deadline=deadline,
+                label=f"rank {rank} result chunk {sequence}",
+            )
+            digest.update(content)
+            size_bytes += len(content)
+            chunk_count += 1
+        local_evidence = {
+            "rank": rank,
+            "size_bytes": size_bytes,
+            "sha256": digest.hexdigest(),
+            "transport": "mpi_chunked",
+        }
+        terminal = (
+            "end",
+            run_index,
+            chunk_count,
+            len(local_results),
+            local_evidence,
+        )
+        _wait_request(
+            comm.isend(terminal, dest=0, tag=_RESULT_TAG),
+            deadline=deadline,
+            label=f"rank {rank} result terminal",
+        )
         return None
 
-    # Root already holds its own shard in memory; poll only for the others.
-    collected = {rank: local_results}
-    shard_evidence = {
-        rank: {
-            "rank": rank,
-            "size_bytes": len(encoded),
-            "sha256": hashlib.sha256(encoded).hexdigest(),
-            "transport": "shared_file",
+    root_digest = hashlib.sha256()
+    root_size = 0
+    for content in _iter_result_chunks(local_results):
+        root_digest.update(content)
+        root_size += len(content)
+    local_evidence = {
+        "rank": 0,
+        "size_bytes": root_size,
+        "sha256": root_digest.hexdigest(),
+        "transport": "mpi_chunked",
+    }
+    collected = {0: local_results}
+    evidence = {0: local_evidence}
+    states = {
+        other: {
+            "next": 0,
+            "records": [],
+            "digest": hashlib.sha256(),
+            "size": 0,
         }
+        for other in range(1, mpi_size)
     }
-    deadline = time.monotonic() + timeout_s
-    shard_errors: dict[int, str] = {}
-    while len(collected) < mpi_size and time.monotonic() < deadline:
-        for other in range(mpi_size):
-            if other in collected:
-                continue
-            path = os.path.join(shard_dir, f"run{run_index}_rank{other}.json")
-            try:
-                from exaserve.state.atomic import regular_file_reader
-
-                with regular_file_reader(path, binary=True) as handle:
-                    content = handle.read()
-                collected[other] = _decode_gather_payload(content)
-                shard_errors.pop(other, None)
-                shard_evidence[other] = {
-                    "rank": other,
-                    "size_bytes": len(content),
-                    "sha256": hashlib.sha256(content).hexdigest(),
-                    "transport": "shared_file",
-                }
-            except FileNotFoundError:
-                continue
-            except (OSError, UnicodeError, ValueError, TypeError) as exc:
-                # Each attempt and rank owns one create-once artifact, so a
-                # malformed shard is final evidence for this attempt. Continue
-                # polling the remaining ranks and publish the exact rejection.
-                shard_errors[other] = f"{type(exc).__name__}: {exc}"
-        if len(collected) < mpi_size:
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
-                time.sleep(min(1.0, remaining))
-
-    missing = [r for r in range(mpi_size) if r not in collected]
-    if missing:
-        print(
-            f"[replay_engine] WARNING: run {run_index} gather collected "
-            f"{len(collected)}/{mpi_size} rank shards after {timeout_s:.0f}s; "
-            f"missing ranks {missing} — their requests are dropped from this run.",
-            flush=True,
+    pending = {other: comm.irecv(source=other, tag=_RESULT_TAG) for other in range(1, mpi_size)}
+    try:
+        while pending and time.monotonic() < deadline:
+            progressed = False
+            for other, request in list(pending.items()):
+                complete, message = _request_test(request)
+                if not complete:
+                    continue
+                progressed = True
+                if not isinstance(message, tuple) or len(message) < 2:
+                    raise RuntimeError(f"rank {other} sent a malformed result message")
+                state = states[other]
+                if message[0] == "data":
+                    if (
+                        len(message) != 4
+                        or message[1] != run_index
+                        or message[2] != state["next"]
+                        or not isinstance(message[3], bytes)
+                    ):
+                        raise RuntimeError(f"rank {other} sent an invalid result chunk")
+                    content = message[3]
+                    decoded = _decode_result_chunk(content)
+                    state["records"].extend(decoded)
+                    state["digest"].update(content)
+                    state["size"] += len(content)
+                    state["next"] += 1
+                    pending[other] = comm.irecv(source=other, tag=_RESULT_TAG)
+                elif message[0] == "end":
+                    if len(message) != 5 or message[1] != run_index:
+                        raise RuntimeError(f"rank {other} sent an invalid result terminal")
+                    expected_chunks, expected_records, claimed = message[2:]
+                    observed = {
+                        "rank": other,
+                        "size_bytes": state["size"],
+                        "sha256": state["digest"].hexdigest(),
+                        "transport": "mpi_chunked",
+                    }
+                    if (
+                        expected_chunks != state["next"]
+                        or expected_records != len(state["records"])
+                        or claimed != observed
+                    ):
+                        raise RuntimeError(f"rank {other} result terminal is inconsistent")
+                    collected[other] = state["records"]
+                    evidence[other] = observed
+                    del pending[other]
+                else:
+                    raise RuntimeError(f"rank {other} sent an unknown result message")
+            if pending and not progressed:
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    except BaseException:
+        _cancel_requests(pending.values())
+        raise
+    if pending:
+        missing = sorted(pending)
+        _cancel_requests(pending.values())
+        _LAST_GATHER_META.update(
+            {
+                "schema_version": 1,
+                "expected_ranks": mpi_size,
+                "collected_ranks": sorted(collected),
+                "missing_ranks": missing,
+                "complete": False,
+                "shards": [evidence[item] for item in sorted(evidence)],
+            }
         )
-    # Completeness is result data, not just a log line. The outer run executor
-    # validates the published result manifest and never labels a partial run
-    # succeeded.
+        raise RuntimeError(
+            f"run {run_index} MPI result transfer timed out after {timeout_s:.3f}s; "
+            f"missing terminal messages from ranks {missing}"
+        )
+    _LAST_GATHER_META.update(
+        {
+            "schema_version": 1,
+            "expected_ranks": mpi_size,
+            "collected_ranks": list(range(mpi_size)),
+            "missing_ranks": [],
+            "complete": True,
+            "shards": [evidence[item] for item in range(mpi_size)],
+        }
+    )
+    return [collected[item] for item in range(mpi_size)]
+
+
+def _merge_latency_histograms(histograms: list[dict]) -> dict:
+    if not histograms:
+        raise ValueError("latency histogram merge requires at least one rank")
+    bounds = histograms[0].get("bucket_upper_bounds_s")
+    if not isinstance(bounds, list) or len(bounds) < 2 or bounds[-1] != -1.0:
+        raise ValueError("latency histogram has no bucket layout")
+    merged_counts = [0] * len(bounds)
+    total_count = 0
+    total_sum = 0.0
+    for rank, histogram in enumerate(histograms):
+        if not isinstance(histogram, dict) or set(histogram) != {
+            "bucket_upper_bounds_s",
+            "counts",
+            "count",
+            "sum_s",
+        }:
+            raise ValueError(f"rank {rank} latency histogram fields are invalid")
+        counts = histogram["counts"]
+        if (
+            histogram["bucket_upper_bounds_s"] != bounds
+            or not isinstance(counts, list)
+            or len(counts) != len(bounds)
+            or any(type(value) is not int or value < 0 for value in counts)
+            or type(histogram["count"]) is not int
+            or histogram["count"] < 0
+            or sum(counts) != histogram["count"]
+            or isinstance(histogram["sum_s"], bool)
+            or not isinstance(histogram["sum_s"], (int, float))
+            or not math.isfinite(float(histogram["sum_s"]))
+            or histogram["sum_s"] < 0
+        ):
+            raise ValueError(f"rank {rank} latency histogram values are invalid")
+        merged_counts = [left + right for left, right in zip(merged_counts, counts)]
+        total_count += histogram["count"]
+        total_sum += float(histogram["sum_s"])
+    return {
+        "bucket_upper_bounds_s": list(bounds),
+        "counts": merged_counts,
+        "count": total_count,
+        "sum_s": total_sum,
+    }
+
+
+def _histogram_percentile(histogram: dict, fraction: float) -> float:
+    count = histogram["count"]
+    if count == 0:
+        return 0.0
+    threshold = max(1, math.ceil(count * fraction))
+    cumulative = 0
+    bounds = histogram["bucket_upper_bounds_s"]
+    for index, bucket_count in enumerate(histogram["counts"]):
+        cumulative += bucket_count
+        if cumulative < threshold:
+            continue
+        upper = float(bounds[index])
+        if upper < 0:
+            if index == 0:
+                raise ValueError("latency histogram overflow has no finite lower bound")
+            return float(bounds[index - 1])
+        lower = float(bounds[index - 1]) if index else 0.0
+        prior = cumulative - bucket_count
+        if bucket_count == 0:
+            return upper
+        position = (threshold - prior) / bucket_count
+        return lower + position * (upper - lower)
+    raise ValueError("latency histogram count exceeds bucket coverage")
+
+
+def _merge_go_process_summaries(summaries: list[dict]) -> dict:
+    """Compose every same-rank Go process with the global histogram contract."""
+    if not summaries:
+        raise ValueError("Go process summary merge requires at least one summary")
+    validated = [_validate_go_summary(summary) for summary in summaries]
+    if any(
+        summary.get("latency_quantile_method") != LATENCY_QUANTILE_METHOD
+        or not isinstance(summary.get("latency_histogram"), dict)
+        for summary in validated
+    ):
+        raise ValueError("Go process summary lacks the supported latency histogram estimator")
+    run_t0s = {summary["adjusted_run_t0"] for summary in validated}
+    if len(run_t0s) != 1:
+        raise ValueError("Go process summaries disagree on adjusted_run_t0")
+    histogram = _merge_latency_histograms([summary["latency_histogram"] for summary in validated])
+    merged = {
+        "__type__": "summary",
+        **{
+            field: sum(summary[field] for summary in validated)
+            for field in (
+                "requests_completed",
+                "requests_scheduled",
+                "errors",
+                "total_input_tokens",
+                "total_output_tokens",
+            )
+        },
+        "p50_s": _histogram_percentile(histogram, 0.50),
+        "p99_s": _histogram_percentile(histogram, 0.99),
+        "latency_quantile_method": LATENCY_QUANTILE_METHOD,
+        "latency_histogram": histogram,
+        "last_fire_time": max(summary["last_fire_time"] for summary in validated),
+        "last_request_start_at": max(summary["last_request_start_at"] for summary in validated),
+        "last_body_done_at": max(summary["last_body_done_at"] for summary in validated),
+        "adjusted_run_t0": next(iter(run_t0s)),
+    }
+    expected_successes = merged["requests_completed"] - merged["errors"]
+    if histogram["count"] != expected_successes:
+        raise ValueError("Go process summary histogram count disagrees with successful requests")
+    return _validate_go_summary(merged)
+
+
+def _reduce_summary_via_mpi(
+    comm,
+    local_summary,
+    *,
+    run_index: int,
+    rank: int,
+    mpi_size: int,
+    is_root: bool,
+    timeout_s: float,
+):
+    """Reduce fixed-size Go summaries and gather exact rank evidence."""
+    if comm is None or mpi_size <= 1:
+        summary = _validate_go_summary(local_summary)
+        encoded = _encode_gather_payload(summary)
+        _LAST_GATHER_META.clear()
+        _LAST_GATHER_META.update(
+            {
+                "schema_version": 1,
+                "expected_ranks": 1,
+                "collected_ranks": [0],
+                "missing_ranks": [],
+                "complete": True,
+                "shards": [
+                    {
+                        "rank": 0,
+                        "size_bytes": len(encoded),
+                        "sha256": hashlib.sha256(encoded).hexdigest(),
+                        "transport": "in_memory",
+                    }
+                ],
+            }
+        )
+        return {
+            field: summary[field]
+            for field in (
+                "requests_completed",
+                "requests_scheduled",
+                "errors",
+                "total_input_tokens",
+                "total_output_tokens",
+                "p50_s",
+                "p99_s",
+                "latency_quantile_method",
+            )
+        }
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or timeout_s <= 0
+    ):
+        raise ValueError("MPI summary deadline must be finite and positive")
+    summary = _validate_go_summary(local_summary)
+    try:
+        from mpi4py import MPI
+    except ImportError as exc:  # pragma: no cover - MPI communicator implies mpi4py
+        raise RuntimeError("mpi4py disappeared after communicator initialization") from exc
+    sum_fields = (
+        "requests_completed",
+        "requests_scheduled",
+        "errors",
+        "total_input_tokens",
+        "total_output_tokens",
+    )
+    histogram = summary.get("latency_histogram")
+    if not isinstance(histogram, dict):
+        raise ValueError("multi-rank summary requires a mergeable latency_histogram")
+    if summary.get("latency_quantile_method") != LATENCY_QUANTILE_METHOD:
+        raise ValueError("multi-rank summary has no supported latency quantile method")
+    requests = {field: comm.ireduce(summary[field], op=MPI.SUM, root=0) for field in sum_fields}
+    encoded = _encode_gather_payload(summary)
+    evidence_request = comm.igather(
+        {
+            "evidence": {
+                "rank": rank,
+                "size_bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "transport": "mpi_reduce",
+            },
+            "latency_histogram": histogram,
+        },
+        root=0,
+    )
+    deadline = time.monotonic() + timeout_s
+    values = {}
+    pending = dict(requests)
+    pending["evidence"] = evidence_request
+    try:
+        while pending and time.monotonic() < deadline:
+            progressed = False
+            for field, request in list(pending.items()):
+                complete, value = _request_test(request)
+                if complete:
+                    progressed = True
+                    values[field] = value
+                    del pending[field]
+            if pending and not progressed:
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    except BaseException:
+        _cancel_requests(pending.values())
+        raise
+    if pending:
+        _cancel_requests(pending.values())
+        raise RuntimeError(
+            f"run {run_index} MPI summary reduction exceeded its {timeout_s:.3f}s deadline; "
+            f"pending operations {sorted(pending)}"
+        )
+    if not is_root:
+        return None
+    gathered = values.pop("evidence")
+    if (
+        not isinstance(gathered, list)
+        or len(gathered) != mpi_size
+        or any(
+            not isinstance(item, dict) or set(item) != {"evidence", "latency_histogram"}
+            for item in gathered
+        )
+        or [item["evidence"].get("rank") for item in gathered] != list(range(mpi_size))
+    ):
+        raise RuntimeError("MPI summary reduction returned incomplete rank evidence")
+    evidence = [item["evidence"] for item in gathered]
+    merged_histogram = _merge_latency_histograms([item["latency_histogram"] for item in gathered])
+    expected_successes = values["requests_completed"] - values["errors"]
+    if merged_histogram["count"] != expected_successes:
+        raise RuntimeError("MPI summary latency histogram count disagrees with successful requests")
     _LAST_GATHER_META.clear()
-    gather_meta = {
-        "schema_version": 1,
-        "expected_ranks": mpi_size,
-        "collected_ranks": sorted(collected),
-        "missing_ranks": missing,
-        "complete": not missing,
-        "shards": [shard_evidence[item] for item in sorted(shard_evidence)],
+    _LAST_GATHER_META.update(
+        {
+            "schema_version": 1,
+            "expected_ranks": mpi_size,
+            "collected_ranks": list(range(mpi_size)),
+            "missing_ranks": [],
+            "complete": True,
+            "shards": evidence,
+        }
+    )
+    return {
+        **{field: values[field] for field in sum_fields},
+        "p50_s": _histogram_percentile(merged_histogram, 0.50),
+        "p99_s": _histogram_percentile(merged_histogram, 0.99),
+        "latency_quantile_method": LATENCY_QUANTILE_METHOD,
     }
-    invalid_shards = {
-        str(item): shard_errors[item] for item in sorted(shard_errors) if item in missing
-    }
-    if invalid_shards:
-        gather_meta["invalid_shards"] = invalid_shards
-    _LAST_GATHER_META.update(gather_meta)
-    return [collected[r] for r in sorted(collected)]
+
+
+def _reduce_dispatch_end_via_mpi(
+    comm,
+    local_last_fire_time: float,
+    *,
+    mpi_size: int,
+    is_root: bool,
+    timeout_s: float,
+) -> float | None:
+    _result_number(local_last_fire_time, field="dispatch last_fire_time")
+    if comm is None or mpi_size <= 1:
+        return float(local_last_fire_time)
+    from mpi4py import MPI
+
+    request = comm.ireduce(float(local_last_fire_time), op=MPI.MAX, root=0)
+    value = _wait_request(
+        request,
+        deadline=time.monotonic() + timeout_s,
+        label="distributed dispatch-end reduction",
+    )
+    return float(value) if is_root else None
 
 
 def _encode_gather_payload(results) -> bytes:
@@ -342,8 +775,8 @@ def _decode_gather_payload(content: bytes):
     return results
 
 
-# Written by _gather_results_via_shards on the root rank; merged into the
-# result meta by _save_results. Single-threaded per-process access.
+# Written by the MPI result transfer on the root rank and merged into result
+# metadata by _save_results. Single-threaded per-process access.
 _LAST_GATHER_META: dict = {}
 
 
@@ -425,6 +858,7 @@ def _summarize_run_results(
             "total_output_tokens",
             "p50_s",
             "p99_s",
+            "latency_quantile_method",
         }
         if set(run_results) != expected:
             raise ValueError("merged Go replay summary fields are invalid")
@@ -438,6 +872,8 @@ def _summarize_run_results(
             _result_count(run_results[field], field=f"merged summary.{field}")
         for field in ("p50_s", "p99_s"):
             _result_number(run_results[field], field=f"merged summary.{field}")
+        if run_results["latency_quantile_method"] != LATENCY_QUANTILE_METHOD:
+            raise ValueError("merged Go replay summary quantile method is unsupported")
         completed = run_results["requests_completed"]
         errors = run_results["errors"]
         scheduled = run_results["requests_scheduled"]
@@ -455,6 +891,7 @@ def _summarize_run_results(
             "success_rps": successes / duration,
             "p50_s": run_results.get("p50_s"),
             "p99_s": run_results.get("p99_s"),
+            "latency_quantile_method": run_results["latency_quantile_method"],
         }
 
     successful_latencies = [float(item[1]) for item in run_results if item[2]]
@@ -578,7 +1015,35 @@ def _apply_direct_topology(
     return chosen
 
 
-def _find_go_binary() -> str | None:
+def _contained_real_path(path: str, root: str, *, label: str) -> str:
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise RuntimeError(f"{label} must be an absolute path")
+    if not isinstance(root, str) or not os.path.isabs(root):
+        raise RuntimeError("EXASERVE_LOCAL_RUNTIME_ROOT must be an absolute path")
+    resolved_root = os.path.realpath(root)
+    resolved = os.path.realpath(path)
+    if os.path.commonpath((resolved_root, resolved)) != resolved_root:
+        raise RuntimeError(f"{label} escapes EXASERVE_LOCAL_RUNTIME_ROOT")
+    return resolved
+
+
+def _find_go_binary(*, require_local: bool = False) -> str | None:
+    local = os.environ.get("EXASERVE_LOCAL_GO_DISPATCH")
+    runtime_root = os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT")
+    if local is not None or runtime_root is not None or require_local:
+        if not local or not runtime_root:
+            raise RuntimeError(
+                "multi-rank replay requires EXASERVE_LOCAL_RUNTIME_ROOT and "
+                "EXASERVE_LOCAL_GO_DISPATCH"
+            )
+        resolved = _contained_real_path(local, runtime_root, label="local Go replay binary")
+        expected_bin_root = os.path.join(os.path.realpath(runtime_root), "bin")
+        if os.path.commonpath((expected_bin_root, resolved)) != expected_bin_root:
+            raise RuntimeError("local Go replay binary must be inside runtime-root/bin")
+        if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
+            raise RuntimeError("local Go replay binary is missing or not executable")
+        return resolved
+
     script_dir = pathlib.Path(__file__).resolve().parent.parent
     candidates = [
         script_dir / "go_client" / "bin" / "go_dispatch",
@@ -595,6 +1060,64 @@ def _find_go_binary() -> str | None:
             continue
         return str(path.resolve())
     return None
+
+
+def _local_replay_state_root(*, require_local: bool) -> str | None:
+    root = os.environ.get("EXASERVE_LOCAL_STATE_ROOT")
+    if not root:
+        if require_local:
+            raise RuntimeError("multi-rank replay requires EXASERVE_LOCAL_STATE_ROOT")
+        return None
+    if not os.path.isabs(root):
+        raise RuntimeError("EXASERVE_LOCAL_STATE_ROOT must be absolute")
+    resolved = os.path.realpath(root)
+    metadata = os.stat(resolved, follow_symlinks=False)
+    if not os.path.isdir(resolved) or metadata.st_uid != os.getuid():
+        raise RuntimeError("EXASERVE_LOCAL_STATE_ROOT must be a user-owned real directory")
+    return resolved
+
+
+def _verify_local_replay_filesystem(*, rank: int) -> None:
+    import socket
+
+    from exaserve.plan.contracts import same_node
+    from exaserve.plan.io import (
+        load_allocation_binding,
+        load_deployment_plan,
+        load_site_profile,
+    )
+    from exaserve.plan.runtime_environment import RuntimePaths
+
+    runtime_root = os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT", "")
+    state_root = os.environ.get("EXASERVE_LOCAL_STATE_ROOT", "")
+    plan_path = os.environ.get("EXASERVE_LOCAL_PLAN_PATH", "")
+    site_path = os.environ.get("EXASERVE_SITE_PROFILE_PATH", "")
+    binding_path = os.environ.get("EXASERVE_ALLOCATION_BINDING_PATH", "")
+    if not all((runtime_root, state_root, plan_path, site_path, binding_path)):
+        raise RuntimeError("multi-rank replay local runtime identity is incomplete")
+    plan = load_deployment_plan(plan_path)
+    profile = load_site_profile(site_path)
+    binding = load_allocation_binding(binding_path)
+    if (
+        profile.site_id != plan.site_profile_id
+        or profile.site_profile_hash != plan.site_profile_hash
+        or binding.deployment_plan_hash != plan.deployment_plan_hash
+        or binding.site_profile_hash != plan.site_profile_hash
+    ):
+        raise RuntimeError("multi-rank replay capsule identities disagree")
+    planned_node = binding.node_for(rank)
+    if not planned_node or not same_node(socket.gethostname(), planned_node):
+        raise RuntimeError(
+            f"replay MPI rank {rank} is not running on AllocationBinding node {planned_node!r}"
+        )
+    paths = RuntimePaths.from_roots(
+        runtime_root,
+        state_root,
+        policy=profile,
+        require_runtime=True,
+    )
+    paths.verify_capsule(policy=profile)
+    paths.prepare_state(policy=profile)
 
 
 def _direct_health_paths(exp_config: EvalManifest) -> list[str]:
@@ -1076,6 +1599,7 @@ def _send_run_t0_and_wait(
             time.sleep(min(0.1, max(0.0, drain_deadline - time.monotonic())))
 
         all_results = []
+        process_summaries = []
         seen_request_ids: set[str] = set()
         max_last_fire_time = 0.0
         for entry in processes:
@@ -1111,23 +1635,7 @@ def _send_run_t0_and_wait(
                     f"expected {expected} output"
                 )
             if sum_only:
-                if not all_results:
-                    all_results = parsed
-                else:
-                    for key in (
-                        "requests_completed",
-                        "requests_scheduled",
-                        "errors",
-                        "total_input_tokens",
-                        "total_output_tokens",
-                    ):
-                        all_results[key] = all_results.get(key, 0) + parsed.get(key, 0)
-                    all_results["p50_s"] = max(
-                        all_results.get("p50_s", 0.0), parsed.get("p50_s", 0.0)
-                    )
-                    all_results["p99_s"] = max(
-                        all_results.get("p99_s", 0.0), parsed.get("p99_s", 0.0)
-                    )
+                process_summaries.append(parsed)
             else:
                 duplicate_ids = sorted(
                     item[0].req_id for item in parsed if item[0].req_id in seen_request_ids
@@ -1139,8 +1647,10 @@ def _send_run_t0_and_wait(
                     )
                 seen_request_ids.update(item[0].req_id for item in parsed)
                 all_results.extend(parsed)
-        if sum_only and isinstance(all_results, dict):
-            all_results["last_fire_time"] = max_last_fire_time
+        if sum_only:
+            all_results = _merge_go_process_summaries(process_summaries)
+            if all_results["last_fire_time"] != max_last_fire_time:
+                raise RuntimeError("merged Go summary dispatch endpoint is inconsistent")
         return all_results, max_last_fire_time, run_t0
     finally:
         for entry in processes:
@@ -1254,202 +1764,129 @@ def _validate_base_urls(exp_config: EvalManifest, base_urls: list[str]) -> list[
     return base_urls
 
 
-def _trace_shard_dir(trace_path: str, mpi_size: int, trace_hash: str) -> str:
-    if not isinstance(trace_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", trace_hash):
-        raise ValueError("trace shard identity requires a lowercase SHA-256")
-    return os.path.join(os.path.dirname(trace_path), f"shards_{trace_hash[:16]}_n{mpi_size}")
+def _trace_request_from_line(line: bytes, *, request_index: int) -> TraceRequest | None:
+    from exaserve.state.atomic import strict_json_loads
 
-
-def _load_trace_shard_manifest(
-    shard_dir: str, *, trace_hash: str, mpi_size: int
-) -> dict[str, object]:
-    from exaserve.state.atomic import strict_json_load_path
-
-    marker_path = pathlib.Path(shard_dir) / "_COMPLETE"
-    try:
-        marker = strict_json_load_path(marker_path)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(f"trace shard manifest is invalid: {exc}") from exc
-    expected_keys = {
-        "schema_version",
-        "trace_sha256",
-        "mpi_size",
-        "total",
-        "last_timestamp",
-        "shards",
-    }
-    if not isinstance(marker, dict) or set(marker) != expected_keys:
-        raise RuntimeError("trace shard manifest has an unexpected shape")
-    if (
-        type(marker["schema_version"]) is not int
-        or marker["schema_version"] != 1
-        or marker["trace_sha256"] != trace_hash
-    ):
-        raise RuntimeError("trace shard manifest has the wrong trace identity")
-    if isinstance(marker["mpi_size"], bool) or marker["mpi_size"] != mpi_size:
-        raise RuntimeError("trace shard manifest has the wrong MPI size")
-    if (
-        isinstance(marker["total"], bool)
-        or not isinstance(marker["total"], int)
-        or marker["total"] < 0
-        or isinstance(marker["last_timestamp"], bool)
-        or not isinstance(marker["last_timestamp"], (int, float))
-        or not math.isfinite(float(marker["last_timestamp"]))
-        or marker["last_timestamp"] < 0
-    ):
-        raise RuntimeError("trace shard manifest has invalid totals")
-    shards = marker["shards"]
-    if not isinstance(shards, list) or len(shards) != mpi_size:
-        raise RuntimeError("trace shard manifest has the wrong shard cardinality")
-    total = 0
-    expected_names = {f"rank{rank}.jsonl" for rank in range(mpi_size)}
-    observed_names: set[str] = set()
-    for index, shard in enumerate(shards):
-        if not isinstance(shard, dict) or set(shard) != {"name", "sha256", "requests"}:
-            raise RuntimeError(f"trace shard manifest entry {index} has an unexpected shape")
-        name = shard["name"]
-        digest = shard["sha256"]
-        requests = shard["requests"]
-        if not isinstance(name, str) or name not in expected_names or name in observed_names:
-            raise RuntimeError(f"trace shard manifest entry {index} has an invalid name")
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise RuntimeError(f"trace shard manifest entry {index} has an invalid checksum")
-        if isinstance(requests, bool) or not isinstance(requests, int) or requests < 0:
-            raise RuntimeError(f"trace shard manifest entry {index} has an invalid count")
-        shard_path = pathlib.Path(shard_dir) / name
-        if shard_path.is_symlink() or not shard_path.is_file():
-            raise RuntimeError(f"trace shard is missing or unsafe: {shard_path}")
-        observed_names.add(name)
-        total += requests
-    if observed_names != expected_names or total != marker["total"]:
-        raise RuntimeError("trace shard manifest is incomplete")
-    actual_files = {
-        path.name for path in pathlib.Path(shard_dir).iterdir() if path.name != "_COMPLETE"
-    }
-    if actual_files != expected_names:
-        raise RuntimeError("trace shard directory contains undeclared files")
-    return marker
-
-
-def _stage_trace_shards(trace_path: str, mpi_size: int, trace_hash: str) -> str:
-    """Split the trace into per-rank shards once, next to the trace itself.
-
-    Without this every rank streams and JSON-parses the WHOLE trace and then
-    keeps requests[rank::mpi_size] -- at 256 nodes that is 256 x 790 MB off one
-    Lustre file (~200 GB) plus 256x redundant parsing of 1.7 M records. The
-    shards preserve the rank::mpi_size partition exactly, are content-addressed
-    with the trace, and are reused by every later run at the same rank count.
-
-    Returns the shard directory. Safe under concurrent jobs: build into a
-    private temp dir, then rename into place; a loser just discards its copy.
-    Failure is fatal because a whole-trace-per-rank fallback causes an avoidable
-    shared-filesystem storm at production scale.
-    """
-    if isinstance(mpi_size, bool) or not isinstance(mpi_size, int) or mpi_size < 2:
-        raise ValueError("trace sharding requires an integer MPI size >= 2")
-    shard_dir = _trace_shard_dir(trace_path, mpi_size, trace_hash)
-    done_marker = os.path.join(shard_dir, "_COMPLETE")
-    if os.path.isfile(done_marker):
-        _load_trace_shard_manifest(shard_dir, trace_hash=trace_hash, mpi_size=mpi_size)
-        return shard_dir
-    tmp_dir = tempfile.mkdtemp(prefix=f".shards_n{mpi_size}_", dir=os.path.dirname(trace_path))
-    try:
-        from exaserve.state.atomic import atomic_write_json, regular_file_reader, strict_json_loads
-
-        shard_digests = [hashlib.sha256() for _ in range(mpi_size)]
-        shard_counts = [0] * mpi_size
-        source_digest = hashlib.sha256()
-        with ExitStack() as stack:
-            handles = [
-                stack.enter_context(open(os.path.join(tmp_dir, f"rank{idx}.jsonl"), "xb"))
-                for idx in range(mpi_size)
-            ]
-            index = 0
-            last_line = b""
-            with regular_file_reader(trace_path, binary=True) as source:
-                for line in source:
-                    source_digest.update(line)
-                    # Cheap prefilter: only the metadata line carries __type__,
-                    # so avoid json.loads on the ~millions of request lines.
-                    if (
-                        b'"__type__"' in line
-                        and strict_json_loads(line.decode("utf-8")).get("__type__") == "metadata"
-                    ):
-                        continue
-                    rank = index % mpi_size
-                    handles[rank].write(line)
-                    shard_digests[rank].update(line)
-                    shard_counts[rank] += 1
-                    last_line = line
-                    index += 1
-            for handle in handles:
-                handle.flush()
-                os.fsync(handle.fileno())
-        observed_trace_hash = source_digest.hexdigest()
-        if observed_trace_hash != trace_hash:
-            raise RuntimeError(
-                "trace changed between manifest validation and shard staging: "
-                f"expected {trace_hash}, observed {observed_trace_hash}"
-            )
-        # The trace is emitted in arrival order, so the last request carries the
-        # trace span the dispatch-overhead diagnostic compares against.
-        last_timestamp = (
-            float(strict_json_loads(last_line.decode("utf-8"))["timestamp"]) if last_line else 0.0
+    if len(line) > _TRACE_ROW_BYTES:
+        raise ValueError(f"trace row exceeds the {_TRACE_ROW_BYTES}-byte safety bound")
+    data = strict_json_loads(line.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("trace row must be a JSON object")
+    if data.get("__type__") == "metadata":
+        return None
+    required = {"timestamp", "model", "prompt", "output_len"}
+    allowed = required | {"input_len", "tensor_parallel_size", "mode"}
+    if not required <= set(data) or not set(data) <= allowed:
+        raise ValueError(
+            "trace request row has invalid fields: "
+            f"missing={sorted(required - set(data))}, "
+            f"unknown={sorted(set(data) - allowed)}"
         )
-        marker = {
-            "schema_version": 1,
-            "trace_sha256": trace_hash,
-            "mpi_size": mpi_size,
-            "total": index,
-            "last_timestamp": last_timestamp,
-            "shards": [
-                {
-                    "name": f"rank{rank}.jsonl",
-                    "sha256": shard_digests[rank].hexdigest(),
-                    "requests": shard_counts[rank],
-                }
-                for rank in range(mpi_size)
-            ],
-        }
-        atomic_write_json(os.path.join(tmp_dir, "_COMPLETE"), marker)
-        directory_fd = os.open(tmp_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        published = False
-        try:
-            os.rename(tmp_dir, shard_dir)
-            published = True
-        except OSError:
-            # Another job staged it first: theirs is equivalent, drop ours.
-            if not os.path.isfile(done_marker):
-                raise
-            shutil.rmtree(tmp_dir)
-        if published:
-            parent_fd = os.open(
-                os.path.dirname(shard_dir), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    return TraceRequest(
+        timestamp=data["timestamp"],
+        model=data["model"],
+        prompt=data["prompt"],
+        input_len=data.get("input_len", 0),
+        output_len=data["output_len"],
+        tensor_parallel_size=data.get("tensor_parallel_size", 1),
+        req_id=f"{request_index:032x}",
+        mode=data.get("mode", "chat"),
+    )
+
+
+def _distribute_trace_requests(
+    comm,
+    *,
+    rank: int,
+    mpi_size: int,
+    trace_path: str | None,
+    expected_hash: str | None,
+) -> tuple[list[TraceRequest], int, float]:
+    """Read/hash once on root and scatter bounded in-memory partitions."""
+    if mpi_size <= 1:
+        if rank != 0 or not trace_path or not expected_hash:
+            raise RuntimeError("single-rank trace input is missing on root")
+        requests = _load_trace_requests(trace_path, expected_hash=expected_hash)
+        return requests, len(requests), requests[-1].timestamp if requests else 0.0
+
+    local_requests: list[TraceRequest] = []
+    if rank != 0:
+        while True:
+            part = comm.scatter(None, root=0)
+            if part is None:
+                break
+            if not isinstance(part, list) or any(
+                not isinstance(item, TraceRequest) for item in part
+            ):
+                raise RuntimeError("root sent a malformed trace partition")
+            local_requests.extend(part)
+        status = _mpi_bcast(comm, None, root=0)
+        if not isinstance(status, dict) or set(status) != {
+            "ok",
+            "error",
+            "total",
+            "last_timestamp",
+        }:
+            raise RuntimeError("root sent a malformed trace terminal")
+        if not status["ok"]:
+            raise RuntimeError(f"root trace validation failed: {status['error']}")
+        return local_requests, status["total"], status["last_timestamp"]
+
+    if not trace_path or not expected_hash:
+        raise RuntimeError("root trace input is missing")
+    from exaserve.state.atomic import regular_file_reader
+
+    digest = hashlib.sha256()
+    partitions: list[list[TraceRequest]] = [[] for _ in range(mpi_size)]
+    buffered_bytes = 0
+    total = 0
+    last_timestamp = 0.0
+    error = None
+    try:
+        with regular_file_reader(trace_path, binary=True) as handle:
+            for line in handle:
+                digest.update(line)
+                request = _trace_request_from_line(line, request_index=total)
+                if request is None:
+                    continue
+                target = total % mpi_size
+                partitions[target].append(request)
+                buffered_bytes += len(line)
+                total += 1
+                last_timestamp = request.timestamp
+                if buffered_bytes >= _TRACE_BATCH_BYTES:
+                    own = comm.scatter(partitions, root=0)
+                    local_requests.extend(own)
+                    partitions = [[] for _ in range(mpi_size)]
+                    buffered_bytes = 0
+        if any(partitions):
+            own = comm.scatter(partitions, root=0)
+            local_requests.extend(own)
+        observed = digest.hexdigest()
+        if observed != expected_hash:
+            raise RuntimeError(
+                f"trace content hash mismatch: expected {expected_hash}, observed {observed}"
             )
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
-        _load_trace_shard_manifest(shard_dir, trace_hash=trace_hash, mpi_size=mpi_size)
-        return shard_dir
-    except BaseException as exc:
-        try:
-            shutil.rmtree(tmp_dir)
-        except FileNotFoundError:
-            pass
-        except OSError as cleanup_exc:
-            add_exception_note(exc, f"trace shard staging cleanup also failed: {cleanup_exc}")
-        raise
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    finally:
+        comm.scatter([None] * mpi_size, root=0)
+    status = {
+        "ok": error is None,
+        "error": error,
+        "total": total,
+        "last_timestamp": last_timestamp,
+    }
+    _mpi_bcast(comm, status, root=0)
+    if error is not None:
+        raise RuntimeError(f"root trace validation failed: {error}")
+    return local_requests, total, last_timestamp
 
 
 def _load_trace_requests(
     trace_path: str, *, expected_hash: str | None = None
 ) -> list[TraceRequest]:
-    from exaserve.state.atomic import regular_file_reader, strict_json_loads
+    from exaserve.state.atomic import regular_file_reader
 
     requests = []
     digest = hashlib.sha256() if expected_hash is not None else None
@@ -1461,38 +1898,16 @@ def _load_trace_requests(
             if parse_error is not None:
                 continue
             try:
-                data = strict_json_loads(line.decode("utf-8"))
-                if not isinstance(data, dict):
-                    raise ValueError("trace row must be a JSON object")
-                if data.get("__type__") == "metadata":
-                    continue
-                required = {"timestamp", "model", "prompt", "output_len"}
-                allowed = required | {"input_len", "tensor_parallel_size", "mode"}
-                if not required <= set(data) or not set(data) <= allowed:
-                    raise ValueError(
-                        "trace request row has invalid fields: "
-                        f"missing={sorted(required - set(data))}, "
-                        f"unknown={sorted(set(data) - allowed)}"
-                    )
-                requests.append(
-                    TraceRequest(
-                        timestamp=data["timestamp"],
-                        model=data["model"],
-                        prompt=data["prompt"],
-                        input_len=data.get("input_len", 0),
-                        output_len=data["output_len"],
-                        tensor_parallel_size=data.get("tensor_parallel_size", 1),
-                        req_id=uuid.uuid4().hex,
-                        mode=data.get("mode", "chat"),
-                    )
-                )
+                request = _trace_request_from_line(line, request_index=len(requests))
+                if request is not None:
+                    requests.append(request)
             except (KeyError, TypeError, UnicodeError, ValueError) as exc:
                 if digest is None:
                     raise
                 parse_error = exc
     if digest is not None and digest.hexdigest() != expected_hash:
         raise RuntimeError(
-            f"trace shard checksum mismatch for {trace_path}: "
+            f"trace checksum mismatch for {trace_path}: "
             f"expected {expected_hash}, observed {digest.hexdigest()}"
         )
     if parse_error is not None:
@@ -1704,22 +2119,36 @@ def _run_saturation_from_manifest(
         print(f"[replay_engine] Result summary written to {result_path}", flush=True)
 
 
-async def replay_from_manifest(
+def _prepare_root_replay_context(
     config_path: str,
     *,
-    include_tp_override: bool | None = None,
-    early_stop_override: float | None = None,
-    num_runs_override: int | None = None,
-    dest_override: str | None = None,
-    base_urls_override: str | None = None,
-    dispatch_topology_override: str | None = None,
-    result_subdir: str | None = None,
-) -> None:
-    exp_config = load_eval_manifest(config_path)
+    include_tp_override: bool | None,
+    early_stop_override: float | None,
+    num_runs_override: int | None,
+    dest_override: str | None,
+    base_urls_override: str | None,
+    dispatch_topology_override: str | None,
+    result_subdir: str | None,
+) -> tuple[EvalManifest, dict]:
+    local_manifest = os.environ.get("EXASERVE_LOCAL_EVAL_MANIFEST", "").strip()
+    local_plan = os.environ.get("EXASERVE_LOCAL_PLAN_PATH", "").strip()
+    local_run_plan = os.environ.get("EXASERVE_LOCAL_RUN_PLAN_PATH", "").strip()
+    using_capsule = bool(local_manifest)
+    if using_capsule and not (local_plan and local_run_plan):
+        raise ValueError("local replay capsule is missing deployment or RunPlan artifacts")
+    if using_capsule and os.path.realpath(config_path) != os.path.realpath(local_manifest):
+        raise ValueError("replay config path is not the certified local eval manifest")
+    exp_config = load_eval_manifest(
+        config_path,
+        verify_trace_artifact=False,
+        deployment_plan_path_override=(local_plan or None) if using_capsule else None,
+        run_plan_path_override=(local_run_plan or None) if using_capsule else None,
+    )
     replay_cfg = exp_config.job_replay_client_config
-    if os.path.abspath(config_path) != os.path.abspath(replay_cfg.config_path):
+    if not using_capsule and os.path.abspath(config_path) != os.path.abspath(
+        replay_cfg.config_path
+    ):
         raise ValueError("replay config path disagrees with immutable manifest config_path")
-
     for name, override, expected in (
         ("include_tp", include_tp_override, replay_cfg.include_tp),
         ("early_stop", early_stop_override, replay_cfg.early_stop),
@@ -1731,10 +2160,6 @@ async def replay_from_manifest(
                 f"replay override {name}={override!r} disagrees with immutable manifest "
                 f"value {expected!r}"
             )
-    include_tp = replay_cfg.include_tp
-    early_stop = replay_cfg.early_stop
-    num_runs = replay_cfg.num_runs
-    dest = replay_cfg.dest
     topology = replay_cfg.direct_dispatch
     if dispatch_topology_override is not None:
         if dispatch_topology_override not in replay_cfg.dispatch_topologies:
@@ -1747,6 +2172,128 @@ async def replay_from_manifest(
             raise ValueError("a topology ablation result_subdir must exactly match its arm")
     elif result_subdir is not None:
         raise ValueError("result_subdir is only valid for a declared topology ablation arm")
+
+    port = _port_from_manifest(exp_config)
+    if base_urls_override is not None:
+        cluster_nodes = []
+        base_urls = [item.strip() for item in base_urls_override.split(",") if item.strip()]
+    elif replay_cfg.dest == "direct":
+        cluster_nodes = _get_cluster_nodes()
+        base_urls = [f"http://{node}:{port}" for node in cluster_nodes]
+    else:
+        cluster_nodes = []
+        base_urls = [f"http://0.0.0.0:{port}"]
+    base_urls = _validate_base_urls(exp_config, base_urls)
+    if replay_cfg.saturation.get("enabled"):
+        # Saturation does not consume trace rows, so retain one explicit root
+        # integrity pass. Ordinary replay verifies while streaming the trace.
+        exp_config.verify_trace_artifact()
+    return exp_config, {
+        "schema_version": 1,
+        "replay": replay_cfg,
+        "topology": topology,
+        "base_urls": base_urls,
+        "cluster_nodes": cluster_nodes,
+        "saturation": dict(replay_cfg.saturation),
+    }
+
+
+def _validate_replay_context(context) -> dict:
+    expected = {
+        "schema_version",
+        "replay",
+        "topology",
+        "base_urls",
+        "cluster_nodes",
+        "saturation",
+    }
+    if (
+        not isinstance(context, dict)
+        or set(context) != expected
+        or context.get("schema_version") != 1
+        or not isinstance(context.get("replay"), ReplayClientConfig)
+        or not isinstance(context.get("topology"), str)
+        or not isinstance(context.get("base_urls"), list)
+        or not context["base_urls"]
+        or any(not isinstance(item, str) or not item for item in context["base_urls"])
+        or not isinstance(context.get("cluster_nodes"), list)
+        or any(not isinstance(item, str) or not item for item in context["cluster_nodes"])
+        or not isinstance(context.get("saturation"), dict)
+    ):
+        raise RuntimeError("root broadcast a malformed validated replay context")
+    return context
+
+
+async def replay_from_manifest(
+    config_path: str,
+    *,
+    include_tp_override: bool | None = None,
+    early_stop_override: float | None = None,
+    num_runs_override: int | None = None,
+    dest_override: str | None = None,
+    base_urls_override: str | None = None,
+    dispatch_topology_override: str | None = None,
+    result_subdir: str | None = None,
+) -> None:
+    # MPI must exist before any rank can touch an argument that may name shared
+    # storage.  Only rank 0 loads/validates the manifest, plans, nodefile, and
+    # URLs; workers receive one already-validated in-memory projection.
+    comm, rank, mpi_size = _init_mpi()
+    is_root = rank == 0
+    exp_config = None
+    root_error = None
+    context = None
+    if is_root:
+        try:
+            exp_config, context = _prepare_root_replay_context(
+                config_path,
+                include_tp_override=include_tp_override,
+                early_stop_override=early_stop_override,
+                num_runs_override=num_runs_override,
+                dest_override=dest_override,
+                base_urls_override=base_urls_override,
+                dispatch_topology_override=dispatch_topology_override,
+                result_subdir=result_subdir,
+            )
+        except Exception as exc:
+            root_error = exc
+    packet = _mpi_bcast(
+        comm,
+        {
+            "context": context,
+            "error": (None if root_error is None else f"{type(root_error).__name__}: {root_error}"),
+        }
+        if is_root
+        else None,
+        root=0,
+    )
+    if not isinstance(packet, dict) or set(packet) != {"context", "error"}:
+        raise RuntimeError("root broadcast a malformed replay initialization packet")
+    if packet["error"] is not None:
+        if is_root and root_error is not None:
+            raise root_error
+        raise RuntimeError(f"root replay initialization failed: {packet['error']}")
+    context = _validate_replay_context(packet["context"])
+    replay_cfg = context["replay"]
+    if mpi_size != replay_cfg.num_nodes or (replay_cfg.num_nodes > 1 and comm is None):
+        raise RuntimeError(
+            f"replay MPI world size {mpi_size} does not equal canonical "
+            f"client.num_nodes {replay_cfg.num_nodes}"
+        )
+    if mpi_size > 1:
+        qualified_python = os.environ.get("EXASERVE_QUALIFIED_PYTHON")
+        if (
+            not qualified_python
+            or not os.path.isabs(qualified_python)
+            or os.path.realpath(qualified_python) != os.path.realpath(sys.executable)
+        ):
+            raise RuntimeError("multi-rank replay is not running under EXASERVE_QUALIFIED_PYTHON")
+        _verify_local_replay_filesystem(rank=rank)
+    include_tp = replay_cfg.include_tp
+    early_stop = replay_cfg.early_stop
+    num_runs = replay_cfg.num_runs
+    dest = replay_cfg.dest
+    topology = context["topology"]
     generation_mode = replay_cfg.generation_mode
     num_go_procs = replay_cfg.num_go_procs
     num_go_workers = replay_cfg.num_go_workers
@@ -1755,26 +2302,8 @@ async def replay_from_manifest(
     warmup_duration_s = replay_cfg.warmup_duration_s
     sum_only = replay_cfg.sum_only
 
-    trace_path = _trace_path(exp_config)
-    port = _port_from_manifest(exp_config)
-    if base_urls_override is not None:
-        cluster_nodes = []
-        base_urls = [item.strip() for item in base_urls_override.split(",") if item.strip()]
-    elif dest == "direct":
-        cluster_nodes = _get_cluster_nodes()
-        base_urls = [f"http://{node}:{port}" for node in cluster_nodes]
-    else:
-        cluster_nodes = []
-        base_urls = [f"http://0.0.0.0:{port}"]
-    base_urls = _validate_base_urls(exp_config, base_urls)
-
-    comm, rank, mpi_size = _init_mpi()
-    is_root = rank == 0
-    gather_attempt_id = _mpi_bcast(comm, uuid.uuid4().hex if is_root else None, root=0)
-    if not isinstance(gather_attempt_id, str) or not re.fullmatch(
-        r"[0-9a-f]{32}", gather_attempt_id
-    ):
-        raise RuntimeError("MPI result gather attempt identity is invalid")
+    base_urls = context["base_urls"]
+    cluster_nodes = context["cluster_nodes"]
 
     if dest == "direct":
         health_error = None
@@ -1803,7 +2332,7 @@ async def replay_from_manifest(
             pair_shift=replay_cfg.direct_pair_shift,
         )
 
-    go_bin = _find_go_binary()
+    go_bin = _find_go_binary(require_local=mpi_size > 1)
     if go_bin is None:
         raise RuntimeError(
             "go_dispatch binary is missing or older than its sources; rebuild the "
@@ -1811,7 +2340,7 @@ async def replay_from_manifest(
         )
 
     # Saturation mode: skip trace loading, run saturation finder instead.
-    sat_cfg = getattr(replay_cfg, "saturation", {}) or {}
+    sat_cfg = context["saturation"]
     if isinstance(sat_cfg, dict) and sat_cfg.get("enabled"):
         if is_root:
             result_dir = (
@@ -1834,45 +2363,13 @@ async def replay_from_manifest(
         _mpi_barrier(comm)
         return
 
-    # Per-rank trace shards: staged once by the root, then every rank reads only
-    # its own ~1/N slice instead of the whole multi-hundred-MB trace.
-    shard_dir = None
-    if mpi_size > 1:
-        stage_error = None
-        if is_root:
-            try:
-                shard_dir = _stage_trace_shards(trace_path, mpi_size, exp_config.trace_content_hash)
-            except Exception as exc:  # pragma: no cover - defensive
-                stage_error = str(exc)
-        shard_dir = _mpi_bcast(comm, shard_dir, root=0)
-        stage_error = _mpi_bcast(comm, stage_error, root=0)
-        if stage_error:
-            raise RuntimeError(f"trace staging failed on root: {stage_error}")
-        _mpi_barrier(comm)
-
-    if shard_dir:
-        marker = _load_trace_shard_manifest(
-            shard_dir,
-            trace_hash=exp_config.trace_content_hash,
-            mpi_size=mpi_size,
-        )
-        shard_entry = marker["shards"][rank]
-        expected_name = f"rank{rank}.jsonl"
-        if shard_entry["name"] != expected_name:
-            raise RuntimeError("trace shard manifest order disagrees with MPI rank")
-        rank_requests = _load_trace_requests(
-            os.path.join(shard_dir, expected_name),
-            expected_hash=shard_entry["sha256"],
-        )
-        if len(rank_requests) != shard_entry["requests"]:
-            raise RuntimeError("trace shard request count disagrees with manifest")
-        total_requests = marker["total"]
-        trace_span_s = marker["last_timestamp"]
-    else:
-        requests = _load_trace_requests(trace_path)
-        rank_requests = requests[rank::mpi_size]
-        total_requests = len(requests)
-        trace_span_s = requests[-1].timestamp if requests else 0.0
+    rank_requests, total_requests, trace_span_s = _distribute_trace_requests(
+        comm,
+        rank=rank,
+        mpi_size=mpi_size,
+        trace_path=_trace_path(exp_config) if is_root else None,
+        expected_hash=exp_config.trace_content_hash if is_root else None,
+    )
     target_responses = int(total_requests * early_stop) if early_stop and early_stop > 0 else None
 
     interrupted = False
@@ -1884,7 +2381,8 @@ async def replay_from_manifest(
         interrupt_event.set()
 
     old_handler = signal.signal(signal.SIGINT, signal_handler)
-    tmp_dir = tempfile.mkdtemp(prefix=f"replay_rank{rank}_")
+    local_state_root = _local_replay_state_root(require_local=mpi_size > 1)
+    tmp_dir = tempfile.mkdtemp(prefix=f"replay_rank{rank}_", dir=local_state_root)
     all_runs_results = []
     run_durations = []
     dispatch_timings = []
@@ -1933,9 +2431,16 @@ async def replay_from_manifest(
                 sum_only,
                 replay_cfg.drain_wait_timeout_s,
             )
-            if is_root and last_fire_time > 0:
+            global_last_fire_time = _reduce_dispatch_end_via_mpi(
+                comm,
+                last_fire_time,
+                mpi_size=mpi_size,
+                is_root=is_root,
+                timeout_s=replay_cfg.shard_timeout_s,
+            )
+            if is_root and global_last_fire_time is not None and global_last_fire_time > 0:
                 trace_span = trace_span_s
-                actual_dispatch_s = last_fire_time - effective_run_t0
+                actual_dispatch_s = global_last_fire_time - effective_run_t0
                 dispatch_timings.append(
                     {
                         "run_index": run_index,
@@ -1944,50 +2449,32 @@ async def replay_from_manifest(
                         "overhead_s": actual_dispatch_s - trace_span,
                     }
                 )
-            # Persist per-rank shards to shared storage and let root read them,
-            # rather than a single-root MPI collective over large per-request
-            # data (it hung / lost all results at 64 nodes when a node dropped).
-            # No-op for proxy mode (mpi_size == 1). See _gather_results_via_shards.
-            _shard_base = (
-                str(_result_dir(exp_config, result_subdir))
-                if exp_config.pbs_result_dir
-                else os.path.join(str(exp_config.pbs_working_dir), "results")
-            )
-            gathered = _gather_results_via_shards(
-                comm,
-                local_results,
-                run_index=run_index,
-                shard_dir=os.path.join(_shard_base, "_shards", gather_attempt_id),
-                rank=rank,
-                mpi_size=mpi_size,
-                is_root=is_root,
-                timeout_s=replay_cfg.shard_timeout_s,
-            )
+            if isinstance(local_results, dict):
+                run_results = _reduce_summary_via_mpi(
+                    comm,
+                    local_results,
+                    run_index=run_index,
+                    rank=rank,
+                    mpi_size=mpi_size,
+                    is_root=is_root,
+                    timeout_s=replay_cfg.shard_timeout_s,
+                )
+                gathered = None
+            else:
+                gathered = _gather_raw_results_via_mpi(
+                    comm,
+                    local_results,
+                    run_index=run_index,
+                    rank=rank,
+                    mpi_size=mpi_size,
+                    is_root=is_root,
+                    timeout_s=replay_cfg.shard_timeout_s,
+                )
+                run_results = None
             if is_root:
                 gather_by_run.append(dict(_LAST_GATHER_META))
             if is_root and isinstance(local_results, dict):
-                merged = {
-                    "requests_completed": 0,
-                    "requests_scheduled": 0,
-                    "errors": 0,
-                    "total_input_tokens": 0,
-                    "total_output_tokens": 0,
-                    "p50_s": 0.0,
-                    "p99_s": 0.0,
-                }
-                for item in gathered:
-                    item = _validate_go_summary(item)
-                    for key in (
-                        "requests_completed",
-                        "requests_scheduled",
-                        "errors",
-                        "total_input_tokens",
-                        "total_output_tokens",
-                    ):
-                        merged[key] += item[key]
-                    merged["p50_s"] = max(merged["p50_s"], item["p50_s"])
-                    merged["p99_s"] = max(merged["p99_s"], item["p99_s"])
-                run_results = merged
+                assert isinstance(run_results, dict)
             elif is_root:
                 run_results = [item for rank_results in gathered for item in rank_results]
                 if target_responses is not None and len(run_results) > target_responses:
@@ -2135,6 +2622,9 @@ def _save_results(
         "gather": gather_by_run[-1] if gather_by_run else None,
         "gather_by_run": gather_by_run,
         "timing_semantics": timing_semantics,
+        "latency_quantile_method": (
+            results["latency_quantile_method"] if isinstance(results, dict) else "exact_raw_samples"
+        ),
     }
     duration = run_durations[-1] if run_durations else max(time.time() - t0, 1e-6)
     duration = max(duration, 1e-6)
@@ -2161,6 +2651,7 @@ def _save_results(
                 "errors": results.get("errors", 0),
                 "p50_s": results.get("p50_s", 0.0),
                 "p99_s": results.get("p99_s", 0.0),
+                "latency_quantile_method": results["latency_quantile_method"],
             },
         }
     else:

@@ -14,7 +14,7 @@ workload:
   output_len: 128
   rate_per_node: 0.25
 deployment:
-  model_storage_path: /flare/datasets/model-weights/hub
+  model_storage_path: /lus/flare/projects/datasets/model-weights/hub
   models:
     - model_id: meta-llama/Llama-3.1-8B-Instruct
       tensor_parallel_size: 8

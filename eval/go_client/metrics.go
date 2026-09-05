@@ -9,27 +9,28 @@ import (
 	"time"
 )
 
-var defaultHistogramBounds = []time.Duration{
-	50 * time.Microsecond,
-	100 * time.Microsecond,
-	250 * time.Microsecond,
-	500 * time.Microsecond,
-	1 * time.Millisecond,
-	2 * time.Millisecond,
-	5 * time.Millisecond,
-	10 * time.Millisecond,
-	20 * time.Millisecond,
-	50 * time.Millisecond,
-	100 * time.Millisecond,
-	250 * time.Millisecond,
-	500 * time.Millisecond,
-	1 * time.Second,
-	2 * time.Second,
-	5 * time.Second,
-	10 * time.Second,
-	30 * time.Second,
-	60 * time.Second,
+const latencyQuantileMethod = "mergeable_histogram_estimate_2pct_through_7200s"
+
+func logarithmicHistogramBounds() []time.Duration {
+	// Two-percent geometric buckets keep merged percentile error bounded while
+	// covering the canonical two-hour request deadline. The snapshot adds one
+	// explicit overflow bucket after the final finite bound.
+	bounds := make([]time.Duration, 0, 1024)
+	for current := 50 * time.Microsecond; current <= 7200*time.Second; {
+		bounds = append(bounds, current)
+		next := time.Duration(float64(current) * 1.02)
+		if next <= current {
+			next = current + time.Nanosecond
+		}
+		current = next
+	}
+	if bounds[len(bounds)-1] < 7200*time.Second {
+		bounds = append(bounds, 7200*time.Second)
+	}
+	return bounds
 }
+
+var defaultHistogramBounds = logarithmicHistogramBounds()
 
 type histogramSnapshot struct {
 	BucketUpperBoundsS []float64 `json:"bucket_upper_bounds_s"`

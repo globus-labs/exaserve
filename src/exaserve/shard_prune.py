@@ -1,18 +1,11 @@
 """Shard-aware pipeline-parallel (PP) staging.
 
-Build a per-PP-stage *pruned view* of a HuggingFace safetensors model dir: a
-symlink farm containing only the shard files that the given pipeline stage's
-workers load, plus a pruned `*.safetensors.index.json` and the small shared
-files (config, tokenizer, ...). Each node then stages only ~model_size / PP of
-weights instead of the whole model, so a model too big for node-local tmpfs
-(e.g. Llama-3.1-405B = 756 GB > ~504 GB tmpfs) fits node-local, and only the PP
-"seed" nodes read the shared store (no Lustre read storm at scale).
-
-How it plugs into bcast: tools/bcast.c tars its source with `-h` (follows
-symlinks) and broadcasts to MPI_COMM_WORLD. So staging is two bcast calls on
-DISJOINT node subsets — stage-0 nodes get the stage-0 pruned dir, stage-1 nodes
-the stage-1 dir — with no change to bcast.c. The pruned dirs are symlink farms,
-so rank 0's `tar -h` dereferences them and streams the real shard bytes.
+Build a per-PP-stage head-local *pruned view* of a HuggingFace safetensors
+model. The view contains only the shard files that a stage loads, plus a pruned
+index and small shared metadata. Its links may resolve into the shared source,
+but only allocation global rank zero follows them. The allocation-wide native
+collective then sends bytes over a root-plus-recipient communicator; no worker
+is a shared-store "seed" reader and non-recipients do not receive payload bytes.
 
 CRITICAL: the PP layer partition here MUST match vLLM's get_pp_indices
 (vllm/distributed/utils.py), or a node would stage shards the worker doesn't load
@@ -23,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from pathlib import Path
 
 from .model_staging import COMPLETION_MARKER, MODEL_WEIGHT_SUFFIXES
@@ -212,6 +206,17 @@ def build_stage_dir(model_dir, pp_size, stage, out_dir, partition_env=None) -> d
     """
     model_dir = Path(model_dir).resolve()
     requested_out = Path(out_dir)
+    from .plan.runtime_environment import RuntimePathError, require_non_shared_path
+
+    try:
+        require_non_shared_path(requested_out, name="PP head-local stage view")
+    except RuntimePathError as exc:
+        raise ValueError(str(exc)) from exc
+    from .model_staging import configured_shared_roots
+
+    resolved_out = Path(os.path.realpath(requested_out))
+    if any(resolved_out.is_relative_to(root) for root in configured_shared_roots()):
+        raise ValueError(f"PP head-local stage view resolves beneath shared storage: {out_dir}")
     if requested_out.is_symlink():
         raise ValueError("PP stage output must not be a symlink")
     out = requested_out.resolve()
@@ -258,9 +263,14 @@ def build_stage_dir(model_dir, pp_size, stage, out_dir, partition_env=None) -> d
             or source.name.endswith(".index.json")
         ):
             continue
+        qualified_source = _resolve_model_input(
+            model_dir,
+            source,
+            label=f"runtime metadata {relative_name!r}",
+        )
         link = out / relative
         link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(source)
+        link.symlink_to(qualified_source)
     return {
         "stage": stage,
         "pp_size": pp_size,
@@ -270,6 +280,71 @@ def build_stage_dir(model_dir, pp_size, stage, out_dir, partition_env=None) -> d
         "bytes": total,
         "shards": shards,
     }
+
+
+def write_stage_manifest(
+    model_dir: Path,
+    stage_dir: Path,
+    source_manifest: dict,
+    *,
+    source_identity: str,
+) -> dict:
+    """Publish a PP manifest without re-reading source weight bytes.
+
+    Symlinked stage entries are exact projections of the already full-hashed
+    source manifest. Only generated real files, notably the pruned index, are
+    hashed here.
+    """
+
+    from .model_staging import (
+        _hash_inventory_file,
+        build_model_manifest_from_files,
+        validate_model_manifest,
+    )
+
+    source_manifest = validate_model_manifest(source_manifest)
+    source_entries = {item["path"]: item for item in source_manifest["files"]}
+    entries: list[dict] = []
+    model_dir = Path(model_dir)
+    stage_dir = Path(stage_dir)
+    for path in sorted(stage_dir.rglob("*"), key=lambda item: item.as_posix()):
+        metadata = os.lstat(path)
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        relative = path.relative_to(stage_dir).as_posix()
+        if stat.S_ISLNK(metadata.st_mode):
+            source_entry = source_entries.get(relative)
+            if source_entry is None:
+                raise ValueError(f"PP stage entry is absent from source manifest: {relative}")
+            qualified_stage = _resolve_model_input(
+                model_dir, path, label=f"PP stage entry {relative!r}"
+            )
+            qualified_source = _resolve_model_input(
+                model_dir,
+                model_dir / relative,
+                label=f"source manifest entry {relative!r}",
+            )
+            if not os.path.samefile(qualified_stage, qualified_source):
+                raise ValueError(f"PP stage entry does not match source manifest: {relative}")
+            entries.append(dict(source_entry))
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"PP stage contains unsupported entry: {relative}")
+        hash_kind, digest, size = _hash_inventory_file(path)
+        entries.append(
+            {
+                "path": relative,
+                "size": size,
+                "hash_kind": hash_kind,
+                "sha256": digest,
+            }
+        )
+    manifest = build_model_manifest_from_files(
+        entries,
+        source_identity=source_identity,
+    )
+    atomic_write_json(stage_dir / COMPLETION_MARKER, manifest)
+    return manifest
 
 
 def main(argv=None):

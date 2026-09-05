@@ -5,12 +5,10 @@ name: pp405b_verify_2node
 # Config: TP=8 x PP=2 = one replica spanning 2 whole nodes (8/12 tiles each);
 # TP=8 stages cannot co-locate (8+8>12) -> no tile sharing -> no load-OOM.
 #
-# STAGING: NO BCAST. 756 GB exceeds node tmpfs (~504 GB) and a failed bcast
-# poisons node state. Instead model_storage_path == local_stage_path points at
-# Lustre where a flat-form SYMLINK (meta-llama--Llama-3.1-405B-Instruct ->
-# shared hub snapshot) reads "complete" on every node -> cache reused -> vLLM
-# loads weights directly from Lustre. Expect a long Phase-2/engine load
-# (16 workers x ~47 GB from Lustre); debug 1h walltime is tight but viable.
+# STAGING: the full 756 GB model does not fit on either node. Global allocation
+# rank 0 follows the shared source snapshot once and streams the two ~380 GiB
+# PP stage views to their exact recipient ranks. Each engine loads only its
+# node-local stage; debug 1h walltime remains tight for distribution + load.
 matrix:
   name_template: '{num_nodes}_nodes'
   axes:
@@ -32,7 +30,7 @@ workload:
 deployment:
   validation_mode: true
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
-  local_stage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /tmp/pp405b_shard
   models:
   - model_id: meta-llama/Llama-3.1-405B-Instruct
     tensor_parallel_size: 8

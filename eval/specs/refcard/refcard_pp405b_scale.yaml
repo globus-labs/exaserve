@@ -4,10 +4,10 @@ name: refcard_pp405b_scale
 # cluster so each replica gets a fixed per-replica offered load -> ideal =
 # aggregate throughput grows linearly with replica count.
 #
-# Shard-aware PP is derived automatically by the harness (PP>1 with multiple
-# replicas -> EXASERVE_PP_SHARD_AWARE=1): each PP stage (~380 GiB) is broadcast
+# Shard-aware PP is derived automatically by the harness for every PP>1 model:
+# each PP stage (~380 GiB) is broadcast
 # only to its node group, so every node holds just its own stage in tmpfs.
-# Expect a long bring-up at scale (weights come off Lustre on seed nodes).
+# Global allocation rank 0 is the sole Lustre reader for every stage.
 #
 # EDIT model_storage_path to your own Lustre model dir.
 matrix:

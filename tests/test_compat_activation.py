@@ -301,6 +301,46 @@ def test_source_snapshot_verifies_without_installed_exaserve_metadata(monkeypatc
     _profile(patches=(patch,)).verify_installed_sources()
 
 
+def test_aggregated_node_source_proof_skips_per_process_rehash(monkeypatch):
+    from exaserve.compat import profile as profile_module
+
+    profile = _profile()
+    manifest = profile_module._profile_manifest_hash(profile)
+    monkeypatch.setenv("EXASERVE_COMPAT_SOURCES_NODE_PROFILE", profile.profile_id)
+    monkeypatch.setenv("EXASERVE_COMPAT_SOURCES_NODE_MANIFEST", manifest)
+    monkeypatch.setattr(profile_module, "_qualified_python_node_proof_is_trusted", lambda: True)
+    monkeypatch.setattr(
+        CompatibilityProfile,
+        "verify_installed_sources",
+        lambda _self: pytest.fail("node-qualified sources were re-opened"),
+    )
+    profile_module.verify_installed_sources_once.cache_clear()
+    profile_module.verify_installed_sources_once(profile)
+    profile_module.verify_installed_sources_once.cache_clear()
+
+
+def test_arbitrary_compatibility_proof_cannot_bypass_identity(monkeypatch):
+    from exaserve.compat import profile as profile_module
+
+    profile = _profile()
+    calls = []
+    monkeypatch.setenv("EXASERVE_COMPAT_SOURCES_NODE_PROFILE", profile.profile_id)
+    monkeypatch.setenv(
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
+        profile_module._profile_manifest_hash(profile),
+    )
+    monkeypatch.setattr(profile_module, "_qualified_python_node_proof_is_trusted", lambda: False)
+    monkeypatch.setattr(
+        CompatibilityProfile,
+        "verify_installed_sources",
+        lambda _self: calls.append(True),
+    )
+    profile_module.verify_installed_sources_once.cache_clear()
+    profile_module.verify_installed_sources_once(profile)
+    assert calls == [True]
+    profile_module.verify_installed_sources_once.cache_clear()
+
+
 def test_default_manifest_has_every_required_wp3_identity_field():
     p = default_profile("xpu")
     assert {patch.patch_id for patch in p.patches} == {

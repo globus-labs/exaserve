@@ -148,8 +148,8 @@ public:
     explicit Server(const ServerConfig& cfg);
     ~Server();
 
-    // Blocks until SIGTERM or error.
-    void run();
+    // Blocks until SIGTERM; returns nonzero on startup/runtime failure.
+    int run();
 
     // Accessors for workers.
     const ServerConfig& config() const { return cfg_; }

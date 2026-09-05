@@ -40,17 +40,21 @@ def test_final39_v2_gate_is_immutable_negative_adjudicator_evidence():
     import json
 
     gate_id = "FQ-FINAL39-SUPERVISOR-WATCHDOG-V2-2N-20260809"
-    document, gate, paths = harness._load_gate(EXPERIMENT_PATH, gate_id)
+    with pytest.raises(RuntimeError, match="lifecycle support changed"):
+        harness._load_gate(EXPERIMENT_PATH, gate_id)
+    document = json.loads(EXPERIMENT_PATH.read_text(encoding="utf-8"))
+    gate = next(item for item in document["gates"] if item["gate_id"] == gate_id)
+    output = ROOT / gate["output_path"]
     result = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
     assert document["schema_version"] == 2
     assert gate["attempt"] == gate["attempt_limit"] == 1
     assert gate["logical_nodes"] == gate["physical_allocation_nodes"] == 2
     assert gate["scenarios"] == ["head-ray-child-death", "worker-supervisor-death"]
-    assert paths["output"] == RESULT_PATH.parent
+    assert output == RESULT_PATH.parent
     assert result["passed"] is False
     assert "did not preserve UNEXPECTED_EXIT" in result["error"]
     status = json.loads(
-        (paths["output"] / "head-ray-child-death/deployment/deployment_status.json").read_text(
+        (output / "head-ray-child-death/deployment/deployment_status.json").read_text(
             encoding="utf-8"
         )
     )

@@ -181,7 +181,6 @@ def _scenario(name: str, *, nodes: int, replicas: int, plan_hash: str, slots: li
 def _materialize_scale_campaign(root: Path) -> tuple[dict, dict]:
     harness = _write(root, "scripts/hardening/run_scale.py")
     lifecycle = _write(root, "scripts/hardening/lifecycle.py")
-    holder = _write(root, "scripts/hardening/hold_port.py")
     approval_payload = {
         "schema_version": 1,
         "decision_id": "OWNER-SCALE-64",
@@ -301,7 +300,6 @@ def _materialize_scale_campaign(root: Path) -> tuple[dict, dict]:
         "harness": {"path": _relative(root, harness), "sha256": _sha(harness)},
         "support": {
             "lifecycle": {"path": _relative(root, lifecycle), "sha256": _sha(lifecycle)},
-            "port_holder": {"path": _relative(root, holder), "sha256": _sha(holder)},
         },
         "scope_approval": {"path": _relative(root, approval), "sha256": _sha(approval)},
         "gates": gates,
@@ -339,8 +337,6 @@ def _materialize_scale_campaign(root: Path) -> tuple[dict, dict]:
             "harness_sha256": _sha(harness),
             "lifecycle_support": str(lifecycle.resolve()),
             "lifecycle_support_sha256": _sha(lifecycle),
-            "port_holder_helper": str(holder.resolve()),
-            "port_holder_helper_sha256": _sha(holder),
             "scope_approval": str(approval.resolve()),
             "scope_approval_sha256": _sha(approval),
             "config_path": str((root / row["config_path"]).resolve()),

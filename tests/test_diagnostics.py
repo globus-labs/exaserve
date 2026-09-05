@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sys
 import tarfile
 
 import pytest
@@ -54,11 +56,50 @@ def test_symlinks_are_never_archived(tmp_path):
     assert result["skipped_files"] == 1
 
 
-def test_rank_diagnostics_run_as_a_finite_result_checked_process(tmp_path):
+def test_diagnostics_never_creates_output_through_intermediate_symlink(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "ray.log").write_text("diagnostic", encoding="utf-8")
+    local = tmp_path / "local"
+    shared = tmp_path / "shared-like"
+    local.mkdir()
+    shared.mkdir()
+    (local / "escape").symlink_to(shared, target_is_directory=True)
+
+    with pytest.raises(diagnostics.DiagnosticsError, match="node-local"):
+        collect_node_diagnostics(
+            source_root=str(source),
+            run_dir=str(local / "escape"),
+            rank=0,
+            deployment_id="d",
+            generation=1,
+        )
+
+    assert not (shared / "per_node").exists()
+
+
+def test_diagnostics_rejects_a_symlink_source_before_traversal(tmp_path):
+    source = tmp_path / "source-link"
+    source.symlink_to("/home", target_is_directory=True)
+    with pytest.raises(diagnostics.DiagnosticsError, match="node-local"):
+        collect_node_diagnostics(
+            source_root=str(source),
+            run_dir=str(tmp_path / "run"),
+            rank=0,
+            deployment_id="d",
+            generation=1,
+        )
+
+
+def test_rank_diagnostics_run_as_a_finite_result_checked_process(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()
     (source / "ray.log").write_text("diagnostic", encoding="utf-8")
     run_dir = tmp_path / "run"
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", sys.executable)
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
 
     result = _collect_diagnostics_finite(
         source_root=str(source),

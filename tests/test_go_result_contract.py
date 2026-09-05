@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from exaserve.go_result_contract import read_go_result_stream
+from exaserve.go_result_contract import LATENCY_QUANTILE_METHOD, read_go_result_stream
 
 
 def _summary(**overrides):
@@ -58,3 +58,34 @@ def test_go_result_stream_never_follows_a_result_symlink(tmp_path):
     link.symlink_to(target)
     with pytest.raises(OSError):
         read_go_result_stream(link)
+
+
+def test_go_summary_histogram_carries_its_exact_estimator_identity(tmp_path):
+    path = tmp_path / "result.jsonl"
+    histogram = {
+        "bucket_upper_bounds_s": [0.1, 1.0, -1.0],
+        "counts": [1, 0, 0],
+        "count": 1,
+        "sum_s": 0.1,
+    }
+    path.write_text(
+        json.dumps(
+            _summary(
+                latency_histogram=histogram,
+                latency_quantile_method=LATENCY_QUANTILE_METHOD,
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert (
+        read_go_result_stream(path).terminal["latency_quantile_method"] == LATENCY_QUANTILE_METHOD
+    )
+
+    path.unlink()
+    path.write_text(
+        json.dumps(_summary(latency_histogram=histogram)) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="published together"):
+        read_go_result_stream(path)

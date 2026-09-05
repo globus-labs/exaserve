@@ -16,6 +16,8 @@ from typing import Any
 
 from .state.atomic import regular_file_reader, strict_json_loads
 
+LATENCY_QUANTILE_METHOD = "mergeable_histogram_estimate_2pct_through_7200s"
+
 
 def _number(value: object, *, field: str, nullable: bool = False) -> None:
     if nullable and value is None:
@@ -60,6 +62,8 @@ def validate_go_summary(record: object) -> dict[str, Any]:
         "max_observed_active",
         "new_connections",
         "reused_connections",
+        "latency_histogram",
+        "latency_quantile_method",
     }
     if (
         not isinstance(record, dict)
@@ -115,6 +119,44 @@ def validate_go_summary(record: object) -> dict[str, Any]:
             for key, value in mapping.items()
         ):
             raise ValueError(f"Go replay summary.{field} is invalid")
+    has_histogram = "latency_histogram" in record
+    has_method = "latency_quantile_method" in record
+    if has_histogram != has_method:
+        raise ValueError(
+            "Go replay summary latency histogram and quantile method must be published together"
+        )
+    if has_method and record["latency_quantile_method"] != LATENCY_QUANTILE_METHOD:
+        raise ValueError("Go replay summary.latency_quantile_method is unsupported")
+    if has_histogram:
+        histogram = record["latency_histogram"]
+        if not isinstance(histogram, dict) or set(histogram) != {
+            "bucket_upper_bounds_s",
+            "counts",
+            "count",
+            "sum_s",
+        }:
+            raise ValueError("Go replay summary.latency_histogram fields are invalid")
+        bounds = histogram["bucket_upper_bounds_s"]
+        counts = histogram["counts"]
+        if (
+            not isinstance(bounds, list)
+            or not isinstance(counts, list)
+            or len(bounds) != len(counts)
+            or len(bounds) < 2
+            or bounds[-1] != -1.0
+            or type(histogram["count"]) is not int
+            or histogram["count"] < 0
+            or any(type(value) is not int or value < 0 for value in counts)
+            or sum(counts) != histogram["count"]
+        ):
+            raise ValueError("Go replay summary.latency_histogram values are invalid")
+        for index, value in enumerate(bounds):
+            if index == len(bounds) - 1 and value == -1.0:
+                continue
+            _number(value, field=f"summary.latency_histogram.bounds[{index}]")
+            if index and value <= bounds[index - 1]:
+                raise ValueError("Go replay summary.latency_histogram bounds are not ordered")
+        _number(histogram["sum_s"], field="summary.latency_histogram.sum_s")
     return record
 
 

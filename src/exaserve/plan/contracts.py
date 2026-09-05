@@ -41,6 +41,7 @@ from typing import Any, Mapping, Optional
 
 SCHEMA_VERSION = 3
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MODEL_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class PlanError(ValueError):
@@ -70,6 +71,27 @@ def require_absolute_path(value: Any, path: str) -> None:
         raise PlanError(f"{path} must be an absolute path")
     if ".." in PurePath(value).parts:
         raise PlanError(f"{path} must not contain parent traversal ('..')")
+
+
+def require_model_id(value: Any, path: str = "model.model_id") -> None:
+    """Require an opaque model identity, never a filesystem-path spelling."""
+
+    if not isinstance(value, str) or not value or len(value) > 512:
+        raise PlanError(f"{path} must be non-empty text of at most 512 characters")
+    if (
+        "\x00" in value
+        or "\\" in value
+        or value.startswith("~")
+        or os.path.isabs(value)
+        or "://" in value
+    ):
+        raise PlanError(f"{path} must be an opaque model ID, not a filesystem path or URL")
+    segments = value.split("/")
+    if any(
+        segment in {"", ".", ".."} or _MODEL_ID_SEGMENT_RE.fullmatch(segment) is None
+        for segment in segments
+    ):
+        raise PlanError(f"{path} must contain only safe slash-separated model-ID segments")
 
 
 def _canonical_value(value: Any, path: str = "$") -> Any:
@@ -636,6 +658,31 @@ class SiteProfile:
         )
         if any(not isinstance(value, str) or not value for _, value in filesystem_semantics):
             raise PlanError("site.filesystem_semantics values must be non-empty strings")
+        for key, _value in filesystem_semantics:
+            expected_kinds = {
+                "shared_root:": "shared",
+                "local_root:": "node_local",
+                "site_root:": "immutable_read_only_site",
+            }
+            for prefix, expected_kind in expected_kinds.items():
+                if not key.startswith(prefix):
+                    continue
+                root = key.removeprefix(prefix)
+                require_absolute_path(root, f"site.filesystem_semantics[{key!r}]")
+                try:
+                    from .runtime_environment import parse_filesystem_expectation
+
+                    expectation = parse_filesystem_expectation(_value)
+                except RuntimeError as exc:
+                    raise PlanError(
+                        f"site.filesystem_semantics[{key!r}] is invalid: {exc}"
+                    ) from exc
+                if expectation.kind != expected_kind:
+                    raise PlanError(
+                        f"site.filesystem_semantics[{key!r}] must declare "
+                        f"{expected_kind!r}, got {expectation.kind!r}"
+                    )
+                break
         object.__setattr__(self, "filesystem_semantics", filesystem_semantics)
         environment = freeze_mapping(self.prepared_environment, "site.prepared_environment")
         names = [key for key, _ in environment]
@@ -885,6 +932,7 @@ class ModelPlan:
     replicas: tuple[ReplicaPlan, ...]
 
     def __post_init__(self) -> None:
+        require_model_id(self.model_id)
         replicas = freeze_sequence(self.replicas, "model.replicas")
         if any(not isinstance(replica, ReplicaPlan) for replica in replicas):
             raise PlanError("model.replicas must contain ReplicaPlan values")
@@ -894,6 +942,8 @@ class ModelPlan:
             for value in (self.model_id, self.storage_name, self.route_name)
         ):
             raise PlanError("model identity fields must be non-empty")
+        if self.storage_name != self.model_id.replace("/", "--"):
+            raise PlanError("model.storage_name must be derived from model.model_id")
         for name in (
             "tensor_parallel_size",
             "pipeline_parallel_size",
@@ -1273,11 +1323,9 @@ class DeploymentPlan:
                 "collect_stats requires the real vllm engine; the selected runtime "
                 "cannot emit complete serving telemetry"
             )
-        has_multi_replica_pp = any(
-            model.pipeline_parallel_size > 1 and model.num_replicas > 1 for model in self.models
-        )
-        if has_multi_replica_pp != self.runtime.pp_shard_aware:
-            raise PlanError("runtime.pp_shard_aware must be enabled exactly for multi-replica PP")
+        has_pipeline_parallel = any(model.pipeline_parallel_size > 1 for model in self.models)
+        if has_pipeline_parallel != self.runtime.pp_shard_aware:
+            raise PlanError("runtime.pp_shard_aware must be enabled exactly for PP models")
 
     # -- identity ----------------------------------------------------------
     def canonical(self) -> dict[str, Any]:
@@ -1403,6 +1451,8 @@ class WorkloadPolicy:
         for name in ("kind", "sampling_strategy", "generation_mode", "client_dest"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise PlanError(f"workload.{name} must be a non-empty string")
+        if self.generation_mode not in {"deterministic", "natural"}:
+            raise PlanError("workload.generation_mode must be deterministic or natural")
         frozen_modes = freeze_mapping(self.modes, "workload.modes")
         if any(name not in {"chat", "completion"} for name, _ in frozen_modes):
             raise PlanError("workload.modes supports only chat and completion")

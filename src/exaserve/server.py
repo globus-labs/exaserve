@@ -41,7 +41,7 @@ from ray.serve.config import HTTPOptions, ProxyLocation
 
 from . import request_validation as _rv
 from .compat.collector import deployment_scope as _deployment_scope
-from .model_staging import print_red, resolve_model_paths
+from .model_staging import print_red
 from .plan.contracts import DeploymentPlan, ModelPlan
 from .plan.runtime_binding import (
     BoundDeployment,
@@ -880,9 +880,28 @@ class EngineWorker:
         CompatibilityActivator().activate("replica")
         from .engines import EngineSpec, NullEngine, get_engine
 
+        if not null_compute and not local_model_path:
+            raise RuntimeError(
+                f"staged model path is required for production model {model_id!r}; "
+                "ambient model IDs and caches are not a fallback"
+            )
+        if not null_compute:
+            from .model_staging import validate_node_local_tree
+
+            try:
+                validate_node_local_tree(
+                    local_model_path,
+                    local_root=_receipt_plan.local_stage_path,
+                    require_immutable=True,
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"staged model path for {model_id!r} is not node-local: {exc}"
+                ) from exc
+        engine_model_path = model_id if null_compute else local_model_path
         spec = EngineSpec(
             model_id=model_id,
-            local_path=local_model_path or model_id,
+            local_path=engine_model_path,
             vendor_name=vendor_name,
             tensor_parallel_size=tensor_parallel_size,
             pipeline_parallel_size=pipeline_parallel_size,
@@ -1534,6 +1553,42 @@ class EngineWorker:
 # ---------------------------------------------------------------------------
 # Deployment helpers
 # ---------------------------------------------------------------------------
+def _model_path_for_deployment(
+    model_id: str, model_path_map: Dict[str, str], config: DeploymentPlan
+) -> str:
+    """Resolve one exact staged model path with no ambient fallback."""
+
+    if config.runtime.null_compute:
+        return model_id
+    expected_models = {model.model_id for model in config.models}
+    if set(model_path_map) != expected_models:
+        raise RuntimeError(
+            "model path mapping must cover the exact canonical model set: "
+            f"expected={sorted(expected_models)}, observed={sorted(model_path_map)}"
+        )
+    try:
+        local_path = model_path_map[model_id]
+    except KeyError as exc:
+        raise RuntimeError(f"staged path is missing for model {model_id!r}") from exc
+    if not isinstance(local_path, str):
+        raise RuntimeError(f"model {model_id!r} path must be text")
+    from .model_paths import get_model_storage_name
+
+    prefix = get_model_storage_name(model_id) + "."
+    local_root = str(config.local_stage_path).rstrip("/") + "/"
+    relative = local_path.removeprefix(local_root)
+    digest = relative.removeprefix(prefix)
+    if (
+        not os.path.isabs(local_path)
+        or not local_path.startswith(local_root)
+        or relative != prefix + digest
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise RuntimeError(f"model {model_id!r} path is not a local content address")
+    return local_path
+
+
 def deploy_model(
     model_config: ModelPlan,
     model_path_map: Dict[str, str],
@@ -1560,8 +1615,8 @@ def deploy_model(
         (deployment, model_id)
     """
     model_id = model_config.model_id
-    local_path = model_path_map.get(model_id, model_id)
     null_compute = config.runtime.null_compute
+    local_path = _model_path_for_deployment(model_id, model_path_map, config)
 
     safe_name = model_config.route_name
     native_head_only = planned_placement is None
@@ -1929,6 +1984,33 @@ def deploy_proxy_anchors(replica_plan: BoundDeployment) -> None:
     print(f"[ExaServe] ✓ {len(targets)} per-node proxy anchor(s) RUNNING", flush=True)
 
 
+def _load_content_addressed_model_paths(plan: DeploymentPlan) -> dict[str, str]:
+    """Load the head-owned staging result and return its typed local mapping.
+
+    This function runs only in the global deployment child on the allocation
+    head. It may read the explicit shared aggregate once; the resulting local
+    path strings are passed to actors, which never open that aggregate.
+    """
+
+    result_path = os.environ.get("EXASERVE_MODEL_BCAST_RESULT", "").strip()
+    if not result_path or not os.path.isabs(result_path):
+        raise RuntimeError("EXASERVE_MODEL_BCAST_RESULT must name the head-owned aggregate")
+    binding_path = os.environ.get("EXASERVE_ALLOCATION_BINDING_PATH", "").strip()
+    if not binding_path or not os.path.isabs(binding_path):
+        raise RuntimeError("EXASERVE_ALLOCATION_BINDING_PATH must name the local binding")
+    from .model_bcast import validate_model_bcast_result
+    from .plan.io import load_allocation_binding
+    from .state.atomic import strict_json_load_path
+
+    binding = load_allocation_binding(binding_path)
+    try:
+        result = strict_json_load_path(result_path)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"model staging aggregate is unreadable: {exc}") from exc
+    validate_model_bcast_result(result, plan=plan, binding=binding)
+    return dict(result["model_paths"])
+
+
 def main() -> None:
     """The deployment entry point (plan WP4.1).
 
@@ -2150,15 +2232,8 @@ def main() -> None:
         model_path_map = {cfg.model_id: cfg.model_id for cfg in config.models}
     else:
         stage_start = time.time()
-        print(
-            f"[ExaServe] Model Resolution: Resolving staged models from {config.local_stage_path}...",
-            flush=True,
-        )
-        model_path_map = resolve_model_paths(
-            config.models,
-            config.local_stage_path,
-            require_complete=True,
-        )
+        print("[ExaServe] Model Resolution: validating staged content addresses...", flush=True)
+        model_path_map = _load_content_addressed_model_paths(canonical_plan)
         print_red(f"[ExaServe] ✓ Model Resolution completed in {time.time() - stage_start:.2f}s")
 
     # ---- Model Deploy: deploy model services to Ray Serve -------------------

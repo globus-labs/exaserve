@@ -231,6 +231,14 @@ def _prepare_scheduler_environment() -> str:
 
 def _sanitize_child_pythonpath() -> None:
     """Remove retired generation overlays from every process we launch."""
+    for key in (
+        "EXASERVE_LOCAL_RUNTIME_ROOT",
+        "EXASERVE_LOCAL_STATE_ROOT",
+        "EXASERVE_LOCAL_GO_DISPATCH",
+        "EXASERVE_COMPAT_OVERLAY_ROOT",
+        "EXASERVE_SHARED_ROOTS",
+    ):
+        os.environ.pop(key, None)
     retained = []
     for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
         if not entry:
@@ -245,6 +253,23 @@ def _sanitize_child_pythonpath() -> None:
         os.environ["PYTHONPATH"] = os.pathsep.join(retained)
     else:
         os.environ.pop("PYTHONPATH", None)
+
+
+def _require_clean_python_bootstrap() -> None:
+    """Reject an interpreter that already consumed shared user-site hooks."""
+
+    if os.environ.get("PYTHONNOUSERSITE") != "1":
+        raise ValueError(
+            "PYTHONNOUSERSITE=1 must be set by the scheduler before the first Python process"
+        )
+    if os.environ.get("PYTHONSAFEPATH") != "1":
+        raise ValueError(
+            "PYTHONSAFEPATH=1 must be set by the scheduler before the first Python process"
+        )
+    if "usercustomize" in sys.modules:
+        module = sys.modules["usercustomize"]
+        location = getattr(module, "__file__", "unknown")
+        raise ValueError(f"usercustomize was loaded before the clean bootstrap: {location}")
 
 
 def _generation_from_environment() -> int:
@@ -266,6 +291,7 @@ def run(config_path: str) -> int:
 
     try:
         _sanitize_child_pythonpath()
+        _require_clean_python_bootstrap()
         scheduler_allocation_id = _prepare_scheduler_environment()
         generation = _generation_from_environment()
     except ValueError as exc:
@@ -283,6 +309,13 @@ def run(config_path: str) -> int:
         from .site import require_execution_qualification
 
         production_qualified = require_execution_qualification(plan, site_profile)
+        from .site import (
+            qualify_declared_shared_filesystems,
+            validate_local_stage_policy,
+        )
+
+        shared_filesystem_evidence = qualify_declared_shared_filesystems(site_profile)
+        validate_local_stage_policy(plan, site_profile)
     except Exception as exc:  # noqa: BLE001 - typed first cause
         _log(f"[Composition] FIRST CAUSE: plan compilation failed: {exc}")
         return 2
@@ -301,11 +334,21 @@ def run(config_path: str) -> int:
     plan_path = os.path.join(run_dir, "deployment.plan.json")
     site_profile_path = os.path.join(run_dir, "site.profile.json")
     try:
-        from .state.atomic import ensure_owned_directory
+        from .state.atomic import atomic_create_or_verify_json, ensure_owned_directory
 
         ensure_owned_directory(run_dir)
         write_deployment_plan(plan_path, plan)
         write_site_profile(site_profile_path, site_profile)
+        atomic_create_or_verify_json(
+            os.path.join(run_dir, "filesystem_identity.json"),
+            {
+                "schema_version": 1,
+                "deployment_id": plan.deployment_id,
+                "generation": generation,
+                "site_profile_hash": site_profile.site_profile_hash,
+                "shared_roots": list(shared_filesystem_evidence),
+            },
+        )
     except Exception as exc:  # noqa: BLE001 - artifact boundary
         _log(f"[Composition] FIRST CAUSE: plan persistence failed: {exc}")
         return 2
@@ -314,10 +357,14 @@ def run(config_path: str) -> int:
     # compatibility activation and before any Ray/engine import.  Every child
     # receives the same verified profile artifact path and prepared values.
     try:
-        from .site import apply_site_profile_environment
+        from .plan.runtime_environment import QUALIFIED_PYTHON_ENV
+        from .site import apply_site_profile_environment, qualify_site_local_bootstrap
 
         apply_site_profile_environment(site_profile)
         os.environ["EXASERVE_SITE_PROFILE_PATH"] = site_profile_path
+        os.environ[QUALIFIED_PYTHON_ENV] = qualify_site_local_bootstrap(
+            sys.executable, site_profile
+        )
     except Exception as exc:  # noqa: BLE001
         _log(f"[Composition] FIRST CAUSE: site environment preparation failed: {exc}")
         return 2
@@ -346,6 +393,7 @@ def run(config_path: str) -> int:
         run_dir=run_dir,
         log=_log,
         production_qualified=production_qualified,
+        site_profile=site_profile,
     )
     try:
         # Signal ownership precedes every process boundary, including gateway
@@ -368,11 +416,19 @@ def run(config_path: str) -> int:
         root.bind_control_listener()
         root.run_staging(root.default_staging_steps(plan_path))
         root.raise_if_termination("staging interrupted")
-        rank_argv = [sys.executable, "-m", "exaserve.rank_main", "--plan", plan_path]
+        if root.local_runtime_paths is None:
+            raise CompositionError("distribution did not publish a node-local runtime capsule")
+        rank_argv = [
+            os.environ["EXASERVE_QUALIFIED_PYTHON"],
+            "-m",
+            "exaserve.rank_main",
+            "--plan",
+            str(root.local_runtime_paths.plan_path),
+        ]
         root.launch_ranks(rank_argv, scheduler=os.environ.get("EXASERVE_SCHEDULER", "pbs"))
         root.await_all_registered()
-        root.start_ray_cluster(plan_path)
-        root.start_deployment(plan_path)
+        root.start_ray_cluster(str(root.local_runtime_paths.plan_path))
+        root.start_deployment(str(root.local_runtime_paths.plan_path))
 
         # §3.2.1 Q3: the ROOT owns the advertised endpoint and commits READY.
         # Previously the deployment child's own gate decided readiness against

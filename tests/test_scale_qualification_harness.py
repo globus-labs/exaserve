@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import hashlib
+import inspect
 import importlib.util
 import json
 import os
@@ -52,7 +53,6 @@ def _approval() -> dict:
 def _materialize_plan(repo: Path) -> tuple[Path, dict]:
     harness = _write(repo / "harness.py", b"# harness\n")
     lifecycle = _write(repo / "support/lifecycle.py", b"VALUE = 1\n")
-    holder = _write(repo / "support/hold_port.py", b"VALUE = 2\n")
     approval = _json(repo / "decisions/scale-64.json", _approval())
     release = repo / "release"
     bootstrap = release / "bootstrap"
@@ -116,7 +116,6 @@ def _materialize_plan(repo: Path) -> tuple[Path, dict]:
         "harness": {"path": "harness.py", "sha256": _sha(harness)},
         "support": {
             "lifecycle": {"path": "support/lifecycle.py", "sha256": _sha(lifecycle)},
-            "port_holder": {"path": "support/hold_port.py", "sha256": _sha(holder)},
         },
         "scope_approval": {"path": "decisions/scale-64.json", "sha256": _sha(approval)},
         "gates": gates,
@@ -140,6 +139,12 @@ def test_scale_harness_supports_the_established_direct_file_invocation():
     )
     assert completed.returncode == 0, completed.stderr
     assert "--experiment-plan" in completed.stdout
+
+
+def test_scale_remote_port_fault_uses_site_qualified_inline_helper():
+    source = inspect.getsource(scale._launch_scale_scenario)
+    assert "helper_path=" not in source
+    assert "site_profile=site_profile" in source
 
 
 def test_scale_gate_loader_accepts_only_predeclared_code_scope_and_ladder(tmp_path):

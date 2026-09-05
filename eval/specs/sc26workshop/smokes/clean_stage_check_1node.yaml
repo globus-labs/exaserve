@@ -1,7 +1,8 @@
 name: clean_stage_check_1node
 # Validation for the per-run clean-stage flag: 1 node, startup_only (no replay),
 # clean_stage=true. Expect a complete per-rank CLEAN-STAGE receipt set, then a
-# model-broadcast result with cache_reused=false before canonical READY.
+# validated immutable model result before canonical READY. Cache reuse is
+# allowed; cold-start qualification requires a fresh allocation/cache root.
 matrix:
   name_template: '{num_nodes}_nodes'
   axes:

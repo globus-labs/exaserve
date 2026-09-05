@@ -18,12 +18,17 @@ _HARNESS = runpy.run_path(
     str(Path(__file__).resolve().parents[1] / "scripts/hardening/run_final_null_qualification.py")
 )
 _cleanup_local_generation_processes = _HARNESS["_cleanup_local_generation_processes"]
+_cleanup_generation_on_nodes = _HARNESS["_cleanup_generation_on_nodes"]
 _expected_observations = _HARNESS["_expected_observations"]
 _load_declared_gate = _HARNESS["_load_declared_gate"]
 _owned_gateway_pid = _HARNESS["_owned_gateway_pid"]
 _owned_replica_target = _HARNESS["_owned_replica_target"]
 _owned_worker_target = _HARNESS["_owned_worker_target"]
+_pals_argv = _HARNESS["_pals_argv"]
 _pin_bootstrap_environment = _HARNESS["_pin_bootstrap_environment"]
+_qualified_remote_python = _HARNESS["_qualified_remote_python"]
+_RemotePortHolder = _HARNESS["_RemotePortHolder"]
+_run_remote_generation_signal = _HARNESS["_run_remote_generation_signal"]
 _scenario_matrix = _HARNESS["_scenario_matrix"]
 _signal_local_generation_pid = _HARNESS["_signal_local_generation_pid"]
 _validate_cluster_snapshot = _HARNESS["_validate_cluster_snapshot"]
@@ -457,6 +462,307 @@ def test_qualification_accepts_only_the_declared_valid_compute_session(tmp_path,
     assert _validated_nodes(1, acquisition_source="interactive_pbs") == (socket.gethostname(),)
     with pytest.raises(RuntimeError, match="AURORA_SUBJOB"):
         _validated_nodes(1, acquisition_source="subjob")
+
+
+def _capsule_context():
+    return {
+        "qualified_python": "/opt/aurora/python",
+        "python_root": "/tmp/exaserve/runtime/python",
+        "state_root": "/tmp/exaserve/state",
+    }
+
+
+def test_multi_node_signal_uses_only_capsule_local_remote_paths(monkeypatch, tmp_path):
+    globals_ = _run_remote_generation_signal.__globals__
+    monkeypatch.setitem(globals_, "_runtime_capsule_context", lambda *_a, **_k: _capsule_context())
+
+    def remote_json(argv, **_kwargs):
+        return {
+            "hostname": "worker",
+            "deployment_id": "deployment",
+            "generation": 1,
+            "deployment_plan_hash": "a" * 64,
+            "signal": "TERM",
+            "owner_rank": 1,
+            "requirement_id": "rank1/ray_worker",
+            "process": {"pid": 10},
+        }
+
+    monkeypatch.setitem(globals_, "_run_remote_json", remote_json)
+    report = _run_remote_generation_signal(
+        "worker",
+        10,
+        "TERM",
+        deployment_id="deployment",
+        generation=1,
+        plan_hash="a" * 64,
+        run_dir=tmp_path,
+        owner_rank=1,
+        requirement_id="rank1/ray_worker",
+        role="ray_worker",
+    )
+    command = report["argv"]
+    assert command[0] == "mpiexec"
+    assert "--genvnone" in command and "--envnone" in command
+    assert "HOME=/tmp/exaserve/state/home" in command
+    assert "TMPDIR=/tmp/exaserve/state/tmp" in command
+    from exaserve.site import AURORA_PMIX_PREPARED_ENVIRONMENT
+
+    for name, value in AURORA_PMIX_PREPARED_ENVIRONMENT:
+        assert f"{name}={value}" in command
+    assert command[command.index("--wdir") + 1] == "/tmp"
+    assert "/tmp/exaserve/runtime/python" in command
+    assert not any(str(tmp_path) in item or "/home/" in item or "/lus/" in item for item in command)
+
+
+def test_pals_helper_defaults_pre_exec_home_to_local_scratch():
+    command = _pals_argv(("worker",), "/opt/aurora/python", "-c", "pass")
+    assert "HOME=/tmp" in command
+    assert "TMPDIR=/tmp" in command
+
+
+def test_multi_node_cleanup_uses_capsule_helper_without_shared_argv(monkeypatch, tmp_path):
+    globals_ = _cleanup_generation_on_nodes.__globals__
+    monkeypatch.setitem(globals_, "_runtime_capsule_context", lambda *_a, **_k: _capsule_context())
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, argv, **_kwargs):
+            self.argv = argv
+
+        def communicate(self, timeout):
+            del timeout
+            nodes = self.argv[self.argv.index("--hosts") + 1].split(",")
+            return (
+                "\n".join(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "hostname": node,
+                            "deployment_id": "deployment",
+                            "generation": 1,
+                            "deployment_plan_hash": "a" * 64,
+                            "matched": [],
+                            "signals": [],
+                            "survivors": [],
+                        }
+                    )
+                    for node in nodes
+                ),
+                "",
+            )
+
+    monkeypatch.setattr(subprocess, "Popen", Process)
+    observed = _cleanup_generation_on_nodes(
+        ("head", "worker"),
+        deployment_id="deployment",
+        generation=1,
+        plan_hash="a" * 64,
+        run_dir=tmp_path,
+    )
+    assert len(observed) == 2
+    for report in observed:
+        assert not any(
+            str(tmp_path) in item or "/home/" in item or "/lus/" in item for item in report["argv"]
+        )
+
+
+def test_remote_port_holder_has_no_shared_helper_path_parameter():
+    import inspect
+
+    signature = inspect.signature(_RemotePortHolder.start)
+    assert "helper_path" not in signature.parameters
+    source = inspect.getsource(_RemotePortHolder.start)
+    assert "hold_port.py" not in source
+
+
+def test_remote_port_holder_python_is_site_profile_qualified(monkeypatch):
+    profile = object()
+    observed = {}
+
+    def qualify(path, supplied_profile):
+        observed.update(path=path, profile=supplied_profile)
+        return "/opt/qualified/python"
+
+    monkeypatch.setattr("exaserve.site.qualify_site_local_bootstrap", qualify)
+    assert _qualified_remote_python(profile) == "/opt/qualified/python"
+    assert observed == {"path": os.path.realpath(sys.executable), "profile": profile}
+
+
+def test_capsule_signal_helper_pidfd_fences_the_live_process():
+    from exaserve.state.qualification_process import signal_exact_process
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EXASERVE_DEPLOYMENT_ID": "qualification",
+            "EXASERVE_GENERATION": "7",
+            "EXASERVE_PLAN_HASH": "a" * 64,
+            "EXASERVE_RECEIPT_RANK": "1",
+            "EXASERVE_RECEIPT_ROLE": "ray_worker",
+            "EXASERVE_RECEIPT_SLOT": "rank1/ray_worker",
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env=environment,
+        start_new_session=True,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="exact receipt slot"):
+            signal_exact_process(
+                pid=process.pid,
+                signal_name="TERM",
+                deployment_id="qualification",
+                generation=7,
+                plan_hash="a" * 64,
+                owner_rank=1,
+                requirement_id="wrong",
+                role="ray_worker",
+            )
+        assert process.poll() is None
+        report = signal_exact_process(
+            pid=process.pid,
+            signal_name="TERM",
+            deployment_id="qualification",
+            generation=7,
+            plan_hash="a" * 64,
+            owner_rank=1,
+            requirement_id="rank1/ray_worker",
+            role="ray_worker",
+        )
+        assert report["process"]["pid"] == process.pid
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+
+
+def test_capsule_signal_helper_fences_the_exact_replica_requirement():
+    from exaserve.state.qualification_process import signal_exact_process
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EXASERVE_DEPLOYMENT_ID": "qualification",
+            "EXASERVE_GENERATION": "8",
+            "EXASERVE_PLAN_HASH": "b" * 64,
+            "EXASERVE_RECEIPT_RANK": "2",
+            "EXASERVE_COMPAT_ROLE": "replica",
+            "EXASERVE_RECEIPT_REQUIREMENT_ID_REPLICA": "replica/model-a/0",
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env=environment,
+        start_new_session=True,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="exact receipt requirement"):
+            signal_exact_process(
+                pid=process.pid,
+                signal_name="TERM",
+                deployment_id="qualification",
+                generation=8,
+                plan_hash="b" * 64,
+                owner_rank=2,
+                requirement_id="replica/model-b/0",
+                role="replica",
+            )
+        assert process.poll() is None
+        report = signal_exact_process(
+            pid=process.pid,
+            signal_name="TERM",
+            deployment_id="qualification",
+            generation=8,
+            plan_hash="b" * 64,
+            owner_rank=2,
+            requirement_id="replica/model-a/0",
+            role="replica",
+        )
+        assert report["process"]["pid"] == process.pid
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+
+
+def test_capsule_cleanup_fences_same_generation_by_plan_hash(tmp_path, monkeypatch):
+    from exaserve.state.process_ownership import ProcessOwnershipRegistry
+    from exaserve.state.qualification_process import cleanup_exact_generation
+
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(tmp_path / "owned"))
+    deployment_id = "qualification-cleanup"
+    generation = 9
+    exact_hash = "c" * 64
+    other_hash = "d" * 64
+
+    def launch(plan_hash):
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "EXASERVE_DEPLOYMENT_ID": deployment_id,
+                "EXASERVE_GENERATION": str(generation),
+                "EXASERVE_PLAN_HASH": plan_hash,
+            }
+        )
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            env=environment,
+            start_new_session=True,
+        )
+
+    exact = launch(exact_hash)
+    other = launch(other_hash)
+    registry = ProcessOwnershipRegistry(
+        deployment_id=deployment_id,
+        generation=generation,
+        rank=0,
+    )
+    exact_receipt = registry.record(
+        "exact",
+        pid=exact.pid,
+        pgid=os.getpgid(exact.pid),
+        argv=[sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    other_receipt = registry.record(
+        "other-plan",
+        pid=other.pid,
+        pgid=os.getpgid(other.pid),
+        argv=[sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    # In production the owning NodeSupervisor/PALS parent reaps the target.
+    # This test is that parent, so make the liveness probe poll/reap its child
+    # instead of treating the resulting zombie process group as still alive.
+    from exaserve.state import process_ownership
+
+    exact_pgid = os.getpgid(exact.pid)
+    real_group_alive = process_ownership._group_alive
+    monkeypatch.setattr(
+        process_ownership,
+        "_group_alive",
+        lambda pgid: exact.poll() is None if pgid == exact_pgid else real_group_alive(pgid),
+    )
+    try:
+        report = cleanup_exact_generation(
+            deployment_id=deployment_id,
+            generation=generation,
+            plan_hash=exact_hash,
+            timeout_s=2.0,
+        )
+        exact.wait(timeout=5)
+        assert other.poll() is None
+        assert [item["pid"] for item in report["matched"]] == [exact.pid]
+        assert not Path(exact_receipt).exists()
+        assert Path(other_receipt).is_file()
+    finally:
+        for process in (exact, other):
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
 
 
 def test_fallback_cleanup_reaps_only_the_exact_generation(tmp_path):

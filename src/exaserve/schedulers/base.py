@@ -125,6 +125,10 @@ class JobSpec:
             raise ValueError("JobSpec.environment_unset must be a tuple of environment names")
         if len(self.environment_unset) != len(set(self.environment_unset)):
             raise ValueError("JobSpec.environment_unset must not contain duplicates")
+        protected_python = {"PYTHONNOUSERSITE", "PYTHONSAFEPATH"}
+        forbidden_unset = protected_python.intersection(self.environment_unset)
+        if forbidden_unset:
+            raise ValueError(f"JobSpec may not unset mandatory {sorted(forbidden_unset)}")
         if not isinstance(self.bootstrap_script, str):
             raise ValueError("JobSpec.bootstrap_script must be text")
         if not isinstance(self.exclusive, bool):
@@ -138,6 +142,11 @@ class JobSpec:
                 raise ValueError(f"job environment value for {key!r} must be text")
             if "\x00" in value:
                 raise ValueError(f"job environment value for {key!r} contains NUL")
+        invalid_python = [key for key in protected_python if self.environment.get(key, "1") != "1"]
+        if invalid_python:
+            raise ValueError(
+                f"JobSpec may not override mandatory Python isolation: {sorted(invalid_python)}"
+            )
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         for name in ("stdout_dir", "stderr_dir", "cwd", "source_env_script"):
             value = getattr(self, name)
@@ -339,6 +348,12 @@ class SchedulerBackend(ABC):
             "set -eo pipefail",
             "unset VIRTUAL_ENV PYTHONHOME CONDA_DEFAULT_ENV CONDA_PREFIX "
             "CONDA_PROMPT_MODIFIER _CE_CONDA _CE_M PYTHONPYCACHEPREFIX",
+            # This precedes site bootstrap and the first Python interpreter.
+            # In particular it prevents a user's shared-home usercustomize.py
+            # from installing import hooks before ExaServe can close the
+            # post-distribution runtime environment.
+            "export PYTHONNOUSERSITE=1",
+            "export PYTHONSAFEPATH=1",
             # A run imports its source snapshot before the snapshot validator
             # executes.  Bytecode writes would otherwise mutate that supposedly
             # immutable tree and make its first import fail its own inventory.
@@ -355,6 +370,11 @@ class SchedulerBackend(ABC):
             lines.append('export PYTHONPATH="$_ES_PYTHONPATH"')
         if spec.source_env_script is not None:
             lines.append(f"source {shlex.quote(str(spec.source_env_script))}")
+        # Trusted module/environment scripts are still not an authority for
+        # Python import isolation. Reassert this after every shell bootstrap
+        # seam and before any caller-supplied exports or the final exec.
+        lines.append("export PYTHONNOUSERSITE=1")
+        lines.append("export PYTHONSAFEPATH=1")
         for key in spec.environment_unset:
             lines.append(f"unset {key}")
         lines.append("set -u")

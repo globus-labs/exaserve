@@ -1,6 +1,6 @@
 # Shared-Filesystem Fan-Out Audit — 2026-09-04
 
-Status: **RELEASE BLOCKER**
+Status: **CODE REMEDIATED; TWO-NODE DISTRIBUTION GATE PASSED; REAL-RUNTIME/SCALE QUALIFICATION PENDING**
 
 This audit was opened after the failed 256-node null-compute trial
 `run7/n256` (PBS `8800730`) exposed load-sensitive startup behavior. It audits
@@ -9,9 +9,140 @@ that shared project/home storage have one allocation-head reader and that
 runtime content be delivered to node-local storage through MPI/native
 collectives.
 
-No new compute job was run for this audit. Evidence comes from static call-path
-inspection, the sealed `run6/n256` and `run7/n256` artifacts, the generated PBS
-job, and current mount inspection on the Aurora login node.
+No new compute job was run for the original pre-fix audit. Its evidence came
+from static call-path inspection, the sealed `run6/n256` and `run7/n256`
+artifacts, the generated PBS job, and mount inspection. The remediation was
+subsequently exercised on the compute jobs recorded below.
+
+## Implementation update — 2026-09-05
+
+The findings below describe commit `6052979`, the audited pre-fix runtime. The
+current working tree now implements the required architectural cutover. This
+does not rehabilitate the rejected n256 evidence and does not authorize mixing
+old and new measurements. Release status remains blocked until the live gates
+at the end of this section pass.
+
+Implemented corrections:
+
+1. Source staging builds one immutable, content-addressed capsule in
+   allocation-head local storage. It includes ExaServe/eval code, generated
+   compatibility content, the exact plan/site/binding and eval artifacts, and
+   native/Go helpers. PALS transfers the native bootstrap; a site-qualified
+   interpreter independently verifies the candidate through descriptor-bound
+   full hashes before candidate code is imported or the capsule is published.
+2. Rank, Ray, deployment, actor, engine, replay, cache, log, HOME, temporary,
+   and working-directory paths are projected from node-local `RuntimePaths`.
+   The head launcher retains PBS/PALS state separately; rank applications use
+   `--genvnone --envnone --envlist` and a local `--wdir`. User site-packages,
+   ambient Python/shell injection variables, shared path tokens, and online
+   Hugging Face fallbacks are rejected.
+3. The SiteProfile now carries hash-bearing local/shared/site root semantics
+   including filesystem type and read-only state. The allocation head verifies
+   shared roots, each rank verifies local roots and the read-only site Python,
+   and legacy profiles remain readable only for historical audit—they cannot
+   cross an execution or staging boundary.
+4. The native distributor no longer invokes `tar`. Its bounded MPI stream
+   binds global rank 0 to the allocation head, opens source bytes only there,
+   sends each PP stage only to its declared recipients, checks inode/size
+   stability, writes local candidates without following links, and performs
+   exact candidate-only rollback. Published content-addressed caches are never
+   deleted by another attempt's cleanup.
+5. Every PP>1 plan, including one replica, uses recipient-aware shard staging.
+   Model descendants must remain on one verified local filesystem and are made
+   immutable before publication. Model IDs are no longer a missing-stage
+   fallback. Model identities now full-SHA every byte; PP stage manifests reuse
+   the already verified source file hashes, so large weights receive one
+   integrity pass and one payload-streaming pass rather than another pass per
+   stage.
+6. Source/model/cache/cleanup/publication receipts now travel through one MPI
+   gather envelope; no rank writes or polls a shared result file. Diagnostics
+   remain local and only their bounded status crosses the authenticated
+   control channel.
+7. Replay initializes MPI before input access. Rank 0 alone loads the exact
+   local manifest/plan, nodefile and shared trace, hashes the trace while
+   streaming bounded partitions, and is the only shared result writer. Raw
+   results use sequenced bounded MPI messages with deadlines; summaries use
+   reductions plus a mergeable, explicitly identified ~2% latency histogram.
+   Missing MPI, rank-count drift, partial results, and malformed terminals fail
+   closed.
+8. ClientLab's remote synthetic targets use a head-local content-addressed C++
+   build, PALS executable transfer, inline bounded config, a closed environment
+   and `/tmp` cwd. Its server now exits nonzero on bind/listen/epoll startup
+   failure. Distributed ClientLab *client* control remains explicitly
+   unsupported and rejects `client_nodes>1`; the paper eval replay path has its
+   own implemented distributed contract.
+9. Head persistence group-commits component bindings, runs snapshot
+   stage/commit off the listener event loop, and crosses a durable barrier
+   before START/READY. READY heartbeats update a compact lease rather than the
+   multi-megabyte status record; a changed receipt/topology/capability set must
+   visibly pass through VALIDATING and publish a new immutable receipt manifest
+   before returning to READY.
+10. Qualified-Python and compatibility-source bytes are verified once per node
+    under the read-only site-image proof and reused by descendants. The engine
+    watcher memoizes immutable identity. A receipt-gated child ownership record
+    now exists before Ray may exec, so killing the guardian cannot orphan an
+    unowned Ray process group.
+11. Qualification fault/cleanup helpers no longer SSH to a shared script.
+    They run capsule-local code through one closed PALS boundary and fence
+    signals by exact deployment, generation, plan, rank, receipt requirement,
+    PID start time and pidfd identity.
+12. PALS applications now receive a node-local `HOME` before PMIx initializes
+    plus exact, SiteProfile-bound PMIx system parameter/component paths. This
+    closes PMIx's otherwise implicit `$HOME/.pmix` lookup while continuing to
+    strip ambient PBS/PALS/PMI/PMIx rank state. Generic PBS and Slurm launchers
+    suppress inherited environments even when their explicit allowlist is
+    empty; arbitrary launch-prefix injection is restricted to the test-only
+    scheduler.
+13. Deterministic local staging, runtime-state, process-ownership, IPC, port,
+    receipt and diagnostics directories use descriptor-relative `O_NOFOLLOW`
+    traversal before the first write. Reads, quarantine, chmod and deletion
+    revalidate the same boundary. Nested mounts are detected from kernel mount
+    IDs rather than directory/file `st_dev`, preserving the escape check on
+    Aurora overlayfs.
+14. Replay proves MPI rank order and rank 0 against the capsule-local
+    `AllocationBinding` before opening a trace. Path-shaped model IDs and replay
+    generation modes are rejected before worker argv construction. The active
+    scale contract no longer loads or records the obsolete port-holder script.
+15. Each transferred ClientLab synthetic target performs an Aurora preflight
+    before becoming long-lived: local `/tmp` HOME/TMP/cwd with tmpfs identity,
+    plus root-owned, non-group-writable PMIx paths.
+
+Repository checks completed before live qualification include Ruff format and
+lint over `src`, `eval`, `clientlab`, `scripts`, and `tests`; Python compilation;
+the Go test suite; C compilation with `mpicc -Wall -Wextra -Werror`; C++
+compilation with `g++ -Wall -Wextra -Werror`; and focused Python suites covering
+the new contracts and injected failure paths. The complete suite then passed
+on Aurora compute node PBS job `8806880`: **1,522 passed**. The same allocation
+verified `/home` and `/lus/flare` as read-write Lustre, the framework Python as
+read-only `/opt/aurora` squashfs, PALS executable transfer, `envnone` isolation,
+local `/tmp` cwd, absence of `PBS_NODEFILE` in the application, native streaming,
+and exact candidate cleanup. The initial shell attempt correctly failed before
+tests because Lmod is not `nounset`-clean; the retry followed the scheduler
+renderer contract by enabling `set -u` only after `env_aurora` was sourced.
+
+The final integrated tree passed **1,563 tests** (27 dependency warnings) on
+the two-node Aurora interactive PBS allocation `8806903`. That allocation also
+proved the following through the repository-generated PALS prefix:
+
+- PALS executable transfer and a closed application environment;
+- allocation rank 0 on `x4514c5s4b0n0` as the sole shared source reader;
+- recipient-only transfer to rank 1 on `x4514c5s6b0n0`;
+- zero rank-1 `open`/`stat`/`readlink` syscalls beneath `/home` or `/lus/flare`
+  after the PMIx controls and local HOME were applied;
+- a destination-collision failure returning nonzero (`143`) followed by exact,
+  candidate-only cleanup; and
+- successful overlap of a worker-only `mpiexec --shared` helper with a normal
+  two-node launch. All test candidates were removed before releasing the job.
+
+Still required before changing this status to release-ready:
+
+- a real read-only staged-model Ray/vLLM smoke with a complete descendant
+  syscall/open trace and rank/guardian-loss exercise (the native/PALS bootstrap
+  portion is now proven; the full external runtime chain is not yet claimed);
+- later scale telemetry, with n128/n256 and all homogeneous paper reruns left
+  until the smaller corrected-snapshot gates pass; and
+- product-owner approval of the resulting production envelope, which code and
+  validation workers cannot self-issue.
 
 ## 1. Required invariant
 
@@ -47,10 +178,10 @@ integrity check and a later streaming pass on that same head may still be
 necessary unless the content hash is computed while streaming from a trusted
 manifest.
 
-## 2. Verdict
+## 2. Pre-fix verdict at commit `6052979`
 
-The implementation does **not** satisfy the invariant. The violation is broad,
-not isolated to the receipt-ledger lock.
+The audited implementation at commit `6052979` did **not** satisfy the
+invariant. The violation was broad, not isolated to the receipt-ledger lock.
 
 Confirmed fan-out includes:
 

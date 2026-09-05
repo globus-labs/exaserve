@@ -19,8 +19,50 @@ from exaserve.compat.profile import (
 
 
 @pytest.fixture(autouse=True)
-def _restore_shim_environment():
+def _restore_shim_environment(tmp_path, monkeypatch):
     snapshot = engine_shim.environment_snapshot()
+    # Engine processes now require the distribution transaction's node-local
+    # contract.  pytest's tmp_path models one node-local filesystem here.
+    monkeypatch.setenv("EXASERVE_LOCAL_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setenv("EXASERVE_LOCAL_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("EXASERVE_SHARED_ROOTS", "/home:/lus/flare")
+    monkeypatch.setenv("EXASERVE_SITE_PROFILE_HASH", "2" * 64)
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", sys.executable)
+    from exaserve.compat.producers import file_hash
+
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SHA256", file_hash(sys.executable))
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH", "2" * 64)
+    monkeypatch.setenv("EXASERVE_COMPAT_PROFILE_ID", "a" * 64)
+    monkeypatch.setenv("EXASERVE_COMPAT_MANIFEST_HASH", "b" * 64)
+    monkeypatch.setenv("EXASERVE_COMPAT_SOURCES_NODE_PROFILE", "a" * 64)
+    monkeypatch.setenv("EXASERVE_COMPAT_SOURCES_NODE_MANIFEST", "b" * 64)
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    for key in (
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "IPYTHONDIR",
+        "JUPYTER_CONFIG_DIR",
+        "NUMBA_CACHE_DIR",
+        "TORCH_EXTENSIONS_DIR",
+        "MPLCONFIGDIR",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+        "TORCH_HOME",
+        "TRITON_CACHE_DIR",
+        "VLLM_CACHE_ROOT",
+        "RAY_TMPDIR",
+    ):
+        monkeypatch.setenv(key, str(tmp_path))
     yield
     engine_shim.restore_environment(snapshot)
 
@@ -81,6 +123,27 @@ def test_prepare_uses_the_staged_cross_node_bootstrap(tmp_path, monkeypatch):
     assert os.environ["EXASERVE_ENGINE_SHIM_PATCHES"] == "1"
 
 
+def test_prepare_never_creates_receipts_through_intermediate_symlink(tmp_path, monkeypatch):
+    _stage_bootstrap(tmp_path, monkeypatch)
+    state = tmp_path / "state"
+    shared = tmp_path / "shared-like"
+    state.mkdir()
+    shared.mkdir()
+    (state / "escape").symlink_to(shared, target_is_directory=True)
+    monkeypatch.setenv("EXASERVE_LOCAL_STATE_ROOT", str(state))
+
+    with pytest.raises((OSError, RuntimeError), match="shared|escape|symlink"):
+        engine_shim.prepare_environment(
+            str(state / "escape" / "receipts"),
+            import_patches=True,
+            deployment_id="d1",
+            generation=7,
+            vendor="xpu",
+        )
+
+    assert not (shared / "receipts").exists()
+
+
 def test_prepare_rejects_a_tampered_staged_bootstrap(tmp_path, monkeypatch):
     bootstrap_root = _stage_bootstrap(tmp_path, monkeypatch)
     (bootstrap_root / "sitecustomize.py").write_text("# drifted\n")
@@ -98,6 +161,7 @@ def test_engine_bootstrap_installs_overlay_without_eager_target_import(monkeypat
     from types import SimpleNamespace
 
     from exaserve.compat import activator, generated_overlay, producers, profile as profile_module
+    from exaserve.plan import runtime_environment
 
     selected = SimpleNamespace(profile_id="a" * 64)
     observed = {}
@@ -117,6 +181,7 @@ def test_engine_bootstrap_installs_overlay_without_eager_target_import(monkeypat
     monkeypatch.setattr(producers, "manifest_hash", lambda profile: "b" * 64)
     monkeypatch.setattr(activator, "CompatibilityActivator", StubActivator)
     monkeypatch.setattr(generated_overlay, "install", install)
+    monkeypatch.setattr(runtime_environment, "require_contained_local_path", lambda *a, **k: "")
     monkeypatch.setattr(
         generated_overlay,
         "activate_patch_ids",
@@ -330,6 +395,7 @@ def test_bound_serve_actor_rebinds_rank_local_receipt_socket(monkeypatch):
     assert env_vars["EXASERVE_RECEIPT_SOCKET"] == socket_path_for(
         "four-node-test", 17, owner_rank=2
     )
+    assert "EXASERVE_SHARED_ROOTS" not in env_vars
 
 
 def test_native_serve_actor_does_not_inherit_the_head_receipt_socket(monkeypatch):
@@ -365,6 +431,7 @@ def test_dynamic_and_declared_receipt_ownership_are_mutually_exclusive(monkeypat
         "EXASERVE_COMPAT_ROLE",
         "EXASERVE_RECEIPT_RANK",
         "EXASERVE_RECEIPT_SOCKET",
+        "EXASERVE_SHARED_ROOTS",
     ],
 )
 def test_actor_extras_cannot_override_canonical_identity(monkeypatch, field):
@@ -384,6 +451,18 @@ def test_actor_extras_require_a_string_mapping(monkeypatch, extra):
     monkeypatch.setenv("EXASERVE_GENERATION", "17")
     with pytest.raises(TypeError, match="map of non-empty strings"):
         build_actor_runtime_env(extra, receipt_owner_rank=1)
+
+
+def test_actor_extra_cannot_hide_shared_path_under_nonstandard_name(monkeypatch):
+    from exaserve.actor_runtime import build_actor_runtime_env
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    with pytest.raises(RuntimeError, match="ODD_SETTING.*shared storage"):
+        build_actor_runtime_env(
+            {"ODD_SETTING": "/home/user/hidden-model"},
+            receipt_owner_rank=1,
+        )
 
 
 @pytest.mark.parametrize("owner_rank", [True, -1, "2"])
@@ -644,7 +723,7 @@ def test_receipt_dir_is_component_scoped_and_path_safe():
     first = engine_shim.receipt_dir_for("../../hostile", 1, "engine/a")
     second = engine_shim.receipt_dir_for("../../hostile", 1, "engine/b")
     assert first != second
-    assert first.startswith("/tmp/exaserve_engine_receipt_")
+    assert first.startswith(os.environ["EXASERVE_LOCAL_STATE_ROOT"] + os.sep)
     assert ".." not in first and "hostile" not in first
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from importlib import metadata
@@ -308,6 +309,13 @@ class CompatibilityProfile:
                 ) from exc
             if not path.is_file():
                 raise ProfileMismatch(f"patch {patch_id}: required file {relative!r} is missing")
+            if os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT"):
+                from ..plan.runtime_environment import require_non_shared_path
+
+                require_non_shared_path(
+                    path,
+                    name=f"compatibility source for patch {patch_id}",
+                )
             return path
 
         for patch in self.patches:
@@ -362,6 +370,43 @@ class CompatibilityProfile:
                         f"for {relative}"
                     )
                 checked_artifacts.add(artifact_key)
+
+
+@lru_cache(maxsize=16)
+def verify_installed_sources_once(profile: CompatibilityProfile) -> None:
+    """Verify immutable compatibility inputs once in the current process."""
+
+    from ..plan.runtime_environment import (
+        COMPAT_SOURCE_MANIFEST_ENV,
+        COMPAT_SOURCE_PROFILE_ENV,
+    )
+
+    if (
+        os.environ.get(COMPAT_SOURCE_PROFILE_ENV) == profile.profile_id
+        and os.environ.get(COMPAT_SOURCE_MANIFEST_ENV) == _profile_manifest_hash(profile)
+        and _qualified_python_node_proof_is_trusted()
+    ):
+        return
+    profile.verify_installed_sources()
+    os.environ[COMPAT_SOURCE_PROFILE_ENV] = profile.profile_id
+    os.environ[COMPAT_SOURCE_MANIFEST_ENV] = _profile_manifest_hash(profile)
+
+
+def _profile_manifest_hash(profile: CompatibilityProfile) -> str:
+    from dataclasses import asdict
+
+    manifest = [asdict(patch) for patch in sorted(profile.patches, key=lambda item: item.patch_id)]
+    return hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _qualified_python_node_proof_is_trusted() -> bool:
+    import sys
+
+    from .producers import _preverified_qualified_python_hash
+
+    return _preverified_qualified_python_hash(sys.executable) is not None
 
 
 def _observed_versions() -> dict[str, str]:

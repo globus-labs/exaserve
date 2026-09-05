@@ -33,25 +33,98 @@ from exaserve.control.rank_launcher import (
 
 def test_launch_prefix_is_one_task_per_node_per_scheduler(monkeypatch):
     monkeypatch.delenv("EXASERVE_MPILAUNCH", raising=False)
-    assert resolve_launch_prefix(8) == ["mpiexec", "-n", "8", "-ppn", "1", "--cpu-bind", "none"]
+    assert resolve_launch_prefix(8) == [
+        "mpiexec",
+        "--genvnone",
+        "--envnone",
+        "-n",
+        "8",
+        "-ppn",
+        "1",
+        "--cpu-bind",
+        "none",
+    ]
     assert resolve_launch_prefix(8, scheduler="slurm") == [
         "srun",
         "--nodes=8",
         "--ntasks-per-node=1",
         "--cpu-bind=none",
+        "--export=NONE",
     ]
 
 
 def test_launch_prefix_override_wins_verbatim(monkeypatch):
     monkeypatch.setenv("EXASERVE_MPILAUNCH", "mpiexec -n 3 --custom flag")
     assert resolve_launch_prefix(99) != ["mpiexec", "-n", "3", "--custom", "flag"]
-    assert resolve_launch_prefix(99, override="mpiexec -n 3 --custom flag") == [
+    with pytest.raises(RankLaunchError, match="only for test scheduler"):
+        resolve_launch_prefix(99, override="mpiexec -n 3 --custom flag")
+    assert resolve_launch_prefix(
+        99,
+        scheduler="test",
+        override="mpiexec -n 3 --custom flag",
+    ) == [
         "mpiexec",
         "-n",
         "3",
         "--custom",
         "flag",
     ]
+
+
+def test_rank_launcher_splits_head_scheduler_env_from_rank_application_env():
+    from exaserve.site import AURORA_PMIX_PREPARED_ENVIRONMENT
+
+    pmix = dict(AURORA_PMIX_PREPARED_ENVIRONMENT)
+    launcher = RankLauncher(
+        node_count=2,
+        rank_argv=["/opt/site/python", "-m", "exaserve.rank_main"],
+        scheduler="pbs",
+        env={
+            "PBS_JOBID": "job",
+            "PBS_NODEFILE": "/home/user/.aurora_leases/nodes",
+            "PMIX_RANK": "head-only-rank",
+            "PALS_RANKID": "head-only-rank",
+        },
+        application_env={
+            "PYTHONNOUSERSITE": "1",
+            "HOME": "/tmp/exaserve/state/home",
+            **pmix,
+        },
+        cwd="/tmp/exaserve/runtime/python",
+    )
+    component = launcher.component()
+    assert component.env["PBS_NODEFILE"].startswith("/home/")
+    assert "--genvnone" in component.argv and "--envnone" in component.argv
+    exported = component.argv[component.argv.index("--envlist") + 1].split(",")
+    assert set(exported) == {
+        "HOME",
+        "PYTHONNOUSERSITE",
+        *pmix,
+    }
+    assert "PBS_NODEFILE" not in exported
+    assert "PMIX_RANK" not in exported
+    assert "PALS_RANKID" not in exported
+    assert component.argv[component.argv.index("--wdir") + 1] == ("/tmp/exaserve/runtime/python")
+
+
+@pytest.mark.parametrize(
+    "application_env",
+    [
+        {"PMIX_RANK": "1"},
+        {"PALS_RANKID": "1"},
+        {"PMIX_MCA_mca_base_param_files": "/home/user/.pmix/mca-params.conf"},
+        {"PMIX_MCA_mca_base_component_path": "/home/user/.pmix/components"},
+    ],
+)
+def test_rank_launcher_rejects_ambient_or_forged_pmix_state(application_env):
+    with pytest.raises(RankLaunchError, match="launcher-only state"):
+        RankLauncher(
+            node_count=2,
+            rank_argv=["/opt/site/python", "-m", "exaserve.rank_main"],
+            env={},
+            application_env=application_env,
+            cwd="/tmp/exaserve/runtime/python",
+        )
 
 
 def test_launcher_rejects_nonsense_shapes():
@@ -86,7 +159,8 @@ def test_launcher_component_is_the_heads_only_child(monkeypatch):
     monkeypatch.delenv("EXASERVE_MPILAUNCH", raising=False)
     launcher = RankLauncher(node_count=4, rank_argv=["python", "-m", "exaserve.driver"])
     component = launcher.component()
-    assert component.argv[:5] == ("mpiexec", "-n", "4", "-ppn", "1")
+    assert component.argv[:5] == ("mpiexec", "--genvnone", "--envnone", "-n", "4")
+    assert "--envlist" not in component.argv
     assert component.argv[-3:] == ("python", "-m", "exaserve.driver")
     # GLOBAL: it is the head's own child, not a rank-scoped one.
     assert component.owner_scope == "GLOBAL"

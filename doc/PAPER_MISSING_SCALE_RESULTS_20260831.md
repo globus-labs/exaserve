@@ -277,7 +277,12 @@ be reset, resubmitted, or silently replaced in the paper consumer.
 1. Resolve every release-blocking shared-filesystem fan-out in
    `doc/SHARED_FILESYSTEM_FANOUT_AUDIT_20260904.md`, including the control-lock
    path, worker plan/environment reads, MPI staging receipts, PP roots, replay,
-   and terminal-cause propagation. Pass the new negative shared-open gates.
+   and terminal-cause propagation. The code remediation is now present in the
+   2026-09-04 working tree and the complete one-node compute test suite plus
+   one-node PALS isolation/transfer checks pass. This does **not** unblock paper
+   execution until the remaining two-node negative shared-open, recipient,
+   failure-cleanup, guardian, and read-only model gates recorded in that audit
+   pass from the same snapshot.
 2. Treat all currently accepted measurements as preserved prior-campaign
    evidence. The runtime/environment/storage rewrite is material to startup and
    may affect serving behavior; corrected n256 points cannot be silently added

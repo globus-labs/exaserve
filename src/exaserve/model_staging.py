@@ -8,6 +8,7 @@ instead of downloading from HuggingFace directly.
 
 import json
 import hashlib
+import errno
 import os
 import shutil
 import stat
@@ -49,6 +50,293 @@ _MANIFEST_FIELDS = {
     "files",
 }
 _MANIFEST_FILE_FIELDS = {"path", "size", "hash_kind", "sha256"}
+_VERIFIED_MANIFEST_CACHE: dict[str, tuple[tuple, dict]] = {}
+
+
+def configured_shared_roots(value: str | None = None) -> tuple[Path, ...]:
+    """Return normalized roots that managed workers may never traverse.
+
+    The canonical runtime exports ``EXASERVE_SHARED_FILESYSTEM_ROOTS`` from the
+    SiteProfile as an ``os.pathsep``-separated list.  Aurora's project and home
+    roots are the fail-closed defaults while older plans are being migrated.
+    """
+
+    raw = (
+        value
+        if value is not None
+        else os.environ.get("EXASERVE_SHARED_ROOTS", "")
+        or os.environ.get("EXASERVE_SHARED_FILESYSTEM_ROOTS", "")
+    )
+    entries = [item for item in raw.split(os.pathsep) if item]
+    if not entries:
+        entries = ["/home", "/lus/flare"]
+    roots: list[Path] = []
+    for entry in entries:
+        path = Path(entry)
+        if not path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"shared filesystem root must be absolute and normalized: {entry!r}")
+        roots.append(Path(os.path.realpath(path)))
+    return tuple(dict.fromkeys(roots))
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_node_local_root(
+    root: str | os.PathLike,
+    *,
+    shared_roots: tuple[Path, ...] | None = None,
+) -> Path:
+    """Prove an existing root is real, local, and outside shared filesystems."""
+
+    requested = Path(root)
+    if not requested.is_absolute() or ".." in requested.parts:
+        raise ValueError(f"node-local root must be absolute and normalized: {requested}")
+    try:
+        metadata = os.lstat(requested)
+    except OSError as exc:
+        raise ValueError(f"node-local root is unavailable: {requested}: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"node-local root must be a real directory: {requested}")
+    resolved = Path(os.path.realpath(requested))
+    declared_shared = shared_roots if shared_roots is not None else configured_shared_roots()
+    if any(_is_relative_to(resolved, shared) for shared in declared_shared):
+        raise ValueError(f"node-local root resolves beneath shared storage: {resolved}")
+    shared_devices: set[int] = set()
+    for shared in declared_shared:
+        try:
+            shared_devices.add(os.stat(shared).st_dev)
+        except OSError:
+            continue
+    if metadata.st_dev in shared_devices:
+        raise ValueError(
+            f"node-local root {resolved} has the same filesystem identity as shared storage"
+        )
+    # Resolve alone is insufficient: explicitly reject a symlink in any
+    # component of the configured root.
+    cursor = Path(requested.anchor)
+    for part in requested.parts[1:]:
+        cursor /= part
+        try:
+            component = os.lstat(cursor)
+        except OSError as exc:
+            raise ValueError(f"node-local root component is unavailable: {cursor}: {exc}") from exc
+        if stat.S_ISLNK(component.st_mode):
+            raise ValueError(f"node-local root contains a symlink component: {cursor}")
+    return resolved
+
+
+def ensure_node_local_directory(
+    root: str | os.PathLike,
+    *,
+    mode: int = 0o700,
+    enforce_mode: bool = False,
+    shared_roots: tuple[Path, ...] | None = None,
+) -> Path:
+    """Create a node-local directory without following an ancestor symlink.
+
+    ``Path.mkdir(parents=True)`` is not a safe bootstrap primitive: an existing
+    intermediate symlink can redirect the first write to shared storage before
+    the completed path is validated.  Walk from ``/`` with directory file
+    descriptors, open every existing component with ``O_NOFOLLOW``, and create
+    each missing component relative to its already-verified parent.  The final
+    pathname must still name the exact inode reached by the descriptor walk.
+    """
+
+    requested = Path(root)
+    if (
+        not requested.is_absolute()
+        or ".." in requested.parts
+        or "\x00" in os.fspath(requested)
+        or requested == Path(requested.anchor)
+    ):
+        raise ValueError(f"node-local directory must be an absolute non-root path: {requested}")
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("node-local directory creation requires O_NOFOLLOW")
+    declared_shared = shared_roots if shared_roots is not None else configured_shared_roots()
+    normalized = Path(os.path.normpath(requested))
+    if any(_is_relative_to(normalized, shared) for shared in declared_shared):
+        raise ValueError(f"node-local directory is beneath shared storage: {normalized}")
+    shared_devices: set[int] = set()
+    for shared in declared_shared:
+        try:
+            shared_devices.add(os.stat(shared).st_dev)
+        except OSError:
+            continue
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    current_fd = os.open(requested.anchor, flags)
+    current_path = Path(requested.anchor)
+    created_final = False
+    try:
+        for index, part in enumerate(requested.parts[1:]):
+            current_path /= part
+            if any(_is_relative_to(current_path, shared) for shared in declared_shared):
+                raise ValueError(
+                    f"node-local directory component is beneath shared storage: {current_path}"
+                )
+            created = False
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                parent_metadata = os.fstat(current_fd)
+                parent_realpath = Path(os.path.realpath(f"/proc/self/fd/{current_fd}"))
+                if parent_metadata.st_dev in shared_devices or any(
+                    _is_relative_to(parent_realpath, shared) for shared in declared_shared
+                ):
+                    raise ValueError(
+                        "refusing to create a node-local directory beneath shared storage: "
+                        f"{current_path}"
+                    )
+                try:
+                    os.mkdir(part, mode=mode, dir_fd=current_fd)
+                    created = True
+                except FileExistsError:
+                    # A concurrent creator is acceptable only if the no-follow
+                    # open below proves that it installed a real directory.
+                    pass
+                try:
+                    next_fd = os.open(part, flags, dir_fd=current_fd)
+                except OSError as exc:
+                    raise ValueError(
+                        f"node-local directory component is unsafe: {current_path}: {exc}"
+                    ) from exc
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError(
+                        f"node-local directory contains a symlink/non-directory: {current_path}"
+                    ) from exc
+                raise ValueError(
+                    f"node-local directory component is unavailable: {current_path}: {exc}"
+                ) from exc
+
+            metadata = os.fstat(next_fd)
+            descriptor_path = Path(os.path.realpath(f"/proc/self/fd/{next_fd}"))
+            if not stat.S_ISDIR(metadata.st_mode):
+                os.close(next_fd)
+                raise ValueError(
+                    f"node-local directory component is not a directory: {current_path}"
+                )
+            if metadata.st_dev in shared_devices or any(
+                _is_relative_to(descriptor_path, shared) for shared in declared_shared
+            ):
+                os.close(next_fd)
+                raise ValueError(
+                    f"node-local directory component resolves beneath shared storage: {current_path}"
+                )
+            os.close(current_fd)
+            current_fd = next_fd
+            created_final = created and index == len(requested.parts[1:]) - 1
+
+        metadata = os.fstat(current_fd)
+        if metadata.st_uid != os.getuid():
+            raise ValueError(f"node-local directory is not owned by this uid: {requested}")
+        if created_final or enforce_mode:
+            os.fchmod(current_fd, mode)
+        try:
+            pathname_metadata = os.lstat(requested)
+        except OSError as exc:
+            raise ValueError(
+                f"node-local directory was replaced during creation: {requested}"
+            ) from exc
+        if stat.S_ISLNK(pathname_metadata.st_mode) or (
+            pathname_metadata.st_dev,
+            pathname_metadata.st_ino,
+        ) != (metadata.st_dev, metadata.st_ino):
+            raise ValueError(f"node-local directory was replaced during creation: {requested}")
+    finally:
+        os.close(current_fd)
+    return validate_node_local_root(requested, shared_roots=declared_shared)
+
+
+def chmod_real_directory(path: str | os.PathLike, mode: int) -> bool:
+    """Apply a mode to one real directory inode without following a symlink.
+
+    Return ``False`` for a symlink so cleanup walkers can unlink it without
+    ever changing its target.  Descriptor-based ``fchmod`` is required because
+    Aurora's Python does not implement ``chmod(..., follow_symlinks=False)``.
+    """
+
+    if type(mode) is not int or not 0 <= mode <= 0o7777:
+        raise ValueError("directory mode must be an integer permission mask")
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode):
+        return False
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(os.fspath(path))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise OSError(f"directory changed before chmod: {path}")
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def validate_node_local_tree(
+    path: str | os.PathLike,
+    *,
+    local_root: str | os.PathLike,
+    shared_roots: tuple[Path, ...] | None = None,
+    require_immutable: bool = False,
+) -> Path:
+    """Reject symlink, mount, special-file, and shared-root escapes in a tree."""
+
+    root = validate_node_local_root(local_root, shared_roots=shared_roots)
+    requested = Path(path)
+    try:
+        metadata = os.lstat(requested)
+    except OSError as exc:
+        raise ValueError(f"node-local candidate is unavailable: {requested}: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"node-local candidate must be a real directory: {requested}")
+    if require_immutable and stat.S_IMODE(metadata.st_mode) & 0o222:
+        raise ValueError(f"node-local immutable tree root is writable: {requested}")
+    resolved = Path(os.path.realpath(requested))
+    if not _is_relative_to(resolved, root):
+        raise ValueError(f"node-local candidate escapes its declared root: {resolved}")
+    from .state.mounts import MountBoundaryError, nested_mount_points
+
+    try:
+        nested_mounts = nested_mount_points(root)
+    except MountBoundaryError as exc:
+        raise ValueError(str(exc)) from exc
+    for current, directories, files in os.walk(resolved, topdown=True, followlinks=False):
+        current_path = Path(current)
+        if current_path in nested_mounts:
+            raise ValueError(f"node-local tree crosses a filesystem boundary: {current_path}")
+        for name in [*directories, *files]:
+            entry = current_path / name
+            entry_metadata = os.lstat(entry)
+            if stat.S_ISLNK(entry_metadata.st_mode):
+                raise ValueError(f"node-local tree contains a symlink escape: {entry}")
+            if require_immutable and stat.S_IMODE(entry_metadata.st_mode) & 0o222:
+                raise ValueError(f"node-local immutable tree entry is writable: {entry}")
+            if entry in nested_mounts:
+                raise ValueError(f"node-local tree crosses a filesystem boundary: {entry}")
+            if not (stat.S_ISDIR(entry_metadata.st_mode) or stat.S_ISREG(entry_metadata.st_mode)):
+                raise ValueError(f"node-local tree contains an unsupported entry: {entry}")
+            if not _is_relative_to(Path(os.path.realpath(entry)), root):
+                raise ValueError(f"node-local tree entry escapes its declared root: {entry}")
+    return resolved
+
+
+def content_addressed_model_path(
+    model_id: str, storage_path: str | os.PathLike, manifest_hash: str
+) -> Path:
+    """Return the immutable local cache identity for one exact model manifest."""
+
+    if not isinstance(manifest_hash, str) or not _SHA256.fullmatch(manifest_hash):
+        raise ValueError("model manifest hash must be lowercase SHA-256")
+    return Path(storage_path) / f"{get_model_storage_name(model_id)}.{manifest_hash}"
 
 
 def _safe_manifest_path(value: object) -> bool:
@@ -58,8 +346,8 @@ def _safe_manifest_path(value: object) -> bool:
     return not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts)
 
 
-def validate_model_manifest(value: object) -> dict:
-    """Validate the exact v2 completion contract and its content identity."""
+def validate_model_manifest(value: object, *, allow_legacy_sampled: bool = False) -> dict:
+    """Validate the v2 contract; production identities require full hashes."""
     if not isinstance(value, dict) or set(value) != _MANIFEST_FIELDS:
         raise ValueError("model completion manifest fields are invalid")
     if type(value["version"]) is not int or value["version"] != MODEL_MANIFEST_VERSION:
@@ -85,10 +373,10 @@ def validate_model_manifest(value: object) -> dict:
             raise ValueError(f"model completion manifest file {index} path is unsafe")
         if type(entry["size"]) is not int or entry["size"] < 0:
             raise ValueError(f"model completion manifest file {index} size is invalid")
-        if entry["hash_kind"] not in {
-            "sha256-full",
-            f"sha256-first-last-{_SAMPLE_BYTES}",
-        }:
+        allowed_hash_kinds = {"sha256-full"}
+        if allow_legacy_sampled:
+            allowed_hash_kinds.add(f"sha256-first-last-{_SAMPLE_BYTES}")
+        if entry["hash_kind"] not in allowed_hash_kinds:
             raise ValueError(f"model completion manifest file {index} hash_kind is invalid")
         if not isinstance(entry["sha256"], str) or not _SHA256.fullmatch(entry["sha256"]):
             raise ValueError(f"model completion manifest file {index} hash is invalid")
@@ -117,16 +405,84 @@ def _open_model_input(path: Path):
         raise
 
 
+def _model_repository_root(model_path: Path) -> Path:
+    resolved = model_path.resolve(strict=True)
+    if resolved.parent.name == "snapshots":
+        return resolved.parent.parent
+    return resolved
+
+
+def _qualified_inventory_input(
+    model_path: Path, path: Path, *, allowed_symlink_root: Path | None = None
+) -> Path:
+    """Allow HF blob links only while they remain inside one model repository."""
+
+    try:
+        resolved = path.resolve(strict=True)
+        own_root = _model_repository_root(model_path)
+        allowed = _model_repository_root(allowed_symlink_root) if allowed_symlink_root else None
+        metadata = os.stat(resolved)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"model inventory entry cannot be resolved safely: {path}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or not (
+        _is_relative_to(resolved, own_root) or (allowed and _is_relative_to(resolved, allowed))
+    ):
+        raise ValueError(f"model inventory entry escapes its repository or is not regular: {path}")
+    return resolved
+
+
+def _model_tree_signature(model_path: Path) -> tuple:
+    entries = []
+    for path in sorted(model_path.rglob("*"), key=lambda item: item.as_posix()):
+        if path == model_path / COMPLETION_MARKER:
+            continue
+        metadata = os.lstat(path)
+        relative = path.relative_to(model_path).as_posix()
+        if stat.S_ISDIR(metadata.st_mode):
+            entries.append(
+                (relative, "dir", metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns)
+            )
+            continue
+        qualified = _qualified_inventory_input(model_path, path)
+        observed = os.stat(qualified)
+        entries.append(
+            (
+                relative,
+                "file",
+                observed.st_dev,
+                observed.st_ino,
+                observed.st_size,
+                observed.st_mtime_ns,
+                observed.st_ctime_ns,
+            )
+        )
+    return tuple(entries)
+
+
+def _remember_verified_manifest(model_path: Path, manifest: dict) -> None:
+    _VERIFIED_MANIFEST_CACHE[str(model_path.resolve())] = (
+        _model_tree_signature(model_path),
+        manifest,
+    )
+
+
+def verified_model_manifest(model_path: Path) -> dict | None:
+    """Return this process's full-hash proof verified manifest if still unchanged."""
+
+    try:
+        cached = _VERIFIED_MANIFEST_CACHE.get(str(model_path.resolve()))
+        if cached is None or cached[0] != _model_tree_signature(model_path):
+            return None
+        return cached[1]
+    except (OSError, ValueError):
+        return None
+
+
 def _hash_inventory_file(path: Path) -> tuple[str, str, int]:
-    """Hash metadata fully and large weights with declared first/last samples."""
+    """Hash every byte; sampled hashes cannot identify immutable model content."""
     digest = hashlib.sha256()
     handle, size = _open_model_input(path)
     with handle:
-        if path.name.endswith(MODEL_WEIGHT_SUFFIXES) and size > 2 * _SAMPLE_BYTES:
-            digest.update(handle.read(_SAMPLE_BYTES))
-            handle.seek(-_SAMPLE_BYTES, os.SEEK_END)
-            digest.update(handle.read(_SAMPLE_BYTES))
-            return f"sha256-first-last-{_SAMPLE_BYTES}", digest.hexdigest(), size
         while True:
             chunk = handle.read(1 << 20)
             if not chunk:
@@ -135,10 +491,40 @@ def _hash_inventory_file(path: Path) -> tuple[str, str, int]:
     return "sha256-full", digest.hexdigest(), size
 
 
+def _legacy_sample_hash(path: Path, hash_kind: str) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    handle, size = _open_model_input(path)
+    with handle:
+        if hash_kind == f"sha256-first-last-{_SAMPLE_BYTES}" and size > 2 * _SAMPLE_BYTES:
+            digest.update(handle.read(_SAMPLE_BYTES))
+            handle.seek(-_SAMPLE_BYTES, os.SEEK_END)
+            digest.update(handle.read(_SAMPLE_BYTES))
+        else:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    return digest.hexdigest(), size
+
+
+def _legacy_sampled_manifest_matches(model_path: Path, manifest: dict) -> bool:
+    try:
+        for entry in manifest["files"]:
+            source = _qualified_inventory_input(model_path, model_path / entry["path"])
+            digest, size = _legacy_sample_hash(source, entry["hash_kind"])
+            if digest != entry["sha256"] or size != entry["size"]:
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def build_model_manifest(
-    model_path: Path, *, tokenizer_only: bool = False, source_identity: str = ""
+    model_path: Path,
+    *,
+    tokenizer_only: bool = False,
+    source_identity: str = "",
+    allowed_symlink_root: Path | None = None,
 ) -> dict:
-    """Complete recursive inventory with bounded checksums and content identity."""
+    """Complete recursive inventory with full-file content identity."""
     if not isinstance(tokenizer_only, bool):
         raise TypeError("tokenizer_only must be a boolean")
     if not isinstance(source_identity, str):
@@ -152,7 +538,10 @@ def build_model_manifest(
             continue
         if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
             raise ValueError(f"model inventory contains an unsupported entry: {path}")
-        hash_kind, digest, size = _hash_inventory_file(path)
+        qualified = _qualified_inventory_input(
+            model_path, path, allowed_symlink_root=allowed_symlink_root
+        )
+        hash_kind, digest, size = _hash_inventory_file(qualified)
         entries.append(
             {
                 "path": path.relative_to(model_path).as_posix(),
@@ -161,11 +550,28 @@ def build_model_manifest(
                 "sha256": digest,
             }
         )
+    return build_model_manifest_from_files(
+        entries,
+        tokenizer_only=tokenizer_only,
+        source_identity=source_identity or str(model_path.resolve()),
+    )
+
+
+def build_model_manifest_from_files(
+    entries: list[dict], *, tokenizer_only: bool = False, source_identity: str
+) -> dict:
+    """Build a strict full-hash manifest from already verified file entries."""
+
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("model manifest entries must be a nonempty list")
+    if any(entry.get("hash_kind") != "sha256-full" for entry in entries):
+        raise ValueError("content-addressed model manifests require full-file SHA-256")
+    entries = sorted((dict(entry) for entry in entries), key=lambda item: item["path"])
     canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"))
     manifest = {
         "version": MODEL_MANIFEST_VERSION,
         "kind": "tokenizer_only" if tokenizer_only else "full_model",
-        "source_identity": source_identity or str(model_path.resolve()),
+        "source_identity": source_identity,
         "file_count": len(entries),
         "total_bytes": sum(item["size"] for item in entries),
         "manifest_hash": hashlib.sha256(canonical.encode()).hexdigest(),
@@ -232,7 +638,6 @@ def check_model_exists(model_path: Path) -> bool:
     """
     if not model_path.exists():
         return False
-
     # IMP-B05: the marker's EXISTENCE is not proof. Verify its recorded
     # inventory against what is actually on disk (every file present with the
     # recorded size) — deleting a weight file after the marker was written
@@ -243,18 +648,43 @@ def check_model_exists(model_path: Path) -> bool:
         try:
             manifest = strict_json_load_path(marker)
             if isinstance(manifest, dict) and manifest.get("version") == MODEL_MANIFEST_VERSION:
-                validate_model_manifest(manifest)
+                validate_model_manifest(manifest, allow_legacy_sampled=True)
                 if manifest["kind"] == "tokenizer_only":
                     return False  # tokenizer staging never certifies a full model
                 observed = build_model_manifest(
                     model_path, source_identity=manifest["source_identity"]
                 )
-                return (
+                exact = (
                     observed["manifest_hash"] == manifest["manifest_hash"]
                     and observed["file_count"] == manifest["file_count"]
                     and observed["total_bytes"] == manifest["total_bytes"]
                     and observed["files"] == manifest["files"]
                 )
+                if exact:
+                    _remember_verified_manifest(model_path, observed)
+                    return True
+                sampled = any(entry["hash_kind"] != "sha256-full" for entry in manifest["files"])
+                if not sampled or not _legacy_sampled_manifest_matches(model_path, manifest):
+                    return False
+                if (
+                    [entry["path"] for entry in observed["files"]]
+                    != [entry["path"] for entry in manifest["files"]]
+                    or observed["file_count"] != manifest["file_count"]
+                    or observed["total_bytes"] != manifest["total_bytes"]
+                ):
+                    return False
+                # Safe migration: the legacy boundary still matches every
+                # declared sample/size/path, and ``observed`` now binds every
+                # byte. Read-only sources remain usable through the run-owned
+                # overlay even when their marker cannot be upgraded in place.
+                try:
+                    from .state.atomic import atomic_write_json
+
+                    atomic_write_json(marker, observed)
+                except OSError:
+                    pass
+                _remember_verified_manifest(model_path, observed)
+                return True
             # Version-1 marker migration: validate the recorded flat sizes,
             # then structural content, and atomically upgrade below.
             if not isinstance(manifest, dict) or type(manifest.get("version")) is not int:
@@ -289,16 +719,24 @@ def check_model_exists(model_path: Path) -> bool:
 
 
 def write_completion_marker(
-    model_path: Path, *, tokenizer_only: bool = False, source_identity: str = ""
-) -> None:
+    model_path: Path,
+    *,
+    tokenizer_only: bool = False,
+    source_identity: str = "",
+    allowed_symlink_root: Path | None = None,
+) -> dict:
     from exaserve.state.atomic import atomic_write_json
 
-    atomic_write_json(
-        model_path / COMPLETION_MARKER,
-        build_model_manifest(
-            model_path, tokenizer_only=tokenizer_only, source_identity=source_identity
-        ),
+    manifest = build_model_manifest(
+        model_path,
+        tokenizer_only=tokenizer_only,
+        source_identity=source_identity,
+        allowed_symlink_root=allowed_symlink_root,
     )
+    if allowed_symlink_root is None:
+        _remember_verified_manifest(model_path, manifest)
+    atomic_write_json(model_path / COMPLETION_MARKER, manifest)
+    return manifest
 
 
 def get_model_dir_state(model_path: Path) -> str:
@@ -565,7 +1003,11 @@ def stage_models(model_configs: List[ModelPlan], storage_path: str) -> dict:
     for model_id in unique_models:
         existing_path = resolve_existing_model_path(model_id, str(storage_path))
         local_path = existing_path or get_model_storage_path(model_id, storage_path)
-        state = get_model_dir_state(local_path)
+        state = (
+            "complete"
+            if existing_path is not None and verified_model_manifest(local_path) is not None
+            else get_model_dir_state(local_path)
+        )
 
         if state == "complete":
             print(f"[ModelStaging] ✓ Model {model_id} already exists at {local_path}", flush=True)
@@ -588,41 +1030,3 @@ def stage_models(model_configs: List[ModelPlan], storage_path: str) -> dict:
     print_red(f"[ModelStaging] ✓ All models staged in {total_elapsed:.2f}s")
 
     return model_paths
-
-
-def resolve_model_paths(
-    model_configs: List[ModelPlan],
-    storage_path: str,
-    require_complete: bool = False,
-) -> Dict[str, str]:
-    """
-    Resolve model IDs to cache paths under `storage_path`.
-
-    When `require_complete` is True, every resolved directory must already exist
-    and pass the completeness check.
-    """
-    model_paths: Dict[str, str] = {}
-    for model_id in iter_unique_model_ids(model_configs):
-        local_path = get_model_storage_path(model_id, storage_path)
-        state = get_model_dir_state(local_path)
-        if require_complete and state != "complete":
-            raise RuntimeError(
-                f"[ModelStaging] Expected a complete staged model for {model_id} at {local_path}, "
-                f"but found state={state}."
-            )
-        model_paths[model_id] = str(local_path)
-    return model_paths
-
-
-def get_local_model_path(model_id: str, storage_path: str) -> str:
-    """
-    Get the local path for a model.
-
-    Args:
-        model_id: HuggingFace model ID
-        storage_path: Base storage path
-
-    Returns:
-        str: Local path to the model
-    """
-    return str(get_model_storage_path(model_id, storage_path))

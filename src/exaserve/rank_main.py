@@ -278,8 +278,13 @@ def _collect_diagnostics_finite(
 
     if timeout_s <= 0:
         raise RuntimeError("diagnostics cleanup budget is exhausted")
+    from .plan.runtime_environment import QUALIFIED_PYTHON_ENV
+
+    qualified_python = os.environ.get(QUALIFIED_PYTHON_ENV, "")
+    if not qualified_python:
+        raise RuntimeError("diagnostics child requires the qualified Python executable")
     command = [
-        sys.executable,
+        qualified_python,
         "-m",
         "exaserve.state.diagnostics",
         "--source-root",
@@ -294,11 +299,11 @@ def _collect_diagnostics_finite(
         str(generation),
     ]
     child_env = _without_control_credentials(dict(os.environ))
-    package_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    inherited_pythonpath = child_env.get("PYTHONPATH", "")
-    child_env["PYTHONPATH"] = os.pathsep.join(
-        item for item in (package_parent, inherited_pythonpath) if item
-    )
+    # The rank already runs from the verified capsule. Reconstructing
+    # PYTHONPATH from ambient/package locations here would reopen the shared
+    # repository escape that staging removed.
+    if child_env.get("PYTHONNOUSERSITE") != "1" or not child_env.get("PYTHONPATH"):
+        raise RuntimeError("diagnostics child does not have a closed Python environment")
     try:
         result = run_finite(command, timeout_s=timeout_s, env=child_env)
     except (OSError, FiniteProcessError) as exc:
@@ -343,14 +348,71 @@ def run(plan_path: str) -> int:
         ray_node_ip,
         ray_worker_argv,
     )
-    from .plan.io import load_deployment_plan
+    from .plan.io import load_allocation_binding, load_deployment_plan
+    from .plan.runtime_environment import (
+        RuntimePathError,
+        RuntimePaths,
+        closed_runtime_environment,
+        require_contained_local_path,
+        runtime_paths,
+    )
 
     rank = get_rank()
     hostname = socket.gethostname()
     try:
+        if (
+            os.environ.get("PYTHONNOUSERSITE") != "1"
+            or os.environ.get("PYTHONSAFEPATH") != "1"
+            or "usercustomize" in sys.modules
+        ):
+            raise RuntimePathError("rank interpreter was not started with clean Python isolation")
+        bootstrap_paths = RuntimePaths.from_roots(
+            os.environ.get("EXASERVE_LOCAL_RUNTIME_ROOT", ""),
+            os.environ.get("EXASERVE_LOCAL_STATE_ROOT", ""),
+            require_runtime=True,
+        )
+        bootstrap_paths.verify_capsule()
+        require_contained_local_path(
+            plan_path,
+            bootstrap_paths.root,
+            name="rank DeploymentPlan",
+            require_exists=True,
+        )
+        if os.path.realpath(plan_path) != os.path.realpath(bootstrap_paths.plan_path):
+            raise RuntimePathError("rank --plan is not the capsule DeploymentPlan path")
         plan = load_deployment_plan(plan_path)
+        paths = runtime_paths(
+            plan,
+            generation=int(os.environ.get("EXASERVE_GENERATION", "")),
+            rank=rank,
+            runtime_root=str(bootstrap_paths.root),
+            state_root=str(bootstrap_paths.state_root),
+            require_runtime=True,
+        )
+        paths.prepare_state(policy=plan)
+        require_contained_local_path(
+            __file__,
+            paths.python_root,
+            policy=plan,
+            name="rank ExaServe module",
+            require_exists=True,
+        )
+        if os.path.realpath(os.getcwd()) != os.path.realpath(paths.python_root):
+            raise RuntimePathError(
+                f"rank cwd {os.getcwd()!r} is not capsule Python root {str(paths.python_root)!r}"
+            )
+        binding = load_allocation_binding(paths.binding_path)
+        if binding.deployment_plan_hash != plan.deployment_plan_hash:
+            raise RuntimePathError("capsule AllocationBinding belongs to another plan")
+        planned_node = binding.node_for(rank)
+        from .plan.contracts import same_node
+
+        if not planned_node or not same_node(planned_node, hostname):
+            raise RuntimePathError(
+                f"rank {rank} runs on {hostname!r}, not bound node {planned_node!r}"
+            )
     except Exception as exc:  # noqa: BLE001 - startup boundary
-        print(f"[Rank {rank}] canonical plan rejected: {exc}", flush=True)
+        print(f"[Rank {rank}] local runtime capsule rejected: {exc}", flush=True)
         return 1
     os.environ["EXASERVE_PLAN_PATH"] = plan_path
     expected_hash = os.environ.get("EXASERVE_PLAN_HASH", "")
@@ -362,9 +424,40 @@ def run(plan_path: str) -> int:
         )
         return 1
     try:
-        from .site import prepare_runtime_site
+        from .plan.runtime_environment import (
+            QUALIFIED_PYTHON_ENV,
+            validate_declared_filesystem,
+        )
+        from .site import prepare_runtime_site, qualify_site_local_bootstrap
 
-        prepare_runtime_site(plan)
+        profile = prepare_runtime_site(plan)
+        qualified_python = qualify_site_local_bootstrap(
+            os.environ.get(QUALIFIED_PYTHON_ENV, ""), profile
+        )
+        if os.path.realpath(qualified_python) != os.path.realpath(sys.executable):
+            raise RuntimeError(
+                "rank interpreter is not the SiteProfile-qualified Python executable"
+            )
+        for local_path in (paths.root, paths.state_root):
+            if (
+                validate_declared_filesystem(
+                    local_path,
+                    policy=profile,
+                    root_kind="local_root",
+                )
+                is None
+            ):
+                raise RuntimeError(
+                    "SiteProfile does not carry node-local filesystem identity evidence"
+                )
+        prepared = closed_runtime_environment(
+            plan,
+            paths=paths,
+            base_environment=os.environ,
+            policy=profile,
+        )
+        os.environ.clear()
+        os.environ.update(prepared)
     except Exception as exc:  # noqa: BLE001 - startup boundary
         print(f"[Rank {rank}] SiteProfile preparation failed: {exc}", flush=True)
         return 1
@@ -501,6 +594,7 @@ def run(plan_path: str) -> int:
 
         from .state.process_ownership import (
             ProcessOwnershipRegistry,
+            cleanup_owned_component_processes,
             generation_runtime_root,
             process_start_ticks,
         )
@@ -511,7 +605,9 @@ def run(plan_path: str) -> int:
         # interface on multi-fabric HPC nodes and make vLLM observe more IPs
         # than Ray node IDs.
         node_ip = ray_node_ip(cluster, rank)
-        ray_env = _without_control_credentials(ray_child_environment(plan, node_ip=node_ip))
+        ray_env = _without_control_credentials(
+            ray_child_environment(plan, node_ip=node_ip, site_profile=profile)
+        )
         # The per-deployment control secret belongs only to NodeSupervisor.  Ray,
         # Serve, engines, and deployment children receive the bounded local receipt
         # socket but never the head control endpoint or authentication secret.
@@ -553,12 +649,24 @@ def run(plan_path: str) -> int:
             cleanup_deadline_s=cleanup_budget,
             receipt_wait_s=min(30.0, cleanup_budget),
         )
+        from .plan.runtime_environment import assert_worker_launch_is_local
+
+        assert_worker_launch_is_local(
+            argv=argv,
+            cwd=paths.python_root,
+            environment=ray_env,
+            policy=profile,
+        )
         ownership = ProcessOwnershipRegistry(
             deployment_id=plan.deployment_id, generation=generation, rank=rank
         )
         ray = ray_component(argv, env=ray_env)
         ray.on_started = lambda identity: ownership.record(
-            "ray", pid=identity["pid"], pgid=identity["pgid"], argv=argv, temp_paths=(runtime_root,)
+            "ray",
+            pid=identity["pid"],
+            pgid=identity["pgid"],
+            argv=argv,
+            temp_paths=(runtime_root, str(paths.state_root)),
         )
         node.adopt(ray)
         if rank == 0:
@@ -616,12 +724,27 @@ def run(plan_path: str) -> int:
             deadline=cleanup_deadline,
             publish_observations=False,
         )
-        if cleanup_clean:
+        child_cleanup_clean = True
+        try:
+            cleanup_owned_component_processes(
+                deployment_id=plan.deployment_id,
+                generation=generation,
+                rank=rank,
+                component_id="ray_child",
+                deadline_s=max(0.001, remaining()),
+            )
+        except RuntimeError as exc:
+            child_cleanup_clean = False
+            cleanup_clean = False
+            node.record_cause("ray_child", "CLEANUP_INCOMPLETE", str(exc))
+            print(f"[Rank {rank}] guarded Ray child cleanup failed: {exc}", flush=True)
+        guardian_stopped = ray.process is not None and ray.process.poll() is not None
+        if guardian_stopped and child_cleanup_clean:
             try:
                 diagnostics_budget = min(10.0, remaining() / 4.0)
                 diagnostics = _collect_diagnostics_finite(
                     source_root=runtime_root,
-                    run_dir=os.environ["EXASERVE_RUN_LOG_DIR"],
+                    run_dir=str(paths.diagnostics),
                     rank=rank,
                     deployment_id=plan.deployment_id,
                     generation=generation,
@@ -658,12 +781,6 @@ def run(plan_path: str) -> int:
                         f"[Rank {rank}] diagnostics failure observation also failed: {report_exc}",
                         flush=True,
                     )
-            try:
-                ownership.release("ray")
-            except RuntimeError as exc:
-                cleanup_clean = False
-                node.record_cause("ray", "OWNERSHIP_RELEASE_FAILED", str(exc))
-                print(f"[Rank {rank}] ownership release failed: {exc}", flush=True)
         try:
             if not forwarder_stop.stop(timeout_s=remaining()):
                 cleanup_clean = False
@@ -704,6 +821,13 @@ def run(plan_path: str) -> int:
             cleanup_clean = False
             node.record_cause("control", "CLEANUP_INCOMPLETE", str(exc))
             print(f"[Rank {rank}] control close error: {exc}", flush=True)
+        if cleanup_clean:
+            try:
+                ownership.release("ray")
+            except RuntimeError as exc:
+                cleanup_clean = False
+                node.record_cause("ray", "OWNERSHIP_RELEASE_FAILED", str(exc))
+                print(f"[Rank {rank}] ownership release failed: {exc}", flush=True)
         if remaining() <= 0:
             cleanup_clean = False
             node.record_cause(

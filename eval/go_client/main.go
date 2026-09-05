@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -150,26 +149,28 @@ type dispatchDoneMeta struct {
 }
 
 type summaryRecord struct {
-	Type               string            `json:"__type__"`
-	RequestsCompleted  int               `json:"requests_completed"`
-	RequestsScheduled  int               `json:"requests_scheduled"`
-	Errors             int               `json:"errors"`
-	ErrorCounts        map[string]int    `json:"error_counts,omitempty"`
-	ErrorSamples       map[string]string `json:"error_samples,omitempty"`
-	P50S               float64           `json:"p50_s"`
-	P99S               float64           `json:"p99_s"`
-	TotalInputTokens   int64             `json:"total_input_tokens"`
-	TotalOutputTokens  int64             `json:"total_output_tokens"`
-	LastFireTime       float64           `json:"last_fire_time"`
-	LastRequestStartAt float64           `json:"last_request_start_at"`
-	LastBodyDoneAt     float64           `json:"last_body_done_at"`
-	AdjustedRunT0      float64           `json:"adjusted_run_t0"`
-	DispatchHealth     string            `json:"dispatch_health,omitempty"`
-	DispatchWarnings   []string          `json:"dispatch_warnings,omitempty"`
-	DispatchLagP99S    float64           `json:"dispatch_lag_p99_s,omitempty"`
-	MaxObservedActive  int64             `json:"max_observed_active,omitempty"`
-	NewConnections     uint64            `json:"new_connections,omitempty"`
-	ReusedConnections  uint64            `json:"reused_connections,omitempty"`
+	Type                  string            `json:"__type__"`
+	RequestsCompleted     int               `json:"requests_completed"`
+	RequestsScheduled     int               `json:"requests_scheduled"`
+	Errors                int               `json:"errors"`
+	ErrorCounts           map[string]int    `json:"error_counts,omitempty"`
+	ErrorSamples          map[string]string `json:"error_samples,omitempty"`
+	P50S                  float64           `json:"p50_s"`
+	P99S                  float64           `json:"p99_s"`
+	LatencyQuantileMethod string            `json:"latency_quantile_method"`
+	LatencyHistogram      histogramSnapshot `json:"latency_histogram"`
+	TotalInputTokens      int64             `json:"total_input_tokens"`
+	TotalOutputTokens     int64             `json:"total_output_tokens"`
+	LastFireTime          float64           `json:"last_fire_time"`
+	LastRequestStartAt    float64           `json:"last_request_start_at"`
+	LastBodyDoneAt        float64           `json:"last_body_done_at"`
+	AdjustedRunT0         float64           `json:"adjusted_run_t0"`
+	DispatchHealth        string            `json:"dispatch_health,omitempty"`
+	DispatchWarnings      []string          `json:"dispatch_warnings,omitempty"`
+	DispatchLagP99S       float64           `json:"dispatch_lag_p99_s,omitempty"`
+	MaxObservedActive     int64             `json:"max_observed_active,omitempty"`
+	NewConnections        uint64            `json:"new_connections,omitempty"`
+	ReusedConnections     uint64            `json:"reused_connections,omitempty"`
 }
 
 type chatMessage struct {
@@ -1056,12 +1057,12 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 
 	if sumOnly {
 		var (
-			successLatencies                    []float64
 			completed, errorsCount              int
 			totalInputTokens, totalOutputTokens int64
 		)
 		errorCounts := make(map[string]int)
 		errorSamples := make(map[string]string)
+		latencyHistogram := newDurationHistogram(defaultHistogramBounds)
 		for _, results := range workerResults {
 			for _, rec := range results {
 				if !recordPopulated(rec) {
@@ -1069,7 +1070,7 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 				}
 				if rec.Success {
 					completed++
-					successLatencies = append(successLatencies, rec.Latency)
+					latencyHistogram.Observe(time.Duration(rec.Latency * float64(time.Second)))
 					if rec.ActualPromptTokens != nil {
 						totalInputTokens += int64(*rec.ActualPromptTokens)
 					} else {
@@ -1097,22 +1098,24 @@ func writeResults(resultFile string, sumOnly bool, workerResults [][]resultRecor
 				}
 			}
 		}
-		sort.Float64s(successLatencies)
+		latencySnapshot := latencyHistogram.Snapshot()
 		summary := summaryRecord{
-			Type:               "summary",
-			RequestsCompleted:  completed + errorsCount,
-			RequestsScheduled:  totalResults,
-			Errors:             errorsCount,
-			ErrorCounts:        errorCounts,
-			ErrorSamples:       errorSamples,
-			P50S:               percentile(successLatencies, 0.50),
-			P99S:               percentile(successLatencies, 0.99),
-			TotalInputTokens:   totalInputTokens,
-			TotalOutputTokens:  totalOutputTokens,
-			LastFireTime:       lastFireTime,
-			LastRequestStartAt: lastRequestStartAt,
-			LastBodyDoneAt:     lastBodyDoneAt,
-			AdjustedRunT0:      runT0,
+			Type:                  "summary",
+			RequestsCompleted:     completed + errorsCount,
+			RequestsScheduled:     totalResults,
+			Errors:                errorsCount,
+			ErrorCounts:           errorCounts,
+			ErrorSamples:          errorSamples,
+			P50S:                  PercentileFromHistogram(&latencySnapshot, 0.50),
+			P99S:                  PercentileFromHistogram(&latencySnapshot, 0.99),
+			LatencyQuantileMethod: latencyQuantileMethod,
+			LatencyHistogram:      latencySnapshot,
+			TotalInputTokens:      totalInputTokens,
+			TotalOutputTokens:     totalOutputTokens,
+			LastFireTime:          lastFireTime,
+			LastRequestStartAt:    lastRequestStartAt,
+			LastBodyDoneAt:        lastBodyDoneAt,
+			AdjustedRunT0:         runT0,
 		}
 
 		// Populate dispatch health from metrics collector.
@@ -1293,23 +1296,6 @@ func readRunT0() (float64, error) {
 		return 0, fmt.Errorf("failed to parse run_t0 from stdin: %q: %w", line, err)
 	}
 	return runT0, nil
-}
-
-func percentile(values []float64, fraction float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	if len(values) == 1 {
-		return values[0]
-	}
-	index := int(float64(len(values)-1) * fraction)
-	if index < 0 {
-		index = 0
-	}
-	if index >= len(values) {
-		index = len(values) - 1
-	}
-	return values[index]
 }
 
 func writeFile(path string, data []byte) error {

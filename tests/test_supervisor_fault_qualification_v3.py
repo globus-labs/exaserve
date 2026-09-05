@@ -115,13 +115,18 @@ def test_final41_canonical_replacement_gate_is_exact_and_passed():
 
 @_requires_evidence(NEXT_EXPERIMENT_PATH)
 def test_final42_q2_declaration_binds_the_current_canonical_harness():
+    import json
+
     gate_id = "FQ-FINAL42-SUPERVISOR-WATCHDOG-V3Q2-2N-20260809"
-    document, gate, paths = harness._load_gate(NEXT_EXPERIMENT_PATH, gate_id)
+    with pytest.raises(RuntimeError, match="lifecycle support changed"):
+        harness._load_gate(NEXT_EXPERIMENT_PATH, gate_id)
+    document = json.loads(NEXT_EXPERIMENT_PATH.read_text(encoding="utf-8"))
+    gate = next(item for item in document["gates"] if item["gate_id"] == gate_id)
     assert document["schema_version"] == 3
     assert gate["attempt"] == gate["attempt_limit"] == 1
     assert gate["logical_nodes"] == gate["physical_allocation_nodes"] == 2
     assert gate["scenarios"] == ["head-ray-child-death", "worker-supervisor-death"]
-    assert paths["output"] == (
+    assert ROOT / gate["output_path"] == (
         ROOT / "artifacts/hardening/final42-supervisor-watchdog-v3q2-2n-20260809-a1/qualification"
     )
 

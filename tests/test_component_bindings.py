@@ -105,13 +105,48 @@ def test_current_projection_can_batch_but_flushes_exactly(tmp_path):
     )
     store.bind_receipt(_receipt("n0:100"))
 
-    # The immutable event is already durable; only the disposable projection
-    # is allowed to lag until its explicit readiness/shutdown barrier.
-    assert len(list((tmp_path / "component_bindings" / "events").glob("*.json"))) == 1
+    # Neither a durable event segment nor its disposable projection is
+    # published before the explicit pre-START/READY/shutdown barrier. A crash
+    # here cannot leave a successful status record, and synchronized receipts
+    # do not each force one shared-filesystem fsync.
+    assert len(list((tmp_path / "component_bindings" / "events").glob("*.json"))) == 0
     assert json.loads(Path(store.current_path).read_text())["revision"] == 0
     assert store.current()["rank0/ray_head"].instance_id == "n0:100"
 
     store.flush()
+    assert len(list((tmp_path / "component_bindings" / "events").glob("*.json"))) == 1
     current = json.loads(Path(store.current_path).read_text())
     assert current["revision"] == 1
     assert current["bindings"][0]["instance_id"] == "n0:100"
+
+
+def test_event_group_commit_recovers_one_segment_for_many_transitions(tmp_path):
+    plan, binding = _plan_and_binding()
+    store = ComponentBindingStore(
+        str(tmp_path),
+        plan=plan,
+        binding=binding,
+        current_publish_batch_size=64,
+        event_publish_batch_size=64,
+    )
+    store.bind_receipt(_receipt("n0:100"))
+    store.bind_receipt(_receipt("n0:200"))
+    store.revoke_slot("rank0/ray_head")
+
+    assert list((tmp_path / "component_bindings" / "events").glob("*.json")) == []
+    store.flush()
+    segments = list((tmp_path / "component_bindings" / "events").glob("*.batch.json"))
+    assert len(segments) == 1
+    payload = json.loads(segments[0].read_text())
+    assert payload["start_sequence"] == 1
+    assert payload["end_sequence"] == 4
+    assert len(payload["events"]) == 4
+
+    recovered = ComponentBindingStore(
+        str(tmp_path),
+        plan=plan,
+        binding=binding,
+        current_publish_batch_size=64,
+        event_publish_batch_size=64,
+    )
+    assert recovered.current() == {}

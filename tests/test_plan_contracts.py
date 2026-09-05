@@ -20,6 +20,7 @@ from exaserve.plan.contracts import (
     SchedulerPlan,
     SiteProfile,
     TracePolicy,
+    WorkloadPolicy,
     build_allocation_binding,
     canonical_node_id,
     provenance_hash,
@@ -46,6 +47,14 @@ def _site(**kw) -> SiteProfile:
         model_storage_path="/lus/models",
         local_stage_path="/tmp/hf_home",
         launcher_capabilities=("ray_serve.run_many",),
+        filesystem_semantics=(
+            ("local_root:/tmp", "node_local;fstype=tmpfs;readonly=false"),
+            ("shared_root:/lus", "shared;fstype=lustre;readonly=false"),
+            (
+                "site_root:/opt",
+                "immutable_read_only_site;fstype=squashfs;readonly=true",
+            ),
+        ),
     )
     base.update(kw)
     return SiteProfile(**base).finalize()
@@ -69,6 +78,41 @@ def _raw(**kw):
     return base
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    (
+        "/home/user/model",
+        "/lus/flare/model",
+        "/tmp/model",
+        "../model",
+        "org/../model",
+        "org//model",
+        "~/.cache/model",
+        "C:\\models\\model",
+        "https://example.invalid/model",
+    ),
+)
+def test_model_id_cannot_be_a_worker_filesystem_path(model_id):
+    raw = _raw()
+    raw["models"] = [
+        {
+            "model_id": model_id,
+            "tensor_parallel_size": 1,
+            "max_model_len": 128,
+            "size": 1,
+        }
+    ]
+    with pytest.raises(PlanError, match="model_id.*(model ID|model-ID)"):
+        compile_deployment_plan(raw, site=_site(), deployment_id="unsafe-model-id")
+
+
+@pytest.mark.parametrize("mode", ("ambient", "/home/user/mode", "natural/../../path"))
+def test_workload_generation_mode_is_an_exact_go_enum(mode):
+    with pytest.raises(PlanError, match="generation_mode must be deterministic or natural"):
+        WorkloadPolicy(generation_mode=mode)
+    assert WorkloadPolicy(generation_mode="natural").generation_mode == "natural"
+
+
 def test_default_aurora_profile_claims_only_qualified_stack_families():
     site = default_site_profile()
     assert site.max_nodes == 256
@@ -84,6 +128,34 @@ def test_default_aurora_profile_claims_only_qualified_stack_families():
         "completion",
         "non_streaming",
     )
+    prepared = dict(site.prepared_environment)
+    assert prepared["PMIX_MCA_mca_base_param_files"] == "/etc/pmix-mca-params.conf"
+    assert prepared["PMIX_MCA_mca_base_component_path"] == "/usr/lib64/pmix"
+    assert not any(
+        key.startswith(("PALS_", "PMI_", "PMIX_"))
+        for key in prepared
+        if key
+        not in {
+            "PMIX_MCA_mca_base_param_files",
+            "PMIX_MCA_mca_base_component_path",
+        }
+    )
+
+
+def test_aurora_pmix_search_controls_are_hash_bound_and_exact():
+    from exaserve.site import require_complete_filesystem_policy
+
+    site = default_site_profile()
+    prepared = dict(site.prepared_environment)
+    prepared["PMIX_MCA_mca_base_param_files"] = "/home/user/.pmix/mca-params.conf"
+    tampered = replace(
+        site,
+        prepared_environment=tuple(prepared.items()),
+        site_profile_hash="",
+    ).finalize()
+    assert tampered.site_profile_hash != site.site_profile_hash
+    with pytest.raises(RuntimeError, match="exact PMIx search controls"):
+        require_complete_filesystem_policy(tampered)
 
 
 def test_ray_internal_proxy_watchdog_cannot_preempt_initial_readiness():
@@ -140,6 +212,53 @@ def test_site_profile_rejects_parent_traversal_in_storage_paths(field):
         _site(**{field: "/tmp/cache/../escape"})
 
 
+@pytest.mark.parametrize(
+    "local_stage_path",
+    ["/home/user/models", "/lus/flare/project/models", "/var/tmp/models"],
+)
+def test_compiler_rejects_local_stage_outside_declared_node_local_root(local_stage_path):
+    site = _site(
+        model_storage_path="/lus/flare/models",
+        filesystem_semantics=(
+            ("local_root:/tmp", "node_local"),
+            ("shared_root:/home", "lustre"),
+            ("shared_root:/lus/flare", "lustre"),
+        ),
+    )
+    with pytest.raises(PlanError, match="local_stage_path"):
+        compile_deployment_plan(
+            _raw(local_stage_path=local_stage_path),
+            site=site,
+            deployment_id="bad-local-stage",
+        )
+
+
+def test_compiler_accepts_local_stage_beneath_declared_node_local_root():
+    site = _site(filesystem_semantics=(("local_root:/tmp", "node_local"),))
+    plan = compile_deployment_plan(
+        _raw(local_stage_path="/tmp/exaserve-models"),
+        site=site,
+        deployment_id="local-stage",
+    )
+    assert plan.local_stage_path == "/tmp/exaserve-models"
+
+
+def test_compiler_rejects_unclassified_model_source_root():
+    site = _site(
+        model_storage_path="/lus/flare/models",
+        filesystem_semantics=(
+            ("shared_root:/lus/flare", "shared;fstype=lustre"),
+            ("local_root:/tmp", "node_local;fstype=tmpfs"),
+        ),
+    )
+    with pytest.raises(PlanError, match="model_storage_path.*shared roots"):
+        compile_deployment_plan(
+            _raw(model_storage_path="/scratch/models"),
+            site=site,
+            deployment_id="unclassified-model-source",
+        )
+
+
 def test_explicit_model_storage_path_does_not_require_account_lookup(monkeypatch):
     monkeypatch.setenv("EXASERVE_MODEL_STORAGE_PATH", "/models/explicit")
     monkeypatch.setattr(
@@ -165,6 +284,16 @@ def test_semantic_option_maps_reject_non_string_and_duplicate_keys():
 
     with pytest.raises(PlanError, match="site.filesystem_semantics.*duplicate key"):
         _site(filesystem_semantics=(("shared", "lustre"), ("shared", "other")))
+    with pytest.raises(PlanError, match="absolute path"):
+        _site(filesystem_semantics=(("local_root:relative", "node_local"),))
+    with pytest.raises(PlanError, match="must declare.*node_local"):
+        _site(filesystem_semantics=(("local_root:/tmp", "shared;fstype=tmpfs"),))
+    with pytest.raises(PlanError, match="readonly expectation"):
+        _site(
+            filesystem_semantics=(
+                ("site_root:/opt/site", "immutable_read_only_site;readonly=maybe"),
+            )
+        )
     with pytest.raises(PlanError, match="site.launcher_capabilities"):
         _site(launcher_capabilities=("mpi", "mpi"))
 
@@ -759,6 +888,30 @@ def test_multi_replica_pp_uses_disjoint_canonical_ranks():
             site=site,
             deployment_id="pp-impossible",
         )
+
+
+def test_single_replica_pp_is_always_shard_aware():
+    raw = _raw(
+        num_nodes=2,
+        validation_mode=True,
+        models=[
+            {
+                "model_id": "org/pp",
+                "tensor_parallel_size": 1,
+                "pipeline_parallel_size": 2,
+                "num_replicas": 1,
+                "max_model_len": 128,
+                "size": 8,
+            }
+        ],
+    )
+    plan = compile_deployment_plan(raw, site=_site(), deployment_id="single-pp")
+    assert plan.models[0].num_replicas == 1
+    assert plan.runtime.pp_shard_aware is True
+
+    raw["runtime"] = {"pp_shard_aware": False}
+    with pytest.raises(PlanError, match="pipeline-parallel models"):
+        compile_deployment_plan(raw, site=_site(), deployment_id="single-pp-disabled")
 
 
 def test_multi_replica_plan_requires_batched_serve_deployment_capability():

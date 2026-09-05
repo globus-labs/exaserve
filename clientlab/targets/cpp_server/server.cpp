@@ -43,16 +43,21 @@ void Server::notify_worker(int worker_id) {
     }
 }
 
-void Server::run() {
+int Server::run() {
     // Block SIGTERM/SIGINT in all threads; read via signalfd.
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGINT);
-    pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+    int mask_result = pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+    if (mask_result != 0) {
+        errno = mask_result;
+        std::perror("pthread_sigmask");
+        return 1;
+    }
 
     int sig_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
-    if (sig_fd < 0) { std::perror("signalfd"); return; }
+    if (sig_fd < 0) { std::perror("signalfd"); return 1; }
 
     // Prefer a socket bound/listening by the owning launcher. This removes the
     // probe/close/rebind race and makes a bind collision a startup failure
@@ -65,33 +70,48 @@ void Server::run() {
         if (end == inherited || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
             std::fprintf(stderr, "Invalid CLIENTLAB_LISTEN_FD\n");
             close(sig_fd);
-            return;
+            return 1;
         }
         listen_fd = static_cast<int>(parsed);
         if (fcntl(listen_fd, F_GETFD) < 0) {
-            std::perror("inherited listen fd"); close(sig_fd); return;
+            std::perror("inherited listen fd"); close(sig_fd); return 1;
         }
         int flags = fcntl(listen_fd, F_GETFL, 0);
         if (flags < 0 || fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-            std::perror("fcntl inherited listen fd"); close(listen_fd); close(sig_fd); return;
+            std::perror("fcntl inherited listen fd"); close(listen_fd); close(sig_fd); return 1;
         }
-        fcntl(listen_fd, F_SETFD, FD_CLOEXEC);
+        if (fcntl(listen_fd, F_SETFD, FD_CLOEXEC) < 0) {
+            std::perror("fcntl inherited listen fd cloexec");
+            close(listen_fd);
+            close(sig_fd);
+            return 1;
+        }
     } else {
         listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        if (listen_fd < 0) { std::perror("socket"); close(sig_fd); return; }
+        if (listen_fd < 0) { std::perror("socket"); close(sig_fd); return 1; }
         int opt = 1;
-        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            std::perror("setsockopt SO_REUSEADDR");
+            close(listen_fd);
+            close(sig_fd);
+            return 1;
+        }
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(static_cast<uint16_t>(cfg_.port));
-        inet_pton(AF_INET, cfg_.host.c_str(), &addr.sin_addr);
+        if (inet_pton(AF_INET, cfg_.host.c_str(), &addr.sin_addr) != 1) {
+            std::fprintf(stderr, "Invalid IPv4 bind address: %s\n", cfg_.host.c_str());
+            close(listen_fd);
+            close(sig_fd);
+            return 1;
+        }
 
         if (bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-            std::perror("bind"); close(listen_fd); close(sig_fd); return;
+            std::perror("bind"); close(listen_fd); close(sig_fd); return 1;
         }
         if (listen(listen_fd, 4096) < 0) {
-            std::perror("listen"); close(listen_fd); close(sig_fd); return;
+            std::perror("listen"); close(listen_fd); close(sig_fd); return 1;
         }
     }
 
@@ -110,19 +130,48 @@ void Server::run() {
 
     // Main thread: epoll on listen_fd + sig_fd.
     int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd < 0) {
+        std::perror("epoll_create1");
+        running_.store(false);
+        close(listen_fd);
+        close(sig_fd);
+        return 1;
+    }
     struct epoll_event ev{};
 
     ev.events = EPOLLIN;
     ev.data.fd = listen_fd;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev);
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
+        std::perror("epoll_ctl listen");
+        running_.store(false);
+        close(epoll_fd);
+        close(listen_fd);
+        close(sig_fd);
+        return 1;
+    }
 
     ev.events = EPOLLIN;
     ev.data.fd = sig_fd;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sig_fd, &ev);
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sig_fd, &ev) < 0) {
+        std::perror("epoll_ctl signal");
+        running_.store(false);
+        close(epoll_fd);
+        close(listen_fd);
+        close(sig_fd);
+        return 1;
+    }
 
     struct epoll_event events[64];
+    int exit_code = 0;
     while (running_.load(std::memory_order_relaxed)) {
         int n = epoll_wait(epoll_fd, events, 64, 500);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            std::perror("epoll_wait");
+            running_.store(false);
+            exit_code = 1;
+            break;
+        }
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == sig_fd) {
                 running_.store(false);
@@ -147,6 +196,7 @@ void Server::run() {
     close(epoll_fd);
     close(listen_fd);
     close(sig_fd);
+    return exit_code;
 }
 
 // ---- WorkerReactor ----

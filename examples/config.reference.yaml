@@ -5,7 +5,7 @@ num_nodes: 1
 num_gpus_per_node: 12
 node_cpus: 64
 ray_port: 6379
-model_storage_path: /lus/path/to/models
+model_storage_path: /lus/flare/projects/YOUR_PROJECT/YOUR_USER/models
 local_stage_path: /tmp/hf_home
 deployment_name: exaserve_serve
 replica_max_ongoing_requests: 32

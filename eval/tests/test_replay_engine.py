@@ -92,6 +92,7 @@ def test_summarize_run_results_sum_only_dict() -> None:
         "total_output_tokens": 5,
         "p50_s": 0.9,
         "p99_s": 1.8,
+        "latency_quantile_method": "mergeable_histogram_estimate_2pct_through_7200s",
     }
 
     summary = _summarize_run_results(2, run_results, requests_scheduled=16, duration_s=4.0)
@@ -105,6 +106,7 @@ def test_summarize_run_results_sum_only_dict() -> None:
     assert summary["success_rps"] == 2.25
     assert summary["p50_s"] == 0.9
     assert summary["p99_s"] == 1.8
+    assert summary["latency_quantile_method"] == "mergeable_histogram_estimate_2pct_through_7200s"
 
 
 def test_summarize_run_results_rejects_coercible_counts() -> None:
@@ -116,6 +118,7 @@ def test_summarize_run_results_rejects_coercible_counts() -> None:
         "total_output_tokens": 0,
         "p50_s": 0.1,
         "p99_s": 0.2,
+        "latency_quantile_method": "mergeable_histogram_estimate_2pct_through_7200s",
     }
     with pytest.raises(ValueError, match="requests_completed"):
         _summarize_run_results(0, run_results, requests_scheduled=12, duration_s=1.0)

@@ -10,9 +10,13 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from exaserve.control.process_guardian import guardian_argv
 from exaserve.state.process_ownership import (
+    ProcessOwnershipError,
     ProcessOwnershipRegistry,
+    cleanup_owned_component_processes,
     process_start_ticks,
 )
 
@@ -118,6 +122,63 @@ def test_guardian_owner_loss_reaps_child_and_releases_exact_receipt(tmp_path, mo
             os.killpg(os.getpgid(owner.pid), signal.SIGKILL)
             owner.wait(timeout=5)
         if guardian is not None and guardian.poll() is None:
+            os.killpg(os.getpgid(guardian.pid), signal.SIGKILL)
+            guardian.wait(timeout=5)
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_guardian_sigkill_leaves_exact_child_receipt_for_rank_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(tmp_path / "owned"))
+    monkeypatch.setenv("EXASERVE_RUNTIME_OWNERSHIP_ROOT", str(tmp_path / "runtime"))
+    child_pid_path = tmp_path / "child.json"
+    guardian, registry, guardian_receipt, runtime = _start_guardian(
+        tmp_path,
+        owner_pid=os.getpid(),
+        owner_ticks=process_start_ticks(os.getpid()),
+        child_argv=_child_command(child_pid_path),
+    )
+    child_pid = None
+    try:
+        _wait_for_path(child_pid_path)
+        child_pid = int(child_pid_path.read_text())
+        receipt_dir = tmp_path / "owned" / "receipts"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and len(list(receipt_dir.glob("*.json"))) < 2:
+            time.sleep(0.02)
+        assert len(list(receipt_dir.glob("*.json"))) == 2
+        with pytest.raises(ProcessOwnershipError, match="guardian is still live"):
+            cleanup_owned_component_processes(
+                deployment_id="deployment",
+                generation=7,
+                rank=1,
+                component_id="ray_child",
+                deadline_s=1,
+            )
+
+        os.killpg(os.getpgid(guardian.pid), signal.SIGKILL)
+        guardian.wait(timeout=5)
+        os.kill(child_pid, 0)  # separate group survived; exact receipt must recover it
+        assert (
+            cleanup_owned_component_processes(
+                deployment_id="deployment",
+                generation=7,
+                rank=1,
+                component_id="ray_child",
+                deadline_s=5,
+            )
+            == 1
+        )
+        _wait_process_gone(child_pid)
+        registry.release("ray")
+        assert not os.path.exists(guardian_receipt)
+        assert not runtime.exists()
+        assert list(receipt_dir.glob("*.json")) == []
+    finally:
+        if guardian.poll() is None:
             os.killpg(os.getpgid(guardian.pid), signal.SIGKILL)
             guardian.wait(timeout=5)
         if child_pid is not None:

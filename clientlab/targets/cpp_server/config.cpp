@@ -45,14 +45,18 @@ static bool yy_bool(yyjson_val* obj, const char* key, bool def) {
     return (v && yyjson_is_bool(v)) ? yyjson_get_bool(v) : def;
 }
 
-ServerConfig load_config(const std::string& path) {
-    std::string data = read_file(path);
+ServerConfig load_config_json(const std::string& data) {
     yyjson_doc* doc = yyjson_read(data.c_str(), data.size(), 0);
     if (!doc) {
-        std::fprintf(stderr, "Failed to parse JSON config: %s\n", path.c_str());
+        std::fprintf(stderr, "Failed to parse JSON config\n");
         std::exit(1);
     }
     yyjson_val* root = yyjson_doc_get_root(doc);
+    if (!root || !yyjson_is_obj(root)) {
+        std::fprintf(stderr, "Synthetic target config root must be an object\n");
+        yyjson_doc_free(doc);
+        std::exit(1);
+    }
 
     ServerConfig cfg;
 
@@ -91,6 +95,17 @@ ServerConfig load_config(const std::string& path) {
         cfg.faults.burst_duration = yy_int(faults, "burst_duration", 0);
     }
 
+    if (cfg.host.empty() || cfg.port < 1 || cfg.port > 65535 ||
+        cfg.response_tokens < 0 || cfg.client_max_active < 0) {
+        std::fprintf(stderr, "Synthetic target config contains invalid bounds\n");
+        yyjson_doc_free(doc);
+        std::exit(1);
+    }
+
     yyjson_doc_free(doc);
     return cfg;
+}
+
+ServerConfig load_config(const std::string& path) {
+    return load_config_json(read_file(path));
 }

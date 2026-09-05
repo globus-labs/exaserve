@@ -63,9 +63,12 @@ def _proxy_inputs(index: int = 0):
 
 
 @requires_review
-def test_candidate_verifier_accepts_exact_final42_package_and_campaigns():
-    review = adjudicator.verify_candidate_review(REVIEW_PATH)
-    assert review["candidate_label"] == "final42"
+def test_final42_review_is_preserved_but_cannot_qualify_the_changed_runtime():
+    # The shared-filesystem cutover changed the lifecycle harness. Retained
+    # final42 bytes remain historical evidence, but updating their declaration
+    # hashes would falsely bless results produced by the old runtime.
+    with pytest.raises(RuntimeError, match="bytes changed"):
+        adjudicator.verify_candidate_review(REVIEW_PATH)
 
 
 def test_candidate_verifier_rejects_manifest_outside_repository(tmp_path):

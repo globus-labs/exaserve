@@ -36,6 +36,7 @@ _STEP_REQUIRED_FIELDS = {
     "p50_latency_s",
     "p99_latency_s",
     "mean_latency_s",
+    "latency_histogram",
     "new_connections",
     "reused_connections",
     "max_observed_active",
@@ -45,6 +46,7 @@ _STEP_OPTIONAL_FIELDS = {
     "p50_ttft_s",
     "p99_ttft_s",
     "mean_ttft_s",
+    "ttft_histogram",
     "fail_reasons",
 }
 
@@ -67,6 +69,41 @@ def _number(value: Any, path: str) -> float:
 def _boolean(value: Any, path: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{path} must be a boolean")
+    return value
+
+
+def _histogram(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "bucket_upper_bounds_s",
+        "counts",
+        "count",
+        "sum_s",
+    }:
+        raise ValueError(f"{path} fields are invalid")
+    bounds = value["bucket_upper_bounds_s"]
+    counts = value["counts"]
+    count = _integer(value["count"], f"{path}.count")
+    total = _number(value["sum_s"], f"{path}.sum_s")
+    if (
+        count < 0
+        or total < 0
+        or not isinstance(bounds, list)
+        or not isinstance(counts, list)
+        or len(bounds) != len(counts)
+        or len(bounds) < 2
+        or bounds[-1] != -1.0
+        or any(type(item) is not int or item < 0 for item in counts)
+        or sum(counts) != count
+    ):
+        raise ValueError(f"{path} values are invalid")
+    previous = -1.0
+    for index, bound in enumerate(bounds):
+        bound = _number(bound, f"{path}.bucket_upper_bounds_s[{index}]")
+        if index == len(bounds) - 1 and bound == -1.0:
+            continue
+        if bound < 0 or (index and bound <= previous):
+            raise ValueError(f"{path} bounds are invalid")
+        previous = bound
     return value
 
 
@@ -162,6 +199,9 @@ def validate_step_result(value: Any, *, path: str = "saturation step") -> dict[s
     if value["error_rate"] > 1:
         raise ValueError(f"{path}.error_rate must be in [0, 1]")
     _boolean(value["healthy"], f"{path}.healthy")
+    _histogram(value["latency_histogram"], f"{path}.latency_histogram")
+    if "ttft_histogram" in value:
+        _histogram(value["ttft_histogram"], f"{path}.ttft_histogram")
     if "fail_reasons" in value and (
         not isinstance(value["fail_reasons"], list)
         or any(not isinstance(reason, str) or not reason for reason in value["fail_reasons"])

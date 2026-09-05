@@ -44,6 +44,9 @@ ENGINE_REPLICA_INDEX_ENV = "EXASERVE_RECEIPT_REPLICA_INDEX"
 ENGINE_WORKER_RANK_ENV = "EXASERVE_ENGINE_WORKER_GLOBAL_RANK"
 ENGINE_WORKER_KIND_ENV = "EXASERVE_ENGINE_WORKER_KIND"
 
+_ENGINE_IDENTITY_LOCK = threading.Lock()
+_ENGINE_IDENTITY_CACHE: dict[tuple[str, ...], dict] = {}
+
 # Written verbatim as ``sitecustomize.py`` in the immutable compatibility
 # overlay.  Source staging publishes that overlay at the same node-local path
 # on every rank.  Keeping the engine bootstrap there is essential for Ray PP
@@ -104,14 +107,62 @@ _MANAGED_ENV_KEYS = frozenset(
         "EXASERVE_COMPAT_PROFILE_ID",
         "EXASERVE_COMPAT_MANIFEST_HASH",
         "EXASERVE_COMPAT_ROLE",
+        "EXASERVE_QUALIFIED_PYTHON",
+        "EXASERVE_QUALIFIED_PYTHON_SHA256",
+        "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH",
+        "EXASERVE_COMPAT_SOURCES_NODE_PROFILE",
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
     }
 )
+
+
+def _ensure_local_receipt_directory(directory: str) -> None:
+    from ..model_staging import ensure_node_local_directory
+    from ..plan.runtime_environment import LOCAL_STATE_ROOT_ENV, require_contained_local_path
+
+    state_root = os.environ.get(LOCAL_STATE_ROOT_ENV, "")
+    if not state_root:
+        raise OSError("engine receipt directory has no local state root")
+    try:
+        require_contained_local_path(
+            directory,
+            state_root,
+            name="engine receipt directory",
+            require_exists=False,
+        )
+        ensure_node_local_directory(
+            directory,
+            mode=0o700,
+            enforce_mode=True,
+        )
+        require_contained_local_path(
+            directory,
+            state_root,
+            name="engine receipt directory",
+            require_exists=True,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise OSError(f"engine receipt directory is unsafe: {exc}") from exc
 
 
 def verify_engine_bootstrap(engine_kind: str) -> None:
     """Fail closed before a spawned engine's first Ray/vLLM import."""
     if engine_kind != "vllm":
         raise RuntimeError(f"unsupported engine shim kind {engine_kind!r}")
+    from ..plan.runtime_environment import (
+        LOCAL_RUNTIME_ROOT_ENV,
+        require_contained_local_path,
+    )
+
+    runtime_root = os.environ.get(LOCAL_RUNTIME_ROOT_ENV, "")
+    if not runtime_root:
+        raise RuntimeError(f"{LOCAL_RUNTIME_ROOT_ENV} is required for engine bootstrap")
+    require_contained_local_path(
+        __file__,
+        os.path.join(runtime_root, "python"),
+        name="engine ExaServe module",
+        require_exists=True,
+    )
     from .activator import CompatibilityActivator
     from .producers import manifest_hash
     from .profile import default_profile
@@ -188,6 +239,11 @@ def prepare_environment(
     why; callers restore the parent environment in ``finally``.
     """
     from .generated_overlay import ROOT_ENV
+    from ..plan.runtime_environment import (
+        LOCAL_RUNTIME_ROOT_ENV,
+        LOCAL_STATE_ROOT_ENV,
+        require_contained_local_path,
+    )
 
     if engine_kind != "vllm":
         raise ValueError(f"unsupported engine shim kind {engine_kind!r}")
@@ -195,6 +251,26 @@ def prepare_environment(
     if not root:
         raise RuntimeError(f"{ROOT_ENV} is required for engine bootstrap")
     root = os.path.abspath(root)
+    runtime_root = os.environ.get(LOCAL_RUNTIME_ROOT_ENV, "")
+    state_root = os.environ.get(LOCAL_STATE_ROOT_ENV, "")
+    if not runtime_root or not state_root:
+        raise RuntimeError("engine preparation requires the published local runtime/state roots")
+    require_contained_local_path(
+        root,
+        runtime_root,
+        name="engine compatibility overlay",
+        require_exists=True,
+    )
+    require_contained_local_path(
+        receipt_dir,
+        state_root,
+        name="engine receipt directory",
+        require_exists=False,
+    )
+    if os.environ.get("PYTHONNOUSERSITE") != "1":
+        raise RuntimeError("engine preparation requires PYTHONNOUSERSITE=1")
+    if os.environ.get("PYTHONSAFEPATH") != "1":
+        raise RuntimeError("engine preparation requires PYTHONSAFEPATH=1")
     python_paths = [
         os.path.abspath(item) for item in os.environ.get("PYTHONPATH", "").split(os.pathsep) if item
     ]
@@ -208,8 +284,7 @@ def prepare_environment(
     if observed_source != _SHIM_SOURCE:
         raise RuntimeError("staged compatibility bootstrap source does not match EN-01")
 
-    os.makedirs(receipt_dir, mode=0o700, exist_ok=True)
-    os.chmod(receipt_dir, 0o700)
+    _ensure_local_receipt_directory(receipt_dir)
     os.environ[RECEIPT_DIR_ENV] = receipt_dir
     os.environ[IMPORT_PATCHES_ENV] = "1" if import_patches else "0"
     os.environ[ENGINE_KIND_ENV] = engine_kind
@@ -278,7 +353,7 @@ def _engine_process_ready(engine_kind: str | None) -> bool:
     return _engine_process_role(engine_kind) is not None
 
 
-def _engine_receipt_identity(engine_kind: str | None) -> dict | None:
+def _resolve_engine_receipt_identity(engine_kind: str | None) -> dict | None:
     role = _engine_process_role(engine_kind)
     if role is None:
         return None
@@ -307,6 +382,26 @@ def _engine_receipt_identity(engine_kind: str | None) -> dict | None:
     binding_path = os.environ.get("EXASERVE_ALLOCATION_BINDING_PATH", "")
     if not model_id or not plan_path or not binding_path:
         return None
+    from ..plan.runtime_environment import (
+        LOCAL_RUNTIME_ROOT_ENV,
+        require_contained_local_path,
+    )
+
+    runtime_root = os.environ.get(LOCAL_RUNTIME_ROOT_ENV, "")
+    if not runtime_root:
+        return None
+    require_contained_local_path(
+        plan_path,
+        runtime_root,
+        name="engine DeploymentPlan",
+        require_exists=True,
+    )
+    require_contained_local_path(
+        binding_path,
+        runtime_root,
+        name="engine AllocationBinding",
+        require_exists=True,
+    )
     worker_kind = os.environ.get(ENGINE_WORKER_KIND_ENV)
     actor = _ray_actor_identity() if worker_kind == "ray" else None
     actor_id = None
@@ -365,6 +460,48 @@ def _engine_receipt_identity(engine_kind: str | None) -> dict | None:
         "owner_rank": owner_rank,
         "actor_id": actor_id,
     }
+
+
+def _engine_receipt_identity(engine_kind: str | None) -> dict | None:
+    """Resolve immutable plan/binding placement at most once per process.
+
+    The watcher polls changing import postconditions. Plan, binding, actor and
+    logical worker identity do not change inside one engine process, so
+    reopening their artifacts on every 100 ms pass only amplifies storage.
+    ``None`` is deliberately not cached because the runtime may not have bound
+    the actor/worker identity yet.
+    """
+
+    cache_key = (
+        engine_kind or "direct",
+        str(os.getpid()),
+        *(
+            os.environ.get(key, "")
+            for key in (
+                "EXASERVE_DEPLOYMENT_ID",
+                "EXASERVE_GENERATION",
+                "EXASERVE_PLAN_HASH",
+                "EXASERVE_ALLOCATION_BINDING_HASH",
+                "EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE",
+                "EXASERVE_RECEIPT_COMPONENT_ID_ENGINE",
+                "EXASERVE_RECEIPT_RANK",
+                ENGINE_MODEL_ENV,
+                ENGINE_REPLICA_INDEX_ENV,
+                ENGINE_WORKER_RANK_ENV,
+                ENGINE_WORKER_KIND_ENV,
+            )
+        ),
+    )
+    with _ENGINE_IDENTITY_LOCK:
+        cached = _ENGINE_IDENTITY_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+    resolved = _resolve_engine_receipt_identity(engine_kind)
+    if resolved is not None:
+        with _ENGINE_IDENTITY_LOCK:
+            existing = _ENGINE_IDENTITY_CACHE.setdefault(cache_key, dict(resolved))
+        return dict(existing)
+    return None
 
 
 def _build_engine_receipt(*, patches_imported: bool, engine_kind: str | None = None):
@@ -452,8 +589,7 @@ def _write_and_deliver(receipt) -> tuple[str, bool]:
     # ``install`` creates this directory on the replica's node.  Ray PP
     # workers run on other nodes with node-local /tmp, so each producer must
     # materialize its own diagnostic directory before publication.
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    os.chmod(directory, 0o700)
+    _ensure_local_receipt_directory(directory)
     path = os.path.join(directory, f"engine_{os.getpid()}_{receipt.receipt_hash}.json")
     payload = receipt.to_dict()
     deliver_receipt_checked(payload, path=_receipt_delivery_target(receipt))
@@ -486,8 +622,7 @@ def _record_attestation_error(exc: Exception, attempts: int) -> None:
     try:
         from ..state.atomic import atomic_write_json
 
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        os.chmod(directory, 0o700)
+        _ensure_local_receipt_directory(directory)
         atomic_write_json(
             os.path.join(directory, f"engine_error_{os.getpid()}.json"),
             {
@@ -735,4 +870,7 @@ def receipt_dir_for(deployment_id: str, generation: int, component_id: str = "sh
         raise ValueError("component_id must be a non-empty string")
     identity = f"{deployment_id}\0{generation}\0{component_id}".encode()
     suffix = hashlib.sha256(identity).hexdigest()[:24]
+    state_root = os.environ.get("EXASERVE_LOCAL_STATE_ROOT", "")
+    if state_root:
+        return os.path.join(state_root, "engine_receipts", suffix)
     return os.path.join("/tmp", f"exaserve_engine_receipt_{suffix}")

@@ -39,7 +39,15 @@ def test_bcast_native_boundary_never_constructs_a_shell_command():
     source = (resources.files("exaserve.resources") / "bcast.c").read_text()
     assert "popen(" not in source
     assert "system(" not in source
-    assert 'execlp("tar"' in source
+    assert 'execlp("tar"' not in source
+    assert "emit_entry(&context" in source
+    assert "receive_stream(transfer_communicator" in source
+
+
+def test_bcast_cleanup_rejects_symlink_or_cross_device_candidate_ancestors():
+    source = (resources.files("exaserve.resources") / "bcast.c").read_text()
+    assert "validate_cleanup_chain(cleanup_root, cleanup_path, &root_metadata)" in source
+    assert "S_ISLNK(metadata.st_mode) || metadata.st_dev != root_metadata->st_dev" in source
 
 
 def test_release_sdist_extraction_rejects_path_escape(tmp_path):

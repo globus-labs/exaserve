@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import copy
+import hashlib
+import os
+from pathlib import Path
 import sys
 import types
 
@@ -13,10 +16,13 @@ from exaserve.model_staging import (
     COMPLETION_MARKER,
     _resolve_hf_cache_snapshot,
     _validate_model_dir,
+    build_model_manifest,
     check_model_exists,
     download_model,
+    ensure_node_local_directory,
     get_model_dir_state,
     load_model_config,
+    validate_model_manifest,
     validate_tensor_parallel_compatibility,
 )
 
@@ -25,6 +31,40 @@ def _complete_single_file_model(path):
     path.mkdir(parents=True)
     (path / "config.json").write_text("{}")
     (path / "model.safetensors").write_text("weights")
+
+
+def test_node_local_directory_creation_rejects_intermediate_home_symlink(tmp_path):
+    local = tmp_path / "local"
+    local.mkdir()
+    escape = local / "escape"
+    escape.symlink_to("/home", target_is_directory=True)
+    escaped_name = f".exaserve-should-not-exist-{os.getpid()}"
+    escaped = Path("/home") / escaped_name
+    assert not escaped.exists()
+
+    with pytest.raises(ValueError, match="symlink|shared storage"):
+        ensure_node_local_directory(
+            escape / escaped_name,
+            shared_roots=(Path("/home"), Path("/lus/flare")),
+        )
+
+    assert not escaped.exists()
+
+
+def test_node_local_directory_creation_never_writes_through_declared_shared_alias(tmp_path):
+    local = tmp_path / "local"
+    shared = tmp_path / "declared-shared"
+    local.mkdir()
+    shared.mkdir()
+    (local / "escape").symlink_to(shared, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink|shared storage"):
+        ensure_node_local_directory(
+            local / "escape" / "created",
+            shared_roots=(shared,),
+        )
+
+    assert not (shared / "created").exists()
 
 
 def test_single_file_model_is_complete_and_gets_marker(tmp_path):
@@ -48,6 +88,69 @@ def test_manifest_detects_same_size_corruption_and_trailing_files(tmp_path):
     assert check_model_exists(m) is True
     (m / "unexpected.tmp").write_text("trailing")
     assert check_model_exists(m) is False
+
+
+def test_large_weight_identity_hashes_interior_bytes(tmp_path):
+    model = tmp_path / "large"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    weight = model / "model.safetensors"
+    weight.write_bytes(b"a" * (3 * 1024 * 1024))
+    before = build_model_manifest(model, source_identity="test@one")
+    assert {entry["hash_kind"] for entry in before["files"]} == {"sha256-full"}
+    with weight.open("r+b") as handle:
+        handle.seek(1536 * 1024)
+        handle.write(b"b")
+    after = build_model_manifest(model, source_identity="test@one")
+    assert after["manifest_hash"] != before["manifest_hash"]
+    before_weight = next(item for item in before["files"] if item["path"] == weight.name)
+    after_weight = next(item for item in after["files"] if item["path"] == weight.name)
+    assert after_weight["sha256"] != before_weight["sha256"]
+
+
+def test_legacy_sampled_marker_migrates_to_full_hash_identity(tmp_path):
+    model = tmp_path / "legacy"
+    model.mkdir()
+    config = model / "config.json"
+    weight = model / "model.safetensors"
+    config.write_text("{}")
+    weight.write_bytes(b"w" * (3 * 1024 * 1024))
+    sample_bytes = 1 << 20
+    weight_bytes = weight.read_bytes()
+    files = [
+        {
+            "path": "config.json",
+            "size": config.stat().st_size,
+            "hash_kind": "sha256-full",
+            "sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+        },
+        {
+            "path": "model.safetensors",
+            "size": len(weight_bytes),
+            "hash_kind": f"sha256-first-last-{sample_bytes}",
+            "sha256": hashlib.sha256(
+                weight_bytes[:sample_bytes] + weight_bytes[-sample_bytes:]
+            ).hexdigest(),
+        },
+    ]
+    legacy = {
+        "version": 2,
+        "kind": "full_model",
+        "source_identity": "legacy@test",
+        "file_count": len(files),
+        "total_bytes": sum(item["size"] for item in files),
+        "manifest_hash": hashlib.sha256(
+            json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "files": files,
+    }
+    (model / COMPLETION_MARKER).write_text(json.dumps(legacy))
+    with pytest.raises(ValueError, match="hash_kind"):
+        validate_model_manifest(legacy)
+    assert check_model_exists(model)
+    migrated = json.loads((model / COMPLETION_MARKER).read_text())
+    assert all(item["hash_kind"] == "sha256-full" for item in migrated["files"])
+    assert migrated["manifest_hash"] != legacy["manifest_hash"]
 
 
 def test_model_config_must_be_an_object(tmp_path):

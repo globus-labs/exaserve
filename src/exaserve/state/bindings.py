@@ -20,6 +20,7 @@ from ..plan.contracts import (
     SCHEMA_VERSION,
     ComponentInstanceBinding,
     PlanError,
+    canonical_hash,
 )
 from ..plan.io import component_instance_binding_from_dict
 from .atomic import ExclusiveLease, atomic_create_json, atomic_write_json, strict_json_load_path
@@ -32,16 +33,30 @@ class BindingStoreError(RuntimeError):
 class ComponentBindingStore:
     """The composition root's sole durable writer for live slot bindings."""
 
-    def __init__(self, run_dir: str, *, plan, binding, current_publish_batch_size: int = 1) -> None:
-        if (
-            isinstance(current_publish_batch_size, bool)
-            or not isinstance(current_publish_batch_size, int)
-            or current_publish_batch_size < 1
+    def __init__(
+        self,
+        run_dir: str,
+        *,
+        plan,
+        binding,
+        current_publish_batch_size: int = 1,
+        event_publish_batch_size: int | None = None,
+    ) -> None:
+        event_publish_batch_size = (
+            current_publish_batch_size
+            if event_publish_batch_size is None
+            else event_publish_batch_size
+        )
+        for name, value in (
+            ("current_publish_batch_size", current_publish_batch_size),
+            ("event_publish_batch_size", event_publish_batch_size),
         ):
-            raise ValueError("current_publish_batch_size must be a positive integer")
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         self.plan = plan
         self.binding = binding
         self.current_publish_batch_size = current_publish_batch_size
+        self.event_publish_batch_size = event_publish_batch_size
         self.directory = os.path.join(run_dir, "component_bindings")
         self.events_dir = os.path.join(self.directory, "events")
         self.current_path = os.path.join(self.directory, "current.json")
@@ -51,6 +66,7 @@ class ComponentBindingStore:
         self._current: dict[str, ComponentInstanceBinding] = {}
         self._sequence = 0
         self._published_sequence = 0
+        self._pending_events: list[ComponentInstanceBinding] = []
         self._recover()
 
     def _identity(self) -> dict:
@@ -68,22 +84,73 @@ class ComponentBindingStore:
                 continue
             path = os.path.join(self.events_dir, name)
             try:
-                event = component_instance_binding_from_dict(strict_json_load_path(path))
+                payload = strict_json_load_path(path)
             except (OSError, json.JSONDecodeError, ValueError, PlanError) as exc:
                 raise BindingStoreError(
                     f"component binding event {path!r} is invalid: {exc}"
                 ) from exc
-            self._verify_identity(event)
-            if event.binding_sequence <= self._sequence:
-                raise BindingStoreError(f"component binding sequence is not monotonic at {path!r}")
-            self._sequence = event.binding_sequence
-            if event.state == "ACTIVE":
-                self._current[event.key()] = event
+            if isinstance(payload, dict) and payload.get("kind") == "component_binding_batch":
+                events = self._decode_batch(payload, path)
             else:
-                current = self._current.get(event.key())
-                if current is not None and current.instance_id == event.instance_id:
-                    self._current.pop(event.key(), None)
+                # Schema-v3 compatibility: existing immutable runs stored one
+                # ComponentInstanceBinding per file.
+                try:
+                    events = (component_instance_binding_from_dict(payload),)
+                except (TypeError, ValueError, PlanError) as exc:
+                    raise BindingStoreError(
+                        f"component binding event {path!r} is invalid: {exc}"
+                    ) from exc
+            for event in events:
+                self._apply_recovered_event(event, path)
         self._publish_current()
+
+    def _decode_batch(self, payload: dict, path: str) -> tuple[ComponentInstanceBinding, ...]:
+        expected = {
+            "schema_version",
+            "kind",
+            *self._identity(),
+            "start_sequence",
+            "end_sequence",
+            "events",
+            "batch_hash",
+        }
+        if set(payload) != expected or payload.get("schema_version") != SCHEMA_VERSION:
+            raise BindingStoreError(f"component binding batch {path!r} has invalid fields")
+        if any(payload.get(key) != value for key, value in self._identity().items()):
+            raise BindingStoreError(f"component binding batch {path!r} has wrong identity")
+        declared = payload.get("batch_hash")
+        unhashed = {key: value for key, value in payload.items() if key != "batch_hash"}
+        if not isinstance(declared, str) or declared != canonical_hash(unhashed):
+            raise BindingStoreError(f"component binding batch {path!r} hash mismatch")
+        raw_events = payload.get("events")
+        if not isinstance(raw_events, list) or not raw_events:
+            raise BindingStoreError(f"component binding batch {path!r} is empty")
+        try:
+            events = tuple(component_instance_binding_from_dict(item) for item in raw_events)
+        except (TypeError, ValueError, PlanError) as exc:
+            raise BindingStoreError(
+                f"component binding batch {path!r} contains an invalid event: {exc}"
+            ) from exc
+        sequences = [event.binding_sequence for event in events]
+        if (
+            sequences != list(range(sequences[0], sequences[-1] + 1))
+            or payload.get("start_sequence") != sequences[0]
+            or payload.get("end_sequence") != sequences[-1]
+        ):
+            raise BindingStoreError(f"component binding batch {path!r} sequence range is invalid")
+        return events
+
+    def _apply_recovered_event(self, event: ComponentInstanceBinding, path: str) -> None:
+        self._verify_identity(event)
+        if event.binding_sequence != self._sequence + 1:
+            raise BindingStoreError(f"component binding sequence is not contiguous at {path!r}")
+        self._sequence = event.binding_sequence
+        if event.state == "ACTIVE":
+            self._current[event.key()] = event
+        else:
+            current = self._current.get(event.key())
+            if current is not None and current.instance_id == event.instance_id:
+                self._current.pop(event.key(), None)
 
     def _verify_identity(self, event: ComponentInstanceBinding) -> None:
         expected = self._identity()
@@ -107,18 +174,42 @@ class ComponentBindingStore:
         )
         self._published_sequence = self._sequence
 
+    def _publish_pending_events(self) -> None:
+        if not self._pending_events:
+            return
+        events = tuple(self._pending_events)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "component_binding_batch",
+            **self._identity(),
+            "start_sequence": events[0].binding_sequence,
+            "end_sequence": events[-1].binding_sequence,
+            "events": [asdict(event) for event in events],
+        }
+        payload["batch_hash"] = canonical_hash(payload)
+        path = os.path.join(
+            self.events_dir,
+            f"{events[0].binding_sequence:012d}-{events[-1].binding_sequence:012d}-"
+            f"{payload['batch_hash']}.batch.json",
+        )
+        try:
+            atomic_create_json(path, payload)
+        except FileExistsError as exc:
+            raise BindingStoreError(f"component binding batch already exists: {path}") from exc
+        del self._pending_events[:]
+
+    def _publish_barrier(self, *, publish_current: bool) -> None:
+        with ExclusiveLease(
+            self.lease_path, ttl_s=60, owner_note="component-instance-binding-writer"
+        ):
+            self._publish_pending_events()
+            if publish_current and self._published_sequence != self._sequence:
+                self._publish_current()
+
     def _append(self, event: ComponentInstanceBinding) -> None:
         self._verify_identity(event)
         if event.component_instance_binding_hash != event.compute_hash():
             raise BindingStoreError("component binding event is not finalized")
-        path = os.path.join(
-            self.events_dir,
-            f"{event.binding_sequence:012d}-{event.component_instance_binding_hash}.json",
-        )
-        try:
-            atomic_create_json(path, asdict(event))
-        except FileExistsError as exc:
-            raise BindingStoreError(f"component binding event already exists: {path}") from exc
         if event.state == "ACTIVE":
             self._current[event.key()] = event
         else:
@@ -126,35 +217,28 @@ class ComponentBindingStore:
             if current is not None and current.instance_id == event.instance_id:
                 self._current.pop(event.key(), None)
         self._sequence = event.binding_sequence
-        if self._sequence - self._published_sequence >= self.current_publish_batch_size:
-            self._publish_current()
+        self._pending_events.append(event)
+        publish_current = (
+            self._sequence - self._published_sequence >= self.current_publish_batch_size
+        )
+        if len(self._pending_events) >= self.event_publish_batch_size or publish_current:
+            self._publish_barrier(publish_current=publish_current)
 
     def flush(self) -> None:
-        """Publish the exact in-memory projection after durable event appends.
+        """Group-commit pending events and publish the exact projection.
 
-        Immutable events are authoritative and individually durable.  The
-        replaceable ``current.json`` projection is batched in production so a
-        synchronized receipt burst does not rewrite an ever-growing Lustre
-        file once per receipt and starve the control listener.  READY and
-        shutdown call this barrier explicitly.
+        Before this barrier, accepted in-memory receipts cannot authorize a
+        durable READY record. Immutable batch segments are authoritative after
+        the barrier; ``current.json`` remains a disposable projection. This
+        turns an N-receipt burst into bounded group commits instead of N file
+        and directory fsyncs. READY, pre-START, and shutdown call the barrier.
         """
-        with (
-            self._thread_lock,
-            ExclusiveLease(
-                self.lease_path, ttl_s=60, owner_note="component-instance-binding-writer"
-            ),
-        ):
-            if self._published_sequence != self._sequence:
-                self._publish_current()
+        with self._thread_lock:
+            self._publish_barrier(publish_current=True)
 
     def bind_receipt(self, receipt) -> ComponentInstanceBinding:
-        """Durably bind an already validated receipt to its planned slot."""
-        with (
-            self._thread_lock,
-            ExclusiveLease(
-                self.lease_path, ttl_s=60, owner_note="component-instance-binding-writer"
-            ),
-        ):
+        """Bind a receipt; the explicit barrier group-commits the event."""
+        with self._thread_lock:
             current = self._current.get(receipt.receipt_requirement_id)
             if current is not None and current.instance_id == receipt.instance_id:
                 return current
@@ -188,12 +272,7 @@ class ComponentBindingStore:
     def revoke_slot(self, slot: str, *, reason: str = "lease lost") -> bool:
         """Append a revocation and remove a current instance fail-closed."""
         del reason  # reason belongs to lifecycle status; binding state is typed.
-        with (
-            self._thread_lock,
-            ExclusiveLease(
-                self.lease_path, ttl_s=60, owner_note="component-instance-binding-writer"
-            ),
-        ):
+        with self._thread_lock:
             current = self._current.get(slot)
             if current is None:
                 return False

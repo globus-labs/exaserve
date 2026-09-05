@@ -51,6 +51,42 @@ func TestDurationHistogramSnapshot(t *testing.T) {
 	}
 }
 
+func TestDefaultHistogramCoversTwoHoursWithDenseRelativeBuckets(t *testing.T) {
+	if len(defaultHistogramBounds) < 100 || defaultHistogramBounds[len(defaultHistogramBounds)-1] != 7200*time.Second {
+		t.Fatalf("unexpected histogram coverage: count=%d last=%s", len(defaultHistogramBounds), defaultHistogramBounds[len(defaultHistogramBounds)-1])
+	}
+	for index := 1; index < len(defaultHistogramBounds); index++ {
+		ratio := float64(defaultHistogramBounds[index]) / float64(defaultHistogramBounds[index-1])
+		if ratio > 1.021 {
+			t.Fatalf("histogram gap %d is too wide: %.6f", index, ratio)
+		}
+	}
+}
+
+func TestOverflowPercentileUsesConservativeFiniteBoundary(t *testing.T) {
+	snapshot := histogramSnapshot{
+		BucketUpperBoundsS: []float64{60, 7200, -1},
+		Counts:             []uint64{98, 0, 2},
+		Count:              100,
+		SumS:               6100,
+	}
+	if observed := PercentileFromHistogram(&snapshot, 0.99); observed != 7200 {
+		t.Fatalf("overflow p99 must use finite lower bound, got %f", observed)
+	}
+}
+
+func TestHistogramPercentileUsesCeilingNearestRank(t *testing.T) {
+	snapshot := histogramSnapshot{
+		BucketUpperBoundsS: []float64{1, 2, -1},
+		Counts:             []uint64{1, 1, 1},
+		Count:              3,
+		SumS:               6,
+	}
+	if observed := PercentileFromHistogram(&snapshot, 0.50); observed != 2 {
+		t.Fatalf("three-sample p50 must select rank two, got %f", observed)
+	}
+}
+
 func TestNewHTTPClientHonorsMaxConnsPerHost(t *testing.T) {
 	var active atomic.Int64
 	var maxSeen atomic.Int64

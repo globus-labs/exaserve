@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -13,7 +16,7 @@ from eval.lib.manifest import (
     TraceGeneratorConfig,
     load_eval_manifest,
 )
-from eval.lib.replay_engine import replay_from_manifest
+from eval.lib.replay_engine import _verify_local_replay_filesystem, replay_from_manifest
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import (
     SCHEMA_VERSION,
@@ -108,6 +111,43 @@ def test_eval_manifest_round_trips_one_exact_deployment_plan(tmp_path):
     assert loaded.job_replay_client_config.num_go_workers == 4
 
 
+def test_capsule_manifest_validation_uses_only_local_plan_copies(tmp_path, monkeypatch):
+    manifest, _run_plan = _manifest(tmp_path)
+    path = tmp_path / "runtime.yaml"
+    manifest.save_yaml(str(path))
+    local = tmp_path / "capsule" / "run"
+    local.mkdir(parents=True)
+    local_deployment = local / "deployment.plan.json"
+    local_run = local / "run.plan.json"
+    local_deployment.write_bytes(Path(manifest.deployment_plan_path).read_bytes())
+    local_run.write_bytes(Path(manifest.run_plan_path).read_bytes())
+
+    import eval.lib.manifest as manifest_module
+
+    real_load_deployment = manifest_module.load_deployment_plan
+    real_load_run = manifest_module.load_run_plan
+    opened = []
+    monkeypatch.setattr(
+        manifest_module,
+        "load_deployment_plan",
+        lambda selected: opened.append(os.fspath(selected)) or real_load_deployment(selected),
+    )
+    monkeypatch.setattr(
+        manifest_module,
+        "load_run_plan",
+        lambda selected: opened.append(os.fspath(selected)) or real_load_run(selected),
+    )
+    loaded = load_eval_manifest(
+        str(path),
+        verify_trace_artifact=False,
+        deployment_plan_path_override=str(local_deployment),
+        run_plan_path_override=str(local_run),
+    )
+    assert opened == [str(local_run), str(local_deployment)]
+    assert loaded.run_plan.run_semantic_hash == manifest.run_semantic_hash
+    assert loaded.run_plan_path == manifest.run_plan_path
+
+
 def test_eval_manifest_rejects_duplicate_yaml_keys(tmp_path):
     manifest, _run_plan = _manifest(tmp_path)
     path = tmp_path / "runtime.yaml"
@@ -164,17 +204,200 @@ def test_eval_manifest_is_create_once_and_loader_rejects_symlinks(tmp_path):
         ({"base_urls_override": "http://node0:9999"}, "canonical port"),
     ],
 )
-def test_replay_rejects_runtime_drift_before_mpi_init(tmp_path, monkeypatch, kwargs, message):
+def test_replay_initializes_mpi_before_root_validates_runtime_drift(
+    tmp_path, monkeypatch, kwargs, message
+):
     manifest, _run_plan = _manifest(tmp_path)
     path = tmp_path / "runtime.yaml"
     manifest.save_yaml(str(path))
 
-    def forbidden_mpi():
-        raise AssertionError("MPI initialized before immutable replay validation")
+    initialized = False
 
-    monkeypatch.setattr("eval.lib.replay_engine._init_mpi", forbidden_mpi)
+    def record_mpi():
+        nonlocal initialized
+        initialized = True
+        return None, 0, 1
+
+    monkeypatch.setattr("eval.lib.replay_engine._init_mpi", record_mpi)
     with pytest.raises(ValueError, match=message):
         asyncio.run(replay_from_manifest(str(path), **kwargs))
+    assert initialized
+
+
+def test_replay_rejects_mpi_world_that_disagrees_with_canonical_client_nodes(tmp_path, monkeypatch):
+    manifest, _run_plan = _manifest(tmp_path)
+    path = tmp_path / "runtime.yaml"
+    manifest.save_yaml(str(path))
+
+    class WrongWorld:
+        def Get_size(self):
+            return 2
+
+        def bcast(self, value, *, root):
+            assert root == 0
+            return value
+
+    monkeypatch.setattr("eval.lib.replay_engine._init_mpi", lambda: (WrongWorld(), 0, 2))
+    with pytest.raises(RuntimeError, match="world size 2.*client.num_nodes 1"):
+        asyncio.run(
+            replay_from_manifest(
+                str(path),
+                base_urls_override="http://node0:8000",
+            )
+        )
+
+
+def test_replay_rank_zero_cannot_read_trace_from_a_non_head_node(tmp_path, monkeypatch):
+    for name, value in {
+        "EXASERVE_LOCAL_RUNTIME_ROOT": str(tmp_path / "runtime"),
+        "EXASERVE_LOCAL_STATE_ROOT": str(tmp_path / "state"),
+        "EXASERVE_LOCAL_PLAN_PATH": str(tmp_path / "runtime/run/deployment.plan.json"),
+        "EXASERVE_SITE_PROFILE_PATH": str(tmp_path / "runtime/run/site.profile.json"),
+        "EXASERVE_ALLOCATION_BINDING_PATH": str(tmp_path / "runtime/run/allocation_binding.json"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    plan = SimpleNamespace(
+        site_profile_id="site",
+        site_profile_hash="a" * 64,
+        deployment_plan_hash="b" * 64,
+    )
+    profile = SimpleNamespace(site_id="site", site_profile_hash="a" * 64)
+    binding = SimpleNamespace(
+        deployment_plan_hash="b" * 64,
+        site_profile_hash="a" * 64,
+        node_for=lambda rank: "allocation-head" if rank == 0 else "worker",
+    )
+    monkeypatch.setattr("exaserve.plan.io.load_deployment_plan", lambda _path: plan)
+    monkeypatch.setattr("exaserve.plan.io.load_site_profile", lambda _path: profile)
+    monkeypatch.setattr("exaserve.plan.io.load_allocation_binding", lambda _path: binding)
+    monkeypatch.setattr("socket.gethostname", lambda: "wrong-worker")
+    with pytest.raises(RuntimeError, match="rank 0.*AllocationBinding node"):
+        _verify_local_replay_filesystem(rank=0)
+
+
+def test_non_root_replay_never_opens_shared_manifest_trace_or_result(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    (runtime / "python").mkdir(parents=True)
+    (runtime / "bin").mkdir()
+    go_binary = runtime / "bin" / "go_dispatch"
+    go_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    go_binary.chmod(0o700)
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setenv("EXASERVE_LOCAL_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("EXASERVE_LOCAL_GO_DISPATCH", str(go_binary))
+    monkeypatch.setenv("EXASERVE_LOCAL_STATE_ROOT", str(state))
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", __import__("sys").executable)
+
+    replay = ReplayClientConfig(
+        config_path="/shared/runtime.yaml",
+        dest="proxy",
+        num_nodes=2,
+    )
+    context = {
+        "schema_version": 1,
+        "replay": replay,
+        "topology": "local",
+        "base_urls": ["http://head:8000"],
+        "cluster_nodes": [],
+        "saturation": dict(replay.saturation),
+    }
+
+    class Immediate:
+        def test(self):
+            return True, None
+
+    class WorkerComm:
+        def __init__(self):
+            self.broadcasts = [
+                {"context": context, "error": None},
+                {"ok": True, "error": None, "total": 0, "last_timestamp": 0.0},
+                1.0,
+            ]
+
+        def Get_size(self):
+            return 2
+
+        def Get_rank(self):
+            return 1
+
+        def bcast(self, value, *, root):
+            assert value is None and root == 0
+            return self.broadcasts.pop(0)
+
+        def scatter(self, value, *, root):
+            assert value is None and root == 0
+            return None
+
+        def Barrier(self):
+            return None
+
+        def isend(self, _value, *, dest, tag):
+            assert dest == 0 and tag > 0
+            return Immediate()
+
+    comm = WorkerComm()
+    monkeypatch.setattr("eval.lib.replay_engine._init_mpi", lambda: (comm, 1, 2))
+    monkeypatch.setattr(
+        "eval.lib.replay_engine._verify_local_replay_filesystem", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "eval.lib.replay_engine.load_eval_manifest",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("non-root loaded the shared manifest")
+        ),
+    )
+    monkeypatch.setattr("eval.lib.replay_engine._spawn_go_procs", lambda *_a: ([], [], {}))
+    monkeypatch.setattr("eval.lib.replay_engine._send_run_t0_and_wait", lambda *_a: ([], 0.0, 1.0))
+    monkeypatch.setattr(
+        "eval.lib.replay_engine._reduce_dispatch_end_via_mpi",
+        lambda *_a, **_k: None,
+    )
+
+    import builtins
+
+    real_open = builtins.open
+    real_os_open = os.open
+    real_stat = os.stat
+    real_lstat = os.lstat
+    real_listdir = os.listdir
+    real_scandir = os.scandir
+    real_access = os.access
+    shared_ops = []
+
+    def shared_path(path):
+        if not isinstance(path, (str, os.PathLike)):
+            return False
+        value = os.fspath(path)
+        return value in {"/shared", "/home", "/lus/flare"} or value.startswith(
+            ("/shared/", "/home/", "/lus/flare/")
+        )
+
+    def guard(operation, function):
+        def guarded(path, *args, **kwargs):
+            if shared_path(path):
+                shared_ops.append((operation, os.fspath(path)))
+                raise AssertionError(f"non-root {operation} touched shared path {path}")
+            return function(path, *args, **kwargs)
+
+        return guarded
+
+    def guarded_open(path, *args, **kwargs):
+        if shared_path(path):
+            shared_ops.append(("open", os.fspath(path)))
+            raise AssertionError(f"non-root opened shared path {path}")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(os, "open", guard("os.open", real_os_open))
+    monkeypatch.setattr(os, "stat", guard("stat", real_stat))
+    monkeypatch.setattr(os, "lstat", guard("lstat", real_lstat))
+    monkeypatch.setattr(os, "listdir", guard("listdir", real_listdir))
+    monkeypatch.setattr(os, "scandir", guard("scandir", real_scandir))
+    monkeypatch.setattr(os, "access", guard("access", real_access))
+    asyncio.run(replay_from_manifest("/shared/runtime.yaml", base_urls_override="ignored"))
+    assert shared_ops == []
+    assert comm.broadcasts == []
 
 
 def _rewrite_manifest(path, change):
@@ -200,6 +423,7 @@ def _rewrite_manifest(path, change):
         ("go_concurrency", -1, "non-negative integer"),
         ("early_stop", 1.1, "between 0.0 and 1.0"),
         ("dest", "somewhere", "proxy.*direct"),
+        ("generation_mode", "/home/user/mode", "deterministic or natural"),
         ("direct_dispatch", "ambient", "local, mesh, or paired"),
         ("request_timeout_s", 0, "positive"),
         ("direct_target_max_workers", 0, "positive integer"),

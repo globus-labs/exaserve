@@ -17,6 +17,7 @@ from eval.lib.run_executor import (
     _replay_process_timeout_s,
     _run_command_with_tee,
     _run_replay_client,
+    _validate_replay_hostfile_binding,
     _validate_replay_results,
 )
 from eval.lib.replay_engine import (
@@ -24,19 +25,21 @@ from eval.lib.replay_engine import (
     TraceRequest,
     _apply_direct_topology,
     _decode_gather_payload,
+    _distribute_trace_requests,
     _encode_gather_payload,
-    _gather_results_via_shards,
+    _gather_raw_results_via_mpi,
+    _init_mpi,
     _load_trace_requests,
-    _load_trace_shard_manifest,
+    _merge_go_process_summaries,
     _next_result_path,
     _port_from_manifest,
     _read_go_results,
+    _reduce_summary_via_mpi,
+    _reduce_dispatch_end_via_mpi,
     _send_run_t0_and_wait,
-    _stage_trace_shards,
     _stop_replay_process,
     _validate_base_urls,
 )
-from exaserve.state.atomic import atomic_create_bytes
 
 
 def _run_plan(
@@ -68,14 +71,81 @@ def _multi_node_replay_plan(tmp_path):
             shard_timeout_s=1.0,
         ),
         workload=SimpleNamespace(duration=0.0),
-        scheduler=SimpleNamespace(type="pbs"),
+        scheduler=SimpleNamespace(type="pbs", nodes=2),
         bundle=SimpleNamespace(logs_dir=str(tmp_path)),
         repo_root=str(tmp_path),
         runtime_manifest_path=str(tmp_path / "runtime.json"),
+        deployment_plan_hash="1" * 64,
+        semantic_plan=SimpleNamespace(
+            deployment=SimpleNamespace(deployment_id="deployment", site_profile_hash="2" * 64)
+        ),
     )
 
 
+def _set_local_replay_env(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    (runtime / "python").mkdir(parents=True)
+    (runtime / "bin").mkdir()
+    go_binary = runtime / "bin" / "go_dispatch"
+    go_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    go_binary.chmod(0o700)
+    run_root = runtime / "run"
+    run_root.mkdir()
+    eval_manifest = run_root / "eval_manifest.yaml"
+    run_plan = run_root / "run.plan.json"
+    deployment_plan = run_root / "deployment.plan.json"
+    for path in (eval_manifest, run_plan, deployment_plan):
+        path.write_text("{}\n", encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setenv("EXASERVE_LOCAL_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("EXASERVE_LOCAL_GO_DISPATCH", str(go_binary))
+    monkeypatch.setenv("EXASERVE_LOCAL_STATE_ROOT", str(state))
+    monkeypatch.setenv("EXASERVE_LOCAL_EVAL_MANIFEST", str(eval_manifest))
+    monkeypatch.setenv("EXASERVE_LOCAL_RUN_PLAN_PATH", str(run_plan))
+    monkeypatch.setenv("EXASERVE_LOCAL_PLAN_PATH", str(deployment_plan))
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", sys.executable)
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SHA256", "1" * 64)
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH", "2" * 64)
+    monkeypatch.setenv("EXASERVE_COMPAT_SOURCES_NODE_PROFILE", "3" * 64)
+    monkeypatch.setenv("EXASERVE_COMPAT_SOURCES_NODE_MANIFEST", "4" * 64)
+    monkeypatch.setattr(
+        "eval.lib.run_executor._closed_replay_worker_environment",
+        lambda _plan, environment: dict(
+            environment,
+            PYTHONPATH=str(runtime / "python"),
+            PYTHONNOUSERSITE="1",
+            HOME=str(state / "home"),
+            TMPDIR=str(state / "tmp"),
+            XDG_CACHE_HOME=str(state / "cache"),
+            HF_HOME=str(state / "cache" / "huggingface"),
+        ),
+    )
+    monkeypatch.setattr(
+        "eval.lib.run_executor._validate_replay_hostfile_binding",
+        lambda *_a, **_k: None,
+    )
+
+
+def test_replay_hostfile_rank_order_is_bound_to_allocation(monkeypatch, tmp_path):
+    hostfile = tmp_path / "hosts"
+    hostfile.write_text("worker\nhead\n", encoding="utf-8")
+    binding = SimpleNamespace(
+        deployment_plan_hash="1" * 64,
+        site_profile_hash="2" * 64,
+        node_for=lambda rank: ("head", "worker")[rank],
+    )
+    monkeypatch.setattr("exaserve.plan.io.load_allocation_binding", lambda _path: binding)
+    with pytest.raises(RuntimeError, match="rank order disagrees"):
+        _validate_replay_hostfile_binding(
+            str(hostfile),
+            binding_path=str(tmp_path / "allocation_binding.json"),
+            run_plan=_multi_node_replay_plan(tmp_path),
+        )
+
+
 def test_replay_hostfile_cleanup_failure_is_fatal_after_success(tmp_path, monkeypatch):
+    _set_local_replay_env(tmp_path, monkeypatch)
     hostfile = tmp_path / "hosts"
     hostfile.write_text("node1\nnode2\n", encoding="utf-8")
     monkeypatch.setattr("eval.lib.run_executor._build_hostfile", lambda _count: str(hostfile))
@@ -90,6 +160,7 @@ def test_replay_hostfile_cleanup_failure_is_fatal_after_success(tmp_path, monkey
 
 
 def test_replay_hostfile_cleanup_preserves_the_primary_failure(tmp_path, monkeypatch):
+    _set_local_replay_env(tmp_path, monkeypatch)
     hostfile = tmp_path / "hosts"
     hostfile.write_text("node1\nnode2\n", encoding="utf-8")
     monkeypatch.setattr("eval.lib.run_executor._build_hostfile", lambda _count: str(hostfile))
@@ -106,6 +177,124 @@ def test_replay_hostfile_cleanup_preserves_the_primary_failure(tmp_path, monkeyp
     with pytest.raises(ValueError, match="replay failed") as caught:
         _run_replay_client(_multi_node_replay_plan(tmp_path), ["http://service"])
     assert any("hostfile cleanup also failed" in note for note in caught.value.__notes__)
+
+
+def test_multi_rank_replay_recovers_local_capsule_from_head_receipt(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    (runtime / "python").mkdir(parents=True)
+    (runtime / "bin").mkdir()
+    (runtime / "run").mkdir()
+    go_binary = runtime / "bin" / "go_dispatch"
+    go_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    go_binary.chmod(0o700)
+    state = tmp_path / "state"
+    state.mkdir()
+    for name in (
+        "EXASERVE_LOCAL_RUNTIME_ROOT",
+        "EXASERVE_LOCAL_GO_DISPATCH",
+        "EXASERVE_LOCAL_STATE_ROOT",
+        "EXASERVE_LOCAL_EVAL_MANIFEST",
+        "EXASERVE_LOCAL_RUN_PLAN_PATH",
+        "EXASERVE_LOCAL_PLAN_PATH",
+        "EXASERVE_QUALIFIED_PYTHON",
+        "EXASERVE_QUALIFIED_PYTHON_SHA256",
+        "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH",
+        "EXASERVE_COMPAT_SOURCES_NODE_PROFILE",
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    capsule_env = {
+        "EXASERVE_LOCAL_RUNTIME_ROOT": str(runtime),
+        "EXASERVE_LOCAL_GO_DISPATCH": str(go_binary),
+        "EXASERVE_LOCAL_STATE_ROOT": str(state),
+        "EXASERVE_LOCAL_EVAL_MANIFEST": str(runtime / "run" / "eval_manifest.yaml"),
+        "EXASERVE_LOCAL_RUN_PLAN_PATH": str(runtime / "run" / "run.plan.json"),
+        "EXASERVE_LOCAL_PLAN_PATH": str(runtime / "run" / "deployment.plan.json"),
+        "EXASERVE_QUALIFIED_PYTHON": sys.executable,
+        "EXASERVE_QUALIFIED_PYTHON_SHA256": "1" * 64,
+        "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH": "2" * 64,
+        "EXASERVE_COMPAT_SOURCES_NODE_PROFILE": "3" * 64,
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST": "4" * 64,
+    }
+    calls = []
+    monkeypatch.setattr(
+        "eval.lib.run_executor._validated_replay_capsule_environment",
+        lambda *args: calls.append(args) or tuple(capsule_env.items()),
+    )
+    monkeypatch.setattr(
+        "eval.lib.run_executor._closed_replay_worker_environment",
+        lambda _plan, environment: dict(
+            environment,
+            PYTHONPATH=str(runtime / "python"),
+            PYTHONNOUSERSITE="1",
+            HOME=str(state / "home"),
+            TMPDIR=str(state / "tmp"),
+            XDG_CACHE_HOME=str(state / "cache"),
+            HF_HOME=str(state / "cache" / "huggingface"),
+        ),
+    )
+    hostfile = tmp_path / "hosts"
+    hostfile.write_text("node1\nnode2\n", encoding="utf-8")
+    monkeypatch.setattr("eval.lib.run_executor._build_hostfile", lambda _count: str(hostfile))
+    monkeypatch.setattr(
+        "eval.lib.run_executor._validate_replay_hostfile_binding",
+        lambda *_a, **_k: None,
+    )
+    launched = {}
+
+    def capture(command, **kwargs):
+        launched.update(command=command, **kwargs)
+        return 0
+
+    monkeypatch.setattr("eval.lib.run_executor._run_command_with_tee", capture)
+    plan = _multi_node_replay_plan(tmp_path)
+    assert (
+        _run_replay_client(
+            plan,
+            ["http://service"],
+            runtime_capsule_manifest_path="/shared/source_staging_manifest.json",
+            runtime_generation=7,
+        )
+        == 0
+    )
+    assert len(calls) == 1
+    assert launched["cwd"] == str(runtime / "python")
+    assert launched["env"]["PYTHONPATH"] == str(runtime / "python")
+    assert launched["env"]["PYTHONNOUSERSITE"] == "1"
+    assert os.path.realpath(sys.executable) in launched["command"]
+    config_index = launched["command"].index("--config") + 1
+    assert launched["command"][config_index] == capsule_env["EXASERVE_LOCAL_EVAL_MANIFEST"]
+    assert plan.runtime_manifest_path not in launched["command"]
+    assert "--genvnone" in launched["command"]
+    assert "--envnone" in launched["command"]
+    assert "--shared" in launched["command"]
+    assert launched["command"][launched["command"].index("--wdir") + 1] == str(runtime / "python")
+    names = launched["command"][launched["command"].index("--envlist") + 1].split(",")
+    assert set(capsule_env) | {"PYTHONPATH", "PYTHONNOUSERSITE"} <= set(names)
+    shared_values = {
+        name: launched["env"][name]
+        for name in names
+        if launched["env"][name].startswith(("/home/", "/lus/flare/"))
+    }
+    assert not shared_values, shared_values
+
+
+def test_multi_rank_slurm_replay_exports_only_the_closed_environment(tmp_path, monkeypatch):
+    _set_local_replay_env(tmp_path, monkeypatch)
+    hostfile = tmp_path / "hosts"
+    hostfile.write_text("node1\nnode2\n", encoding="utf-8")
+    monkeypatch.setattr("eval.lib.run_executor._build_hostfile", lambda _count: str(hostfile))
+    launched = {}
+    monkeypatch.setattr(
+        "eval.lib.run_executor._run_command_with_tee",
+        lambda command, **kwargs: launched.update(command=command, **kwargs) or 0,
+    )
+    plan = _multi_node_replay_plan(tmp_path)
+    plan.scheduler.type = "slurm"
+    assert _run_replay_client(plan, ["http://service"]) == 0
+    export = next(item for item in launched["command"] if item.startswith("--export="))
+    assert export.startswith("--export=NONE,")
+    assert "ALL" not in export.split("=", 1)[1].split(",")
 
 
 def test_replay_outer_deadline_comes_only_from_the_plan(monkeypatch):
@@ -267,6 +456,9 @@ def test_go_dispatch_capture_cannot_deadlock_on_more_than_a_pipe_buffer(tmp_path
     result_path.write_text(
         '{"__type__":"summary","requests_completed":0,"requests_scheduled":0,'
         '"errors":0,"p50_s":0.0,"p99_s":0.0,"total_input_tokens":0,'
+        '"latency_quantile_method":"mergeable_histogram_estimate_2pct_through_7200s",'
+        '"latency_histogram":{"bucket_upper_bounds_s":[0.1,1.0,-1.0],'
+        '"counts":[0,0,0],"count":0,"sum_s":0.0},'
         '"total_output_tokens":0,"last_fire_time":0.0,"last_request_start_at":0.0,'
         '"last_body_done_at":0.0,"adjusted_run_t0":1.0}\n',
         encoding="utf-8",
@@ -292,6 +484,13 @@ def _go_summary_row() -> dict:
         "errors": 0,
         "p50_s": 0.0,
         "p99_s": 0.0,
+        "latency_quantile_method": "mergeable_histogram_estimate_2pct_through_7200s",
+        "latency_histogram": {
+            "bucket_upper_bounds_s": [0.1, 1.0, -1.0],
+            "counts": [0, 0, 0],
+            "count": 0,
+            "sum_s": 0.0,
+        },
         "total_input_tokens": 0,
         "total_output_tokens": 0,
         "last_fire_time": 0.0,
@@ -414,7 +613,7 @@ def test_replay_stop_reaps_descendant_after_leader_exits(tmp_path):
         assert Path(f"/proc/{child_pid}/stat").read_text().split()[2] == "Z"
 
 
-def test_result_shard_json_round_trip_preserves_typed_records():
+def test_result_mpi_payload_round_trip_preserves_typed_records():
     request = TraceRequest(1.5, "model", "prompt", 2, 3, 1, "request-1", "chat")
     record = (request, 0.5, True, "", 2.0, 2, 3, 0.1, 1.6, 0.01, 0.02, 0.03, 3)
 
@@ -425,7 +624,7 @@ def test_result_shard_json_round_trip_preserves_typed_records():
     assert decoded[0][1:] == record[1:]
 
 
-def test_result_shard_decoder_rejects_pickle_and_unknown_shapes():
+def test_result_mpi_payload_decoder_rejects_pickle_and_unknown_shapes():
     import pickle
 
     with pytest.raises((UnicodeError, ValueError)):
@@ -434,60 +633,274 @@ def test_result_shard_decoder_rejects_pickle_and_unknown_shapes():
         _decode_gather_payload(b'{"schema_version":1,"kind":"summary","summary":{},"extra":true}')
 
 
-def test_multi_rank_gather_emits_schema_accepted_complete_evidence(tmp_path):
-    shard_dir = tmp_path / "_shards" / ("a" * 32)
-    shard_dir.mkdir(parents=True)
-    summary = _go_summary_row()
-    atomic_create_bytes(shard_dir / "run0_rank1.json", _encode_gather_payload(summary))
+class _ImmediateRequest:
+    def __init__(self, value=None):
+        self.value = value
 
-    gathered = _gather_results_via_shards(
-        object(),
-        summary,
+    def test(self):
+        return True, self.value
+
+
+class _NeverRequest:
+    def test(self):
+        return False, None
+
+    def cancel(self):
+        return None
+
+
+class _SendComm:
+    def __init__(self):
+        self.messages = []
+
+    def isend(self, message, *, dest, tag):
+        assert (dest, tag) == (0, 27181)
+        self.messages.append(message)
+        return _ImmediateRequest()
+
+
+class _ReceiveComm:
+    def __init__(self, messages):
+        self.messages = {rank: list(items) for rank, items in messages.items()}
+
+    def irecv(self, *, source, tag):
+        assert tag == 27181
+        if not self.messages[source]:
+            return _NeverRequest()
+        return _ImmediateRequest(self.messages[source].pop(0))
+
+
+class _SummaryComm:
+    def ireduce(self, value, *, op, root):
+        from mpi4py import MPI
+
+        assert root == 0
+        return _ImmediateRequest(value * 2 if op == MPI.SUM else value)
+
+    def igather(self, value, *, root):
+        assert root == 0
+        peer = {
+            "evidence": dict(value["evidence"], rank=1),
+            "latency_histogram": dict(value["latency_histogram"]),
+        }
+        return _ImmediateRequest([value, peer])
+
+
+class _MaxComm:
+    def ireduce(self, _value, *, op, root):
+        from mpi4py import MPI
+
+        assert op == MPI.MAX and root == 0
+        return _ImmediateRequest(9.0)
+
+
+def _raw_record(request_id="request-1"):
+    request = TraceRequest(1.5, "model", "prompt", 2, 3, 1, request_id, "chat")
+    return (request, 0.5, True, "", 2.0, 2, 3, 0.1, 1.6, 0.01, 0.02, 0.03, 3)
+
+
+def test_multi_rank_mpi_transfer_emits_complete_evidence_without_files(tmp_path):
+    remote_comm = _SendComm()
+    remote_record = _raw_record("remote")
+    assert (
+        _gather_raw_results_via_mpi(
+            remote_comm,
+            [remote_record],
+            run_index=0,
+            rank=1,
+            mpi_size=2,
+            is_root=False,
+            timeout_s=0.1,
+        )
+        is None
+    )
+    forbidden = tmp_path / "must-not-exist"
+    gathered = _gather_raw_results_via_mpi(
+        _ReceiveComm({1: remote_comm.messages}),
+        [_raw_record("root")],
         run_index=0,
-        shard_dir=str(shard_dir),
         rank=0,
         mpi_size=2,
         is_root=True,
         timeout_s=0.1,
     )
 
-    assert gathered == [summary, summary]
-    assert "invalid_shards" not in _LAST_GATHER_META
+    assert [[row[0].req_id for row in rows] for rows in gathered] == [["root"], ["remote"]]
+    assert not forbidden.exists()
     assert _LAST_GATHER_META["complete"] is True
+    assert {item["transport"] for item in _LAST_GATHER_META["shards"]} == {"mpi_chunked"}
     from eval.lib.run_executor import _valid_gather_evidence
 
     assert _valid_gather_evidence(_LAST_GATHER_META, 2)
 
 
-def test_gather_attempt_directory_does_not_consume_a_stale_prior_attempt(tmp_path):
-    summary = _go_summary_row()
-    stale_dir = tmp_path / "_shards" / ("a" * 32)
-    stale_dir.mkdir(parents=True)
-    atomic_create_bytes(stale_dir / "run0_rank1.json", _encode_gather_payload(summary))
-    current_dir = tmp_path / "_shards" / ("b" * 32)
-
-    gathered = _gather_results_via_shards(
-        object(),
-        summary,
-        run_index=0,
-        shard_dir=str(current_dir),
-        rank=0,
-        mpi_size=2,
-        is_root=True,
-        timeout_s=0.01,
-    )
-
-    assert gathered == [summary]
+def test_multi_rank_mpi_transfer_timeout_fails_closed():
+    with pytest.raises(RuntimeError, match=r"timed out.*missing.*\[1\]"):
+        _gather_raw_results_via_mpi(
+            _ReceiveComm({1: []}),
+            [_raw_record("root")],
+            run_index=0,
+            rank=0,
+            mpi_size=2,
+            is_root=True,
+            timeout_s=0.01,
+        )
     assert _LAST_GATHER_META["complete"] is False
     assert _LAST_GATHER_META["missing_ranks"] == [1]
 
 
-def test_trace_staging_failure_is_not_a_whole_trace_fallback(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        _stage_trace_shards(str(tmp_path / "missing.jsonl"), 2, "0" * 64)
+def _install_fake_mpi(monkeypatch):
+    mpi = SimpleNamespace(SUM=object(), MAX=object())
+    monkeypatch.setitem(sys.modules, "mpi4py", SimpleNamespace(MPI=mpi))
+    return mpi
 
 
-def test_trace_shards_are_identity_bound_and_corruption_fails_closed(tmp_path):
+def test_multi_rank_summary_uses_bounded_mpi_reductions(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    summary.update(
+        requests_completed=2,
+        requests_scheduled=2,
+        total_input_tokens=3,
+        total_output_tokens=4,
+        p50_s=0.2,
+        p99_s=0.4,
+        latency_histogram={
+            "bucket_upper_bounds_s": [0.1, 1.0, -1.0],
+            "counts": [0, 2, 0],
+            "count": 2,
+            "sum_s": 0.6,
+        },
+    )
+    reduced = _reduce_summary_via_mpi(
+        _SummaryComm(),
+        summary,
+        run_index=0,
+        rank=0,
+        mpi_size=2,
+        is_root=True,
+        timeout_s=0.1,
+    )
+    assert reduced["requests_completed"] == 4
+    assert reduced["total_output_tokens"] == 8
+    assert reduced["p99_s"] == pytest.approx(1.0)
+    assert _LAST_GATHER_META["complete"] is True
+    assert {item["transport"] for item in _LAST_GATHER_META["shards"]} == {"mpi_reduce"}
+
+
+def test_same_rank_go_process_summaries_merge_histograms_not_quantile_maxima():
+    left = _go_summary_row()
+    left.update(
+        requests_completed=1,
+        requests_scheduled=1,
+        p50_s=0.1,
+        p99_s=0.1,
+        latency_histogram={
+            "bucket_upper_bounds_s": [0.1, 1.0, -1.0],
+            "counts": [1, 0, 0],
+            "count": 1,
+            "sum_s": 0.1,
+        },
+    )
+    right = _go_summary_row()
+    right.update(
+        requests_completed=1,
+        requests_scheduled=1,
+        p50_s=0.9,
+        p99_s=0.9,
+        latency_histogram={
+            "bucket_upper_bounds_s": [0.1, 1.0, -1.0],
+            "counts": [0, 1, 0],
+            "count": 1,
+            "sum_s": 0.9,
+        },
+    )
+    merged = _merge_go_process_summaries([left, right])
+    assert merged["p50_s"] == pytest.approx(0.1)
+    assert merged["p99_s"] == pytest.approx(1.0)
+    assert merged["latency_histogram"]["count"] == 2
+    assert merged["latency_quantile_method"] == "mergeable_histogram_estimate_2pct_through_7200s"
+
+
+def test_dispatch_end_uses_the_latest_rank_not_rank_zero(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    assert (
+        _reduce_dispatch_end_via_mpi(_MaxComm(), 2.0, mpi_size=2, is_root=True, timeout_s=0.1)
+        == 9.0
+    )
+
+
+def test_mpi_import_failure_cannot_create_independent_roots(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def reject_mpi(name, *args, **kwargs):
+        if name == "mpi4py":
+            raise ImportError("missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setenv("PMI_SIZE", "2")
+    monkeypatch.setattr(builtins, "__import__", reject_mpi)
+    with pytest.raises(RuntimeError, match="requires mpi4py"):
+        _init_mpi()
+
+
+def test_mpi_import_failure_rejects_launcher_rank_without_size_hint(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def reject_mpi(name, *args, **kwargs):
+        if name == "mpi4py":
+            raise ImportError("missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delenv("PMI_SIZE", raising=False)
+    monkeypatch.setenv("PALS_RANKID", "0")
+    monkeypatch.setattr(builtins, "__import__", reject_mpi)
+    with pytest.raises(RuntimeError, match="requires mpi4py"):
+        _init_mpi()
+
+
+class _RootScatterComm:
+    def __init__(self):
+        self.rank_parts = []
+        self.status = None
+
+    def scatter(self, values, *, root):
+        assert root == 0 and isinstance(values, list) and len(values) == 2
+        if values[0] is not None:
+            self.rank_parts.append(values)
+        return values[0]
+
+    def bcast(self, value, *, root):
+        assert root == 0
+        self.status = value
+        return value
+
+    def Get_size(self):
+        return 2
+
+
+class _WorkerScatterComm:
+    def __init__(self, parts, status):
+        self.parts = list(parts)
+        self.status = status
+
+    def scatter(self, value, *, root):
+        assert value is None and root == 0
+        return self.parts.pop(0)
+
+    def bcast(self, value, *, root):
+        assert value is None and root == 0
+        return self.status
+
+    def Get_size(self):
+        return 2
+
+
+def test_root_reads_and_hashes_trace_once_then_scatters_partitions(tmp_path, monkeypatch):
     trace = tmp_path / "trace.jsonl"
     trace.write_text(
         '{"__type__":"metadata"}\n'
@@ -496,13 +909,51 @@ def test_trace_shards_are_identity_bound_and_corruption_fails_closed(tmp_path):
         encoding="utf-8",
     )
     trace_hash = hashlib.sha256(trace.read_bytes()).hexdigest()
-    shard_dir = _stage_trace_shards(str(trace), 2, trace_hash)
-    marker = _load_trace_shard_manifest(shard_dir, trace_hash=trace_hash, mpi_size=2)
-    assert marker["total"] == 2
-    rank0 = Path(shard_dir) / "rank0.jsonl"
-    rank0.write_text("{}\n", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="checksum mismatch"):
-        _load_trace_requests(str(rank0), expected_hash=marker["shards"][0]["sha256"])
+    from exaserve.state import atomic
+
+    real_reader = atomic.regular_file_reader
+    opens = []
+
+    def recording_reader(path, *args, **kwargs):
+        opens.append(os.fspath(path))
+        return real_reader(path, *args, **kwargs)
+
+    monkeypatch.setattr(atomic, "regular_file_reader", recording_reader)
+    comm = _RootScatterComm()
+    requests, total, span = _distribute_trace_requests(
+        comm,
+        rank=0,
+        mpi_size=2,
+        trace_path=str(trace),
+        expected_hash=trace_hash,
+    )
+    assert opens == [str(trace)]
+    assert [item.req_id for item in requests] == [f"{0:032x}"]
+    assert total == 2 and span == 1.0
+    assert [[item.req_id for item in part] for part in comm.rank_parts[0]] == [
+        [f"{0:032x}"],
+        [f"{1:032x}"],
+    ]
+
+
+def test_non_root_trace_distribution_performs_zero_file_opens(monkeypatch):
+    request = TraceRequest(0.0, "m", "p", 1, 1, 1, f"{0:032x}")
+    status = {"ok": True, "error": None, "total": 1, "last_timestamp": 0.0}
+    comm = _WorkerScatterComm([[request], None], status)
+
+    def forbidden_reader(*_args, **_kwargs):
+        raise AssertionError("non-root attempted a file open")
+
+    monkeypatch.setattr("exaserve.state.atomic.regular_file_reader", forbidden_reader)
+    requests, total, span = _distribute_trace_requests(
+        comm,
+        rank=1,
+        mpi_size=2,
+        trace_path=None,
+        expected_hash=None,
+    )
+    assert requests == [request]
+    assert total == 1 and span == 0.0
 
 
 def test_trace_request_loading_rejects_coercion_and_duplicate_json(tmp_path):
@@ -581,7 +1032,7 @@ def _gather_evidence(ranks: int) -> dict:
                 "rank": rank,
                 "size_bytes": 1,
                 "sha256": f"{rank + 1:064x}",
-                "transport": "shared_file" if ranks > 1 else "in_memory",
+                "transport": "mpi_chunked" if ranks > 1 else "in_memory",
             }
             for rank in range(ranks)
         ],

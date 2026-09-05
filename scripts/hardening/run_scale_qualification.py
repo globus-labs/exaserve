@@ -79,7 +79,7 @@ _CANDIDATE_FIELDS = {
     "compatibility_manifest_hash",
 }
 _CODE_FIELDS = {"path", "sha256"}
-_SUPPORT_FIELDS = {"lifecycle", "port_holder"}
+_SUPPORT_FIELDS = {"lifecycle"}
 _GATE_FIELDS = {
     "gate_id",
     "lane",
@@ -557,9 +557,6 @@ def _load_scale_gate(
             "lifecycle_support": _declared_path(
                 root, support["lifecycle"]["path"], "support.lifecycle.path", kind="file"
             ),
-            "port_holder": _declared_path(
-                root, support["port_holder"]["path"], "support.port_holder.path", kind="file"
-            ),
             "scope_approval": approval_path,
         }
     )
@@ -647,7 +644,6 @@ def _launch_scale_scenario(
     ready_timeout_s: float,
     nodes: tuple[str, ...],
     partial_observation_s: float,
-    port_holder_path: Path,
 ) -> dict:
     """Forked from v1's `_launch_scenario`, generalized off two nodes.
 
@@ -655,10 +651,16 @@ def _launch_scale_scenario(
     logic verbatim, minus the `replica_death` branch, which stays in the v1
     four-node PP cell.
     """
-    from exaserve.plan.io import load_deployment_plan
+    from exaserve.plan.io import load_deployment_plan, load_site_profile
     from exaserve.status_api import require_ready_endpoint
 
     plan = load_deployment_plan(str(plan_path))
+    site_profile = load_site_profile(str(site_path))
+    if (
+        site_profile.site_id != plan.site_profile_id
+        or site_profile.site_profile_hash != plan.site_profile_hash
+    ):
+        raise RuntimeError("scale scenario SiteProfile does not match DeploymentPlan")
     run_dir = root / name / "deployment"
     run_dir.mkdir(parents=True)
     stdout_path = root / name / "stdout.log"
@@ -697,8 +699,8 @@ def _launch_scale_scenario(
         remote_holder = lifecycle._RemotePortHolder.start(
             node=nodes[-1],
             port=plan.gateway.backend_port,
-            helper_path=port_holder_path,
             evidence_path=fault_evidence_path,
+            site_profile=site_profile,
         )
         precondition = {
             "kind": "remote_worker_proxy_port_holder",
@@ -1231,7 +1233,6 @@ def main() -> int:
                 f"queue {declared_gate['queue']!r}"
             )
         lifecycle._atomic_json(output / "environment.json", environment)
-        helper = declared_paths["port_holder"]
         manifest = {
             "schema_version": 1,
             "gate_id": gate_id,
@@ -1267,8 +1268,6 @@ def main() -> int:
             "harness_sha256": _sha256_file(Path(__file__).resolve()),
             "lifecycle_support": str(declared_paths["lifecycle_support"]),
             "lifecycle_support_sha256": _sha256_file(declared_paths["lifecycle_support"]),
-            "port_holder_helper": str(helper),
-            "port_holder_helper_sha256": _sha256_file(helper),
             "scope_approval": str(declared_paths["scope_approval"]),
             "scope_approval_sha256": _sha256_file(declared_paths["scope_approval"]),
             "expected_observations": list(declared_gate["expected_observations"]),
@@ -1289,7 +1288,6 @@ def main() -> int:
                     ready_timeout_s=ready_timeout,
                     nodes=nodes,
                     partial_observation_s=partial_observation,
-                    port_holder_path=helper,
                 )
             )
         result = {

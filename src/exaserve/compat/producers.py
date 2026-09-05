@@ -28,9 +28,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import stat
+import threading
 import time
+from functools import lru_cache
 from typing import Any, Mapping, Optional, Sequence
 
 from .receipt_v2 import (
@@ -58,9 +61,62 @@ _ENV_EXCLUDE_PREFIXES = (
     "_",
 )
 
+_FILE_HASH_CACHE: dict[tuple[str, int, int, int, int, int], str] = {}
+_FILE_HASH_LOCK = threading.Lock()
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _preverified_qualified_python_hash(path: str) -> str | None:
+    """Reuse node-aggregated Python evidence only on the qualified RO image."""
+
+    from ..plan.runtime_environment import (
+        LOCAL_RUNTIME_ROOT_ENV,
+        QUALIFIED_PYTHON_ENV,
+        QUALIFIED_PYTHON_HASH_ENV,
+        QUALIFIED_PYTHON_PROFILE_ENV,
+    )
+
+    return _preverified_qualified_python_hash_cached(
+        os.path.realpath(path),
+        os.path.realpath(os.environ.get(QUALIFIED_PYTHON_ENV, "")),
+        os.environ.get(QUALIFIED_PYTHON_HASH_ENV, ""),
+        os.environ.get(QUALIFIED_PYTHON_PROFILE_ENV, ""),
+        os.environ.get("EXASERVE_SITE_PROFILE_HASH", ""),
+        os.environ.get(LOCAL_RUNTIME_ROOT_ENV, ""),
+    )
+
+
+@lru_cache(maxsize=16)
+def _preverified_qualified_python_hash_cached(
+    resolved_path: str,
+    qualified: str,
+    expected: str,
+    profile_hash: str,
+    site_profile_hash: str,
+    runtime_root: str,
+) -> str | None:
+    from ..plan.runtime_environment import filesystem_identity
+
+    if (
+        not runtime_root
+        or not qualified
+        or not _SHA256.fullmatch(expected)
+        or not profile_hash
+        or profile_hash != site_profile_hash
+        or resolved_path != qualified
+    ):
+        return None
+    try:
+        identity = filesystem_identity(qualified)
+    except RuntimeError:
+        return None
+    if identity.fstype != "squashfs" or not identity.readonly:
+        return None
+    return expected
 
 
 def file_hash(path: str) -> str:
@@ -73,7 +129,25 @@ def file_hash(path: str) -> str:
     """
     if not isinstance(path, str) or not path:
         raise ReceiptError("receipt executable path must be non-empty text")
+    if preverified := _preverified_qualified_python_hash(path):
+        return preverified
     resolved = os.path.realpath(path)
+    try:
+        observed = os.stat(resolved, follow_symlinks=False)
+    except OSError as exc:
+        raise ReceiptError(f"could not hash receipt executable {path!r}: {exc}") from exc
+    cache_key = (
+        resolved,
+        observed.st_dev,
+        observed.st_ino,
+        observed.st_size,
+        observed.st_mtime_ns,
+        observed.st_ctime_ns,
+    )
+    with _FILE_HASH_LOCK:
+        cached = _FILE_HASH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -95,7 +169,23 @@ def file_hash(path: str) -> str:
         or before.st_ctime_ns != after.st_ctime_ns
     ):
         raise ReceiptError("receipt executable changed while it was being hashed")
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    final_key = (
+        resolved,
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    with _FILE_HASH_LOCK:
+        # One process normally has one executable. Keep only its current inode
+        # identity so a replaced test/runtime file cannot reuse an old digest.
+        stale = [key for key in _FILE_HASH_CACHE if key[0] == resolved and key != final_key]
+        for key in stale:
+            _FILE_HASH_CACHE.pop(key, None)
+        _FILE_HASH_CACHE[final_key] = value
+    return value
 
 
 def argv_hash(argv: Optional[Sequence[str]]) -> Optional[str]:
@@ -126,7 +216,10 @@ def prepared_environment_hash(env: Optional[Mapping[str, str]] = None) -> str:
             raise ReceiptError("prepared environment must be a string mapping")
         if key.startswith(_ENV_EXCLUDE_PREFIXES):
             continue
-        if key.startswith(
+        if key in {
+            "PMIX_MCA_mca_base_param_files",
+            "PMIX_MCA_mca_base_component_path",
+        } or key.startswith(
             (
                 "EXASERVE_",
                 "RAY_",
@@ -144,6 +237,7 @@ def prepared_environment_hash(env: Optional[Mapping[str, str]] = None) -> str:
     return sha256_text(json.dumps(keep, sort_keys=True, separators=(",", ":")))
 
 
+@lru_cache(maxsize=16)
 def manifest_hash(profile) -> str:
     """Hash of the resolved patch manifest, distinct from the profile id."""
     from dataclasses import asdict
@@ -171,7 +265,8 @@ def _identity(profile) -> dict[str, Any]:
     }
 
 
-def _observed_versions() -> dict[str, str]:
+@lru_cache(maxsize=1)
+def _observed_versions_cached() -> tuple[tuple[str, str], ...]:
     import platform
     from importlib import metadata
 
@@ -181,10 +276,17 @@ def _observed_versions() -> dict[str, str]:
             observed[key] = metadata.version(distribution)
         except metadata.PackageNotFoundError:
             pass
-    return observed
+    return tuple(sorted(observed.items()))
 
 
-def _observed_profile_hashes(profile) -> tuple[dict[str, str], dict[str, str]]:
+def _observed_versions() -> dict[str, str]:
+    return dict(_observed_versions_cached())
+
+
+@lru_cache(maxsize=16)
+def _observed_profile_hashes_cached(
+    profile,
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
     """Hashes re-derived while the producer constructs its own profile.
 
     A profile mismatch changes ``profile_id`` and is rejected by the head. The
@@ -205,7 +307,12 @@ def _observed_profile_hashes(profile) -> tuple[dict[str, str], dict[str, str]]:
         packages[distribution] = sha256_text(
             json.dumps(sorted(set(entries)), separators=(",", ":"))
         )
-    return dict(sorted(packages.items())), dict(sorted(sources.items()))
+    return tuple(sorted(packages.items())), tuple(sorted(sources.items()))
+
+
+def _observed_profile_hashes(profile) -> tuple[dict[str, str], dict[str, str]]:
+    packages, sources = _observed_profile_hashes_cached(profile)
+    return dict(packages), dict(sources)
 
 
 def _patch_results(profile, role: str, *, postcondition=None) -> tuple[dict, tuple[str, ...]]:

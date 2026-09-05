@@ -6,8 +6,10 @@ import os
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -39,7 +41,7 @@ from exaserve.control.process_handshake import (
 )
 from exaserve.control.supervisor import ManagedComponent, RuntimeSupervisor
 from exaserve.exception_notes import add_exception_note
-from exaserve.go_result_contract import read_go_result_stream
+from exaserve.go_result_contract import LATENCY_QUANTILE_METHOD, read_go_result_stream
 from exaserve.state.atomic import (
     ExclusiveLease,
     LeaseHeartbeat,
@@ -1619,6 +1621,23 @@ def _merge_step_results(step_results, total_target_rate):
 
     for index, result in enumerate(step_results):
         validate_step_result(result, path=f"saturation result {index}")
+    merged_latency = {}
+    for result in step_results:
+        merged_latency = merge_histograms(
+            {"latency": merged_latency} if merged_latency else {},
+            {"latency": result["latency_histogram"]},
+        )["latency"]
+    ttft_histograms = [result.get("ttft_histogram") for result in step_results]
+    if any(item is not None for item in ttft_histograms) and not all(
+        item is not None for item in ttft_histograms
+    ):
+        raise RuntimeError("saturation TTFT histogram coverage differs across processes")
+    merged_ttft = None
+    if all(item is not None for item in ttft_histograms):
+        for histogram in ttft_histograms:
+            merged_ttft = merge_histograms(
+                {"ttft": merged_ttft} if merged_ttft else {}, {"ttft": histogram}
+            )["ttft"]
     merged = {
         "target_rate": total_target_rate,
         "completed": sum(
@@ -1633,19 +1652,12 @@ def _merge_step_results(step_results, total_target_rate):
             _contract_number(r, "duration_s", label=f"saturation result {index}")
             for index, r in enumerate(step_results)
         ),
-        "p50_latency_s": max(
-            _contract_number(r, "p50_latency_s", label=f"saturation result {index}")
-            for index, r in enumerate(step_results)
+        "p50_latency_s": _percentile_from_histogram(merged_latency, 0.50),
+        "p99_latency_s": _percentile_from_histogram(merged_latency, 0.99),
+        "mean_latency_s": (
+            merged_latency["sum_s"] / merged_latency["count"] if merged_latency["count"] else 0.0
         ),
-        "p99_latency_s": max(
-            _contract_number(r, "p99_latency_s", label=f"saturation result {index}")
-            for index, r in enumerate(step_results)
-        ),
-        "mean_latency_s": sum(
-            _contract_number(r, "mean_latency_s", label=f"saturation result {index}")
-            for index, r in enumerate(step_results)
-        )
-        / len(step_results),
+        "latency_histogram": merged_latency,
         "new_connections": sum(
             _contract_count(r, "new_connections", label=f"saturation result {index}")
             for index, r in enumerate(step_results)
@@ -1664,6 +1676,13 @@ def _merge_step_results(step_results, total_target_rate):
     merged["achieved_rate"] = (
         merged["completed"] / merged["duration_s"] if merged["duration_s"] > 0 else 0.0
     )
+    if merged_ttft is not None:
+        merged["ttft_histogram"] = merged_ttft
+        merged["p50_ttft_s"] = _percentile_from_histogram(merged_ttft, 0.50)
+        merged["p99_ttft_s"] = _percentile_from_histogram(merged_ttft, 0.99)
+        merged["mean_ttft_s"] = (
+            merged_ttft["sum_s"] / merged_ttft["count"] if merged_ttft["count"] else 0.0
+        )
     return merged
 
 
@@ -1710,16 +1729,66 @@ def ensure_go_binary():
     return str(go_bin.resolve())
 
 
-def ensure_cpp_server():
+_CPP_SERVER_SOURCES = (
+    "main.cpp",
+    "server.cpp",
+    "server.hpp",
+    "handler.cpp",
+    "handler.hpp",
+    "faults.cpp",
+    "faults.hpp",
+    "metrics.cpp",
+    "metrics.hpp",
+    "config.cpp",
+    "config.hpp",
+    "vendor/yyjson.c",
+    "vendor/yyjson.h",
+)
+
+
+def _head_local_cpp_source(cpp_dir: Path) -> Path:
+    """Copy one content-addressed C++ source tree to allocation-head /tmp."""
+    inventory = []
+    digest = hashlib.sha256()
+    for relative in _CPP_SERVER_SOURCES:
+        source = cpp_dir / relative
+        with regular_file_reader(source, binary=True) as handle:
+            content = handle.read()
+        inventory.append((relative, content))
+        digest.update(relative.encode("utf-8") + b"\0" + content)
+    private_root = Path("/tmp") / f"clientlab-cpp-{os.getuid()}"
+    private_root.mkdir(mode=0o700, exist_ok=True)
+    root_metadata = os.lstat(private_root)
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_ISLNK(root_metadata.st_mode)
+        or root_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(root_metadata.st_mode) & 0o077
+    ):
+        raise RuntimeError("ClientLab head-local build root is not a private real directory")
+    build_dir = private_root / digest.hexdigest()
+    build_dir.mkdir(mode=0o700, exist_ok=True)
+    build_metadata = os.lstat(build_dir)
+    if (
+        not stat.S_ISDIR(build_metadata.st_mode)
+        or stat.S_ISLNK(build_metadata.st_mode)
+        or build_metadata.st_uid != os.getuid()
+    ):
+        raise RuntimeError("ClientLab content-addressed build directory is unsafe")
+    for relative, content in inventory:
+        destination = build_dir / relative
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic_create_or_verify_bytes(destination, content)
+    return build_dir
+
+
+def ensure_cpp_server(*, head_local: bool = False):
     from exaserve.control.finite_process import run_finite
 
-    cpp_dir = Path(__file__).resolve().parents[1] / "targets" / "cpp_server"
+    shared_cpp_dir = Path(__file__).resolve().parents[1] / "targets" / "cpp_server"
+    cpp_dir = _head_local_cpp_source(shared_cpp_dir) if head_local else shared_cpp_dir
     cpp_bin = cpp_dir / "bin" / "synthetic_server"
-    sources = (
-        list(cpp_dir.glob("*.cpp"))
-        + list(cpp_dir.glob("*.hpp"))
-        + [cpp_dir / "vendor" / "yyjson.c"]
-    )
+    sources = [cpp_dir / relative for relative in _CPP_SERVER_SOURCES]
     needs_build = not (cpp_bin.is_file() and os.access(str(cpp_bin), os.X_OK))
     if not needs_build:
         bin_mtime = cpp_bin.stat().st_mtime
@@ -1734,7 +1803,12 @@ def ensure_cpp_server():
     compiler = shutil.which(compiler_name)
     if compiler is None:
         raise RuntimeError(f"C++ compiler is unavailable: {compiler_name!r}")
-    cpp_bin.parent.mkdir(parents=True, exist_ok=True)
+    if head_local and any(
+        Path(compiler).resolve().is_relative_to(root) for root in (Path("/home"), Path("/lus"))
+    ):
+        raise RuntimeError("PBS synthetic target compiler must not resolve on shared storage")
+    cpp_bin.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    build_output = cpp_bin.with_name(f".{cpp_bin.name}.{os.getpid()}.{time.time_ns()}")
     build = run_finite(
         [
             compiler,
@@ -1744,7 +1818,7 @@ def ensure_cpp_server():
             "-Wextra",
             "-pthread",
             "-o",
-            str(cpp_bin),
+            str(build_output),
             "main.cpp",
             "server.cpp",
             "handler.cpp",
@@ -1757,9 +1831,15 @@ def ensure_cpp_server():
         cwd=str(cpp_dir),
     )
     if build.returncode != 0:
+        try:
+            build_output.unlink()
+        except FileNotFoundError:
+            pass
         raise RuntimeError(f"Failed to build cpp synthetic_server:\n{build.stdout}\n{build.stderr}")
-    if not cpp_bin.is_file():
+    if not build_output.is_file():
         raise RuntimeError("cpp synthetic_server build completed but binary was not found")
+    build_output.chmod(0o700)
+    os.replace(build_output, cpp_bin)
     return str(cpp_bin.resolve())
 
 
@@ -1821,6 +1901,8 @@ def load_summary_result(path, *, expected_request_ids, sum_only):
 
 
 def merge_summary_results(results):
+    if not results:
+        raise RuntimeError("client summary merge requires at least one result")
     merged = {
         "requests_completed": 0,
         "requests_scheduled": 0,
@@ -1830,15 +1912,39 @@ def merge_summary_results(results):
         "total_input_tokens": 0,
         "total_output_tokens": 0,
     }
+    latency_histogram = None
     for index, result in enumerate(results):
         label = f"client summary {index}"
         merged["requests_completed"] += _contract_count(result, "requests_completed", label=label)
         merged["requests_scheduled"] += _contract_count(result, "requests_scheduled", label=label)
         merged["errors"] += _contract_count(result, "errors", label=label)
-        merged["p50_s"] = max(merged["p50_s"], _contract_number(result, "p50_s", label=label))
-        merged["p99_s"] = max(merged["p99_s"], _contract_number(result, "p99_s", label=label))
+        _contract_number(result, "p50_s", label=label)
+        _contract_number(result, "p99_s", label=label)
+        histogram = result.get("latency_histogram")
+        method = result.get("latency_quantile_method")
+        if len(results) > 1 and not isinstance(histogram, dict):
+            raise RuntimeError("multi-process client summary lacks latency_histogram")
+        if isinstance(histogram, dict) and method != LATENCY_QUANTILE_METHOD:
+            raise RuntimeError("client summary has an unsupported latency quantile method")
+        if isinstance(histogram, dict):
+            latency_histogram = merge_histograms(
+                {"latency": latency_histogram} if latency_histogram else {},
+                {"latency": histogram},
+            )["latency"]
         merged["total_input_tokens"] += _contract_count(result, "total_input_tokens", label=label)
         merged["total_output_tokens"] += _contract_count(result, "total_output_tokens", label=label)
+    if len(results) == 1 and latency_histogram is None:
+        merged["p50_s"] = _contract_number(results[0], "p50_s", label="client summary 0")
+        merged["p99_s"] = _contract_number(results[0], "p99_s", label="client summary 0")
+    else:
+        assert latency_histogram is not None
+        expected_successes = merged["requests_completed"] - merged["errors"]
+        if latency_histogram["count"] != expected_successes:
+            raise RuntimeError("client summary histogram count disagrees with successful requests")
+        merged["latency_histogram"] = latency_histogram
+        merged["p50_s"] = _percentile_from_histogram(latency_histogram, 0.50)
+        merged["p99_s"] = _percentile_from_histogram(latency_histogram, 0.99)
+        merged["latency_quantile_method"] = LATENCY_QUANTILE_METHOD
     return merged
 
 
@@ -1953,6 +2059,39 @@ def _validate_histogram(hist, *, label):
         raise RuntimeError(f"{label}.bucket_upper_bounds_s must contain finite numbers")
     if len(counts) != len(bounds):
         raise RuntimeError(f"{label} bucket counts and bounds disagree")
+    if sum(counts) != hist["count"] or len(bounds) < 2 or bounds[-1] != -1.0:
+        raise RuntimeError(f"{label} count disagrees with buckets")
+    previous = -1.0
+    for index, bound in enumerate(bounds):
+        if index == len(bounds) - 1 and bound == -1.0:
+            continue
+        if bound < 0 or (index and bound <= previous):
+            raise RuntimeError(f"{label} bucket bounds are not ordered")
+        previous = bound
+
+
+def _percentile_from_histogram(hist, fraction):
+    _validate_histogram(hist, label="percentile histogram")
+    count = hist["count"]
+    if count == 0:
+        return 0.0
+    threshold = max(1, math.ceil(count * fraction))
+    cumulative = 0
+    for index, bucket_count in enumerate(hist["counts"]):
+        cumulative += bucket_count
+        if cumulative < threshold:
+            continue
+        upper = float(hist["bucket_upper_bounds_s"][index])
+        if upper < 0:
+            if index == 0:
+                raise RuntimeError("percentile histogram overflow has no finite lower bound")
+            return float(hist["bucket_upper_bounds_s"][index - 1])
+        lower = float(hist["bucket_upper_bounds_s"][index - 1]) if index else 0.0
+        prior = cumulative - bucket_count
+        if bucket_count == 0:
+            return upper
+        return lower + ((threshold - prior) / bucket_count) * (upper - lower)
+    raise RuntimeError("percentile histogram count exceeds bucket coverage")
 
 
 def merge_per_target(left, right):
@@ -2071,6 +2210,7 @@ def launch_local_synthetic_targets(run_config, point_dir):
     server_cmd_prefix = [ensure_cpp_server()]
     repo_root = str(Path(__file__).resolve().parents[2])
     child_env = dict(os.environ)
+    child_env["PYTHONNOUSERSITE"] = "1"
     child_env["PYTHONPATH"] = os.pathsep.join(
         [repo_root, os.path.join(repo_root, "src"), child_env.get("PYTHONPATH", "")]
     )
@@ -2138,24 +2278,81 @@ def launch_local_synthetic_targets(run_config, point_dir):
 def launch_pbs_synthetic_targets(run_config, point_dir):
     nodes = validate_pbs_session()
     client_nodes = int(run_config["execution"].get("client_nodes", 1))
+    if client_nodes != 1:
+        # Eval's MPI replay transport is bound to an EvalManifest, trace
+        # partitions, and its own exact result-completeness protocol. A
+        # ClientLab point drives adaptive/saturation steps and has no matching
+        # distributed point contract yet. Launching one copy per node here
+        # would therefore duplicate the control loop and mislabel its result.
+        raise RuntimeError(
+            "unsupported feature: ClientLab PBS execution currently supports exactly one client node; "
+            "execution.client_nodes>1 would otherwise claim a distributed client "
+            "while running every Go process on the allocation head"
+        )
     synthetic_nodes = int(run_config["target"].get("synthetic_nodes", 1))
     if len(nodes) < client_nodes + synthetic_nodes:
         raise RuntimeError(
             "PBS allocation does not provide enough nodes for the requested synthetic target count"
         )
-    repo_root = str(Path(__file__).resolve().parents[2])
-    server_binary = ensure_cpp_server()
+    server_binary = ensure_cpp_server(head_local=True)
     handles = []
     base_port = int(run_config["target"].get("port", 18100))
+    if base_port < 1 or base_port + synthetic_nodes - 1 > 65535:
+        raise RuntimeError("rank-adjusted synthetic target ports must remain in 1..65535")
+    target_payload = copy.deepcopy(run_config)
+    target_payload["target"]["host"] = "0.0.0.0"
+    target_payload["target"]["port"] = base_port
+    target_fields = ("host", "port", "response_tokens")
+    client_fields = ("model", "prompt_words", "max_active_requests")
+    fault_fields = (
+        "max_inflight",
+        "max_queue",
+        "queue_delay_ms",
+        "error_rate",
+        "error_status",
+        "reject_status",
+        "close_after_response",
+        "reset_after_response",
+        "idle_timeout_s",
+        "burst_every",
+        "burst_duration",
+    )
+    projected_faults = {
+        name: target_payload["faults"][name]
+        for name in fault_fields
+        if name in target_payload["faults"]
+    }
+    if "service_time" in target_payload["faults"]:
+        projected_faults["service_time"] = {
+            name: target_payload["faults"]["service_time"][name]
+            for name in ("distribution", "value_ms", "stddev_ms")
+            if name in target_payload["faults"]["service_time"]
+        }
+    inline_config = json.dumps(
+        {
+            "target": {
+                name: target_payload["target"][name]
+                for name in target_fields
+                if name in target_payload["target"]
+            },
+            "client": {
+                name: target_payload["client"][name]
+                for name in client_fields
+                if name in target_payload["client"]
+            },
+            "faults": projected_faults,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if len(inline_config.encode("utf-8")) > 64 << 10 or "\x00" in inline_config:
+        raise RuntimeError("synthetic target inline config exceeds its 64 KiB argv bound")
     stdout_log = (point_dir / "targets.stdout.log").open("w", encoding="utf-8")
     supervisor = RuntimeSupervisor(poll_interval_s=0.1)
+    hostfile = None
     try:
         for idx, node in enumerate(nodes[client_nodes : client_nodes + synthetic_nodes]):
-            target_config = copy.deepcopy(run_config)
-            target_config["target"]["host"] = "0.0.0.0"
-            target_config["target"]["port"] = base_port + idx
-            config_path = point_dir / f"target_{idx}.json"
-            atomic_create_or_verify_json(config_path, target_config)
             base_url = f"http://{resolve_hsn_host(node)}:{base_port + idx}"
             handles.append(
                 {
@@ -2166,20 +2363,43 @@ def launch_pbs_synthetic_targets(run_config, point_dir):
                     "stdout_log": stdout_log if idx == 0 else None,
                 }
             )
-        hostfile = point_dir / "synthetic_hosts"
-        atomic_create_or_verify_text(
-            hostfile,
-            "".join(f"{node}\n" for node in nodes[client_nodes : client_nodes + synthetic_nodes]),
+        hostfile_fd, hostfile_name = tempfile.mkstemp(
+            prefix="clientlab-synthetic-hosts-", suffix=".txt", dir="/tmp"
         )
+        hostfile = Path(hostfile_name)
+        with os.fdopen(hostfile_fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                "".join(
+                    f"{node}\n" for node in nodes[client_nodes : client_nodes + synthetic_nodes]
+                )
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
         env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [repo_root, os.path.join(repo_root, "src"), env.get("PYTHONPATH", "")]
-        )
+        env["PYTHONNOUSERSITE"] = "1"
+        from exaserve.site import AURORA_PMIX_PREPARED_ENVIRONMENT
+
+        pmix_argv = [
+            item
+            for name, value in AURORA_PMIX_PREPARED_ENVIRONMENT
+            for item in ("--genv", f"{name}={value}")
+        ]
         component = supervisor.register(
             ManagedComponent(
                 component_id="clientlab-targets/mpi",
                 argv=[
                     "mpiexec",
+                    "--transfer",
+                    "--genvnone",
+                    "--envnone",
+                    "--genv",
+                    "PYTHONNOUSERSITE=1",
+                    "--genv",
+                    "HOME=/tmp",
+                    "--genv",
+                    "TMPDIR=/tmp",
+                    *pmix_argv,
+                    "--abort-on-failure",
                     "-n",
                     str(synthetic_nodes),
                     "--ppn",
@@ -2188,16 +2408,16 @@ def launch_pbs_synthetic_targets(run_config, point_dir):
                     "none",
                     "--hostfile",
                     str(hostfile),
-                    sys.executable,
-                    "-m",
-                    "clientlab.targets.synthetic_target",
-                    "--config-template",
-                    str(point_dir / "target_{rank}.json"),
-                    "--binary",
+                    "--wdir",
+                    "/tmp",
                     server_binary,
+                    "--config-json",
+                    inline_config,
+                    "--rank-port-offset",
+                    "--require-aurora-local-runtime",
                 ],
                 env=env,
-                cwd=repo_root,
+                cwd="/tmp",
                 stdout=stdout_log,
                 long_lived=True,
             )
@@ -2205,6 +2425,7 @@ def launch_pbs_synthetic_targets(run_config, point_dir):
         supervisor.start_all(rollback_s=10.0)
         for handle in handles:
             handle["component"] = component
+            handle["head_local_artifacts"] = [str(hostfile)]
             wait_for_health(handle["base_url"], timeout_s=30.0)
         return handles
     except BaseException as exc:
@@ -2222,6 +2443,13 @@ def launch_pbs_synthetic_targets(run_config, point_dir):
                 stdout_log.close()
             except OSError as cleanup_exc:
                 add_exception_note(exc, f"PBS target log close failed: {cleanup_exc}")
+        if hostfile is not None:
+            try:
+                hostfile.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_exc:
+                add_exception_note(exc, f"PBS target hostfile cleanup failed: {cleanup_exc}")
         raise
 
 
@@ -2240,6 +2468,12 @@ def stop_targets(handles):
         except BaseException as exc:
             cleanup_errors.append(f"{type(exc).__name__}: {exc}")
     closed = set()
+    local_artifacts = {
+        path
+        for handle in handles
+        for path in handle.get("head_local_artifacts", ())
+        if isinstance(path, str)
+    }
     for handle in handles:
         log = handle.get("stdout_log")
         if log is not None and id(log) not in closed:
@@ -2248,6 +2482,13 @@ def stop_targets(handles):
                 log.close()
             except OSError as exc:
                 cleanup_errors.append(f"log close: {type(exc).__name__}: {exc}")
+    for path in sorted(local_artifacts):
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            cleanup_errors.append(f"local launch artifact cleanup: {type(exc).__name__}: {exc}")
     if cleanup_errors:
         raise RuntimeError("ClientLab target cleanup failed: " + "; ".join(cleanup_errors))
 

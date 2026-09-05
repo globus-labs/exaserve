@@ -59,7 +59,7 @@ def get_rank() -> int:
     )
 
 
-def ray_child_environment(plan, *, node_ip: str) -> dict[str, str]:
+def ray_child_environment(plan, *, node_ip: str, site_profile=None) -> dict[str, str]:
     """Build the node-local Ray environment with one network identity.
 
     vLLM's Ray executor compares the driver's ``VLLM_HOST_IP`` with the
@@ -85,7 +85,29 @@ def ray_child_environment(plan, *, node_ip: str) -> dict[str, str]:
     for key, value in expected.items():
         if os.environ.get(key) != value:
             raise RuntimeError(f"prepared runtime {key} does not match DeploymentPlan")
-    environment = dict(os.environ)
+    from ..plan.runtime_environment import (
+        LOCAL_RUNTIME_ROOT_ENV,
+        closed_runtime_environment,
+        runtime_paths,
+    )
+
+    if os.environ.get(LOCAL_RUNTIME_ROOT_ENV):
+        try:
+            generation = int(os.environ.get("EXASERVE_GENERATION", ""))
+        except ValueError as exc:
+            raise RuntimeError("managed Ray child requires an integer generation") from exc
+        paths = runtime_paths(plan, generation=generation, require_runtime=True)
+        environment = closed_runtime_environment(
+            plan,
+            paths=paths,
+            base_environment=os.environ,
+            policy=site_profile or plan,
+        )
+    else:
+        # Portable argument-construction tests exercise this helper without a
+        # staged capsule. Production rank_main rejects that state before it can
+        # create a child.
+        environment = dict(os.environ)
     environment["VLLM_HOST_IP"] = node_ip
     if plan.vendor == "xpu":
         environment.pop("ONEAPI_DEVICE_SELECTOR", None)
@@ -125,7 +147,7 @@ def ray_node_ip(cluster: RayClusterConfig, rank: int) -> str:
 def ray_head_argv(cluster: RayClusterConfig, num_gpus: int) -> list[str]:
     limit = _startup_limit(cluster)
     return [
-        sys.executable,
+        _python_executable(),
         "-m",
         "exaserve.ray_start",
         "--head",
@@ -147,7 +169,7 @@ def ray_worker_argv(
     limit = _startup_limit(cluster)
     worker_ip = worker_ip or _local_hsn_ip()
     return [
-        sys.executable,
+        _python_executable(),
         "-m",
         "exaserve.ray_start",
         f"--address={cluster.head_ip}:{cluster.port}",
@@ -163,7 +185,20 @@ def ray_worker_argv(
 def server_argv(plan_path: str) -> list[str]:
     if not isinstance(plan_path, str) or not plan_path:
         raise ValueError("plan_path must be non-empty")
-    return [sys.executable, "-m", "exaserve.server_bootstrap", "--plan", plan_path]
+    return [_python_executable(), "-m", "exaserve.server_bootstrap", "--plan", plan_path]
+
+
+def _python_executable() -> str:
+    """Use the SiteProfile-qualified interpreter for managed descendants."""
+
+    from ..plan.runtime_environment import QUALIFIED_PYTHON_ENV, require_non_shared_path
+
+    executable = os.environ.get(QUALIFIED_PYTHON_ENV, "") or sys.executable
+    if not os.path.isabs(executable):
+        raise RuntimeError("managed Python executable must be absolute")
+    if os.environ.get(QUALIFIED_PYTHON_ENV):
+        require_non_shared_path(executable, name="qualified Python executable")
+    return executable
 
 
 def _positive_gpus(value: int) -> int:

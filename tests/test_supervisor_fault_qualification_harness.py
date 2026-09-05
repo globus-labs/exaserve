@@ -41,14 +41,25 @@ def _requires_evidence(*paths: Path):
     )
 
 
+def _superseded_gate(experiment_path: Path, gate_id: str):
+    """Read retained evidence after proving current code cannot qualify it."""
+    import json
+
+    with pytest.raises(RuntimeError, match="lifecycle support changed"):
+        harness._load_gate(experiment_path, gate_id)
+    document = json.loads(experiment_path.read_text(encoding="utf-8"))
+    gate = next(item for item in document["gates"] if item["gate_id"] == gate_id)
+    return document, gate, ROOT / gate["output_path"]
+
+
 @_requires_evidence(FAILED_EXPERIMENT_PATH, FAILED_RESULT_PATH)
 def test_failed_supervisor_campaign_remains_immutable_negative_evidence():
     import json
 
     gate_id = "FQ-FINAL35-SUPERVISOR-FAULTS-2N-20260809"
-    _, gate, paths = harness._load_gate(FAILED_EXPERIMENT_PATH, gate_id)
+    _, gate, output = _superseded_gate(FAILED_EXPERIMENT_PATH, gate_id)
     result = json.loads(FAILED_RESULT_PATH.read_text(encoding="utf-8"))
-    assert paths["output"] == FAILED_RESULT_PATH.parent
+    assert output == FAILED_RESULT_PATH.parent
     assert gate["attempt"] == gate["attempt_limit"] == 1
     assert result["gate_id"] == gate_id
     assert result["passed"] is False
@@ -60,9 +71,9 @@ def test_mismatched_declaration_remains_immutable_prelaunch_failure():
     import json
 
     gate_id = "FQ-FINAL36-SUPERVISOR-WATCHDOG-2N-20260809"
-    _, gate, paths = harness._load_gate(DECLARATION_FAILURE_EXPERIMENT_PATH, gate_id)
+    _, gate, output = _superseded_gate(DECLARATION_FAILURE_EXPERIMENT_PATH, gate_id)
     result = json.loads(DECLARATION_FAILURE_RESULT_PATH.read_text(encoding="utf-8"))
-    assert paths["output"] == DECLARATION_FAILURE_RESULT_PATH.parent
+    assert output == DECLARATION_FAILURE_RESULT_PATH.parent
     assert gate["attempt"] == gate["attempt_limit"] == 1
     assert result["passed"] is False
     assert result["scenarios"] == []
@@ -74,9 +85,9 @@ def test_truncated_deployment_identity_remains_immutable_startup_failure():
     import json
 
     gate_id = "FQ-FINAL37-SUPERVISOR-WATCHDOG-2N-20260809"
-    _, gate, paths = harness._load_gate(IDENTITY_FAILURE_EXPERIMENT_PATH, gate_id)
+    _, gate, output = _superseded_gate(IDENTITY_FAILURE_EXPERIMENT_PATH, gate_id)
     result = json.loads(IDENTITY_FAILURE_RESULT_PATH.read_text(encoding="utf-8"))
-    stdout = (paths["output"] / "head-ray-child-death/stdout.log").read_text(encoding="utf-8")
+    stdout = (output / "head-ray-child-death/stdout.log").read_text(encoding="utf-8")
     assert result["passed"] is False
     assert result["scenarios"] == []
     assert "terminal before READY" in result["error"]
@@ -88,8 +99,8 @@ def test_final38_supervisor_gate_is_immutable_cleanup_evidence_but_not_strict_ca
     import json
 
     gate_id = "FQ-FINAL38-SUPERVISOR-WATCHDOG-2N-20260809"
-    document, gate, paths = harness._load_gate(EXPERIMENT_PATH, gate_id)
-    result = json.loads((paths["output"] / "result.json").read_text(encoding="utf-8"))
+    document, gate, output = _superseded_gate(EXPERIMENT_PATH, gate_id)
+    result = json.loads((output / "result.json").read_text(encoding="utf-8"))
     assert document["schema_version"] == 1
     assert gate["attempt"] == gate["attempt_limit"] == 1
     assert gate["logical_nodes"] == gate["physical_allocation_nodes"] == 2
@@ -101,7 +112,7 @@ def test_final38_supervisor_gate_is_immutable_cleanup_evidence_but_not_strict_ca
     )
     for item in result["scenarios"]:
         cleanup = json.loads(
-            (paths["output"] / item["scenario"] / "exact_generation_cleanup.json").read_text(
+            (output / item["scenario"] / "exact_generation_cleanup.json").read_text(
                 encoding="utf-8"
             )
         )

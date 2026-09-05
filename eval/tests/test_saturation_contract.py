@@ -18,6 +18,12 @@ def _step() -> dict:
         "p50_latency_s": 0.1,
         "p99_latency_s": 0.2,
         "mean_latency_s": 0.12,
+        "latency_histogram": {
+            "bucket_upper_bounds_s": [0.1, 1.0, -1.0],
+            "counts": [9, 0, 0],
+            "count": 9,
+            "sum_s": 0.9,
+        },
         "new_connections": 1,
         "reused_connections": 9,
         "max_observed_active": 2,

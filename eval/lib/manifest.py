@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass, field
+from functools import cached_property
 from typing import Any, Dict, Union
 
 from eval.lib.saturation import parse_saturation_spec
@@ -221,6 +222,8 @@ class ReplayClientConfig:
                 raise ValueError(f"replay.{name} must be positive")
         if self.dest not in {"proxy", "direct"}:
             raise ValueError("replay.dest must be 'proxy' or 'direct'")
+        if self.generation_mode not in {"deterministic", "natural"}:
+            raise ValueError("replay.generation_mode must be deterministic or natural")
         allowed_topologies = {"local", "mesh", "paired"}
         if self.direct_dispatch not in allowed_topologies:
             raise ValueError("replay.direct_dispatch must be local, mesh, or paired")
@@ -321,7 +324,7 @@ class EvalManifest:
         if self.job_replay_client_config.num_nodes > self.pbs_num_nodes:
             raise ValueError("replay.num_nodes cannot exceed pbs_num_nodes")
 
-    @property
+    @cached_property
     def run_plan(self):
         """Load the canonical run and reject every duplicated-field drift."""
         plan = load_run_plan(self.run_plan_path)
@@ -409,20 +412,30 @@ class EvalManifest:
             raise ValueError(
                 f"eval trace policy disagrees with canonical RunPlan: {differing_trace}"
             )
+        return plan
+
+    def verify_trace_artifact(self) -> None:
+        """Verify the trace once when a caller is not consuming it itself.
+
+        Replay consumes and hashes the trace in one streaming pass, so it calls
+        :func:`load_eval_manifest` with ``verify_trace_artifact=False``.  Other
+        callers retain the historical eager integrity check.
+        """
         try:
             digest = hashlib.sha256()
             from exaserve.state.atomic import regular_file_reader
 
-            with regular_file_reader(trace.output_trace_path, binary=True) as handle:
+            with regular_file_reader(
+                self.job_trace_config.output_trace_path, binary=True
+            ) as handle:
                 for chunk in iter(lambda: handle.read(1 << 20), b""):
                     digest.update(chunk)
         except OSError as exc:
             raise ValueError(f"eval trace artifact is unreadable: {exc}") from exc
         if digest.hexdigest() != self.trace_content_hash:
             raise ValueError("eval trace artifact content hash mismatch")
-        return plan
 
-    @property
+    @cached_property
     def deployment_plan(self):
         run_plan = self.run_plan
         plan = load_deployment_plan(self.deployment_plan_path)
@@ -476,6 +489,7 @@ class EvalManifest:
         # Resolve and verify before publishing a manifest that a compute job may
         # consume hours later.
         self.deployment_plan
+        self.verify_trace_artifact()
         parent = os.path.dirname(os.path.abspath(path))
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -628,7 +642,13 @@ def _replay_config_from_dict(d: Dict[str, Any]) -> ReplayClientConfig:
     )
 
 
-def load_eval_manifest(path: str) -> EvalManifest:
+def load_eval_manifest(
+    path: str,
+    *,
+    verify_trace_artifact: bool = True,
+    deployment_plan_path_override: str | None = None,
+    run_plan_path_override: str | None = None,
+) -> EvalManifest:
     from exaserve.state.atomic import regular_file_reader
     from exaserve.yaml_support import load_yaml_mapping_text
 
@@ -669,5 +689,23 @@ def load_eval_manifest(path: str) -> EvalManifest:
         run_semantic_hash=_text(data["run_semantic_hash"], "run_semantic_hash"),
         trace_content_hash=_text(data["trace_content_hash"], "trace_content_hash"),
     )
-    manifest.deployment_plan
+    if (deployment_plan_path_override is None) != (run_plan_path_override is None):
+        raise ValueError("eval manifest artifact overrides must be supplied together")
+    if deployment_plan_path_override is not None:
+        from dataclasses import replace
+
+        local = replace(
+            manifest,
+            deployment_plan_path=deployment_plan_path_override,
+            run_plan_path=run_plan_path_override,
+        )
+        # Preserve the signed manifest's original location fields for result
+        # provenance while caching objects validated from its certified local
+        # capsule copies. No later property access can reopen the shared paths.
+        manifest.__dict__["run_plan"] = local.run_plan
+        manifest.__dict__["deployment_plan"] = local.deployment_plan
+    else:
+        manifest.deployment_plan
+    if verify_trace_artifact:
+        manifest.verify_trace_artifact()
     return manifest

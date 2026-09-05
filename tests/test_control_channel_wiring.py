@@ -499,6 +499,134 @@ def test_pre_start_heartbeat_uses_the_control_lease_not_poll_remainder():
     assert client.control_failure() is None
 
 
+def test_snapshot_ledger_transaction_never_blocks_the_listener_event_loop():
+    import asyncio
+    import concurrent.futures
+
+    started = threading.Event()
+    release = threading.Event()
+    worker_threads = []
+
+    class Ledger:
+        binding_store = None
+
+        def commit_rank_snapshot(self, _rank, _candidate):
+            return None
+
+    head = HeadChannel.__new__(HeadChannel)
+    head.ledger = Ledger()
+    head.sessions_coordinator = None
+    head._enforce_planned_observations = False
+    head._state_lock = threading.RLock()
+    head.receipt_rejections = []
+    head.receipt_payloads = []
+    head.failures = []
+    head._observations_by_rank = {}
+    head._observation_arrivals = {}
+    head._durable_limit = 256
+    head._durable_lock = threading.Lock()
+    head._durable_pending = set()
+    head._durable_tail = None
+    head._durable_closed = False
+    head._durable_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    def blocked_decode(_rank, _payloads):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(2)
+        return True, "accepted", object()
+
+    head._decode_snapshot_receipts = blocked_decode
+
+    async def exercise():
+        listener_thread = threading.get_ident()
+        task = asyncio.create_task(
+            head._on_snapshot(
+                0,
+                "snapshot",
+                "hash",
+                [
+                    {
+                        "kind": "receipt",
+                        "body": {"receipt_requirement_id": "rank0/node_supervisor"},
+                    }
+                ],
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        # If decode/staging still ran synchronously, the listener could not
+        # execute this independent heartbeat-sized event-loop turn.
+        await asyncio.sleep(0)
+        assert worker_threads == [worker_threads[0]]
+        assert worker_threads[0] != listener_thread
+        release.set()
+        assert await asyncio.wait_for(task, 2) == (
+            True,
+            "complete rank snapshot atomically accepted",
+        )
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        head._durable_executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_invalid_snapshot_receipts_do_not_advance_session_state():
+    import asyncio
+    import concurrent.futures
+
+    class Coordinator:
+        def __init__(self):
+            self.calls = []
+
+        def begin_snapshot(self, *_args):
+            self.calls.append("begin")
+            return True, "unexpected"
+
+    head = HeadChannel.__new__(HeadChannel)
+    head.ledger = SimpleNamespace(binding_store=None)
+    head.sessions_coordinator = Coordinator()
+    head._enforce_planned_observations = False
+    head._state_lock = threading.RLock()
+    head.receipt_rejections = []
+    head.receipt_payloads = []
+    head.failures = []
+    head._observations_by_rank = {}
+    head._observation_arrivals = {}
+    head._durable_limit = 8
+    head._durable_lock = threading.Lock()
+    head._durable_pending = set()
+    head._durable_tail = None
+    head._durable_closed = False
+    head._durable_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    head._decode_snapshot_receipts = lambda _rank, _payloads: (
+        False,
+        "invalid receipt",
+        None,
+    )
+
+    try:
+        result = asyncio.run(
+            head._on_snapshot(
+                0,
+                "snapshot",
+                "hash",
+                [
+                    {
+                        "kind": "receipt",
+                        "body": {"receipt_requirement_id": "rank0/node_supervisor"},
+                    }
+                ],
+            )
+        )
+    finally:
+        head._durable_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert result == (False, "invalid receipt")
+    assert head.sessions_coordinator.calls == []
+
+
 def test_observation_freshness_rejects_nonfinite_values(head):
     for value in (True, 0, -1, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="finite and positive"):

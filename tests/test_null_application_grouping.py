@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import sys
 from exaserve.composition import CompositionRoot
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import build_allocation_binding
@@ -53,6 +54,26 @@ def _bound_plan(monkeypatch):
         "EXASERVE_PLAN_HASH": plan.deployment_plan_hash,
         "EXASERVE_SITE_PROFILE_HASH": plan.site_profile_hash,
         "EXASERVE_ALLOCATION_BINDING_HASH": binding.allocation_binding_hash,
+        "EXASERVE_LOCAL_RUNTIME_ROOT": "/tmp/exaserve-test-runtime",
+        "EXASERVE_LOCAL_STATE_ROOT": "/tmp/exaserve-test-state",
+        "EXASERVE_QUALIFIED_PYTHON": sys.executable,
+        "EXASERVE_QUALIFIED_PYTHON_SHA256": "a" * 64,
+        "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH": plan.site_profile_hash,
+        "EXASERVE_COMPAT_PROFILE_ID": plan.compatibility_profile_hash,
+        "EXASERVE_COMPAT_MANIFEST_HASH": plan.manifest_hash,
+        "EXASERVE_COMPAT_SOURCES_NODE_PROFILE": plan.compatibility_profile_hash,
+        "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST": plan.manifest_hash,
+        "EXASERVE_COMPAT_OVERLAY_ROOT": "/tmp/exaserve-test-runtime/python/overlay",
+        "EXASERVE_PLAN_PATH": "/tmp/exaserve-test-runtime/run/deployment.plan.json",
+        "EXASERVE_SITE_PROFILE_PATH": "/tmp/exaserve-test-runtime/run/site.profile.json",
+        "EXASERVE_ALLOCATION_BINDING_PATH": (
+            "/tmp/exaserve-test-runtime/run/allocation_binding.json"
+        ),
+        "PYTHONPATH": "/tmp/exaserve-test-runtime/python",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+        "HOME": "/tmp/exaserve-test-state/home",
+        "TMPDIR": "/tmp/exaserve-test-state/tmp",
     }.items():
         monkeypatch.setenv(key, value)
     return plan, bound

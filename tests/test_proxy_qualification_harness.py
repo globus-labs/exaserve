@@ -32,13 +32,19 @@ def _requires_evidence(*paths: Path):
 )
 @_requires_evidence(EXPERIMENT_PATH)
 def test_immutable_proxy_gate_declarations_are_exact(gate_id, expected_no_delay, arm):
-    document, gate, paths = harness._load_gate(EXPERIMENT_PATH, gate_id)
+    # The declaration remains immutable evidence for the old candidate. The
+    # lifecycle support changed in the shared-filesystem cutover, so it must no
+    # longer pass the current-code qualification loader.
+    with pytest.raises(RuntimeError, match="support bytes changed"):
+        harness._load_gate(EXPERIMENT_PATH, gate_id)
+    document = harness._load_json(EXPERIMENT_PATH)
+    gate = next(item for item in document["gates"] if item["gate_id"] == gate_id)
     assert document["schema_version"] == 1
     assert gate["attempt"] == gate["attempt_limit"] == 1
     assert gate["logical_nodes"] == gate["physical_allocation_nodes"] == 1
     assert gate["http_no_delay"] is expected_no_delay
-    assert paths["deployment_plan"].parent.name == arm
-    result = harness._load_json(paths["output"] / "result.json")
+    assert (ROOT / gate["deployment_plan_path"]).parent.name == arm
+    result = harness._load_json(ROOT / gate["output_path"] / "result.json")
     assert result["passed"] is True
     assert result["declared_gate"] == gate
 

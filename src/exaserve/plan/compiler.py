@@ -37,6 +37,7 @@ from .contracts import (
     WorkloadPolicy,
     build_receipt_requirements,
     deep_freeze,
+    require_model_id,
 )
 
 _MODEL_KEYS = {
@@ -244,6 +245,60 @@ def _absolute_path(value: Any, path: str, *, default: str) -> str:
     return result
 
 
+def _compiled_local_stage_path(value: Any, *, site: SiteProfile) -> str:
+    """Bind a local destination to the SiteProfile's declared local roots."""
+
+    result = _absolute_path(
+        value,
+        "deployment.local_stage_path",
+        default=site.local_stage_path,
+    )
+    candidate = PurePath(result)
+    semantics = dict(site.filesystem_semantics)
+    shared = [
+        PurePath(key.removeprefix("shared_root:"))
+        for key in semantics
+        if key.startswith("shared_root:")
+    ]
+    if site.site_id == "alcf-aurora":
+        shared.extend((PurePath("/home"), PurePath("/lus/flare")))
+    if any(candidate == root or root in candidate.parents for root in shared):
+        raise PlanError(
+            f"deployment.local_stage_path must not be beneath shared storage: {result!r}"
+        )
+    local = [
+        PurePath(key.removeprefix("local_root:"))
+        for key in semantics
+        if key.startswith("local_root:")
+    ]
+    if local and not any(candidate == root or root in candidate.parents for root in local):
+        raise PlanError(
+            "deployment.local_stage_path is outside SiteProfile-declared local roots: "
+            f"{result!r} not under {[str(root) for root in local]}"
+        )
+    return result
+
+
+def _compiled_model_storage_path(value: Any, *, site: SiteProfile) -> str:
+    result = _absolute_path(
+        value,
+        "deployment.model_storage_path",
+        default=site.model_storage_path,
+    )
+    candidate = PurePath(result)
+    roots = [
+        PurePath(key.removeprefix("shared_root:"))
+        for key, _value in site.filesystem_semantics
+        if key.startswith("shared_root:")
+    ]
+    if roots and not any(candidate == root or root in candidate.parents for root in roots):
+        raise PlanError(
+            "deployment.model_storage_path is outside SiteProfile-declared shared roots: "
+            f"{result!r} not under {[str(root) for root in roots]}"
+        )
+    return result
+
+
 def _sha(value: str, path: str) -> str:
     if not _SHA256.fullmatch(value):
         raise PlanError(f"{path} must be a lowercase sha256 digest")
@@ -287,6 +342,7 @@ def _compile_model_intents(
         raw = _mapping(item, path)
         _reject_unknown(raw, _MODEL_KEYS, path)
         model_id = _string(raw.get("model_id"), f"{path}.model_id")
+        require_model_id(model_id, f"{path}.model_id")
         storage_name = _storage_name(model_id)
         route_name = _route_name(storage_name)
         for family, value in (
@@ -1144,9 +1200,7 @@ def compile_deployment_plan(
     raw_runtime = _optional_mapping(deployment.get("runtime"), "deployment.runtime")
     _reject_unknown(raw_runtime, _RUNTIME_KEYS, "deployment.runtime")
     multi_replica = any(model.num_replicas > 1 for model in models)
-    multi_replica_pp = any(
-        model.pipeline_parallel_size > 1 and model.num_replicas > 1 for model in models
-    )
+    any_pipeline_parallel = any(model.pipeline_parallel_size > 1 for model in models)
     if multi_replica and "ray_serve.run_many" not in site.launcher_capabilities:
         raise PlanError(
             "canonical multi-replica placement requires the SiteProfile "
@@ -1155,12 +1209,11 @@ def compile_deployment_plan(
     requested_shard_aware = _boolean(
         raw_runtime.get("pp_shard_aware"),
         "deployment.runtime.pp_shard_aware",
-        default=multi_replica_pp,
+        default=any_pipeline_parallel,
     )
-    if requested_shard_aware != multi_replica_pp:
+    if requested_shard_aware != any_pipeline_parallel:
         raise PlanError(
-            "deployment.runtime.pp_shard_aware must be enabled exactly for "
-            "multi-replica pipeline-parallel models"
+            "deployment.runtime.pp_shard_aware must be enabled exactly for pipeline-parallel models"
         )
     runtime = RuntimePolicy(
         null_compute=_boolean(
@@ -1282,16 +1335,10 @@ def compile_deployment_plan(
         ray_port=ray_port,
         vendor=vendor,
         engine=engine,
-        model_storage_path=_absolute_path(
-            deployment.get("model_storage_path"),
-            "deployment.model_storage_path",
-            default=site.model_storage_path,
+        model_storage_path=_compiled_model_storage_path(
+            deployment.get("model_storage_path"), site=site
         ),
-        local_stage_path=_absolute_path(
-            deployment.get("local_stage_path"),
-            "deployment.local_stage_path",
-            default=site.local_stage_path,
-        ),
+        local_stage_path=_compiled_local_stage_path(deployment.get("local_stage_path"), site=site),
         deployment_name=_string(
             deployment.get("deployment_name"),
             "deployment.deployment_name",

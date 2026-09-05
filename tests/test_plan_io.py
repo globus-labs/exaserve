@@ -100,6 +100,15 @@ def _rehash_plan_payload(payload):
     return payload
 
 
+def test_plan_loader_rejects_path_shaped_model_id_before_worker_launch():
+    payload = _json_artifact(_plan())
+    payload["models"][0]["model_id"] = "/home/user/model"
+    payload["models"][0]["storage_name"] = "--home--user--model"
+    _rehash_plan_payload(payload)
+    with pytest.raises(PlanError, match="model_id.*model ID"):
+        deployment_plan_from_dict(payload)
+
+
 def test_plan_artifact_round_trips_with_the_same_identity(tmp_path):
     plan = _plan()
     path = tmp_path / "deployment.plan.json"
@@ -208,6 +217,14 @@ def test_run_plan_artifact_round_trips_and_verifies_both_hashes(tmp_path):
     payload = json.loads(path.read_text())
     payload["deployment"]["ray_port"] += 1
     with pytest.raises(PlanError, match="compiled plan hash mismatch"):
+        run_plan_from_dict(payload)
+
+    payload = json.loads(path.read_text())
+    payload["workload"]["generation_mode"] = "/home/user/mode"
+    unhashed = dict(payload)
+    unhashed.pop("run_semantic_hash", None)
+    payload["run_semantic_hash"] = canonical_hash(unhashed)
+    with pytest.raises(PlanError, match="generation_mode must be deterministic or natural"):
         run_plan_from_dict(payload)
 
 

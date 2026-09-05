@@ -28,7 +28,7 @@ workload:
   generation_mode: deterministic
 deployment:
   validation_mode: true
-  model_storage_path: /flare/datasets/model-weights/hub
+  model_storage_path: /lus/flare/projects/datasets/model-weights/hub
   models:
   - model_id: openai/gpt-oss-120b
     tensor_parallel_size: 8

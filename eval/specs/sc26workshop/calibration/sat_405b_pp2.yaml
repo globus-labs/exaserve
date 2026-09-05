@@ -1,10 +1,11 @@
 name: sat_405b_pp2
 # Rate calibration for the multi-node-PP row: Llama-3.1-405B TP=8 x PP=2 on 2
-# whole nodes (same deployment as smokes/pp405b_verify_2node, incl. the
-# Lustre-direct staging symlink). Binary-searches single-REPLICA saturation;
+# whole nodes (same deployment as smokes/pp405b_verify_2node). The allocation
+# head streams one PP stage to each node-local cache. Binary-searches
+# single-REPLICA saturation;
 # the verify run suggests the knee is well under 1 req/s, so the search starts
 # at 1 and the 15 s steps keep the sweep short. Expect a long bring-up
-# (~21 min weights from Lustre) before the search even starts -> 1 h walltime
+# (distribution plus 405B engine load) before the search even starts -> 1 h walltime
 # is tight; prefer a >=90 min window or capacity.
 matrix:
   name_template: baseline
@@ -27,7 +28,7 @@ deployment:
   validation_mode: true
   num_nodes: 2
   model_storage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
-  local_stage_path: /lus/flare/projects/AuroraGPT/wenyiw/models
+  local_stage_path: /tmp/pp405b_shard
   models:
   - model_id: meta-llama/Llama-3.1-405B-Instruct
     tensor_parallel_size: 8

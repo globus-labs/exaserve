@@ -145,8 +145,16 @@ class BoundedUnixIngress:
         try:
             if not hasattr(socket, "SO_PEERCRED"):
                 raise OSError("SO_PEERCRED is required for peer attribution")
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-            os.chmod(directory, 0o700)
+            from ..model_staging import ensure_node_local_directory
+
+            try:
+                ensure_node_local_directory(
+                    directory,
+                    mode=0o700,
+                    enforce_mode=True,
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise OSError(f"local IPC directory is unsafe: {exc}") from exc
             owner_path = self.path + ".owner"
             owner_flags = os.O_CREAT | os.O_RDWR
             if hasattr(os, "O_NOFOLLOW"):

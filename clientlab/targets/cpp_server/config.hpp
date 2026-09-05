@@ -33,3 +33,4 @@ struct ServerConfig {
 };
 
 ServerConfig load_config(const std::string& path);
+ServerConfig load_config_json(const std::string& data);

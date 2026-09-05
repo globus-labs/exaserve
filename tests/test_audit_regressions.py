@@ -158,7 +158,7 @@ def test_status_revision_cas_rejects_aba_stale_writer(tmp_path):
 def _raw():
     return {
         "num_nodes": 2,
-        "model_storage_path": "/m",
+        "model_storage_path": "/lus/flare/projects/test/models",
         "validation_mode": True,
         "exposure": {"mode": "DIRECT_VALIDATION"},
         "gateway": None,

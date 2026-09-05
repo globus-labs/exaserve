@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -56,6 +57,29 @@ def _root(tmp_path, nodes=2):
     return CompositionRoot(
         plan=_plan(nodes), generation=7, run_dir=str(tmp_path), log=lambda *_: None
     )
+
+
+def _give_local_runtime(root, tmp_path, monkeypatch):
+    from exaserve.plan.runtime_environment import (
+        COMPAT_SOURCE_MANIFEST_ENV,
+        COMPAT_SOURCE_PROFILE_ENV,
+        QUALIFIED_PYTHON_HASH_ENV,
+        QUALIFIED_PYTHON_PROFILE_ENV,
+        RuntimePaths,
+    )
+
+    runtime = tmp_path / "runtime"
+    for child in ("python", "run", "bin"):
+        (runtime / child).mkdir(parents=True, exist_ok=True)
+    state = tmp_path / "state"
+    root.local_runtime_paths = RuntimePaths.from_roots(runtime, state, policy=root.plan)
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", sys.executable)
+    monkeypatch.setenv(QUALIFIED_PYTHON_HASH_ENV, "d" * 64)
+    monkeypatch.setenv(QUALIFIED_PYTHON_PROFILE_ENV, root.plan.site_profile_hash)
+    monkeypatch.setenv(COMPAT_SOURCE_PROFILE_ENV, root.plan.compatibility_profile_hash)
+    monkeypatch.setenv(COMPAT_SOURCE_MANIFEST_ENV, root.plan.manifest_hash)
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    return root.local_runtime_paths
 
 
 def test_composition_root_overwrites_ambient_deployment_identity(tmp_path, monkeypatch):
@@ -145,6 +169,29 @@ def test_a_nonzero_staging_step_fails(tmp_path):
     root = _root(tmp_path)
     with pytest.raises(CompositionError, match="exited 3"):
         root.run_staging([StagingStep(name="bad", argv=["/bin/sh", "-c", "exit 3"])])
+
+
+def test_post_source_head_utility_keeps_scheduler_state_only_for_nested_launcher(
+    tmp_path, monkeypatch
+):
+    root = _root(tmp_path)
+    _give_local_runtime(root, tmp_path, monkeypatch)
+    marker = tmp_path / "head-env.json"
+    script = (
+        "import json,os,sys; "
+        "json.dump({'nodefile': os.environ.get('PBS_NODEFILE'), "
+        "'pythonpath': os.environ.get('PYTHONPATH')}, open(sys.argv[1], 'w'))"
+    )
+    step = StagingStep(
+        name="model_bcast",
+        argv=[sys.executable, "-c", script, str(marker)],
+        result_paths=(str(marker),),
+        env={**os.environ, "PBS_NODEFILE": "/home/user/.aurora_leases/nodes"},
+    )
+    root.run_staging([step])
+    observed = json.loads(marker.read_text())
+    assert observed["nodefile"] == "/home/user/.aurora_leases/nodes"
+    assert observed["pythonpath"].split(os.pathsep)[-1] == str(root.local_runtime_paths.python_root)
 
 
 def test_a_staging_step_has_a_bounded_deadline(tmp_path):
@@ -350,13 +397,16 @@ def test_the_run_directory_is_propagated_to_ranks(tmp_path, monkeypatch):
     """
     root = _root(tmp_path)
     root.bind_allocation(["n0", "n1"], "j")
+    paths = _give_local_runtime(root, tmp_path, monkeypatch)
     root._head_address = "10.0.0.1"
     registration_starts = []
     root.sessions = SimpleNamespace(begin_registration=lambda: registration_starts.append(True))
-    component = root.launch_ranks(["/bin/true"], launch_prefix=["/bin/true"])
+    component = root.launch_ranks(["/bin/true"], scheduler="test", launch_prefix=["/bin/true"])
     try:
         assert registration_starts == [True]
-        assert component.env["EXASERVE_RUN_LOG_DIR"] == str(tmp_path)
+        assert component.env["EXASERVE_RUN_LOG_DIR"] == str(paths.logs)
+        assert component.cwd == str(paths.python_root)
+        assert str(tmp_path) not in component.env["PYTHONPATH"].split(os.pathsep)[:-1]
         assert component.env["EXASERVE_HEAD_IP"]
         assert component.env["EXASERVE_PLAN_HASH"] == root.plan.deployment_plan_hash
         assert component.result_check is not None
@@ -366,17 +416,22 @@ def test_the_run_directory_is_propagated_to_ranks(tmp_path, monkeypatch):
         root.shutdown(drain_s=5)
 
 
-def test_rank_registration_clock_arms_before_even_a_failed_spawn_attempt(tmp_path):
+def test_rank_registration_clock_arms_before_even_a_failed_spawn_attempt(tmp_path, monkeypatch):
     from exaserve.control.supervisor import SupervisorError
 
     root = _root(tmp_path)
     root.bind_allocation(["n0", "n1"], "j")
+    _give_local_runtime(root, tmp_path, monkeypatch)
     root._head_address = "10.0.0.1"
     registration_starts = []
     root.sessions = SimpleNamespace(begin_registration=lambda: registration_starts.append(True))
 
     with pytest.raises(SupervisorError, match="startup transaction failed"):
-        root.launch_ranks(["/bin/true"], launch_prefix=["/path/that/does/not/exist"])
+        root.launch_ranks(
+            ["/bin/true"],
+            scheduler="test",
+            launch_prefix=["/path/that/does/not/exist"],
+        )
     assert registration_starts == [True]
 
 
@@ -385,6 +440,7 @@ def test_rank_launcher_captures_authenticated_rank_failure_before_global_cause(
 ):
     root = _root(tmp_path)
     root.bind_allocation(["n0", "n1"], "j")
+    _give_local_runtime(root, tmp_path, monkeypatch)
     root._head_address = "10.0.0.1"
 
     class TypedHeadChannel:
@@ -400,7 +456,7 @@ def test_rank_launcher_captures_authenticated_rank_failure_before_global_cause(
 
     root.head_channel = TypedHeadChannel()
     root.sessions = SimpleNamespace(begin_registration=lambda: 0.0)
-    component = root.launch_ranks(["/bin/true"], launch_prefix=["/bin/true"])
+    component = root.launch_ranks(["/bin/true"], scheduler="test", launch_prefix=["/bin/true"])
     try:
         assert component.on_unexpected_exit is not None
         assert component.on_unexpected_exit(143) == (
