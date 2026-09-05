@@ -1,6 +1,6 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress; last updated 2026-09-04**. This document is an evidence
+Status: **in progress; last updated 2026-09-05**. This document is an evidence
 ledger, not a completed paper reproduction claim. A number appears in an
 accepted table only after the immutable run bundle, terminal state, result
 manifest, readiness evidence, and shutdown evidence all pass the repository's
@@ -26,6 +26,34 @@ The authoritative specifications are:
 
 - `eval/specs/sc26workshop/full/nullcompute_haproxy_scale_to256_v040.yaml`
 - `eval/specs/sc26workshop/full/pp405b_pp2_haproxy_nostream_v040.yaml`
+
+## 2026-09-05 corrected-snapshot attempt
+
+The first post-fan-out snapshot, commit `4d204ce` with source snapshot hash
+`bbbd13550a0c42d9cc8e740c97dd50a588140e4a44d4679aafb58e936fe93802`,
+was exercised at the two smallest campaign gates:
+
+- PP2 `run5/n4`, PBS `8807213`, and
+- null-compute `run8/n32`, PBS `8807214`.
+
+Both jobs are rejected negative evidence. Native source broadcast succeeded on
+every allocated rank (4/4 and 32/32 respectively), but the verifier then failed
+the source stage on every rank because it used the exact attempt directory as
+`HOME`, TMP and XDG scratch while successful publication incorrectly required
+that same directory to be empty. Neither job reached Ray startup or READY;
+neither produced a result manifest or paper measurement. Both published clean
+failure shutdown evidence.
+
+Commit `bf7eafd` moves candidate cleanup to the outer owner after the finite
+verifier MPI/PMIx process has exited, performs one exact collective cleanup,
+and preserves the verifier error as the first cause if cleanup also fails. It
+also explicitly discards Lmod/module bookkeeping from the closed child
+environment; a one-node live lifecycle exposed that otherwise-unused
+`__LMOD_REF_COUNT_PATH` retained login-home entries. The complete compute-node
+suite passes with this correction, but a newly materialized snapshot and new
+run identities are required before resubmission. `run5` and `run8` remain
+immutable; unattempted `run9` is operationally superseded because it binds the
+same defective snapshot and must not be submitted.
 
 ## Current accepted results
 
