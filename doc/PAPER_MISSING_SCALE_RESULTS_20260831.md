@@ -133,8 +133,46 @@ constructor phases so a future failure preserves its actual cause. It also
 adds the eval-owned two-node TP8 x PP2 null-compute startup canary; the canary
 exercises the real PP placement/compatibility lifecycle without distributing
 model bytes and always owns DRAIN/GOODBYE cleanup. These changes are committed
-but not yet live-qualified or represented by a PP result. `run7/n4` is
-immutable and must not be rerun; qualification requires a fresh run identity.
+but were not yet live-qualified by `run7`. The subsequent qualification and
+fresh PP identity are recorded below. `run7/n4` is immutable and must not be
+rerun.
+
+### Two-node PP compatibility qualification and fourth PP attempt
+
+The first canary materialization, `pp_compatibility_canary_2node/run0`, is a
+rejected immutable partial record. Its one-second, 0.1-request/s/node trace
+rounded to zero requests, and the fail-closed materializer stopped before
+creating the `n2` cell. The retained run group contains only its `meta/spec.yaml`
+and `meta/run_group.json`: it has no RunPlan, PBS submission, compute execution,
+READY evidence, result manifest or measurement. It must not be repaired or
+submitted under the same identity.
+
+The corrected nonempty-trace identity, canary `run1/n2`, ran as PBS `8808125`
+from commit `58d5524` and source snapshot
+`a8ed2c2d7165e5547cb96e8a20076537832b28301759b3b066e38160059f2670`.
+It is accepted **only as live compatibility/lifecycle qualification evidence**,
+not as a paper data point. Source distribution and verification passed on 2/2
+ranks. The real Ray default-worker process activated the replica role for one
+TP8 x PP2 null-compute replica spanning both planned ranks, while the null path
+correctly skipped model distribution and EngineCore creation. Canonical READY
+proved 2/2 sessions, two exact Ray nodes, three exact Serve applications, two
+healthy Serve proxies, 7/7 receipt slots, one of one model replica, a healthy
+HAProxy gateway and a successful model canary. READY-after-trace-start was
+43.500215 seconds.
+
+Canary `run1/n2` published a complete seven-entry ResultManifest with hash
+`9da71807c8102ff691108f022cd7de95ae8a717d84b9d5e53bc9715921f77aa6`.
+The deployment exited 0; all 2/2 ranks acknowledged DRAIN and GOODBYE; terminal
+state was `STOPPED`; and the shutdown report records `clean=true`, no errors
+and no exhausted deadline. This closes the narrow live PP
+default-worker-to-replica compatibility gate, but it does not exercise 405B
+model staging, vLLM/EngineCore initialization, replay, or throughput.
+
+The full PP2 paper campaign was then materialized as `run8` from the same
+`a8ed2c2d...59f2670` source snapshot. Its n4/n8/n16/n32/n64/n128/n256 cells
+are immutable distinct plans. The n4 gate was submitted as PBS `8808137` in
+the capacity queue; all larger `run8` cells remain unsubmitted pending its
+terminal evidence. No `run8` cell is a paper result at this update.
 
 ## Current accepted results
 
@@ -411,12 +449,15 @@ be reset, resubmitted, or silently replaced in the paper consumer.
 
 The corrected-snapshot null-compute n32 pair is now complete as `run10/n32`
 and `run11/n32`. PP2 `run7/n4`, PBS `8807877`, is the newest immutable failure
-and must likewise never be reset or resubmitted.
+and must likewise never be reset or resubmitted. The two-node PP canary
+`run1/n2` is accepted qualification evidence only. PP2 `run8/n4`, PBS
+`8808137`, is the active fresh paper-workload gate.
 
-1. Live-qualify commit `b5a43f6` with its bounded two-node PP compatibility
-   canary, then run one newly materialized PP2 n4 identity. The n4 run must
+1. Adjudicate immutable PP2 `run8/n4` when PBS `8808137` terminates. It must
    preserve detailed public Serve deployment status on failure and must reach
-   two successful replays before a PP n256 job is submitted.
+   two successful replays before a PP n256 job is submitted. Do not reset or
+   resubmit the identity if it fails; materialize a replacement only after a
+   concrete correction.
 2. For the current largest-scale bring-up objective, use the already-proven
    `run10`/`run11` null snapshot to run its two independently materialized n256
    lifecycles, and jump from the accepted fresh PP n4 gate directly to PP n256.
