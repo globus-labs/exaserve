@@ -33,7 +33,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from importlib import util as importlib_util
 from importlib import resources
 from pathlib import Path
@@ -855,7 +855,6 @@ def verify_and_publish(
         **compatibility_evidence,
         "verification_duration_s": round(time.monotonic() - started, 6),
     }
-    _remove_source_candidate_parent(candidate_package, local_base=local_base, failed=False)
     return receipt
 
 
@@ -972,7 +971,14 @@ def _compatibility_evidence(runtime_root: Path) -> dict:
 
 
 def _remove_source_candidate_parent(candidate: Path, *, local_base: Path, failed: bool) -> None:
-    """Remove only this transaction's exact generation/attempt candidate."""
+    """Remove only this transaction's exact generation/attempt candidate.
+
+    The verifier deliberately uses the attempt parent as its node-local HOME,
+    temporary directory, and cache root. MPI/Python may therefore leave
+    attempt-owned bootstrap state next to ``capsule``. Once a successful
+    publication has moved (or deduplicated) ``capsule``, that residue is
+    disposable transaction scratch rather than evidence of a bad publication.
+    """
 
     parent = candidate.parent
     if (
@@ -1002,12 +1008,11 @@ def _remove_source_candidate_parent(candidate: Path, *, local_base: Path, failed
             _thaw_private_input(candidate)
         shutil.rmtree(parent)
         return
-    try:
-        parent.rmdir()
-    except OSError as exc:
+    if os.path.lexists(candidate):
         raise SourceStagingError(
-            f"published source candidate parent is unexpectedly nonempty: {parent}: {exc}"
-        ) from exc
+            f"refusing successful source cleanup while candidate remains unpublished: {candidate}"
+        )
+    shutil.rmtree(parent)
 
 
 def _rollback_source_candidate(candidate: Path, *, local_base: Path) -> None:
@@ -1219,6 +1224,46 @@ def _run_checked(argv: list[str], *, timeout_s: float, env: dict[str, str] | Non
     return completed
 
 
+def _run_source_verifier(
+    argv: list[str],
+    *,
+    timeout_s: float,
+    env: dict[str, str],
+    candidate_parent: Path,
+    cleanup_candidate: Callable[[], None],
+):
+    """Run the verifier to process exit, then remove its exact local scratch.
+
+    The verifier's MPI/PMIx and Python runtimes may continue using HOME/TMP
+    until process finalization. Cleanup therefore belongs to the owning head
+    process after the finite verifier has exited, never to code running inside
+    that verifier.
+    """
+
+    def cleanup_and_require_absent() -> None:
+        cleanup_candidate()
+        if os.path.lexists(candidate_parent):
+            raise SourceStagingError(
+                "source verifier cleanup returned while the head candidate still exists: "
+                f"{candidate_parent}"
+            )
+
+    active_error: BaseException | None = None
+    try:
+        completed = _run_checked(argv, timeout_s=timeout_s, env=env)
+    except BaseException as exc:
+        active_error = exc
+        raise
+    finally:
+        try:
+            cleanup_and_require_absent()
+        except BaseException as cleanup_exc:
+            if active_error is None:
+                raise
+            add_exception_note(active_error, f"source verifier cleanup also failed: {cleanup_exc}")
+    return completed
+
+
 def qualify_runtime_staging_base(root: Path, profile) -> Path:
     """Require the staging destination's declared fstype/RO identity."""
 
@@ -1408,7 +1453,7 @@ def stage(
             *mpi_launch_prefix(
                 plan.num_nodes,
                 scheduler=scheduler,
-                application_cwd=str(candidate_parent),
+                application_cwd="/tmp",
                 application_environment=bootstrap_application_environment(
                     profile=site_profile,
                     base_environment=verify_env,
@@ -1450,33 +1495,24 @@ def stage(
             "--expected-root-node",
             root_node,
         ]
-        try:
-            verified = _run_checked(
-                verifier_command,
-                timeout_s=operation_timeout_s,
-                env=verify_env,
-            )
-        except BaseException as exc:
-            for cleanup_path in (candidate_parent,):
-                try:
-                    cleanup_native_candidates(
-                        binary,
-                        cleanup_path,
-                        local_root=local_base,
-                        num_nodes=plan.num_nodes,
-                        binding=binding,
-                        scheduler=scheduler,
-                        application_cwd=Path("/tmp"),
-                        application_environment=native_application_environment,
-                        transfer_executable=(scheduler == "pbs"),
-                        timeout_s=min(300.0, operation_timeout_s),
-                    )
-                except BaseException as cleanup_exc:
-                    add_exception_note(
-                        exc,
-                        f"source verifier cleanup for {cleanup_path} also failed: {cleanup_exc}",
-                    )
-            raise
+        verified = _run_source_verifier(
+            verifier_command,
+            timeout_s=operation_timeout_s,
+            env=verify_env,
+            candidate_parent=candidate_parent,
+            cleanup_candidate=lambda: cleanup_native_candidates(
+                binary,
+                candidate_parent,
+                local_root=local_base,
+                num_nodes=plan.num_nodes,
+                binding=binding,
+                scheduler=scheduler,
+                application_cwd=Path("/tmp"),
+                application_environment=native_application_environment,
+                transfer_executable=(scheduler == "pbs"),
+                timeout_s=min(300.0, operation_timeout_s),
+            ),
+        )
         try:
             receipts = [
                 _validate_source_receipt(receipt)
@@ -1616,24 +1652,17 @@ def main(argv: list[str] | None = None) -> int:
         local_base = Path(args.local_base)
 
         def operation() -> dict:
-            try:
-                return verify_and_publish(
-                    candidate,
-                    args.expected_hash,
-                    args.expected_files,
-                    args.expected_bytes,
-                    args.generation,
-                    Path(args.stable_path),
-                    local_base=local_base,
-                    state_root=Path(args.state_root),
-                    qualified_python=Path(args.qualified_python),
-                )
-            except BaseException as exc:
-                try:
-                    _remove_source_candidate_parent(candidate, local_base=local_base, failed=True)
-                except BaseException as cleanup_exc:
-                    add_exception_note(exc, f"source candidate cleanup also failed: {cleanup_exc}")
-                raise
+            return verify_and_publish(
+                candidate,
+                args.expected_hash,
+                args.expected_files,
+                args.expected_bytes,
+                args.generation,
+                Path(args.stable_path),
+                local_base=local_base,
+                state_root=Path(args.state_root),
+                qualified_python=Path(args.qualified_python),
+            )
 
         success = run_collective_operation(
             operation,
@@ -1641,18 +1670,6 @@ def main(argv: list[str] | None = None) -> int:
             expected_world_size=args.expected_world_size,
             expected_root_node=args.expected_root_node,
         )
-        if not success:
-            try:
-                _rollback_source_candidate(
-                    candidate,
-                    local_base=local_base,
-                )
-            except BaseException as cleanup_exc:
-                print(
-                    f"[SourceStaging] rollback cleanup failed: {cleanup_exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
         return 0 if success else 1
     if not args.plan or not args.binding or not args.result:
         parser.error("--plan, --binding, and --result are required")

@@ -42,6 +42,7 @@ from exaserve.source_staging import (
     _rank,
     _remove_source_candidate_parent,
     _rollback_source_candidate,
+    _run_source_verifier,
     _validate_source_receipt,
     runtime_paths_from_result,
     tree_manifest,
@@ -237,6 +238,12 @@ def test_verify_then_atomic_publish_creates_real_capsule_and_state(tmp_path, mon
     state = local_base / "state" / "deployment" / "g11"
     monkeypatch.setenv("PALS_RANKID", "7")
     qualified_python = _allow_test_python(monkeypatch)
+    monkeypatch.setattr(
+        "exaserve.source_staging._remove_source_candidate_parent",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the still-running verifier must not clean its candidate parent"
+        ),
+    )
     receipt = verify_and_publish(
         package,
         manifest["source_manifest_hash"],
@@ -325,6 +332,129 @@ def test_failed_source_attempt_removes_only_its_owned_local_candidate(tmp_path):
     assert not parent.exists()
     assert sibling.is_dir()
     assert stable.is_dir()
+
+
+def test_successful_source_attempt_removes_attempt_owned_runtime_scratch(tmp_path):
+    local_base = tmp_path / "exaserve"
+    attempt = "a" * 32
+    parent = local_base / "candidates" / "g7" / f"source.{attempt}"
+    candidate = parent / "capsule"
+    scratch = parent / ".pmix" / "components"
+    scratch.mkdir(parents=True)
+    (parent / "python-cache").mkdir()
+    sibling = parent.parent / f"source.{'b' * 32}"
+    sibling.mkdir(parents=True)
+
+    _remove_source_candidate_parent(candidate, local_base=local_base, failed=False)
+
+    assert not parent.exists()
+    assert sibling.is_dir()
+
+
+def test_successful_source_cleanup_refuses_to_erase_unpublished_candidate(tmp_path):
+    local_base = tmp_path / "exaserve"
+    attempt = "a" * 32
+    parent = local_base / "candidates" / "g7" / f"source.{attempt}"
+    candidate = parent / "capsule"
+    candidate.mkdir(parents=True)
+    (candidate / "payload").write_text("still awaiting publication")
+
+    with pytest.raises(SourceStagingError, match="candidate remains unpublished"):
+        _remove_source_candidate_parent(candidate, local_base=local_base, failed=False)
+
+    assert (candidate / "payload").read_text() == "still awaiting publication"
+
+
+@pytest.mark.parametrize("verifier_fails", [False, True])
+def test_source_verifier_cleans_only_after_process_exit(tmp_path, monkeypatch, verifier_fails):
+    candidate_parent = tmp_path / "candidates" / "g7" / f"source.{'a' * 32}"
+    (candidate_parent / ".pmix").mkdir(parents=True)
+    events = []
+    completed = SimpleNamespace(stdout="receipts")
+
+    def fake_run(_argv, *, timeout_s, env):
+        assert timeout_s == 30.0
+        assert env == {"HOME": str(candidate_parent)}
+        assert candidate_parent.exists()
+        events.extend(("verifier-running", "verifier-exited"))
+        if verifier_fails:
+            raise SourceStagingError("verifier failed")
+        return completed
+
+    def cleanup():
+        assert events[-1] == "verifier-exited"
+        events.append("cleanup")
+        import shutil
+
+        shutil.rmtree(candidate_parent)
+
+    monkeypatch.setattr("exaserve.source_staging._run_checked", fake_run)
+    if verifier_fails:
+        with pytest.raises(SourceStagingError, match="verifier failed"):
+            _run_source_verifier(
+                ["verifier"],
+                timeout_s=30.0,
+                env={"HOME": str(candidate_parent)},
+                candidate_parent=candidate_parent,
+                cleanup_candidate=cleanup,
+            )
+    else:
+        assert (
+            _run_source_verifier(
+                ["verifier"],
+                timeout_s=30.0,
+                env={"HOME": str(candidate_parent)},
+                candidate_parent=candidate_parent,
+                cleanup_candidate=cleanup,
+            )
+            is completed
+        )
+
+    assert events == ["verifier-running", "verifier-exited", "cleanup"]
+    assert not candidate_parent.exists()
+
+
+def test_source_verifier_requires_candidate_absent_after_cleanup(tmp_path, monkeypatch):
+    candidate_parent = tmp_path / "candidates" / "g7" / f"source.{'a' * 32}"
+    candidate_parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        "exaserve.source_staging._run_checked",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="receipts"),
+    )
+
+    with pytest.raises(SourceStagingError, match="head candidate still exists"):
+        _run_source_verifier(
+            ["verifier"],
+            timeout_s=30.0,
+            env={},
+            candidate_parent=candidate_parent,
+            cleanup_candidate=lambda: None,
+        )
+
+
+def test_source_verifier_preserves_primary_failure_when_cleanup_also_fails(tmp_path, monkeypatch):
+    candidate_parent = tmp_path / "candidates" / "g7" / f"source.{'a' * 32}"
+    candidate_parent.mkdir(parents=True)
+    primary = SourceStagingError("primary verifier failure")
+
+    def fail_verifier(*_args, **_kwargs):
+        raise primary
+
+    def fail_cleanup():
+        raise RuntimeError("cleanup failure")
+
+    monkeypatch.setattr("exaserve.source_staging._run_checked", fail_verifier)
+    with pytest.raises(SourceStagingError, match="primary verifier failure") as captured:
+        _run_source_verifier(
+            ["verifier"],
+            timeout_s=30.0,
+            env={},
+            candidate_parent=candidate_parent,
+            cleanup_candidate=fail_cleanup,
+        )
+
+    assert captured.value is primary
+    assert any("cleanup failure" in note for note in primary.__notes__)
 
 
 def test_supervised_native_failure_cleanup_removes_exact_candidate_only(tmp_path, monkeypatch):

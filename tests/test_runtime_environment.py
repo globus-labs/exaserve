@@ -285,6 +285,42 @@ def test_closed_environment_rejects_shared_path_hidden_in_unknown_key(tmp_path):
         )
 
 
+def test_closed_environment_discards_lmod_bookkeeping_before_shared_path_scan(tmp_path):
+    plan = _plan()
+    paths = _paths(tmp_path)
+    python = tmp_path / "site-python"
+    python.write_bytes(b"python")
+    python.chmod(0o755)
+    bookkeeping = {
+        "LMOD_CMD": "/home/user/lmod/libexec/lmod",
+        "__LMOD_REF_COUNT_PATH": "/opt/aurora/bin:1;/home/user/bin:1",
+        "_ModuleTable001_": "encoded-module-table",
+        "_ModuleTable_Sz_": "1",
+        "MODULEPATH": "/home/user/modulefiles:/opt/aurora/modulefiles",
+        "MODULEPATH_ROOT": "/home/user/modulefiles",
+        "MODULESHOME": "/home/user/lmod",
+        "LOADEDMODULES": "frameworks/2025.3.1",
+        "_LMFILES_": "/home/user/modulefiles/frameworks.lua",
+        "BASH_FUNC_module%%": "() { source /home/user/module.sh; }",
+        "BASH_FUNC_ml%%": "() { source /home/user/ml.sh; }",
+    }
+    env = closed_runtime_environment(
+        plan,
+        paths=paths,
+        policy=plan,
+        base_environment={
+            QUALIFIED_PYTHON_ENV: str(python),
+            QUALIFIED_PYTHON_HASH_ENV: "d" * 64,
+            QUALIFIED_PYTHON_PROFILE_ENV: plan.site_profile_hash,
+            COMPAT_SOURCE_PROFILE_ENV: plan.compatibility_profile_hash,
+            COMPAT_SOURCE_MANIFEST_ENV: plan.manifest_hash,
+            **bookkeeping,
+        },
+    )
+
+    assert not bookkeeping.keys() & env.keys()
+
+
 def test_closed_environment_drops_unrecognized_ambient_behavior(tmp_path):
     plan = _plan()
     paths = _paths(tmp_path)

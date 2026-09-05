@@ -147,8 +147,29 @@ _AMBIENT_ALLOWED_PREFIXES = (
     "ROCR_",
     "EXASERVE_VERSION_",
 )
-_AMBIENT_DISCARD_PREFIXES = ("PBS_", "SLURM_", "PALS_", "PMI_", "PMIX_", "OMPI_")
-_AMBIENT_DISCARD_KEYS: set[str] = set()
+_AMBIENT_DISCARD_PREFIXES = (
+    "PBS_",
+    "SLURM_",
+    "PALS_",
+    "PMI_",
+    "PMIX_",
+    "OMPI_",
+    # Module initialization is a head-side concern. Lmod encodes its loaded
+    # module table and reference-counted search paths in ambient variables;
+    # those values can retain the login-node HOME even after PATH itself has
+    # been projected. They are bookkeeping, not application inputs, so never
+    # expose them to ranks or treat their intentionally discarded values as a
+    # child-environment leak.
+    "LMOD_",
+    "__LMOD_",
+    "_ModuleTable",
+    "MODULEPATH",
+    "MODULESHOME",
+    # Exported shell functions are neither data nor a supported child-runtime
+    # extension point. In particular, Lmod exports ``module``/``ml`` this way.
+    "BASH_FUNC_",
+)
+_AMBIENT_DISCARD_KEYS = {"LOADEDMODULES", "_LMFILES_"}
 _OVERWRITTEN_PATH_KEYS = {
     "PWD",
     "OLDPWD",
@@ -810,6 +831,10 @@ def _ambient_allowed(key: str, prepared: frozenset[str]) -> bool:
     )
 
 
+def _ambient_discarded(key: str) -> bool:
+    return key in _AMBIENT_DISCARD_KEYS or key.startswith(_AMBIENT_DISCARD_PREFIXES)
+
+
 def closed_runtime_environment(
     plan,
     *,
@@ -827,11 +852,7 @@ def closed_runtime_environment(
     exempt = _SHARED_ONLY_KEYS | _OVERWRITTEN_PATH_KEYS | set(_SEARCH_PATH_KEYS)
     leaked = {}
     for key, value in source.items():
-        if (
-            key in exempt
-            or key in _AMBIENT_DISCARD_KEYS
-            or key.startswith(_AMBIENT_DISCARD_PREFIXES)
-        ):
+        if key in exempt or _ambient_discarded(key):
             continue
         paths_found = shared_path_tokens(value, policy=policy or plan)
         if paths_found:
@@ -847,8 +868,7 @@ def closed_runtime_environment(
         key: value
         for key, value in source.items()
         if key not in _SHARED_ONLY_KEYS
-        and key not in _AMBIENT_DISCARD_KEYS
-        and not key.startswith(_AMBIENT_DISCARD_PREFIXES)
+        and not _ambient_discarded(key)
         and _ambient_allowed(key, prepared_names)
     }
     for key in _SEARCH_PATH_KEYS:
