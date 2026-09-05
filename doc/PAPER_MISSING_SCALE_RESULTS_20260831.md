@@ -69,9 +69,22 @@ It proved 32/32 ranks, 384/384 replicas, 64 Serve applications and 450/450
 exact receipt slots; READY-after-trace-start was 29.369265 seconds,
 `serve.run_many` was 10.5004 seconds and canonical deployment was 19.8270
 seconds. All ranks acknowledged DRAIN and GOODBYE and terminal publication was
-clean `STOPPED`. This is one trial, not yet the required two-trial n32 result;
-the independently materialized `run11/n32` is PBS `8807874` and remains
-scheduler-pending at this update.
+clean `STOPPED`.
+
+The independently materialized `run11/n32`, PBS `8807874`, is accepted as the
+second corrected-snapshot n32 trial. Its complete seven-entry ResultManifest
+hash is
+`d9c4361b1e7d08f00e520533be7581a4516494cda4e853c132e46e17119b7609`.
+It independently proved the same exact 32/32-rank, 384/384-replica,
+64-application and 450/450-receipt topology. READY-after-trace-start was
+28.840942 seconds, `serve.run_many` was 10.5998 seconds and canonical
+deployment was 20.0267 seconds. All 32 ranks acknowledged DRAIN and GOODBYE;
+the deployment, HAProxy and rank launcher were reaped without cleanup errors,
+and terminal publication was clean `STOPPED`. The corrected-snapshot n32 pair
+is therefore 29.369265 and 28.840942 seconds, or **29.105103 +/- 0.373581
+seconds** (mean +/- sample standard deviation). It is a separate homogeneous
+pair and must not be combined silently with the preserved pre-hardening n32
+pair below.
 
 PP2 `run6/n4` is rejected negative evidence. Its source capsule and all four
 per-rank Python/compatibility proofs completed correctly, but `model_bcast`
@@ -83,9 +96,67 @@ sequential handoff regression. `run6` remains immutable and must not be
 resubmitted; PP2 requires a newly materialized run group from the follow-on
 snapshot.
 
+### Third PP low-node attempt and constructor diagnosis
+
+The follow-on PP2 `run7/n4`, PBS `8807877`, used source snapshot
+`270e59c1516b39f82310afa5ed9faf2a044baeb8d4be3a8d7b4b79332214db92`
+and is rejected negative evidence. The source capsule completed on 4/4 ranks
+in 4.3 seconds. Head-rooted shard-aware model distribution then sent stage 0
+only to ranks 0 and 2 and stage 1 only to ranks 1 and 3; all four immutable
+publication receipts passed. Model broadcast took 2,767.9 seconds. Ray reached
+the exact four-node/48-GPU membership, and all four per-node proxy anchors were
+RUNNING.
+
+The run failed while constructing the two PP `EngineWorker` applications.
+Each application started three actor processes, but neither emitted a
+`VLLMEngine`/EngineCore/EngineShim startup record. Application replica 0 then
+entered `DEPLOY_FAILED`; the durable outer first cause is `deployment:
+UNEXPECTED_EXIT (exit=1)`. The run never reached canonical READY, gateway
+launch or either replay. Its `results/` directory is empty and it contributes
+no paper measurement. Failure cleanup is nevertheless complete evidence:
+DRAIN and GOODBYE were received from 4/4 ranks, the deployment exited 1, the
+rank launcher was terminated with the expected 143, and the shutdown report
+records `clean=true`, no errors and no exhausted deadline. Stable immutable
+model caches were preserved; no attempt candidate required removal.
+
+The retained Ray application message collapsed the actual constructor error
+to `Failed to update the deployments`, while Ray kept the detailed deployment
+message only in the now-gone node-local controller logs. Static ordering and
+the last actor output localize the fault to replica compatibility activation,
+before `VLLMEngine.create`, but the immutable artifact cannot prove which
+postcondition failed. Commit `b5a43f6` therefore does not invent a retroactive
+cause. It (1) applies PP-gated SC-11 to the inherited
+`ray_head` and `ray_worker` roles before Ray's early Intel accelerator import,
+(2) stops overriding Ray's node-owned `RAY_TMPDIR` through actor `runtime_env`,
+and (3) adds bounded public `serve.status()` deployment diagnostics plus named
+constructor phases so a future failure preserves its actual cause. It also
+adds the eval-owned two-node TP8 x PP2 null-compute startup canary; the canary
+exercises the real PP placement/compatibility lifecycle without distributing
+model bytes and always owns DRAIN/GOODBYE cleanup. These changes are committed
+but not yet live-qualified or represented by a PP result. `run7/n4` is
+immutable and must not be rerun; qualification requires a fresh run identity.
+
 ## Current accepted results
 
-### HAProxy null-compute startup
+### Corrected-snapshot HAProxy null-compute startup
+
+| Nodes | Exact replicas | READY trials (s) | READY mean +/- sample std (s) | `serve.run_many` trials (s) | Canonical deploy trials (s) | Status |
+|---:|---:|---:|---:|---:|---:|---|
+| 32 | 384 | 29.369, 28.841 | 29.105 +/- 0.374 | 10.500, 10.600 | 19.827, 20.027 | accepted corrected pair |
+| 64 | 768 | pending | pending | pending | pending | not run from corrected snapshot |
+| 128 | 1,536 | pending | pending | pending | pending | not run from corrected snapshot |
+| 256 | 3,072 | pending | pending | pending | pending | not run from corrected snapshot |
+
+| Trial | PBS job | Result-manifest SHA-256 |
+|---|---|---|
+| run10/n32 | 8807652 | `ae4415f0d11234ad55fba4cc62a3569d75a8f3f6049101c1eee573df591cb863` |
+| run11/n32 | 8807874 | `d9c4361b1e7d08f00e520533be7581a4516494cda4e853c132e46e17119b7609` |
+
+Both rows use source snapshot
+`7298aefce67c5b1a7a820dc0f20e5135abc6a967a3d33ea3edc6239bd4d2aa6b`.
+No corrected-snapshot number exists yet above 32 nodes.
+
+### Preserved pre-hardening HAProxy null-compute startup
 
 READY time is measured from the start of the sealed startup trace to the
 canonical composition-root READY transition. It is not inferred from a log
@@ -313,6 +384,14 @@ throughput for a 2x node/replica increase.
   report proves bounded failure cleanup only: it has no DRAIN, GOODBYE,
   canonical READY, startup metric, or result manifest and contributes no paper
   number.
+- PP2 `run7/n4`, PBS job `8807877`, completed exact source and shard-aware
+  model distribution and formed the exact four-node Ray cluster, but both
+  `EngineWorker` applications exhausted three pre-`VLLMEngine` constructor
+  attempts. It never reached READY or replay and `results/` is empty. Its clean
+  4/4 DRAIN/GOODBYE shutdown is failure evidence only. The retained application
+  error omitted Ray's detailed constructor message, so this bundle cannot be
+  used to claim a more specific runtime cause than the compatibility-activation
+  interval documented above.
 - PP2 `run2` 4- and 8-node successes use the superseded 0.90 setting; the final
   low-node values come from `run3` at 0.95.
 - Three historical streaming PP2 cells were produced while their nominal
@@ -330,22 +409,22 @@ materialized `run7/n256` trial B bundle, failed before Ray startup and is
 rejected above. The failed bundle is immutable negative evidence and must not
 be reset, resubmitted, or silently replaced in the paper consumer.
 
-1. Resolve every release-blocking shared-filesystem fan-out in
-   `doc/SHARED_FILESYSTEM_FANOUT_AUDIT_20260904.md`, including the control-lock
-   path, worker plan/environment reads, MPI staging receipts, PP roots, replay,
-   and terminal-cause propagation. The code remediation is now present in the
-   2026-09-04 working tree and the complete one-node compute test suite plus
-   one-node PALS isolation/transfer checks pass. This does **not** unblock paper
-   execution until the remaining two-node negative shared-open, recipient,
-   failure-cleanup, guardian, and read-only model gates recorded in that audit
-   pass from the same snapshot.
-2. Treat all currently accepted measurements as preserved prior-campaign
-   evidence. The runtime/environment/storage rewrite is material to startup and
-   may affect serving behavior; corrected n256 points cannot be silently added
-   to the old curves. For homogeneous final curves, rerun null-compute
-   n32/n64/n128/n256 twice and the PP2 n4/n8/n16/n32/n64/n128/n256 ladder from
-   one corrected snapshot. Otherwise label the output explicitly as a
-   mixed-campaign comparison. PP2 n256 remains last.
+The corrected-snapshot null-compute n32 pair is now complete as `run10/n32`
+and `run11/n32`. PP2 `run7/n4`, PBS `8807877`, is the newest immutable failure
+and must likewise never be reset or resubmitted.
+
+1. Live-qualify commit `b5a43f6` with its bounded two-node PP compatibility
+   canary, then run one newly materialized PP2 n4 identity. The n4 run must
+   preserve detailed public Serve deployment status on failure and must reach
+   two successful replays before a PP n256 job is submitted.
+2. For the current largest-scale bring-up objective, use the already-proven
+   `run10`/`run11` null snapshot to run its two independently materialized n256
+   lifecycles, and jump from the accepted fresh PP n4 gate directly to PP n256.
+   Do not replay every intermediate scale merely as a launch prerequisite.
+   The corrected n64/n128 null pairs and PP n8/n16/n32/n64/n128 cells remain
+   required later for a homogeneous final curve; until they exist, preserve
+   prior measurements separately and label any combined output explicitly as
+   a mixed-campaign comparison.
 3. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
 4. Replace all `pending` rows in this ledger with sealed evidence or an explicit
