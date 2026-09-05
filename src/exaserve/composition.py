@@ -662,7 +662,6 @@ class CompositionRoot:
                         os.path.join(self.run_dir, "model_bcast_timing.json"), kind="model"
                     ),
                     deadline_s=3600.0,
-                    env=clean_env,
                 )
             )
         return steps

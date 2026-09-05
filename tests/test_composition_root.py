@@ -500,8 +500,74 @@ def test_staging_steps_are_owned_with_deadlines_and_results(tmp_path):
             "staging must not build shell strings"
         )
     bcast = next(s for s in steps if s.name == "model_bcast")
+    source = next(s for s in steps if s.name == "distribute_source")
+    assert source.env is not None, "source staging needs its fixed pre-capsule environment"
+    assert bcast.env is None, "model staging must resolve the post-capsule environment"
     assert bcast.result_paths, "model staging must declare a result manifest"
     assert "--plan" in bcast.argv and "--config" not in bcast.argv
+
+
+def test_model_staging_resolves_proofs_after_source_activation(tmp_path, monkeypatch):
+    """Later staging must not reuse the environment captured before source proof."""
+    from exaserve.plan.runtime_environment import (
+        COMPAT_SOURCE_MANIFEST_ENV,
+        COMPAT_SOURCE_PROFILE_ENV,
+        LOCAL_RUNTIME_ROOT_ENV,
+        QUALIFIED_PYTHON_HASH_ENV,
+        QUALIFIED_PYTHON_PROFILE_ENV,
+    )
+
+    root = _root(tmp_path)
+    proof_keys = (
+        LOCAL_RUNTIME_ROOT_ENV,
+        QUALIFIED_PYTHON_HASH_ENV,
+        QUALIFIED_PYTHON_PROFILE_ENV,
+        COMPAT_SOURCE_PROFILE_ENV,
+        COMPAT_SOURCE_MANIFEST_ENV,
+    )
+    for key in proof_keys:
+        monkeypatch.delenv(key, raising=False)
+
+    source_result = tmp_path / "source.json"
+    model_result = tmp_path / "model.json"
+    write_result = "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('{}')"
+    dump_proofs = (
+        "import json,os,sys; "
+        f"json.dump({{key: os.environ.get(key) for key in {proof_keys!r}}}, "
+        "open(sys.argv[1], 'w'))"
+    )
+    source_env = os.environ.copy()
+
+    def activate_runtime_capsule(path):
+        assert path == str(source_result)
+        _give_local_runtime(root, tmp_path, monkeypatch)
+
+    monkeypatch.setattr(root, "activate_runtime_capsule", activate_runtime_capsule)
+    root.run_staging(
+        [
+            StagingStep(
+                name="distribute_source",
+                argv=[sys.executable, "-c", write_result, str(source_result)],
+                result_paths=(str(source_result),),
+                env=source_env,
+            ),
+            StagingStep(
+                name="model_bcast",
+                argv=[sys.executable, "-c", dump_proofs, str(model_result)],
+                result_paths=(str(model_result),),
+            ),
+        ]
+    )
+
+    assert all(key not in source_env for key in proof_keys)
+    observed = json.loads(model_result.read_text())
+    assert observed == {
+        LOCAL_RUNTIME_ROOT_ENV: str(root.local_runtime_paths.root),
+        QUALIFIED_PYTHON_HASH_ENV: "d" * 64,
+        QUALIFIED_PYTHON_PROFILE_ENV: root.plan.site_profile_hash,
+        COMPAT_SOURCE_PROFILE_ENV: root.plan.compatibility_profile_hash,
+        COMPAT_SOURCE_MANIFEST_ENV: root.plan.manifest_hash,
+    }
 
 
 def test_null_compute_skips_model_staging(tmp_path, monkeypatch):
