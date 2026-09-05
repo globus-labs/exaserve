@@ -398,6 +398,23 @@ def test_bound_serve_actor_rebinds_rank_local_receipt_socket(monkeypatch):
     assert "EXASERVE_SHARED_ROOTS" not in env_vars
 
 
+def test_actor_runtime_inherits_ray_session_tmpdir_instead_of_overriding_it(monkeypatch):
+    from exaserve.actor_runtime import build_actor_runtime_env
+
+    monkeypatch.setenv("EXASERVE_DEPLOYMENT_ID", "four-node-test")
+    monkeypatch.setenv("EXASERVE_GENERATION", "17")
+    monkeypatch.setenv("RAY_TMPDIR", "/tmp/rank-zero-ray-session")
+
+    env_vars = build_actor_runtime_env(receipt_owner_rank=2)["env_vars"]
+
+    assert "RAY_TMPDIR" not in env_vars
+    with pytest.raises(ValueError, match="cannot override"):
+        build_actor_runtime_env(
+            {"RAY_TMPDIR": "/tmp/forged-ray-session"},
+            receipt_owner_rank=2,
+        )
+
+
 def test_native_serve_actor_does_not_inherit_the_head_receipt_socket(monkeypatch):
     from exaserve.actor_runtime import build_actor_runtime_env
 
@@ -432,6 +449,7 @@ def test_dynamic_and_declared_receipt_ownership_are_mutually_exclusive(monkeypat
         "EXASERVE_RECEIPT_RANK",
         "EXASERVE_RECEIPT_SOCKET",
         "EXASERVE_SHARED_ROOTS",
+        "RAY_TMPDIR",
     ],
 )
 def test_actor_extras_cannot_override_canonical_identity(monkeypatch, field):

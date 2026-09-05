@@ -16,10 +16,13 @@ Aurora when Ray rewrites it to a "level_zero:..." list.
 
 import argparse
 import asyncio
+from collections.abc import Mapping
+from contextlib import contextmanager
 from collections import deque
 import json
 import math
 import os
+import re
 import socket
 import threading
 import time
@@ -64,6 +67,232 @@ _CORE_ENV_EXPECTED = (
     "RAY_worker_register_timeout_seconds",
     "RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT",
 )
+
+_DIAGNOSTIC_TEXT_LIMIT = 320
+_SERVE_STATUS_DIAGNOSTIC_LIMIT = 4096
+_SERVE_STATUS_FETCH_TIMEOUT_S = 10.0
+_SERVE_STATUS_APPLICATION_LIMIT = 16
+_SERVE_STATUS_DEPLOYMENT_LIMIT = 4
+_SENSITIVE_DIAGNOSTIC_PATTERN = re.compile(
+    r"(?i)(?:password|passwd|secret|credential|authorization|bearer|"
+    r"api[\s_-]?key|master[\s_-]?key|private[\s_-]?key|access[\s_-]?key|"
+    r"(?:^|[^A-Z0-9])(?:access[\s_-]?token|refresh[\s_-]?token|token)"
+    r"(?=$|[^A-Z0-9]))"
+)
+_ENGINE_STARTUP_PHASES = frozenset(
+    {"canonical_bind", "compat_activate", "tree_validate", "backend_create"}
+)
+
+
+def _bounded_diagnostic_text(value: object, *, limit: int = _DIAGNOSTIC_TEXT_LIMIT) -> str:
+    """Return printable, secret-safe diagnostic text within an exact bound."""
+    if type(limit) is not int or limit < 32:
+        raise ValueError("diagnostic text limit must be an integer of at least 32")
+    if not isinstance(value, str):
+        return f"<{type(value).__name__}>"[:limit]
+    text = " ".join("".join(char if char.isprintable() else " " for char in value).split())
+    if _SENSITIVE_DIAGNOSTIC_PATTERN.search(text):
+        text = "<redacted sensitive detail>"
+    if not text:
+        text = "<no detail>"
+    marker = "...[truncated]"
+    return text if len(text) <= limit else text[: limit - len(marker)] + marker
+
+
+def _bounded_exception_summary(error: Exception) -> str:
+    error_type = _bounded_diagnostic_text(type(error).__name__, limit=96)
+    try:
+        detail = _bounded_diagnostic_text(str(error))
+    except Exception:
+        detail = "<unprintable detail>"
+    return f"{error_type}: {detail}"
+
+
+def _public_status_field(value: object, name: str, default=None):
+    if isinstance(value, Mapping):
+        result = value.get(name, default)
+    else:
+        result = getattr(value, name, default)
+    return default if result is None else result
+
+
+def _public_status_name(value: object) -> str:
+    for candidate in (getattr(value, "value", None), getattr(value, "name", None), value):
+        if isinstance(candidate, str) and candidate:
+            return _bounded_diagnostic_text(candidate, limit=64)
+    return f"<{type(value).__name__}>"[:64]
+
+
+def _public_serve_status_application(name: object, application: object) -> dict:
+    """Serialize one public ``serve.status()`` application without private APIs."""
+    app_status = _public_status_name(_public_status_field(application, "status", "UNKNOWN"))
+    deployments = _public_status_field(application, "deployments", {})
+    if not isinstance(deployments, Mapping):
+        deployments = {}
+    deployment_rows = []
+    for deployment_name, deployment in deployments.items():
+        deployment_rows.append(
+            {
+                "message": _bounded_diagnostic_text(
+                    _public_status_field(deployment, "message", ""), limit=192
+                ),
+                "name": _bounded_diagnostic_text(deployment_name, limit=128),
+                "status": _public_status_name(
+                    _public_status_field(deployment, "status", "UNKNOWN")
+                ),
+            }
+        )
+    deployment_rows.sort(
+        key=lambda row: (row["status"].upper() in {"HEALTHY", "RUNNING"}, row["name"])
+    )
+    selected_deployments = deployment_rows[:_SERVE_STATUS_DEPLOYMENT_LIMIT]
+    return {
+        "deployment_count": len(deployment_rows),
+        "deployments": selected_deployments,
+        "message": _bounded_diagnostic_text(
+            _public_status_field(application, "message", ""), limit=192
+        ),
+        "name": _bounded_diagnostic_text(name, limit=128),
+        "omitted_deployment_count": len(deployment_rows) - len(selected_deployments),
+        "status": app_status,
+    }
+
+
+def _fetch_public_serve_status() -> object:
+    """Call public ``serve.status()`` without making failure cleanup unbounded.
+
+    Ray 2.53's public helper performs an unbounded ``ray.get`` internally and
+    exposes no timeout argument. A daemon diagnostic thread lets the owning
+    deployment path retain a finite failure budget when the Serve controller
+    itself is unavailable. This path runs at most once after ``run_many`` has
+    already failed; it is not a status poller.
+    """
+    done = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def fetch() -> None:
+        try:
+            outcome["status"] = serve.status()
+        except Exception as status_exc:
+            outcome["error"] = status_exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=fetch, name="serve-status-diagnostic", daemon=True)
+    thread.start()
+    if not done.wait(_SERVE_STATUS_FETCH_TIMEOUT_S):
+        raise TimeoutError(
+            f"public serve.status() exceeded {_SERVE_STATUS_FETCH_TIMEOUT_S:g}s diagnostic budget"
+        )
+    error = outcome.get("error")
+    if isinstance(error, Exception):
+        raise error
+    if "status" not in outcome:
+        raise RuntimeError("public serve.status() returned no diagnostic outcome")
+    return outcome["status"]
+
+
+def serialize_public_serve_status(status: object | None = None) -> str:
+    """Return bounded JSON from Ray Serve's public application status API.
+
+    Failed or transitional applications and deployments sort first. The helper
+    deliberately excludes replica detail, tracebacks, and arbitrary object
+    representations: those are both unbounded at scale and may contain runtime
+    credentials. Supplying ``status`` is useful for callers that already own a
+    public status snapshot and for hermetic tests.
+    """
+    try:
+        snapshot = _fetch_public_serve_status() if status is None else status
+        applications = _public_status_field(snapshot, "applications", {})
+        if not isinstance(applications, Mapping):
+            raise TypeError("ServeStatus.applications is not a mapping")
+        rows = [
+            _public_serve_status_application(name, application)
+            for name, application in applications.items()
+        ]
+        rows.sort(
+            key=lambda row: (
+                row["status"].upper() in {"RUNNING", "HEALTHY"}
+                and all(
+                    deployment["status"].upper() in {"RUNNING", "HEALTHY"}
+                    for deployment in row["deployments"]
+                ),
+                row["name"],
+            )
+        )
+        total = len(rows)
+        selected: list[dict] = []
+        for row in rows[:_SERVE_STATUS_APPLICATION_LIMIT]:
+            candidate = {
+                "application_count": total,
+                "applications": [*selected, row],
+                "omitted_application_count": total - len(selected) - 1,
+            }
+            encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+            if len(encoded) > _SERVE_STATUS_DIAGNOSTIC_LIMIT:
+                break
+            selected.append(row)
+        payload = {
+            "application_count": total,
+            "applications": selected,
+            "omitted_application_count": total - len(selected),
+        }
+    except Exception as status_exc:
+        payload = {
+            "application_count": None,
+            "applications": [],
+            "diagnostic_error": _bounded_exception_summary(status_exc),
+            "omitted_application_count": None,
+        }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if len(encoded) > _SERVE_STATUS_DIAGNOSTIC_LIMIT:
+        # All individual fields are already capped. This minimal fallback keeps
+        # the contract fail-safe if the payload shape changes in the future.
+        encoded = json.dumps(
+            {
+                "application_count": payload.get("application_count"),
+                "applications": [],
+                "diagnostic_error": "status serialization exceeded bound",
+                "omitted_application_count": payload.get("application_count"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return encoded
+
+
+def _serve_run_many_failure(context: str, error: Exception) -> RuntimeError:
+    status_detail = serialize_public_serve_status()
+    message = (
+        f"{_bounded_diagnostic_text(context, limit=256)}: "
+        f"{_bounded_exception_summary(error)}; serve_status={status_detail}"
+    )
+    print(f"[ExaServe] {message}", flush=True)
+    return RuntimeError(message)
+
+
+def _raise_engine_startup_failure(name: str, error: Exception) -> None:
+    if name not in _ENGINE_STARTUP_PHASES:
+        raise ValueError(f"unknown EngineWorker startup phase {name!r}")
+    message = (
+        f"[EngineWorker pid={os.getpid()}] startup phase {name} failed: "
+        f"{_bounded_exception_summary(error)}"
+    )
+    print(message, flush=True)
+    # Chaining would re-render the original, potentially secret-bearing and
+    # unbounded exception text after the safe wrapper.
+    raise RuntimeError(message) from None
+
+
+@contextmanager
+def _engine_startup_phase(name: str):
+    """Name one EngineWorker constructor phase and bound its failure output."""
+    if name not in _ENGINE_STARTUP_PHASES:
+        raise ValueError(f"unknown EngineWorker startup phase {name!r}")
+    try:
+        yield
+    except Exception as phase_exc:
+        _raise_engine_startup_failure(name, phase_exc)
 
 
 def _verify_core_env() -> None:
@@ -773,15 +1002,15 @@ class EngineWorker:
         # Bind this live actor to exactly one precompiled logical slot before
         # the backend spawns EngineCore.  The resolved ids are inherited by the
         # engine shim, so replica and engine self-report distinct exact slots.
-        from .plan.io import (
-            load_allocation_binding,
-            load_deployment_plan,
-            rank_for_node,
-            resolve_replica_index_for_live_placement,
-            resolve_replica_receipt_requirement,
-        )
-
         try:
+            from .plan.io import (
+                load_allocation_binding,
+                load_deployment_plan,
+                rank_for_node,
+                resolve_replica_index_for_live_placement,
+                resolve_replica_receipt_requirement,
+            )
+
             _receipt_plan = load_deployment_plan(os.environ["EXASERVE_PLAN_PATH"])
             _receipt_binding = load_allocation_binding(
                 os.environ["EXASERVE_ALLOCATION_BINDING_PATH"]
@@ -843,98 +1072,98 @@ class EngineWorker:
                 self._engine_component_id = _requirements[
                     self._engine_requirement_id
                 ].component_slot
-        except (KeyError, OSError, ValueError) as exc:
-            raise RuntimeError(
-                f"could not bind replica {model_id!r} on {hostname} devices "
-                f"{gpu_ids} to canonical topology: {exc}"
-            ) from exc
-        os.environ["EXASERVE_RECEIPT_RANK"] = str(_owner_rank)
-        os.environ["EXASERVE_RECEIPT_REPLICA_INDEX"] = str(replica_index)
-        os.environ["EXASERVE_RECEIPT_REQUIREMENT_ID_REPLICA"] = self._replica_requirement_id
-        from .compat.local_ingress import SOCKET_ENV, socket_path_for
+        except Exception as exc:
+            _raise_engine_startup_failure("canonical_bind", exc)
+        try:
+            os.environ["EXASERVE_RECEIPT_RANK"] = str(_owner_rank)
+            os.environ["EXASERVE_RECEIPT_REPLICA_INDEX"] = str(replica_index)
+            os.environ["EXASERVE_RECEIPT_REQUIREMENT_ID_REPLICA"] = self._replica_requirement_id
+            from .compat.local_ingress import SOCKET_ENV, socket_path_for
 
-        os.environ[SOCKET_ENV] = socket_path_for(
-            os.environ["EXASERVE_DEPLOYMENT_ID"],
-            int(os.environ["EXASERVE_GENERATION"]),
-            owner_rank=_owner_rank,
-        )
-        if self._engine_requirement_id is not None and self._engine_component_id is not None:
-            os.environ["EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE"] = self._engine_requirement_id
-            os.environ["EXASERVE_RECEIPT_COMPONENT_ID_ENGINE"] = self._engine_component_id
-            os.environ["EXASERVE_RECEIPT_MODEL_ID_ENGINE"] = model_id
-            os.environ["EXASERVE_RECEIPT_DEVICE_IDS_ENGINE"] = ",".join(
-                str(value) for value in sorted(gpu_ids)
+            os.environ[SOCKET_ENV] = socket_path_for(
+                os.environ["EXASERVE_DEPLOYMENT_ID"],
+                int(os.environ["EXASERVE_GENERATION"]),
+                owner_rank=_owner_rank,
             )
-        else:
-            os.environ.pop("EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE", None)
-            os.environ.pop("EXASERVE_RECEIPT_COMPONENT_ID_ENGINE", None)
-            os.environ.pop("EXASERVE_RECEIPT_MODEL_ID_ENGINE", None)
-            os.environ.pop("EXASERVE_RECEIPT_DEVICE_IDS_ENGINE", None)
+            if self._engine_requirement_id is not None and self._engine_component_id is not None:
+                os.environ["EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE"] = self._engine_requirement_id
+                os.environ["EXASERVE_RECEIPT_COMPONENT_ID_ENGINE"] = self._engine_component_id
+                os.environ["EXASERVE_RECEIPT_MODEL_ID_ENGINE"] = model_id
+                os.environ["EXASERVE_RECEIPT_DEVICE_IDS_ENGINE"] = ",".join(
+                    str(value) for value in sorted(gpu_ids)
+                )
+            else:
+                os.environ.pop("EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE", None)
+                os.environ.pop("EXASERVE_RECEIPT_COMPONENT_ID_ENGINE", None)
+                os.environ.pop("EXASERVE_RECEIPT_MODEL_ID_ENGINE", None)
+                os.environ.pop("EXASERVE_RECEIPT_DEVICE_IDS_ENGINE", None)
+        except Exception as exc:
+            _raise_engine_startup_failure("canonical_bind", exc)
 
         # The deployment bootstrap activated only its own Ray Serve adapter.
         # A replica is a different interpreter and activates its exact role
         # only after its rank-local receipt transport is bound, and still
         # before importing an engine backend.
-        from .compat.activator import CompatibilityActivator
+        with _engine_startup_phase("compat_activate"):
+            from .compat.activator import CompatibilityActivator
 
-        CompatibilityActivator().activate("replica")
-        from .engines import EngineSpec, NullEngine, get_engine
+            CompatibilityActivator().activate("replica")
 
-        if not null_compute and not local_model_path:
-            raise RuntimeError(
-                f"staged model path is required for production model {model_id!r}; "
-                "ambient model IDs and caches are not a fallback"
-            )
-        if not null_compute:
-            from .model_staging import validate_node_local_tree
+        with _engine_startup_phase("tree_validate"):
+            if not null_compute and not local_model_path:
+                raise RuntimeError(
+                    f"staged model path is required for production model {model_id!r}; "
+                    "ambient model IDs and caches are not a fallback"
+                )
+            if not null_compute:
+                from .model_staging import validate_node_local_tree
 
-            try:
                 validate_node_local_tree(
                     local_model_path,
                     local_root=_receipt_plan.local_stage_path,
                     require_immutable=True,
                 )
-            except ValueError as exc:
-                raise RuntimeError(
-                    f"staged model path for {model_id!r} is not node-local: {exc}"
-                ) from exc
-        engine_model_path = model_id if null_compute else local_model_path
-        spec = EngineSpec(
-            model_id=model_id,
-            local_path=engine_model_path,
-            vendor_name=vendor_name,
-            tensor_parallel_size=tensor_parallel_size,
-            pipeline_parallel_size=pipeline_parallel_size,
-            max_model_len=max_model_len,
-            gpu_memory_utilization=gpu_memory_utilization,
-            enforce_eager=enforce_eager,
-            max_num_seqs=max_num_seqs,
-            device_ids=gpu_ids,
-            collect_stats=collect_stats,
-            stats_retention=stats_retention,
-            stats_push_period_s=stats_push_period_s,
-            stats_sample_cap=stats_sample_cap,
-            enable_log_requests=enable_log_requests,
-        )
-        # The host, not a backend-specific exception path, owns the public
-        # context-window contract. Retain the exact canonical limit so both
-        # JSON and SSE requests can be rejected before generation begins.
-        self.max_model_len = spec.max_model_len
 
-        if null_compute:
-            latency = float(null_compute_latency_s)
-            if not math.isfinite(latency) or latency < 0:
-                raise ValueError("null_compute_latency_s must be finite and non-negative")
-            self.backend = NullEngine(latency_s=latency)
-            print(
-                f"[EngineWorker pid={pid}] NullCompute mode on tile {device_id} "
-                f"(latency={latency:.2f}s, no engine)",
-                flush=True,
+        with _engine_startup_phase("backend_create"):
+            from .engines import EngineSpec, NullEngine, get_engine
+
+            engine_model_path = model_id if null_compute else local_model_path
+            spec = EngineSpec(
+                model_id=model_id,
+                local_path=engine_model_path,
+                vendor_name=vendor_name,
+                tensor_parallel_size=tensor_parallel_size,
+                pipeline_parallel_size=pipeline_parallel_size,
+                max_model_len=max_model_len,
+                gpu_memory_utilization=gpu_memory_utilization,
+                enforce_eager=enforce_eager,
+                max_num_seqs=max_num_seqs,
+                device_ids=gpu_ids,
+                collect_stats=collect_stats,
+                stats_retention=stats_retention,
+                stats_push_period_s=stats_push_period_s,
+                stats_sample_cap=stats_sample_cap,
+                enable_log_requests=enable_log_requests,
             )
-        else:
-            self.backend = get_engine(engine_name)
+            # The host, not a backend-specific exception path, owns the public
+            # context-window contract. Retain the exact canonical limit so both
+            # JSON and SSE requests can be rejected before generation begins.
+            self.max_model_len = spec.max_model_len
 
-        self.backend.create(spec)
+            if null_compute:
+                latency = float(null_compute_latency_s)
+                if not math.isfinite(latency) or latency < 0:
+                    raise ValueError("null_compute_latency_s must be finite and non-negative")
+                self.backend = NullEngine(latency_s=latency)
+                print(
+                    f"[EngineWorker pid={pid}] NullCompute mode on tile {device_id} "
+                    f"(latency={latency:.2f}s, no engine)",
+                    flush=True,
+                )
+            else:
+                self.backend = get_engine(engine_name)
+
+            self.backend.create(spec)
 
         init_monotonic_end = time.monotonic()
         total_s = init_monotonic_end - init_monotonic_start
@@ -1868,10 +2097,10 @@ def deploy_from_canonical_binding(
                 try:
                     serve.run_many(targets, wait_for_applications_running=True)
                 except Exception as deploy_exc:
-                    raise RuntimeError(
-                        f"node-grouped null deployment failed for {n_rep} replicas "
-                        f"of {model_id}: {deploy_exc}"
-                    ) from deploy_exc
+                    raise _serve_run_many_failure(
+                        f"node-grouped null deployment failed for {n_rep} replicas of {model_id}",
+                        deploy_exc,
+                    ) from None
             print(
                 f"[ExaServe] ✓ {model_id}: {n_rep} exact replicas RUNNING "
                 f"in {len(targets)} node-grouped applications",
@@ -1930,9 +2159,10 @@ def deploy_from_canonical_binding(
             try:
                 serve.run_many(targets, wait_for_applications_running=True)
             except Exception as deploy_exc:
-                raise RuntimeError(
-                    f"canonical deployment failed for {n_rep} replicas of {model_id}: {deploy_exc}"
-                ) from deploy_exc
+                raise _serve_run_many_failure(
+                    f"canonical deployment failed for {n_rep} replicas of {model_id}",
+                    deploy_exc,
+                ) from None
         print(
             f"[ExaServe] ✓ {model_id}: all {n_rep} bound replica applications RUNNING",
             flush=True,

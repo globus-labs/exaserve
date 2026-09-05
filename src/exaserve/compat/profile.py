@@ -704,7 +704,13 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
             "vendor-compat",
             "xpu_selector",
             "get_current_process_visible_accelerator_ids",
-            roles=("replica", "engine_worker"),
+            # Ray's default worker imports ``ray._private.node`` before it
+            # executes user actor code.  That import reaches
+            # ``ray._private.accelerators.intel_gpu``, so SC-11 must already
+            # belong to the inherited Ray process role.  Otherwise rebinding
+            # a prestarted worker to ``replica`` correctly fails closed
+            # because the target was loaded from the unpatched base source.
+            roles=("ray_head", "ray_worker", "replica", "engine_worker"),
         ),
         _patch(
             "SC-12",

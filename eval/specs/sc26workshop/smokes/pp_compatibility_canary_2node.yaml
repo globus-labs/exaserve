@@ -1,0 +1,74 @@
+name: pp_compatibility_canary_2node
+# Fast lifecycle canary for the Ray-worker -> Serve-replica compatibility-role
+# transition used by real pipeline parallelism. Null-compute deliberately skips
+# model discovery and model_bcast, while TP=8 x PP=2 still compiles one replica
+# across two exact ranks, reserves the production PP placement-group shape, and
+# enables every PP-gated replica/Ray compatibility patch. startup_only exercises
+# canonical READY evidence and the normal eval-owned DRAIN/GOODBYE cleanup.
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [2]
+    targets: [deployment.num_nodes, scheduler.nodes]
+trace:
+  kind: weak_scaling
+workload:
+  duration: 1.0
+  input_len: 64
+  output_len: 1
+  rate_per_node: 0.1
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  validation_mode: true
+  num_nodes: 2
+  num_gpus_per_node: 12
+  local_stage_path: /tmp/pp_compat_canary
+  control:
+    watchdog_cleanup_deadline_s: 300.0
+  readiness:
+    initial_deadline_s: 900.0
+    recovery_deadline_s: 300.0
+    canary_timeout_s: 120.0
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    num_replicas: 1
+    max_model_len: 4096
+    size: 8
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 1
+  replica_max_ongoing_requests: 1
+client:
+  num_runs: 1
+  startup_only: true
+  dest: proxy
+  stream: false
+  num_nodes: 1
+  num_go_procs: 1
+  num_go_workers: 1
+  go_concurrency: 1
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+        null_compute: true
+        instrumentation: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 64
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 00:15:00

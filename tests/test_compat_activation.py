@@ -10,6 +10,7 @@ import pytest
 
 from exaserve.compat.activator import ActivationError, CompatibilityActivator
 from exaserve.compat.profile import (
+    PP_PATCH_GATE,
     CompatibilityProfile,
     PatchSpec,
     ProfileMismatch,
@@ -378,6 +379,21 @@ def test_default_manifest_has_every_required_wp3_identity_field():
     assert p.required_patch_ids("deployment") == ("RS-01", "RS-03")
     assert p.required_patch_ids("ray_head") == ("RS-02", "RS-03")
     assert p.required_patch_ids("ray_worker") == ("RS-02",)
+
+
+def test_pp_ray_head_preloads_sc11_but_not_sc12():
+    profile = default_profile("xpu")
+    required = set(profile.required_patch_ids("ray_head", {PP_PATCH_GATE: "1"}))
+    assert "SC-11" in required
+    assert "SC-12" not in required
+
+
+def test_pp_ray_worker_preloads_sc11_but_not_sc12():
+    profile = default_profile("xpu")
+    required = set(profile.required_patch_ids("ray_worker", {PP_PATCH_GATE: "1"}))
+    assert "SC-11" in required
+    assert "SC-12" not in required
+    assert {"SC-11", "SC-12"} <= set(profile.required_patch_ids("replica", {PP_PATCH_GATE: "1"}))
 
 
 def test_ray_start_is_import_clean_until_compatibility_activation():

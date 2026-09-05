@@ -196,6 +196,26 @@ def test_role_can_be_rebound_before_target_import(overlay_fixture, monkeypatch):
     assert str(target.__exaserve_overlay_source__).startswith(str(root))
 
 
+def test_patch_shared_by_ray_worker_and_replica_survives_role_rebind(overlay_fixture, monkeypatch):
+    _fixture_profile, source, root = overlay_fixture
+    profile = _profile(
+        hashlib.sha256(source.read_bytes()).hexdigest(),
+        roles=("ray_worker", "replica"),
+    )
+    generated_overlay.materialize(profile, root)
+
+    monkeypatch.setenv("EXASERVE_COMPAT_ROLE", "ray_worker")
+    generated_overlay.install(profile, root)
+    target = importlib.import_module("fakepkg.target")
+    assert target.patched is True
+    overlay_source = target.__exaserve_overlay_source__
+
+    monkeypatch.setenv("EXASERVE_COMPAT_ROLE", "replica")
+    generated_overlay.install(profile, root)
+    assert target.__exaserve_overlay_source__ == overlay_source
+    assert target.__exaserve_overlay_profile_id__ == profile.profile_id
+
+
 def test_role_rebinding_rejects_a_target_loaded_from_base(overlay_fixture, monkeypatch):
     profile, _source, root = overlay_fixture
     generated_overlay.materialize(profile, root)

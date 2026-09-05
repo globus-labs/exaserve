@@ -169,6 +169,37 @@ def test_missing_paper_scale_specs_preserve_the_declared_current_infra_matrix() 
             )
 
 
+def test_pp_compatibility_canary_retains_pp_lifecycle_without_model_staging() -> None:
+    spec_path = (
+        Path(__file__).parents[1]
+        / "specs"
+        / "sc26workshop"
+        / "smokes"
+        / "pp_compatibility_canary_2node.yaml"
+    )
+    variants = expand_matrix(load_experiment_spec(str(spec_path)))
+    assert len(variants) == 1
+    variant = variants[0]
+    assert variant.spec.client.startup_only is True
+    assert variant.spec.backend.args["ray"]["launch"]["null_compute"] is True
+
+    run_plan = compile_shared_run_plan(
+        variant.spec,
+        run_id="canary/run0/n2",
+        deployment_id="pp-compatibility-canary",
+    )
+    deployment = run_plan.deployment
+    model = deployment.models[0]
+    assert deployment.num_nodes == 2
+    assert deployment.runtime.null_compute is True
+    assert deployment.runtime.pp_shard_aware is True
+    assert model.tensor_parallel_size == 8
+    assert model.pipeline_parallel_size == 2
+    assert model.num_replicas == 1
+    assert model.replicas[0].planned_ranks == (0, 1)
+    assert model.replicas[0].gpu_demand == 16
+
+
 def test_pp_curves_use_explicit_complete_evidence_contracts() -> None:
     from eval.lib import pp405b_evidence as evidence
     from eval.plot import sc26_full_figures as figures
