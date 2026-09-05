@@ -17,7 +17,10 @@ workload:
   duration: 1.0
   input_len: 64
   output_len: 1
-  rate_per_node: 0.1
+  # The trace is never replayed in startup-only mode, but materialization still
+  # requires at least one deterministic request. Two nodes at 1 request/s for
+  # one second produces a small non-empty artifact without affecting runtime.
+  rate_per_node: 1.0
   arrival: fixed
   generation_mode: deterministic
 deployment:

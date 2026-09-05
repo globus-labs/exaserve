@@ -182,6 +182,11 @@ def test_pp_compatibility_canary_retains_pp_lifecycle_without_model_staging() ->
     variant = variants[0]
     assert variant.spec.client.startup_only is True
     assert variant.spec.backend.args["ray"]["launch"]["null_compute"] is True
+    assert int(
+        variant.spec.deployment.num_nodes
+        * variant.spec.workload.rate_per_node
+        * variant.spec.workload.duration
+    ) >= 1
 
     run_plan = compile_shared_run_plan(
         variant.spec,
