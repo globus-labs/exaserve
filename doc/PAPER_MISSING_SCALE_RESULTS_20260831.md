@@ -55,6 +55,34 @@ run identities are required before resubmission. `run5` and `run8` remain
 immutable; unattempted `run9` is operationally superseded because it binds the
 same defective snapshot and must not be submitted.
 
+### Second low-node attempt
+
+Commit `6816440`, source snapshot
+`7298aefce67c5b1a7a820dc0f20e5135abc6a967a3d33ea3edc6239bd4d2aa6b`,
+was exercised as PP2 `run6/n4` (PBS `8807651`) and null-compute
+`run10/n32` (PBS `8807652`).
+
+Null-compute `run10/n32` is accepted as the first corrected-snapshot n32
+trial. Its complete seven-entry ResultManifest hash is
+`ae4415f0d11234ad55fba4cc62a3569d75a8f3f6049101c1eee573df591cb863`.
+It proved 32/32 ranks, 384/384 replicas, 64 Serve applications and 450/450
+exact receipt slots; READY-after-trace-start was 29.369265 seconds,
+`serve.run_many` was 10.5004 seconds and canonical deployment was 19.8270
+seconds. All ranks acknowledged DRAIN and GOODBYE and terminal publication was
+clean `STOPPED`. This is one trial, not yet the required two-trial n32 result;
+the independently materialized `run11/n32` is PBS `8807874` and remains
+scheduler-pending at this update.
+
+PP2 `run6/n4` is rejected negative evidence. Its source capsule and all four
+per-rank Python/compatibility proofs completed correctly, but `model_bcast`
+never launched: the staging-step list had captured its environment before
+source activation installed `EXASERVE_QUALIFIED_PYTHON_SHA256` and the other
+distributed proof values. Commit `1e5eb1b` defers the model staging environment
+until execution after source activation and adds the previously missing
+sequential handoff regression. `run6` remains immutable and must not be
+resubmitted; PP2 requires a newly materialized run group from the follow-on
+snapshot.
+
 ## Current accepted results
 
 ### HAProxy null-compute startup
