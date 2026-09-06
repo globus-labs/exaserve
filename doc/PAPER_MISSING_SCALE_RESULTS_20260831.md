@@ -257,8 +257,79 @@ snapshot. This is a proven coverage bug, not evidence about the underlying
 actor failure. Commit `c5dd69a` routes both `serve.run` branches and both
 `serve.run_many` branches through the same bounded public-status diagnostic.
 Fresh canary `run1/n2` was materialized from that commit and submitted as PBS
-`8808227`; it has no terminal outcome at this update. Rejected `run0/n2`
-remains immutable and must not be rerun.
+`8808227`. It is now terminal and rejected as described below. Rejected
+`run0/n2` remains immutable and must not be rerun.
+
+Canary `run1/n2`, source snapshot
+`1b8179fe26189895c03bd1a49ff2d8d965a4c2bc51ca6467e8016c94cd44e272`,
+proved that the common Serve wrapper works and localized the actor failure to
+`EngineWorker` phase `backend_create`. After three actor-start attempts, the
+retained final failure is a Pydantic `ValidationError` while constructing vLLM
+`ModelConfig`: model architecture `LlamaForCausalLM` “failed to be inspected.”
+This is the exact retained outer failure, but it does not reveal why vLLM's
+registry inspection failed. The run never reached READY and its `results/`
+directory is empty. All 2/2 ranks acknowledged DRAIN and GOODBYE; the
+deployment exited 1, the rank launcher was reaped with expected code 143, and
+the shutdown report records `clean=true`, no errors and no exhausted deadline.
+
+Commit `f201923` then attached a bounded handler to the exact vLLM model-registry
+logger around `AsyncEngineArgs` construction. Fresh canary `run2/n2`, source
+snapshot
+`fa856a1e8f7e65166a0867b896aec884dbe77d09d010c8119bb31e29dd92ef0c`,
+ran as PBS `8808252` and is also rejected. It reproduced three actor-start
+attempts and retained the same final `backend_create`/`ModelConfig`
+architecture-inspection failure. The registry hook demonstrably fired, but
+its logger record was rendered into text and then passed through nested
+head/tail truncation. The retained tail contains only Transformers' nonfatal
+deprecation warning for `TRANSFORMERS_CACHE`; it contains neither the registry
+subprocess return code nor its causal exception/signal. This is another
+diagnostic representation failure, not evidence that the warning caused the
+actor failure. `run2/n2` has no READY or result artifact. Its deployment
+exited 1 and its shutdown was again clean with 2/2 DRAIN and GOODBYE, expected
+rank-launcher code 143, no cleanup errors and no exhausted deadline.
+
+Commit `a970d38` replaced that nested text with a versioned structured
+diagnostic carrying the registry exception, its immediate subprocess cause,
+return code/signal, and separately bounded stderr head and tail. Fresh canary
+`run3/n2`, PBS `8808281`, used source snapshot
+`9198863dea1eb1b4bdcfa0691d631151d96c5f18cd32a146a37ebe1bd55ec8a7`.
+Its exact model-broadcast result was again healthy (80.7057 seconds total;
+9,987,887,987 bytes to rank 0 and 11,095,244,439 bytes to rank 1), after which
+the replica exhausted three actor starts in `backend_create`.
+
+This time the retained cause is decisive: vLLM's
+`vllm.model_executor.models.registry` subprocess died with
+`CalledProcessError`, `returncode=-11`, `signal=SIGSEGV` while inspecting
+`LlamaForCausalLM`. Its stderr head begins in IPEX/XPU operator registration;
+the tail contains only a nonfatal Transformers cache deprecation. The failure
+therefore occurs in the fresh-cache native registry helper, before EngineCore
+or model-weight loading, and is not caused by model size or the warning at the
+stderr tail. `run3/n2` has no READY/result artifact and exited 1 after 4:31;
+cleanup was clean with 2/2 DRAIN and GOODBYE, expected rank-launcher code 143,
+no errors and no exhausted deadline.
+
+The accepted historical PP `eabf59c/run3` environment exposes the likely hidden
+dependency that these cold-cache canaries uncovered. At that revision the
+actor runtime did not project `HOME`, `XDG_CACHE_HOME` or `VLLM_CACHE_ROOT`, so
+Ray actors inherited `/home/wenyiw`; retained vLLM output explicitly names
+`/home/wenyiw/.config/vllm`. vLLM defaults its model-info cache to
+`~/.cache/vllm`, and the current
+`vllm-model_executor-models-llama-LlamaForCausalLM.json` there predates the
+accepted run by more than five months. Its recorded module hash
+`a9013536a88eca40c49613d301e4d8ae` still matches the installed Llama module,
+and the 754-byte file's current SHA-256 is
+`28e56efcb7a06784a7a6ddaf45c25e022799bdf7f12b235b36c19b033d96609d`.
+This is strong evidence that historical success used a shared-home cache hit,
+whereas production hardening correctly creates a fresh generation-local
+`VLLM_CACHE_ROOT` and therefore exercises vLLM's registry subprocess on a
+miss. The historical manifest did not bind those cache bytes, so this remains
+a documented dependency inference rather than retroactive immutable proof.
+Restoring ambient `/home` cache access is not an admissible fix: it would
+reintroduce worker Lustre fan-out and unversioned mutable runtime input. The
+next diagnostic must preserve the registry exception type, subprocess return
+code/signal and bounded stderr as separate structured fields before choosing
+between a hash-bound distributed cache seed and a correctly isolated
+cache-miss subprocess.
 
 ## Current accepted results
 
@@ -527,6 +598,18 @@ throughput for a 2x node/replica increase.
   exited 1 with clean 2/2 DRAIN/GOODBYE. Its single-replica `serve.run` branch
   bypassed the new causal-tail serializer, so it diagnoses a coverage defect
   but does not establish the actor's root-cause phase.
+- Real 8B PP canary `run1/n2`, PBS job `8808227`, proved the shared Serve
+  wrapper and retained exact phase `backend_create` plus vLLM `ModelConfig`'s
+  `LlamaForCausalLM` architecture-inspection failure. The swallowed registry
+  cause is absent; it has no READY/result and clean 2/2 DRAIN/GOODBYE only.
+- Real 8B PP canary `run2/n2`, PBS job `8808252`, proved the registry logging
+  hook ran, but nested truncation retained only a nonfatal
+  `TRANSFORMERS_CACHE` warning instead of subprocess exit/cause. It likewise
+  has no READY/result and ended with clean 2/2 DRAIN/GOODBYE.
+- Real 8B PP canary `run3/n2`, PBS job `8808281`, retained the structured
+  native cause: vLLM's cold `LlamaForCausalLM` registry helper died with
+  `returncode=-11`/`SIGSEGV` during `backend_create`. It has no READY/result
+  and ended with clean 2/2 DRAIN/GOODBYE.
 - PP2 `run2` 4- and 8-node successes use the superseded 0.90 setting; the final
   low-node values come from `run3` at 0.95.
 - Three historical streaming PP2 cells were produced while their nominal
@@ -553,14 +636,21 @@ submission. Commit `5401cbd` contains the causal-tail diagnostic correction;
 commit `ec48442` contains the real-engine 8B PP canary. Its immutable
 `run0/n2`, PBS `8808210`, reproduced the actor-start failure but also proved
 that the single-replica `serve.run` branch bypasses that correction. Commit
-`c5dd69a` closes that coverage gap; fresh `run1/n2`, PBS `8808227`, is the
-active diagnostic identity.
+`c5dd69a` closes that coverage gap; rejected `run1/n2`, PBS `8808227`, then
+localized the failure to `backend_create`/vLLM model-registry inspection.
+Rejected `f201923` canary `run2/n2`, PBS `8808252`, fired its registry logger
+hook but lost subprocess exit/cause to nested text truncation. Rejected
+`a970d38` canary `run3/n2`, PBS `8808281`, then proved the cold registry helper
+dies with SIGSEGV. All four 8B canary identities are immutable negative
+evidence.
 
-1. Adjudicate two-node 8B real-engine PP canary `run1/n2`, PBS `8808227`. It
-   must either reach exact startup-only READY and clean terminal evidence or
-   preserve the named causal phase and traceback tail. It is qualification
-   evidence, never a paper result; rejected `run0/n2` must not be reset or
-   rerun.
+1. Ship reviewed, exact-version vLLM model-info seeds inside the immutable
+   source capsule, bind their seed and target-module SHA-256 identities into
+   the compatibility profile, and install/verify them on every node's local
+   `VLLM_CACHE_ROOT` before Ray starts. Prove a cold local cache never launches
+   the SIGSEGV registry subprocess, then materialize a fresh two-node 8B
+   real-engine PP canary. Do not restore ambient shared-home model-info caches
+   or reuse rejected `run0`/`run1`/`run2`/`run3` identities.
 2. Only after that diagnosis, materialize a fresh 405B PP run group and run its
    n4 cell. The n4 workload must complete both replays before its n256 cell is
    submitted; no rejected `run7`/`run8` identity may be reset or reused.
