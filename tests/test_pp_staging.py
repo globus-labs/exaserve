@@ -343,7 +343,9 @@ def test_broadcast_uses_plan_ranks_not_binding_prefix(tmp_path, monkeypatch):
     model_id = "org/pp"
     source = tmp_path / "source"
     source.mkdir()
-    (source / "config.json").write_text('{"num_attention_heads": 4}')
+    (source / "config.json").write_text(
+        '{"architectures":["LlamaForCausalLM"],"num_attention_heads":4}'
+    )
     (source / "model.safetensors").write_text("weights")
 
     model = SimpleNamespace(
@@ -367,7 +369,16 @@ def test_broadcast_uses_plan_ranks_not_binding_prefix(tmp_path, monkeypatch):
             SimpleNamespace(planned_ranks=(3, 1)),
         ),
     )
-    deployment = SimpleNamespace(models=(canonical_model,))
+    from exaserve.compat.profile import default_profile
+
+    compatibility = default_profile("xpu")
+    deployment = SimpleNamespace(
+        compatibility_profile_hash=compatibility.profile_id,
+        engine="vllm",
+        models=(canonical_model,),
+        runtime=SimpleNamespace(null_compute=False),
+        vendor="xpu",
+    )
     observed = {}
     run_logs = tmp_path / "run-logs"
     run_logs.mkdir()

@@ -77,6 +77,7 @@ def _receipt(
     )
     profile = default_profile(plan.vendor)
     package_hashes, source_hashes = _observed_profile_hashes(profile)
+    attestation_type = attestation or slot.attestation_type
     return CompatibilityReceiptV2(
         schema_version=SCHEMA_VERSION,
         deployment_id=plan.deployment_id,
@@ -102,8 +103,8 @@ def _receipt(
         observed_package_hashes=package_hashes,
         observed_source_hashes=source_hashes,
         patch_results=(patches if patches is not None else {"SC-01": PatchResult("APPLIED", True)}),
-        capabilities=("x",),
-        attestation_type=attestation or slot.attestation_type,
+        capabilities=(profile.capabilities() if attestation_type == "SELF" else ()),
+        attestation_type=attestation_type,
         attested_at="2026-08-07T00:00:00Z",
     ).finalize()
 
@@ -288,6 +289,45 @@ def test_ledger_rejects_component_substitution_within_a_valid_slot():
         receipt, required_patch_ids={"SC-01"}, session_rank=0, session_node="n0"
     )
     assert not ok and "component_id" in detail
+
+
+def test_ledger_rejects_missing_vllm_seed_source_or_capability_evidence():
+    from dataclasses import replace
+
+    plan = _plan()
+    binding = _binding(plan)
+    receipt = _receipt(
+        plan, binding, requirement="rank0/ray_head", role="ray_head", rank=0, node="n0"
+    )
+    sources = dict(receipt.observed_source_hashes)
+    sources.pop("vllm_modelinfo:manifest")
+    missing_source = replace(
+        receipt,
+        observed_source_hashes=sources,
+        receipt_hash="",
+    ).finalize()
+    ok, detail = ExactReceiptLedger(plan, binding).accept(
+        missing_source,
+        required_patch_ids={"SC-01"},
+        session_rank=0,
+        session_node="n0",
+    )
+    assert not ok and "source/artifact hashes" in detail
+
+    missing_capability = replace(
+        receipt,
+        capabilities=tuple(
+            value for value in receipt.capabilities if value != "vllm_modelinfo_cache_seed"
+        ),
+        receipt_hash="",
+    ).finalize()
+    ok, detail = ExactReceiptLedger(plan, binding).accept(
+        missing_capability,
+        required_patch_ids={"SC-01"},
+        session_rank=0,
+        session_node="n0",
+    )
+    assert not ok and "capabilities" in detail
 
 
 def test_supervisor_attestation_cannot_replace_a_managed_self_report():

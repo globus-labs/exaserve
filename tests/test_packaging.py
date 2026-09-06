@@ -26,6 +26,13 @@ def test_packaged_runtime_resources_are_present():
         "bcast.Makefile",
     ):
         assert (resource_root / name).is_file()
+    seed_root = resource_root / "vllm_modelinfo"
+    for name in (
+        "manifest.json",
+        "vllm-model_executor-models-gpt_oss-GptOssForCausalLM.json",
+        "vllm-model_executor-models-llama-LlamaForCausalLM.json",
+    ):
+        assert (seed_root / name).is_file()
 
 
 def test_bcast_sources_materialize_to_writable_build_dir(tmp_path):
@@ -72,6 +79,7 @@ def test_release_builder_stages_only_declared_inputs(tmp_path):
     assert not (staged / "src/exaserve.egg-info").exists()
     assert not (staged / "doc").exists()
     assert not (staged / "scripts").exists()
+    assert (staged / "src/exaserve/resources/vllm_modelinfo/manifest.json").is_file()
 
 
 def test_release_artifact_publication_never_replaces_an_existing_identity(tmp_path):

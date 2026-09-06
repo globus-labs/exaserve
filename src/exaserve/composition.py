@@ -689,7 +689,17 @@ class CompositionRoot:
         if mismatches:
             return False, f"{kind} staging manifest identity mismatch: {mismatches}"
         if kind == "source":
+            from .compat.profile import default_profile
             from .source_staging import SourceStagingError, validate_source_staging_result
+            from .vllm_modelinfo_seed import expected_source_seed_evidence
+
+            compatibility = default_profile(self.plan.vendor)
+            expected_seed_evidence = expected_source_seed_evidence(
+                compatibility,
+                install_required=(
+                    self.plan.engine == "vllm" and not self.plan.runtime.null_compute
+                ),
+            )
 
             try:
                 validate_source_staging_result(
@@ -699,8 +709,12 @@ class CompositionRoot:
                     expected_plan_hash=self.plan.deployment_plan_hash,
                     expected_site_profile_hash=self.plan.site_profile_hash,
                     expected_binding_hash=self.binding.allocation_binding_hash,
+                    expected_compatibility_profile_id=(self.plan.compatibility_profile_hash),
+                    expected_compatibility_manifest_hash=self.plan.manifest_hash,
                     expected_rank_to_node=self.binding.rank_to_node,
                     expected_run_dir=self.run_dir,
+                    require_seed_evidence=True,
+                    expected_seed_evidence=expected_seed_evidence,
                 )
             except SourceStagingError as exc:
                 return False, str(exc)

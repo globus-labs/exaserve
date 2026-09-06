@@ -256,6 +256,39 @@ def test_stale_cleanup_garbage_collects_a_dead_current_generation(tmp_path, monk
     assert not runtime.exists()
 
 
+def test_stale_cleanup_preserves_republished_current_generation_state(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from exaserve.plan import runtime_environment
+
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(tmp_path / "owned"))
+
+    def local_state(plan, generation, rank=0):
+        del rank
+        return str(tmp_path / "state" / plan.deployment_id / f"g{generation}")
+
+    monkeypatch.setattr(runtime_environment, "default_local_state_root", local_state)
+    dead = _sleeping_child()
+    state = local_state(SimpleNamespace(deployment_id="current"), 2)
+    seed = Path(state) / "cache" / "vllm" / "modelinfos" / "seed.json"
+    seed.parent.mkdir(parents=True)
+    seed.write_text("reviewed", encoding="utf-8")
+    registry = ProcessOwnershipRegistry(deployment_id="current", generation=2, rank=0)
+    receipt = registry.record(
+        "ray",
+        pid=dead.pid,
+        pgid=os.getpgid(dead.pid),
+        argv=dead.args,
+        temp_paths=(state,),
+    )
+    os.killpg(os.getpgid(dead.pid), 15)
+    dead.wait(timeout=5)
+
+    assert cleanup_stale_owned_processes(deployment_id="current", generation=2, deadline_s=1) == 1
+    assert not os.path.exists(receipt)
+    assert seed.read_text(encoding="utf-8") == "reviewed"
+
+
 def test_normal_release_removes_receipt_and_owned_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(tmp_path / "owned"))
     child = _sleeping_child()

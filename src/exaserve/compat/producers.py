@@ -240,10 +240,10 @@ def prepared_environment_hash(env: Optional[Mapping[str, str]] = None) -> str:
 @lru_cache(maxsize=16)
 def manifest_hash(profile) -> str:
     """Hash of the resolved patch manifest, distinct from the profile id."""
-    from dataclasses import asdict
 
-    manifest = [asdict(p) for p in sorted(profile.patches, key=lambda p: p.patch_id)]
-    return sha256_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+    from .profile import _profile_manifest_hash
+
+    return _profile_manifest_hash(profile)
 
 
 def _identity(profile) -> dict[str, Any]:
@@ -303,6 +303,16 @@ def _observed_profile_hashes_cached(
         by_distribution.setdefault(patch.target_distribution, []).append(
             (patch.target_version, patch.target_source_hash)
         )
+    if profile.vllm_modelinfo_seeds:
+        sources["vllm_modelinfo:manifest"] = profile.vllm_modelinfo_seed_manifest_hash
+        sources["vllm_modelinfo:installer"] = profile.vllm_modelinfo_installer_hash
+        for source in profile.vllm_modelinfo_support_sources:
+            sources[f"vllm_modelinfo:support:{source.target_file}"] = source.target_sha256
+            by_distribution.setdefault("vllm", []).append((profile.vllm, source.target_sha256))
+        for seed in profile.vllm_modelinfo_seeds:
+            sources[f"vllm_modelinfo:target:{seed.architecture}"] = seed.target_sha256
+            sources[f"vllm_modelinfo:seed:{seed.architecture}"] = seed.seed_sha256
+            by_distribution.setdefault("vllm", []).append((profile.vllm, seed.target_sha256))
     for distribution, entries in by_distribution.items():
         packages[distribution] = sha256_text(
             json.dumps(sorted(set(entries)), separators=(",", ":"))

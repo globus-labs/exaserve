@@ -33,7 +33,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from importlib import util as importlib_util
 from importlib import resources
 from pathlib import Path
@@ -47,7 +47,7 @@ class SourceStagingError(RuntimeError):
     """The source artifact could not be published on every planned rank."""
 
 
-_SOURCE_RECEIPT_FIELDS = {
+_SOURCE_RECEIPT_BASE_FIELDS = {
     "schema_version",
     "attempt_id",
     "result_id",
@@ -71,7 +71,7 @@ _SOURCE_RECEIPT_FIELDS = {
     "compatibility_manifest_hash",
     "verification_duration_s",
 }
-_SOURCE_RESULT_FIELDS = {
+_SOURCE_RESULT_BASE_FIELDS = {
     "schema_version",
     "deployment_id",
     "generation",
@@ -100,6 +100,15 @@ _SOURCE_RESULT_FIELDS = {
     "duration_s",
     "rank_receipts",
 }
+_MODELINFO_SEED_EVIDENCE_FIELDS = {
+    "source_evidence_schema_version",
+    "vllm_modelinfo_seed_manifest_hash",
+    "vllm_modelinfo_seed_count",
+    "vllm_modelinfo_seed_install_report_hash",
+    "vllm_modelinfo_seed_installed_count",
+}
+_SOURCE_RECEIPT_FIELDS = _SOURCE_RECEIPT_BASE_FIELDS | _MODELINFO_SEED_EVIDENCE_FIELDS
+_SOURCE_RESULT_FIELDS = _SOURCE_RESULT_BASE_FIELDS | _MODELINFO_SEED_EVIDENCE_FIELDS
 _SOURCE_FILE_FIELDS = {"path", "size", "mode", "sha256"}
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ATTEMPT_ID = re.compile(r"[0-9a-f]{32}")
@@ -318,7 +327,11 @@ def runtime_paths_from_result(result: object) -> RuntimePaths:
 
 
 def _validate_source_receipt(value: object) -> dict:
-    if not isinstance(value, dict) or set(value) != _SOURCE_RECEIPT_FIELDS:
+    if not isinstance(value, dict):
+        raise SourceStagingError("source receipt fields are invalid")
+    has_seed_evidence = _MODELINFO_SEED_EVIDENCE_FIELDS <= set(value)
+    expected_fields = _SOURCE_RECEIPT_FIELDS if has_seed_evidence else _SOURCE_RECEIPT_BASE_FIELDS
+    if set(value) != expected_fields:
         raise SourceStagingError("source receipt fields are invalid")
     duration = value["verification_duration_s"]
     if (
@@ -364,6 +377,23 @@ def _validate_source_receipt(value: object) -> dict:
         or not _SHA256.fullmatch(value["compatibility_profile_id"])
         or not isinstance(value["compatibility_manifest_hash"], str)
         or not _SHA256.fullmatch(value["compatibility_manifest_hash"])
+        or (
+            has_seed_evidence
+            and (
+                type(value["source_evidence_schema_version"]) is not int
+                or value["source_evidence_schema_version"] != 2
+                or not isinstance(value["vllm_modelinfo_seed_manifest_hash"], str)
+                or not _SHA256.fullmatch(value["vllm_modelinfo_seed_manifest_hash"])
+                or type(value["vllm_modelinfo_seed_count"]) is not int
+                or value["vllm_modelinfo_seed_count"] < 1
+                or not isinstance(value["vllm_modelinfo_seed_install_report_hash"], str)
+                or not _SHA256.fullmatch(value["vllm_modelinfo_seed_install_report_hash"])
+                or type(value["vllm_modelinfo_seed_installed_count"]) is not int
+                or not 0
+                <= value["vllm_modelinfo_seed_installed_count"]
+                <= value["vllm_modelinfo_seed_count"]
+            )
+        )
         or isinstance(duration, bool)
         or not isinstance(duration, (int, float))
         or not math.isfinite(duration)
@@ -423,16 +453,45 @@ def validate_source_staging_result(
     expected_plan_hash: str | None = None,
     expected_site_profile_hash: str | None = None,
     expected_binding_hash: str | None = None,
+    expected_compatibility_profile_id: str | None = None,
+    expected_compatibility_manifest_hash: str | None = None,
     expected_rank_to_node: Iterable[tuple[int, str]] | None = None,
     expected_run_dir: str | os.PathLike | None = None,
+    require_seed_evidence: bool = False,
+    expected_seed_evidence: Mapping[str, str | int] | None = None,
 ) -> dict:
     """Validate the complete immutable source-staging evidence boundary."""
-    if not isinstance(value, dict) or set(value) != _SOURCE_RESULT_FIELDS:
+    if type(require_seed_evidence) is not bool:
+        raise TypeError("require_seed_evidence must be a boolean")
+    if not isinstance(value, dict):
+        raise SourceStagingError("source staging result fields are invalid")
+    schema_version = value.get("schema_version")
+    if schema_version == 2:
+        expected_fields = _SOURCE_RESULT_BASE_FIELDS
+        has_seed_evidence = False
+    elif schema_version == 3:
+        expected_fields = _SOURCE_RESULT_FIELDS
+        has_seed_evidence = True
+    else:
+        raise SourceStagingError("source staging result values are invalid")
+    if require_seed_evidence and not has_seed_evidence:
+        raise SourceStagingError("current source staging requires VC-01 seed evidence")
+    resolved_seed_expectation = None
+    if expected_seed_evidence is not None:
+        if (
+            not isinstance(expected_seed_evidence, Mapping)
+            or set(expected_seed_evidence) != _MODELINFO_SEED_EVIDENCE_FIELDS
+        ):
+            raise TypeError("expected_seed_evidence must contain the exact VC-01 evidence fields")
+        if not has_seed_evidence:
+            raise SourceStagingError("current source staging requires VC-01 seed evidence")
+        resolved_seed_expectation = dict(expected_seed_evidence)
+    if set(value) != expected_fields:
         raise SourceStagingError("source staging result fields are invalid")
     duration = value["duration_s"]
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 2
+        or value["schema_version"] not in {2, 3}
         or not isinstance(value["deployment_id"], str)
         or not value["deployment_id"]
         or type(value["generation"]) is not int
@@ -452,6 +511,23 @@ def validate_source_staging_result(
         or not _SHA256.fullmatch(value["compatibility_profile_id"])
         or not isinstance(value["compatibility_manifest_hash"], str)
         or not _SHA256.fullmatch(value["compatibility_manifest_hash"])
+        or (
+            has_seed_evidence
+            and (
+                type(value["source_evidence_schema_version"]) is not int
+                or value["source_evidence_schema_version"] != 2
+                or not isinstance(value["vllm_modelinfo_seed_manifest_hash"], str)
+                or not _SHA256.fullmatch(value["vllm_modelinfo_seed_manifest_hash"])
+                or type(value["vllm_modelinfo_seed_count"]) is not int
+                or value["vllm_modelinfo_seed_count"] < 1
+                or not isinstance(value["vllm_modelinfo_seed_install_report_hash"], str)
+                or not _SHA256.fullmatch(value["vllm_modelinfo_seed_install_report_hash"])
+                or type(value["vllm_modelinfo_seed_installed_count"]) is not int
+                or not 0
+                <= value["vllm_modelinfo_seed_installed_count"]
+                <= value["vllm_modelinfo_seed_count"]
+            )
+        )
         or type(value["file_count"]) is not int
         or value["file_count"] < 0
         or type(value["total_bytes"]) is not int
@@ -527,6 +603,8 @@ def validate_source_staging_result(
         "deployment_plan_hash": expected_plan_hash,
         "site_profile_hash": expected_site_profile_hash,
         "allocation_binding_hash": expected_binding_hash,
+        "compatibility_profile_id": expected_compatibility_profile_id,
+        "compatibility_manifest_hash": expected_compatibility_manifest_hash,
     }
     mismatches = {
         name: (expected, value[name])
@@ -535,6 +613,12 @@ def validate_source_staging_result(
     }
     if mismatches:
         raise SourceStagingError(f"source staging result identity mismatch: {mismatches}")
+    if resolved_seed_expectation is not None:
+        observed_seed_evidence = {name: value[name] for name in _MODELINFO_SEED_EVIDENCE_FIELDS}
+        if observed_seed_evidence != resolved_seed_expectation:
+            raise SourceStagingError(
+                "source staging VC-01 evidence does not match the DeploymentPlan"
+            )
 
     receipts = [_validate_source_receipt(item) for item in value["rank_receipts"]]
     ranks = [item["rank"] for item in receipts]
@@ -547,8 +631,10 @@ def validate_source_staging_result(
     attempt_id = next(iter(attempt_ids))
     expected_target = value["local_runtime_root"]
     for receipt in receipts:
+        receipt_has_seed_evidence = _MODELINFO_SEED_EVIDENCE_FIELDS <= set(receipt)
         if (
-            receipt["generation"] != value["generation"]
+            receipt_has_seed_evidence != has_seed_evidence
+            or receipt["generation"] != value["generation"]
             or receipt["source_manifest_hash"] != value["source_manifest_hash"]
             or receipt["file_count"] != value["file_count"]
             or receipt["total_bytes"] != value["total_bytes"]
@@ -562,6 +648,18 @@ def validate_source_staging_result(
             or receipt["qualified_python_fs_type"].lower() in _SHARED_FS_TYPES
             or receipt["compatibility_profile_id"] != value["compatibility_profile_id"]
             or receipt["compatibility_manifest_hash"] != value["compatibility_manifest_hash"]
+            or (
+                has_seed_evidence
+                and (
+                    receipt["vllm_modelinfo_seed_manifest_hash"]
+                    != value["vllm_modelinfo_seed_manifest_hash"]
+                    or receipt["vllm_modelinfo_seed_count"] != value["vllm_modelinfo_seed_count"]
+                    or receipt["vllm_modelinfo_seed_install_report_hash"]
+                    != value["vllm_modelinfo_seed_install_report_hash"]
+                    or receipt["vllm_modelinfo_seed_installed_count"]
+                    != value["vllm_modelinfo_seed_installed_count"]
+                )
+            )
         ):
             raise SourceStagingError(f"source receipt rank {receipt['rank']} disagrees with result")
 
@@ -837,7 +935,10 @@ def verify_and_publish(
 
     profile = load_site_profile(str(stable / "run" / "site.profile.json"))
     python_evidence = _qualified_executable_evidence(qualified_python, profile=profile)
-    compatibility_evidence = _compatibility_evidence(stable)
+    compatibility_evidence = _compatibility_evidence(
+        stable,
+        state_root=state_root,
+    )
     receipt = {
         "rank": _rank(),
         "node": socket.gethostname(),
@@ -940,7 +1041,7 @@ def _qualified_executable_evidence(path: Path, *, profile) -> dict:
     }
 
 
-def _compatibility_evidence(runtime_root: Path) -> dict:
+def _compatibility_evidence(runtime_root: Path, *, state_root: Path | None) -> dict:
     import platform
     from importlib import metadata
 
@@ -958,6 +1059,40 @@ def _compatibility_evidence(runtime_root: Path) -> dict:
             pass
     profile.verify_environment(observed)
     profile.verify_installed_sources()
+    from .vllm_modelinfo_seed import (
+        expected_source_seed_evidence,
+        install_vllm_modelinfo_seeds,
+        validate_profile_seed_bundle,
+    )
+
+    validate_profile_seed_bundle(
+        capsule_python_root=runtime_root / "python",
+        profile=profile,
+    )
+    install_required = plan.engine == "vllm" and not plan.runtime.null_compute
+    expected_seed_evidence = expected_source_seed_evidence(
+        profile,
+        install_required=install_required,
+    )
+    if install_required:
+        if state_root is None:
+            raise SourceStagingError("real vLLM source publication requires a local state root")
+        install_report = install_vllm_modelinfo_seeds(
+            capsule_python_root=runtime_root / "python",
+            state_root=state_root,
+            cache_root=state_root / "cache" / "vllm",
+            expected_vllm_version=profile.vllm,
+            expected_manifest_sha256=profile.vllm_modelinfo_seed_manifest_hash,
+            expected_support_sources=profile.vllm_modelinfo_support_sources,
+            expected_seeds=profile.vllm_modelinfo_seeds,
+        )
+        if (
+            len(install_report.architectures)
+            != expected_seed_evidence["vllm_modelinfo_seed_installed_count"]
+            or install_report.report_hash
+            != expected_seed_evidence["vllm_modelinfo_seed_install_report_hash"]
+        ):
+            raise SourceStagingError("VC-01 installation report disagrees with the profile")
     resolved_manifest_hash = manifest_hash(profile)
     if (
         profile.profile_id != plan.compatibility_profile_hash
@@ -967,6 +1102,7 @@ def _compatibility_evidence(runtime_root: Path) -> dict:
     return {
         "compatibility_profile_id": profile.profile_id,
         "compatibility_manifest_hash": resolved_manifest_hash,
+        **expected_seed_evidence,
     }
 
 
@@ -1556,9 +1692,25 @@ def stage(
             plan.manifest_hash
         }:
             raise SourceStagingError("compatibility proof differs across allocation ranks")
+        from .compat.profile import default_profile
+        from .vllm_modelinfo_seed import expected_source_seed_evidence
+
+        compatibility = default_profile(plan.vendor)
+        expected_seed_evidence = expected_source_seed_evidence(
+            compatibility,
+            install_required=plan.engine == "vllm" and not plan.runtime.null_compute,
+        )
+        for receipt in receipts:
+            observed_seed_evidence = {
+                name: receipt[name] for name in _MODELINFO_SEED_EVIDENCE_FIELDS
+            }
+            if observed_seed_evidence != expected_seed_evidence:
+                raise SourceStagingError(
+                    f"rank {receipt['rank']} VC-01 evidence disagrees with the DeploymentPlan"
+                )
         result = validate_source_staging_result(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "deployment_id": plan.deployment_id,
                 "generation": binding.generation,
                 "deployment_plan_hash": plan.deployment_plan_hash,
@@ -1592,6 +1744,7 @@ def stage(
                 "qualified_python_sha256": by_rank[0]["qualified_python_sha256"],
                 "compatibility_profile_id": plan.compatibility_profile_hash,
                 "compatibility_manifest_hash": plan.manifest_hash,
+                **expected_seed_evidence,
                 "file_count": manifest["file_count"],
                 "total_bytes": manifest["total_bytes"],
                 "files": manifest["files"],
@@ -1603,8 +1756,12 @@ def stage(
             expected_plan_hash=plan.deployment_plan_hash,
             expected_site_profile_hash=plan.site_profile_hash,
             expected_binding_hash=binding.allocation_binding_hash,
+            expected_compatibility_profile_id=plan.compatibility_profile_hash,
+            expected_compatibility_manifest_hash=plan.manifest_hash,
             expected_rank_to_node=binding.rank_to_node,
             expected_run_dir=run_dir,
+            require_seed_evidence=True,
+            expected_seed_evidence=expected_seed_evidence,
         )
     atomic_create_json(result_path, result)
     return result

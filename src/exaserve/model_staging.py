@@ -847,6 +847,43 @@ def validate_tensor_parallel_compatibility(
         )
 
 
+def validate_vllm_modelinfo_seed_coverage(
+    model_id: str,
+    model_path: Path,
+    supported_architectures: frozenset[str],
+) -> tuple[str, ...]:
+    """Reject a real vLLM model whose architecture lacks reviewed cache data.
+
+    This runs only in the allocation-head staging process, before model bytes
+    are broadcast. Workers receive the resulting model tree via MPI and never
+    inspect the shared source path themselves.
+    """
+
+    if not isinstance(supported_architectures, frozenset) or any(
+        not isinstance(value, str) or not value for value in supported_architectures
+    ):
+        raise TypeError("supported vLLM architectures must be a frozenset of text")
+    config_data = load_model_config(model_path)
+    architectures = config_data.get("architectures")
+    if (
+        not isinstance(architectures, list)
+        or not architectures
+        or any(not isinstance(value, str) or not value for value in architectures)
+        or len(architectures) != len(set(architectures))
+    ):
+        raise RuntimeError(
+            f"[ModelStaging] Model {model_id} at {model_path} must declare a unique, "
+            "non-empty architectures list for VC-01"
+        )
+    unsupported = sorted(set(architectures) - supported_architectures)
+    if unsupported:
+        raise RuntimeError(
+            f"[ModelStaging] Model {model_id} requires unreviewed vLLM model-info "
+            f"architecture(s) {unsupported}; refusing a cache-miss subprocess before broadcast"
+        )
+    return tuple(architectures)
+
+
 def download_model(model_id: str, local_path: Path, tokenizer_only: bool = False) -> str:
     """
     Download a model from HuggingFace to the specified local path.

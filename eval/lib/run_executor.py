@@ -591,6 +591,11 @@ def _validated_replay_capsule_environment(
     generation: int,
     deployment_plan_hash: str,
     site_profile_hash: str,
+    compatibility_profile_hash: str,
+    compatibility_manifest_hash: str,
+    vendor: str,
+    engine: str,
+    null_compute: bool,
     expected_ranks: int,
 ) -> tuple[tuple[str, str], ...]:
     """Read the head-published capsule receipt once and bind its local paths."""
@@ -599,6 +604,14 @@ def _validated_replay_capsule_environment(
         validate_source_staging_result,
     )
     from exaserve.state.atomic import strict_json_load_path
+    from exaserve.compat.profile import default_profile
+    from exaserve.vllm_modelinfo_seed import expected_source_seed_evidence
+
+    compatibility = default_profile(vendor)
+    seed_evidence = expected_source_seed_evidence(
+        compatibility,
+        install_required=engine == "vllm" and not null_compute,
+    )
 
     result = validate_source_staging_result(
         strict_json_load_path(manifest_path),
@@ -606,6 +619,10 @@ def _validated_replay_capsule_environment(
         expected_generation=generation,
         expected_plan_hash=deployment_plan_hash,
         expected_site_profile_hash=site_profile_hash,
+        expected_compatibility_profile_id=compatibility_profile_hash,
+        expected_compatibility_manifest_hash=compatibility_manifest_hash,
+        require_seed_evidence=True,
+        expected_seed_evidence=seed_evidence,
     )
     if len(result["rank_receipts"]) != expected_ranks:
         raise RuntimeError("source capsule receipt rank count disagrees with the replay allocation")
@@ -765,6 +782,11 @@ def _run_replay_client(
                     runtime_generation,
                     run_plan.deployment_plan_hash,
                     run_plan.semantic_plan.deployment.site_profile_hash,
+                    run_plan.semantic_plan.deployment.compatibility_profile_hash,
+                    run_plan.semantic_plan.deployment.manifest_hash,
+                    run_plan.semantic_plan.deployment.vendor,
+                    run_plan.semantic_plan.deployment.engine,
+                    run_plan.semantic_plan.deployment.runtime.null_compute,
                     run_plan.scheduler.nodes,
                 )
             )

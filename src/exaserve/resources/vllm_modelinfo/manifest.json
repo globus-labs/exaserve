@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "vllm_version": "0.15.0+xpu",
+  "support_sources": [
+    {
+      "target_file": "vllm/envs.py",
+      "target_sha256": "daed927944497df0d7f11f108eea2975fe2a580d1871198120371c502797c277"
+    },
+    {
+      "target_file": "vllm/model_executor/models/interfaces.py",
+      "target_sha256": "28b64eccf30f14fa77a13e259db422990302d6072a736e774cab9896c44ca57b"
+    },
+    {
+      "target_file": "vllm/model_executor/models/interfaces_base.py",
+      "target_sha256": "f21d1891fa8dbf72720488d7378a18b667bb94c68ea19d11399c3d082e3dc9f4"
+    },
+    {
+      "target_file": "vllm/model_executor/models/registry.py",
+      "target_sha256": "7b7a825f2d77d5d6ccbe6aee87d959d646d9e5e84c783c66676e4f7c5bbb7bf6"
+    },
+    {
+      "target_file": "vllm/utils/hashing.py",
+      "target_sha256": "89b4bd2bd246a5bfdcf00d766ea38a8182376aecfd6b6b7d5c47d96b1559243e"
+    }
+  ],
+  "seeds": [
+    {
+      "architecture": "GptOssForCausalLM",
+      "target_module": "vllm.model_executor.models.gpt_oss",
+      "target_file": "vllm/model_executor/models/gpt_oss.py",
+      "target_sha256": "0956d4ef35a5dbd75a5585013df73fc4525eb44f0721c3d21e7c1bda66def448",
+      "vllm_cache_hash_algorithm": "md5",
+      "vllm_cache_hash": "88d67c0015d1badbb4f387a5a0501081",
+      "seed_filename": "vllm-model_executor-models-gpt_oss-GptOssForCausalLM.json",
+      "seed_sha256": "65a10dce2fe8204f45d6ea8635f28602def42ecb483df12275c91b46be278065",
+      "destination_filename": "vllm-model_executor-models-gpt_oss-GptOssForCausalLM.json"
+    },
+    {
+      "architecture": "LlamaForCausalLM",
+      "target_module": "vllm.model_executor.models.llama",
+      "target_file": "vllm/model_executor/models/llama.py",
+      "target_sha256": "7d3e385e5b984602f1353f93630b43a86eca4e3fa6ab63cd54db24b81228596b",
+      "vllm_cache_hash_algorithm": "md5",
+      "vllm_cache_hash": "a9013536a88eca40c49613d301e4d8ae",
+      "seed_filename": "vllm-model_executor-models-llama-LlamaForCausalLM.json",
+      "seed_sha256": "a1634b6d56d44604dc7b01fc2743ca7087f0b2ff18e9dd6751d57ec39064f3c3",
+      "destination_filename": "vllm-model_executor-models-llama-LlamaForCausalLM.json"
+    }
+  ]
+}

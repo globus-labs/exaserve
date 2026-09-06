@@ -1236,6 +1236,7 @@ def test_a_short_hostname_matches_its_bound_fqdn(monkeypatch, tmp_path):
     ok, detail = ledger.accept(
         receipt,
         required_patch_ids=("RS-02",),
+        resolved_not_required=("SC-11",),
         session_rank=1,
         session_node="x4310c4s0b0n0",
     )

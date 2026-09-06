@@ -67,6 +67,60 @@ def _distribution(distribution_name: str):
 
 
 @dataclass(frozen=True)
+class VLLMModelInfoSupportSourceSpec:
+    """One exact vLLM source file that defines the private cache contract."""
+
+    target_file: str
+    target_sha256: str
+
+    def __post_init__(self) -> None:
+        target = Path(self.target_file)
+        if (
+            not self.target_file
+            or target.is_absolute()
+            or ".." in target.parts
+            or target.as_posix() != self.target_file
+        ):
+            raise ProfileMismatch("vLLM model-info support source path is invalid")
+        if _SHA256.fullmatch(self.target_sha256) is None:
+            raise ProfileMismatch("vLLM model-info support source hash must be lowercase SHA-256")
+
+
+@dataclass(frozen=True)
+class VLLMModelInfoSeedSpec:
+    """One reviewed vLLM cache entry bound into the profile identity."""
+
+    architecture: str
+    target_module: str
+    target_file: str
+    target_sha256: str
+    vllm_cache_hash: str
+    seed_filename: str
+    seed_sha256: str
+    destination_filename: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "architecture",
+            "target_module",
+            "target_file",
+            "seed_filename",
+            "destination_filename",
+        ):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ProfileMismatch(f"vLLM model-info seed {name} must be non-empty text")
+        for name in ("target_sha256", "seed_sha256"):
+            if _SHA256.fullmatch(getattr(self, name)) is None:
+                raise ProfileMismatch(f"vLLM model-info seed {name} must be lowercase SHA-256")
+        if re.fullmatch(r"[0-9a-f]{32}", self.vllm_cache_hash) is None:
+            raise ProfileMismatch("vLLM model-info seed cache hash must be lowercase MD5")
+        for name in ("seed_filename", "destination_filename"):
+            value = getattr(self, name)
+            if Path(value).name != value or value in {".", ".."}:
+                raise ProfileMismatch(f"vLLM model-info seed {name} must be one filename")
+
+
+@dataclass(frozen=True)
 class PatchSpec:
     """One manifest entry (plan WP3.10 field list)."""
 
@@ -177,6 +231,14 @@ class CompatibilityProfile:
     vllm: str
     vendor: str
     patches: tuple[PatchSpec, ...]
+    # Empty defaults keep pre-VC-01 profile artifacts reconstructable. New
+    # Aurora profiles provide all three fields and include them in profile_id.
+    vllm_modelinfo_seed_manifest_path: str = ""
+    vllm_modelinfo_seed_manifest_hash: str = ""
+    vllm_modelinfo_installer_path: str = ""
+    vllm_modelinfo_installer_hash: str = ""
+    vllm_modelinfo_support_sources: tuple[VLLMModelInfoSupportSourceSpec, ...] = ()
+    vllm_modelinfo_seeds: tuple[VLLMModelInfoSeedSpec, ...] = ()
     # Roles that must publish a receipt before READY (plan WP3.9).
     required_roles: tuple[str, ...] = (
         "supervisor",
@@ -204,6 +266,80 @@ class CompatibilityProfile:
             raise ProfileMismatch("compatibility.required_roles must contain non-empty strings")
         object.__setattr__(self, "patches", tuple(self.patches))
         object.__setattr__(self, "required_roles", tuple(self.required_roles))
+        if not isinstance(self.vllm_modelinfo_support_sources, (tuple, list)) or any(
+            not isinstance(source, VLLMModelInfoSupportSourceSpec)
+            for source in self.vllm_modelinfo_support_sources
+        ):
+            raise ProfileMismatch(
+                "compatibility.vllm_modelinfo_support_sources must contain "
+                "VLLMModelInfoSupportSourceSpec values"
+            )
+        object.__setattr__(
+            self,
+            "vllm_modelinfo_support_sources",
+            tuple(self.vllm_modelinfo_support_sources),
+        )
+        if not isinstance(self.vllm_modelinfo_seeds, (tuple, list)) or any(
+            not isinstance(seed, VLLMModelInfoSeedSpec) for seed in self.vllm_modelinfo_seeds
+        ):
+            raise ProfileMismatch(
+                "compatibility.vllm_modelinfo_seeds must contain VLLMModelInfoSeedSpec values"
+            )
+        object.__setattr__(self, "vllm_modelinfo_seeds", tuple(self.vllm_modelinfo_seeds))
+        seed_contract_present = (
+            bool(self.vllm_modelinfo_seed_manifest_path),
+            bool(self.vllm_modelinfo_seed_manifest_hash),
+            bool(self.vllm_modelinfo_installer_path),
+            bool(self.vllm_modelinfo_installer_hash),
+            bool(self.vllm_modelinfo_support_sources),
+            bool(self.vllm_modelinfo_seeds),
+        )
+        if any(seed_contract_present) and not all(seed_contract_present):
+            raise ProfileMismatch(
+                "compatibility vLLM model-info seed path, hash, and entries must be declared together"
+            )
+        if self.vllm_modelinfo_seed_manifest_path:
+            manifest_path = Path(self.vllm_modelinfo_seed_manifest_path)
+            if (
+                manifest_path.is_absolute()
+                or ".." in manifest_path.parts
+                or manifest_path.as_posix() != self.vllm_modelinfo_seed_manifest_path
+            ):
+                raise ProfileMismatch(
+                    "compatibility vLLM model-info seed manifest path must be normalized and relative"
+                )
+            if _SHA256.fullmatch(self.vllm_modelinfo_seed_manifest_hash) is None:
+                raise ProfileMismatch(
+                    "compatibility vLLM model-info seed manifest hash must be lowercase SHA-256"
+                )
+            installer_path = Path(self.vllm_modelinfo_installer_path)
+            if (
+                installer_path.is_absolute()
+                or ".." in installer_path.parts
+                or installer_path.as_posix() != self.vllm_modelinfo_installer_path
+            ):
+                raise ProfileMismatch(
+                    "compatibility vLLM model-info installer path must be normalized and relative"
+                )
+            if _SHA256.fullmatch(self.vllm_modelinfo_installer_hash) is None:
+                raise ProfileMismatch(
+                    "compatibility vLLM model-info installer hash must be lowercase SHA-256"
+                )
+            architectures = [seed.architecture for seed in self.vllm_modelinfo_seeds]
+            if len(architectures) != len(set(architectures)):
+                raise ProfileMismatch(
+                    "compatibility vLLM model-info seed architectures must be unique"
+                )
+            destinations = [seed.destination_filename for seed in self.vllm_modelinfo_seeds]
+            if len(destinations) != len(set(destinations)):
+                raise ProfileMismatch(
+                    "compatibility vLLM model-info seed destinations must be unique"
+                )
+            support_paths = [source.target_file for source in self.vllm_modelinfo_support_sources]
+            if len(support_paths) != len(set(support_paths)):
+                raise ProfileMismatch(
+                    "compatibility vLLM model-info support source paths must be unique"
+                )
         patch_ids = [patch.patch_id for patch in self.patches]
         if len(patch_ids) != len(set(patch_ids)):
             raise ProfileMismatch("compatibility manifest has duplicate patch IDs")
@@ -218,6 +354,16 @@ class CompatibilityProfile:
     def canonical(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("profile_id", None)
+        if not self.vllm_modelinfo_seeds:
+            # CompatibilityProfile artifacts created before VC-01 did not
+            # encode these additive defaults. Omitting the empty extension
+            # preserves their historical profile IDs and readability.
+            data.pop("vllm_modelinfo_seed_manifest_path", None)
+            data.pop("vllm_modelinfo_seed_manifest_hash", None)
+            data.pop("vllm_modelinfo_installer_path", None)
+            data.pop("vllm_modelinfo_installer_hash", None)
+            data.pop("vllm_modelinfo_support_sources", None)
+            data.pop("vllm_modelinfo_seeds", None)
         return data
 
     def compute_id(self) -> str:
@@ -225,7 +371,10 @@ class CompatibilityProfile:
         return hashlib.sha256(blob.encode()).hexdigest()
 
     def capabilities(self) -> tuple[str, ...]:
-        return tuple(sorted({p.capability for p in self.patches if p.capability}))
+        capabilities = {p.capability for p in self.patches if p.capability}
+        if self.vllm_modelinfo_seeds:
+            capabilities.add("vllm_modelinfo_cache_seed")
+        return tuple(sorted(capabilities))
 
     def required_patch_ids(
         self, role: str, env: Mapping[str, str] | None = None
@@ -371,6 +520,82 @@ class CompatibilityProfile:
                     )
                 checked_artifacts.add(artifact_key)
 
+        if self.vllm_modelinfo_seeds:
+            try:
+                vllm_dist = _distribution("vllm")
+            except metadata.PackageNotFoundError as exc:
+                raise ProfileMismatch("required distribution 'vllm' is not installed") from exc
+            if vllm_dist.version != self.vllm:
+                raise ProfileMismatch(f"VC-01 vllm version {vllm_dist.version!r} != {self.vllm!r}")
+            manifest_path = distribution_file(
+                exaserve_dist,
+                self.vllm_modelinfo_seed_manifest_path,
+                patch_id="VC-01",
+            )
+            if (
+                content_hash(manifest_path, label="VC-01 seed manifest")
+                != self.vllm_modelinfo_seed_manifest_hash
+            ):
+                raise ProfileMismatch("VC-01 seed manifest hash mismatch")
+            installer_path = distribution_file(
+                exaserve_dist,
+                self.vllm_modelinfo_installer_path,
+                patch_id="VC-01",
+            )
+            if (
+                content_hash(installer_path, label="VC-01 installer")
+                != self.vllm_modelinfo_installer_hash
+            ):
+                raise ProfileMismatch("VC-01 installer hash mismatch")
+            for source in self.vllm_modelinfo_support_sources:
+                support_path = distribution_file(
+                    vllm_dist,
+                    source.target_file,
+                    patch_id="VC-01",
+                )
+                if (
+                    content_hash(
+                        support_path,
+                        label=f"VC-01 support source {source.target_file}",
+                    )
+                    != source.target_sha256
+                ):
+                    raise ProfileMismatch(
+                        f"VC-01 support source hash mismatch for {source.target_file}"
+                    )
+            resource_parent = Path(self.vllm_modelinfo_seed_manifest_path).parent
+            for seed in self.vllm_modelinfo_seeds:
+                target_path = distribution_file(
+                    vllm_dist,
+                    seed.target_file,
+                    patch_id="VC-01",
+                )
+                if (
+                    content_hash(
+                        target_path,
+                        label=f"VC-01 target {seed.architecture}",
+                    )
+                    != seed.target_sha256
+                ):
+                    raise ProfileMismatch(
+                        f"VC-01 target source hash mismatch for {seed.architecture}"
+                    )
+                seed_path = distribution_file(
+                    exaserve_dist,
+                    (resource_parent / seed.seed_filename).as_posix(),
+                    patch_id="VC-01",
+                )
+                if (
+                    content_hash(
+                        seed_path,
+                        label=f"VC-01 seed {seed.architecture}",
+                    )
+                    != seed.seed_sha256
+                ):
+                    raise ProfileMismatch(
+                        f"VC-01 seed artifact hash mismatch for {seed.architecture}"
+                    )
+
 
 @lru_cache(maxsize=16)
 def verify_installed_sources_once(profile: CompatibilityProfile) -> None:
@@ -395,7 +620,30 @@ def verify_installed_sources_once(profile: CompatibilityProfile) -> None:
 def _profile_manifest_hash(profile: CompatibilityProfile) -> str:
     from dataclasses import asdict
 
-    manifest = [asdict(patch) for patch in sorted(profile.patches, key=lambda item: item.patch_id)]
+    patches = [asdict(patch) for patch in sorted(profile.patches, key=lambda item: item.patch_id)]
+    manifest: object = patches
+    if profile.vllm_modelinfo_seeds:
+        manifest = {
+            "patches": patches,
+            "vllm_modelinfo_seed_manifest_path": (profile.vllm_modelinfo_seed_manifest_path),
+            "vllm_modelinfo_seed_manifest_hash": (profile.vllm_modelinfo_seed_manifest_hash),
+            "vllm_modelinfo_installer_path": profile.vllm_modelinfo_installer_path,
+            "vllm_modelinfo_installer_hash": profile.vllm_modelinfo_installer_hash,
+            "vllm_modelinfo_support_sources": [
+                asdict(source)
+                for source in sorted(
+                    profile.vllm_modelinfo_support_sources,
+                    key=lambda item: item.target_file,
+                )
+            ],
+            "vllm_modelinfo_seeds": [
+                asdict(seed)
+                for seed in sorted(
+                    profile.vllm_modelinfo_seeds,
+                    key=lambda item: item.architecture,
+                )
+            ],
+        }
     return hashlib.sha256(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -805,6 +1053,50 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
             removal_ref="remove-when-engine-offers-pre-import-hook",
         ),
     )
+    modelinfo_support_sources = (
+        VLLMModelInfoSupportSourceSpec(
+            target_file="vllm/envs.py",
+            target_sha256="daed927944497df0d7f11f108eea2975fe2a580d1871198120371c502797c277",
+        ),
+        VLLMModelInfoSupportSourceSpec(
+            target_file="vllm/model_executor/models/interfaces.py",
+            target_sha256="28b64eccf30f14fa77a13e259db422990302d6072a736e774cab9896c44ca57b",
+        ),
+        VLLMModelInfoSupportSourceSpec(
+            target_file="vllm/model_executor/models/interfaces_base.py",
+            target_sha256="f21d1891fa8dbf72720488d7378a18b667bb94c68ea19d11399c3d082e3dc9f4",
+        ),
+        VLLMModelInfoSupportSourceSpec(
+            target_file="vllm/model_executor/models/registry.py",
+            target_sha256="7b7a825f2d77d5d6ccbe6aee87d959d646d9e5e84c783c66676e4f7c5bbb7bf6",
+        ),
+        VLLMModelInfoSupportSourceSpec(
+            target_file="vllm/utils/hashing.py",
+            target_sha256="89b4bd2bd246a5bfdcf00d766ea38a8182376aecfd6b6b7d5c47d96b1559243e",
+        ),
+    )
+    modelinfo_seeds = (
+        VLLMModelInfoSeedSpec(
+            architecture="GptOssForCausalLM",
+            target_module="vllm.model_executor.models.gpt_oss",
+            target_file="vllm/model_executor/models/gpt_oss.py",
+            target_sha256="0956d4ef35a5dbd75a5585013df73fc4525eb44f0721c3d21e7c1bda66def448",
+            vllm_cache_hash="88d67c0015d1badbb4f387a5a0501081",
+            seed_filename="vllm-model_executor-models-gpt_oss-GptOssForCausalLM.json",
+            seed_sha256="65a10dce2fe8204f45d6ea8635f28602def42ecb483df12275c91b46be278065",
+            destination_filename=("vllm-model_executor-models-gpt_oss-GptOssForCausalLM.json"),
+        ),
+        VLLMModelInfoSeedSpec(
+            architecture="LlamaForCausalLM",
+            target_module="vllm.model_executor.models.llama",
+            target_file="vllm/model_executor/models/llama.py",
+            target_sha256="7d3e385e5b984602f1353f93630b43a86eca4e3fa6ab63cd54db24b81228596b",
+            vllm_cache_hash="a9013536a88eca40c49613d301e4d8ae",
+            seed_filename="vllm-model_executor-models-llama-LlamaForCausalLM.json",
+            seed_sha256="a1634b6d56d44604dc7b01fc2743ca7087f0b2ff18e9dd6751d57ec39064f3c3",
+            destination_filename=("vllm-model_executor-models-llama-LlamaForCausalLM.json"),
+        ),
+    )
     # This function is part of pre-import plan compilation/activation.  It must
     # be pure metadata and must not import Ray or vLLM merely to discover the
     # versions that the profile itself pins.  ``verify_environment`` performs
@@ -817,6 +1109,14 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
         vllm="0.15.0+xpu",
         vendor=vendor,
         patches=patches,
+        vllm_modelinfo_seed_manifest_path=("exaserve/resources/vllm_modelinfo/manifest.json"),
+        vllm_modelinfo_seed_manifest_hash=(
+            "b297babd63c22943e208740fd208f317e7a27ceb5a65516d227e31c403221d43"
+        ),
+        vllm_modelinfo_installer_path="exaserve/vllm_modelinfo_seed.py",
+        vllm_modelinfo_installer_hash=_hash_file(package_dir / "vllm_modelinfo_seed.py"),
+        vllm_modelinfo_support_sources=modelinfo_support_sources,
+        vllm_modelinfo_seeds=modelinfo_seeds,
     )
     object.__setattr__(profile, "profile_id", profile.compute_id())
     return profile

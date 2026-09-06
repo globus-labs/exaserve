@@ -77,7 +77,15 @@ def _multi_node_replay_plan(tmp_path):
         runtime_manifest_path=str(tmp_path / "runtime.json"),
         deployment_plan_hash="1" * 64,
         semantic_plan=SimpleNamespace(
-            deployment=SimpleNamespace(deployment_id="deployment", site_profile_hash="2" * 64)
+            deployment=SimpleNamespace(
+                deployment_id="deployment",
+                site_profile_hash="2" * 64,
+                compatibility_profile_hash="3" * 64,
+                manifest_hash="4" * 64,
+                vendor="xpu",
+                engine="vllm",
+                runtime=SimpleNamespace(null_compute=True),
+            )
         ),
     )
 

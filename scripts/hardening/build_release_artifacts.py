@@ -71,6 +71,12 @@ def _expected_package_members(repo_root: Path) -> dict[str, Path]:
             path.suffix == ".c" or path.name.endswith(".Makefile")
         ):
             expected[f"exaserve/{relative.as_posix()}"] = path
+        elif (
+            relative.parts[:2] == ("resources", "vllm_modelinfo")
+            and len(relative.parts) == 3
+            and path.suffix == ".json"
+        ):
+            expected[f"exaserve/{relative.as_posix()}"] = path
     return expected
 
 

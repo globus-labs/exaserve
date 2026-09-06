@@ -1,6 +1,6 @@
 # Production compatibility inventory
 
-**Updated:** 2026-08-09. This is the current selected manifest inventory.
+**Updated:** 2026-09-06. This is the current selected manifest inventory.
 Historical SC/OV/SH/SV records and the eliminated alternatives are preserved
 in repository history and summarized in ADR-003; they are not active policy.
 
@@ -36,9 +36,10 @@ and therefore its SHA-256 identity. Prefixes below are for review only.
 | SC-12 | Ray 2.53.0 | `ray/experimental/channel/accelerator_context.py` | `c92c9c9b3b63` | replica, engine worker | generated overlay | XPU accelerator context |
 | RS-01 | Ray 2.53.0 | `ray/serve/_private/constants.py` | `84c39b95bd32` | deployment | generated overlay | Serve startup proxy timeout |
 | RS-02 | Ray 2.53.0 | `ray/_private/services.py` | `ae09f861986f` | Ray head/worker | generated overlay | Raylet startup fanout |
+| RS-03 | Ray 2.53.0 | `ray/serve/_private/proxy_state.py` | `eb0e30bb8eaf` | deployment, Ray head | generated overlay | isolated Serve proxy timeout futures |
 | EN-01 | ExaServe 0.4.0 | `exaserve/compat/engine_shim.py` | profile-pinned | engine core/worker | generated shim | spawned-interpreter reach/self-attestation |
 
-The profile currently contains 15 entries and 12 generated target modules.
+The profile currently contains 16 patch entries and 13 generated target modules.
 SC-09, SC-10, and EW-01 share one complete generated `ray_executor.py`;
 all other duplicate base files are similarly grouped into one output whose
 manifest lists the exact patch-ID set.
@@ -55,6 +56,74 @@ The following are plan/site configuration rather than compatibility patches:
   `SiteProfile`/`DeploymentPlan`;
 - instrumentation emitted by ExaServe-owned telemetry collectors rather than
   modified Ray Serve source.
+
+## VC-01 reviewed vLLM model-info seeds
+
+VC-01 is compatibility data, not a code patch. Aurora's qualified vLLM
+`0.15.0+xpu` process can terminate with `SIGSEGV` while importing an XPU model
+class in its cache-miss inspection subprocess. The profile therefore binds a
+strict seed manifest and the exact source/cache identities for the current
+non-legacy vLLM architecture surface:
+
+| Architecture | Qualified vLLM source | Source SHA-256 prefix | vLLM cache hash |
+|---|---|---|---|
+| `LlamaForCausalLM` | `vllm/model_executor/models/llama.py` | `7d3e385e5b98` | `a9013536a88eca40c49613d301e4d8ae` |
+| `GptOssForCausalLM` | `vllm/model_executor/models/gpt_oss.py` | `0956d4ef35a5` | `88d67c0015d1badbb4f387a5a0501081` |
+
+The manifest SHA-256 is
+`b297babd63c22943e208740fd208f317e7a27ceb5a65516d227e31c403221d43`.
+It also pins `registry.py`, `envs.py`, `utils/hashing.py`, `interfaces.py`, and
+`interfaces_base.py`, which define the cache location, filename/hash protocol,
+deserialization shape, and `_ModelInfo` semantics. A same-version vendor rebuild
+that changes any of those sources therefore fails before a seed can be trusted.
+Source staging validates the manifest, every seed, and every qualified target
+module on each rank; it then installs the entries into that generation's
+node-local `VLLM_CACHE_ROOT` before emitting collective source evidence.
+`rank_main` re-verifies the installed entries before registration and again
+after the START-authorized stale-process cleanup, immediately before Ray. A
+same-generation retry preserves the state root that source staging has just
+republished while removing the dead ownership receipt and other stale paths.
+The allocation head checks each active model's `config.json` against the
+profile seed set before any large model broadcast.
+
+`OPTForCausalLM` appears only in the explicitly legacy
+`eval/specs/legacy/mixed_model_pp_smoke.yaml`; it is not a current supported
+release architecture and is intentionally not seeded. Moving that workload
+back into the supported surface requires new compatibility and execution
+evidence, not merely adding a cache file.
+
+### VC-01 seed provenance and review
+
+The reviewed inputs were the pre-existing Aurora vLLM cache entries
+`/home/wenyiw/.cache/vllm/modelinfos/vllm-model_executor-models-llama-LlamaForCausalLM.json`
+and
+`vllm-model_executor-models-gpt_oss-GptOssForCausalLM.json`, whose observed
+SHA-256 values were respectively
+`28e56efcb7a06784a7a6ddaf45c25e022799bdf7f12b235b36c19b033d96609d`
+and
+`1e025af5f2c62b2e74c5d6fbfc4a3eee851efa50d32edbe5649121065e351702`.
+They were treated only as review inputs; runtime code never reads that ambient
+directory.
+
+For each entry, review on 2026-09-06 strictly decoded the exact
+`{hash, modelinfo}` shape, checked every `_ModelInfo` field and primitive type,
+matched `architecture` to the built-in registry class, and recomputed vLLM
+0.15's `safe_hash` over the exact installed model module. The reviewed values
+were then serialized as repository resources with deterministic two-space JSON
+and one trailing newline. Their resulting committed SHA-256 identities are
+`a1634b6d56d44604dc7b01fc2743ca7087f0b2ff18e9dd6751d57ec39064f3c3`
+(Llama) and
+`65a10dce2fe8204f45d6ea8635f28602def42ecb483df12275c91b46be278065`
+(GPT-OSS). The compatibility profile additionally binds the exact installer
+source and all five vLLM sources that implement or interpret this private cache
+format.
+
+The cold-cache failure is sealed by 8B diagnostic `run3/n2`, PBS `8808281`:
+vLLM's registry subprocess exited `-11`/`SIGSEGV` while inspecting
+`LlamaForCausalLM`. A VC-01 candidate is not qualified merely by these static
+checks; Aurora evidence must also show that a fresh generation-local cache
+consumes the seeded entry without launching that subprocess, followed by a
+successful real-engine PP canary.
 
 ## Removed entries and mechanisms
 
@@ -88,9 +157,10 @@ The following are plan/site configuration rather than compatibility patches:
   The two-node PP=2 cell records one EngineCore and two engine workers across
   the two planned physical hosts.
 
-The final profile hash is
+The following hashes identify the prior Final43 evidence snapshot, not the
+VC-01 source above. The prior final profile hash is
 `c17e684fe485261a9cfa82248bd24a9209b66a7c66bae8b889b24ca878d335d3`;
-the final compatibility manifest hash is
+the prior final compatibility manifest hash is
 `cd85123822f4b936216282ed43346223a4b68f1a7cb152a85715a36fdab24259`.
 
 Any profile/source change supersedes those semantic identities and requires a

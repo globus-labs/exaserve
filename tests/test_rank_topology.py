@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import sys
 
 import pytest
@@ -29,6 +30,23 @@ from exaserve.control.rank_launcher import (
 
 
 # -- RankLauncher -----------------------------------------------------------
+
+
+def test_vllm_seed_verification_precedes_rank_registration_and_ray_start():
+    import exaserve.rank_main as rank_main
+
+    source = Path(rank_main.__file__).read_text(encoding="utf-8")
+    seed_verify = source.index("verify_from_environment(profile=compatibility)")
+    registration = source.index("channel = RankClient(")
+    ray_environment = source.index("ray_child_environment(", registration)
+    stale_cleanup = source.index("_clear_stale_ray_state(rank)")
+    post_cleanup_verify = source.index(
+        "verify_from_environment(profile=compatibility)", seed_verify + 1
+    )
+    ray_child = source.index("ray_component(argv, env=ray_env)")
+
+    assert seed_verify < registration < ray_environment
+    assert stale_cleanup < post_cleanup_verify < ray_child
 
 
 def test_launch_prefix_is_one_task_per_node_per_scheduler(monkeypatch):

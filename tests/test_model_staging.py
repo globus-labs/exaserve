@@ -24,6 +24,7 @@ from exaserve.model_staging import (
     load_model_config,
     validate_model_manifest,
     validate_tensor_parallel_compatibility,
+    validate_vllm_modelinfo_seed_coverage,
 )
 
 
@@ -31,6 +32,29 @@ def _complete_single_file_model(path):
     path.mkdir(parents=True)
     (path / "config.json").write_text("{}")
     (path / "model.safetensors").write_text("weights")
+
+
+def test_vllm_modelinfo_seed_coverage_accepts_only_reviewed_architectures(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    config = model / "config.json"
+    supported = frozenset({"LlamaForCausalLM", "GptOssForCausalLM"})
+
+    config.write_text(json.dumps({"architectures": ["LlamaForCausalLM"]}))
+    assert validate_vllm_modelinfo_seed_coverage("org/model", model, supported) == (
+        "LlamaForCausalLM",
+    )
+
+    for architectures in (
+        None,
+        [],
+        "LlamaForCausalLM",
+        ["LlamaForCausalLM", "LlamaForCausalLM"],
+        ["UnknownForCausalLM"],
+    ):
+        config.write_text(json.dumps({"architectures": architectures}))
+        with pytest.raises(RuntimeError, match="architectures|unreviewed"):
+            validate_vllm_modelinfo_seed_coverage("org/model", model, supported)
 
 
 def test_node_local_directory_creation_rejects_intermediate_home_symlink(tmp_path):

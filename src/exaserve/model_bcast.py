@@ -1578,6 +1578,23 @@ def bcast_models(
 
     per_model_timings: list[dict] = []
     unique_model_ids = list(iter_unique_model_ids(model_configs))
+    if deployment_plan.engine == "vllm" and not deployment_plan.runtime.null_compute:
+        from .compat.profile import default_profile
+        from .model_staging import validate_vllm_modelinfo_seed_coverage
+
+        compatibility = default_profile(deployment_plan.vendor)
+        if compatibility.profile_id != deployment_plan.compatibility_profile_hash:
+            raise RuntimeError("VC-01 compatibility profile does not match the DeploymentPlan")
+        supported_architectures = frozenset(
+            seed.architecture for seed in compatibility.vllm_modelinfo_seeds
+        )
+
+        for model_id in unique_model_ids:
+            validate_vllm_modelinfo_seed_coverage(
+                model_id,
+                Path(lustre_model_paths[model_id]),
+                supported_architectures,
+            )
     cleanup_receipts: list[dict] = []
     if clean_stage:
         cleanup_receipts = clean_model_caches(

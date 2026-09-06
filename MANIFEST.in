@@ -3,7 +3,7 @@ include pyproject.toml
 include MANIFEST.in
 recursive-include requirements *.lock README.md
 recursive-include src/exaserve *.py
-recursive-include src/exaserve/resources *.c *.Makefile
+recursive-include src/exaserve/resources *.c *.Makefile *.json
 include src/exaserve/py.typed
 
 prune benchmarks

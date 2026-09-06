@@ -74,9 +74,14 @@ def _allow_test_python(monkeypatch) -> Path:
     )
     monkeypatch.setattr(
         "exaserve.source_staging._compatibility_evidence",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             "compatibility_profile_id": "7" * 64,
             "compatibility_manifest_hash": "8" * 64,
+            "source_evidence_schema_version": 2,
+            "vllm_modelinfo_seed_manifest_hash": "a" * 64,
+            "vllm_modelinfo_seed_count": 2,
+            "vllm_modelinfo_seed_install_report_hash": "b" * 64,
+            "vllm_modelinfo_seed_installed_count": 2,
         },
     )
     return executable
@@ -149,6 +154,22 @@ def _aggregate_source_result(*, nodes=("n0", "n1")) -> dict:
     }
 
 
+def _seeded_source_result(*, installed_count: int = 2) -> dict:
+    result = json.loads(json.dumps(_aggregate_source_result()))
+    evidence = {
+        "source_evidence_schema_version": 2,
+        "vllm_modelinfo_seed_manifest_hash": "a" * 64,
+        "vllm_modelinfo_seed_count": 2,
+        "vllm_modelinfo_seed_install_report_hash": "b" * 64,
+        "vllm_modelinfo_seed_installed_count": installed_count,
+    }
+    result.update(evidence)
+    result["schema_version"] = 3
+    for receipt in result["rank_receipts"]:
+        receipt.update(evidence)
+    return result
+
+
 def test_source_result_contract_exposes_one_exact_runtime_layout():
     result = _aggregate_source_result()
     assert (
@@ -167,6 +188,91 @@ def test_source_result_contract_exposes_one_exact_runtime_layout():
     assert str(paths.root) == result["local_runtime_root"]
     assert str(paths.go_dispatch_path) == result["local_go_dispatch"]
     assert str(paths.state_root) == result["local_state_root"]
+
+
+def test_source_result_schema_three_binds_all_rank_seed_installation_evidence():
+    result = _seeded_source_result()
+    expected_seed_evidence = {
+        name: result[name]
+        for name in (
+            "source_evidence_schema_version",
+            "vllm_modelinfo_seed_manifest_hash",
+            "vllm_modelinfo_seed_count",
+            "vllm_modelinfo_seed_install_report_hash",
+            "vllm_modelinfo_seed_installed_count",
+        )
+    }
+
+    assert (
+        validate_source_staging_result(
+            result,
+            expected_compatibility_profile_id="7" * 64,
+            expected_compatibility_manifest_hash="8" * 64,
+            require_seed_evidence=True,
+            expected_seed_evidence=expected_seed_evidence,
+        )
+        is result
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "forged"),
+    [
+        ("vllm_modelinfo_seed_manifest_hash", "c" * 64),
+        ("vllm_modelinfo_seed_install_report_hash", "d" * 64),
+        ("vllm_modelinfo_seed_installed_count", 0),
+    ],
+)
+def test_current_source_validation_rejects_uniform_forged_seed_evidence(field, forged):
+    result = _seeded_source_result()
+    expected_seed_evidence = {
+        name: result[name]
+        for name in (
+            "source_evidence_schema_version",
+            "vllm_modelinfo_seed_manifest_hash",
+            "vllm_modelinfo_seed_count",
+            "vllm_modelinfo_seed_install_report_hash",
+            "vllm_modelinfo_seed_installed_count",
+        )
+    }
+    result[field] = forged
+    for receipt in result["rank_receipts"]:
+        receipt[field] = forged
+
+    with pytest.raises(SourceStagingError, match="does not match the DeploymentPlan"):
+        validate_source_staging_result(
+            result,
+            require_seed_evidence=True,
+            expected_seed_evidence=expected_seed_evidence,
+        )
+
+
+def test_current_source_validation_rejects_legacy_shape_but_reader_keeps_it():
+    legacy = _aggregate_source_result()
+
+    assert validate_source_staging_result(legacy) is legacy
+    with pytest.raises(SourceStagingError, match="requires VC-01"):
+        validate_source_staging_result(legacy, require_seed_evidence=True)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.pop("vllm_modelinfo_seed_manifest_hash"),
+        lambda value: value["rank_receipts"][0].pop("vllm_modelinfo_seed_install_report_hash"),
+        lambda value: value["rank_receipts"][1].update(
+            vllm_modelinfo_seed_install_report_hash="c" * 64
+        ),
+        lambda value: value.update(vllm_modelinfo_seed_installed_count=1),
+        lambda value: value.update(schema_version=2),
+    ],
+)
+def test_source_result_schema_three_rejects_missing_or_mixed_seed_evidence(mutate):
+    result = _seeded_source_result()
+    mutate(result)
+
+    with pytest.raises(SourceStagingError):
+        validate_source_staging_result(result)
 
 
 @pytest.mark.parametrize(

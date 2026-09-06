@@ -1430,9 +1430,11 @@ def _canary(endpoint: str, model_id: str) -> dict:
 
 
 def _validate_ready_evidence(status, plan, run_dir: Path) -> dict:
+    from exaserve.compat.profile import default_profile
     from exaserve.source_staging import validate_source_staging_result
     from exaserve.state.receipts import load_receipt_manifest
     from exaserve.status_api import load_status_allocation_binding
+    from exaserve.vllm_modelinfo_seed import expected_source_seed_evidence
 
     manifest = load_receipt_manifest(status.receipt_manifest_path)
     expected_slots = sorted(item.receipt_requirement_id for item in plan.receipt_requirements)
@@ -1442,6 +1444,11 @@ def _validate_ready_evidence(status, plan, run_dir: Path) -> dict:
             f"receipt slot set mismatch: expected={expected_slots}, observed={observed_slots}"
         )
     binding = load_status_allocation_binding(str(run_dir), status)
+    compatibility = default_profile(plan.vendor)
+    seed_evidence = expected_source_seed_evidence(
+        compatibility,
+        install_required=plan.engine == "vllm" and not plan.runtime.null_compute,
+    )
     source = validate_source_staging_result(
         _read_json(run_dir / "source_staging_manifest.json"),
         expected_deployment_id=plan.deployment_id,
@@ -1449,8 +1456,12 @@ def _validate_ready_evidence(status, plan, run_dir: Path) -> dict:
         expected_plan_hash=plan.deployment_plan_hash,
         expected_site_profile_hash=plan.site_profile_hash,
         expected_binding_hash=status.allocation_binding_hash,
+        expected_compatibility_profile_id=plan.compatibility_profile_hash,
+        expected_compatibility_manifest_hash=plan.manifest_hash,
         expected_rank_to_node=binding.rank_to_node,
         expected_run_dir=run_dir,
+        require_seed_evidence=True,
+        expected_seed_evidence=seed_evidence,
     )
     receipts = source["rank_receipts"]
     engine_evidence = (

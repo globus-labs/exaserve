@@ -461,6 +461,24 @@ def run(plan_path: str) -> int:
     except Exception as exc:  # noqa: BLE001 - startup boundary
         print(f"[Rank {rank}] SiteProfile preparation failed: {exc}", flush=True)
         return 1
+    compatibility = None
+    try:
+        if plan.engine == "vllm" and not plan.runtime.null_compute:
+            from .compat.profile import default_profile
+            from .vllm_modelinfo_seed import verify_from_environment
+
+            compatibility = default_profile(plan.vendor)
+            if compatibility.profile_id != plan.compatibility_profile_hash:
+                raise RuntimeError("VC-01 compatibility profile does not match the DeploymentPlan")
+            verify_from_environment(profile=compatibility)
+            print(
+                f"[Rank {rank}] VC-01 verified {len(compatibility.vllm_modelinfo_seeds)} "
+                "preinstalled vLLM model-info seed(s)",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 - pre-registration startup boundary
+        print(f"[Rank {rank}] VC-01 model-info seed verification failed: {exc}", flush=True)
+        return 1
     head_ip = os.environ.get("EXASERVE_HEAD_IP", "").strip()
     if not head_ip:
         print(f"[Rank {rank}] EXASERVE_HEAD_IP is missing from allocation binding", flush=True)
@@ -591,6 +609,17 @@ def run(plan_path: str) -> int:
 
     try:
         _clear_stale_ray_state(rank)
+        if compatibility is not None:
+            # Stale-process cleanup is authorized only after START. Recheck
+            # the cache after that mutation boundary so no cleanup regression
+            # can reopen vLLM's crashing cache-miss subprocess before Ray.
+            from .vllm_modelinfo_seed import verify_from_environment
+
+            verify_from_environment(profile=compatibility)
+            print(
+                f"[Rank {rank}] VC-01 remained valid after stale-state cleanup",
+                flush=True,
+            )
 
         from .state.process_ownership import (
             ProcessOwnershipRegistry,

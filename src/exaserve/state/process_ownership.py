@@ -619,10 +619,17 @@ def _mount_identity(path: str | os.PathLike) -> tuple[str, str, str]:
     return max(matches, key=lambda item: item[0])[1]
 
 
-def _remove_owned_paths(receipt: ProcessOwnershipReceipt) -> None:
+def _remove_owned_paths(
+    receipt: ProcessOwnershipReceipt,
+    *,
+    preserve_paths: tuple[str, ...] = (),
+) -> None:
+    preserved = {os.path.abspath(path) for path in preserve_paths}
     failures = []
     for path in receipt.temp_paths:
         absolute = os.path.abspath(path)
+        if absolute in preserved:
+            continue
         if not _is_owned_temp_path(
             absolute,
             deployment_id=receipt.deployment_id,
@@ -758,10 +765,13 @@ def cleanup_stale_owned_processes(
     current process can see it under the same Unix account.  Signalling it
     would let one concurrent deployment kill another.  Likewise, an equal or
     newer live generation of this deployment is a conflict, never a cleanup
-    target: an old/repeated launch must not kill the current launch.  Dead
-    receipts from any generation/deployment are safe to garbage-collect; live
-    groups are signalled only for a strictly older generation of this exact
-    deployment.
+    target: an old/repeated launch must not kill the current launch. Dead
+    receipts from any generation/deployment are safe to garbage-collect,
+    except that a dead receipt from the current generation may name the exact
+    state root that source staging has already republished for this retry. That
+    root is preserved while the dead receipt and its other owned paths are
+    removed. Live groups are signalled only for a strictly older generation of
+    this exact deployment.
     """
     if not isinstance(deadline_s, (int, float)) or isinstance(deadline_s, bool):
         raise ProcessOwnershipError("stale cleanup deadline must be numeric")
@@ -788,7 +798,19 @@ def cleanup_stale_owned_processes(
                     f"process group {receipt.pgid} for deployment {deployment_id!r}"
                 )
             _terminate_owned_group(receipt, deadline=deadline)
-        _remove_owned_paths(receipt)
+        preserve_paths: tuple[str, ...] = ()
+        if same_deployment and receipt.generation == generation:
+            from types import SimpleNamespace
+
+            from ..plan.runtime_environment import default_local_state_root
+
+            preserve_paths = (
+                default_local_state_root(
+                    SimpleNamespace(deployment_id=deployment_id),
+                    generation,
+                ),
+            )
+        _remove_owned_paths(receipt, preserve_paths=preserve_paths)
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
         cleaned += 1

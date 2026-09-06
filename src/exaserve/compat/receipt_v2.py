@@ -508,6 +508,21 @@ class ExactReceiptLedger:
         for patch in self.profile.patches:
             expected_sources[f"target:{patch.patch_id}"] = patch.target_source_hash
             expected_sources[f"artifact:{patch.patch_id}"] = patch.patch_artifact_hash
+            expected_sources[f"delivery:{patch.patch_id}"] = patch.delivery_artifact_hash
+        if self.profile.vllm_modelinfo_seeds:
+            expected_sources["vllm_modelinfo:manifest"] = (
+                self.profile.vllm_modelinfo_seed_manifest_hash
+            )
+            expected_sources["vllm_modelinfo:installer"] = (
+                self.profile.vllm_modelinfo_installer_hash
+            )
+            for source in self.profile.vllm_modelinfo_support_sources:
+                expected_sources[f"vllm_modelinfo:support:{source.target_file}"] = (
+                    source.target_sha256
+                )
+            for seed in self.profile.vllm_modelinfo_seeds:
+                expected_sources[f"vllm_modelinfo:target:{seed.architecture}"] = seed.target_sha256
+                expected_sources[f"vllm_modelinfo:seed:{seed.architecture}"] = seed.seed_sha256
         mismatched_sources = {
             key: (wanted, receipt.observed_source_hashes.get(key))
             for key, wanted in expected_sources.items()
@@ -515,6 +530,11 @@ class ExactReceiptLedger:
         }
         if mismatched_sources:
             return self._reject(receipt, "observed compatibility source/artifact hashes mismatch")
+        if (
+            receipt.attestation_type == AttestationType.SELF.value
+            and receipt.capabilities != self.profile.capabilities()
+        ):
+            return self._reject(receipt, "capabilities do not match the compatibility profile")
         if receipt.allocation_binding_hash != self.binding.allocation_binding_hash:
             return self._reject(receipt, "allocation_binding_hash is from another generation")
         if receipt.generation != self.binding.generation:
