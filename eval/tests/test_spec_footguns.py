@@ -182,11 +182,14 @@ def test_pp_compatibility_canary_retains_pp_lifecycle_without_model_staging() ->
     variant = variants[0]
     assert variant.spec.client.startup_only is True
     assert variant.spec.backend.args["ray"]["launch"]["null_compute"] is True
-    assert int(
-        variant.spec.deployment.num_nodes
-        * variant.spec.workload.rate_per_node
-        * variant.spec.workload.duration
-    ) >= 1
+    assert (
+        int(
+            variant.spec.deployment.num_nodes
+            * variant.spec.workload.rate_per_node
+            * variant.spec.workload.duration
+        )
+        >= 1
+    )
 
     run_plan = compile_shared_run_plan(
         variant.spec,
@@ -203,6 +206,60 @@ def test_pp_compatibility_canary_retains_pp_lifecycle_without_model_staging() ->
     assert model.num_replicas == 1
     assert model.replicas[0].planned_ranks == (0, 1)
     assert model.replicas[0].gpu_demand == 16
+
+
+def test_pp8b_real_engine_canary_covers_complete_pp_startup_without_replay() -> None:
+    spec_path = (
+        Path(__file__).parents[1]
+        / "specs"
+        / "sc26workshop"
+        / "smokes"
+        / "pp8b_real_engine_canary_2node.yaml"
+    )
+    variants = expand_matrix(load_experiment_spec(str(spec_path)))
+    assert len(variants) == 1
+    variant = variants[0]
+    launch = variant.spec.backend.args["ray"]["launch"]
+    assert variant.spec.client.startup_only is True
+    assert variant.spec.client.stream is False
+    assert launch["null_compute"] is False
+    assert launch["clean_stage"] is True
+    assert launch["instrumentation"] is True
+    assert (
+        int(
+            variant.spec.deployment.num_nodes
+            * variant.spec.workload.rate_per_node
+            * variant.spec.workload.duration
+        )
+        >= 1
+    )
+
+    run_plan = compile_shared_run_plan(
+        variant.spec,
+        run_id="canary/run0/n2",
+        deployment_id="pp8b-real-engine-canary",
+    )
+    deployment = run_plan.deployment
+    model = deployment.models[0]
+    assert deployment.num_nodes == 2
+    assert deployment.runtime.null_compute is False
+    assert deployment.runtime.pp_shard_aware is True
+    assert deployment.runtime.clean_stage is True
+    assert model.model_id == "meta-llama/Meta-Llama-3-8B-Instruct"
+    assert model.tensor_parallel_size == 8
+    assert model.pipeline_parallel_size == 2
+    assert model.num_replicas == 1
+    assert model.replicas[0].planned_ranks == (0, 1)
+    assert model.replicas[0].gpu_demand == 16
+    roles = [requirement.role for requirement in deployment.receipt_requirements]
+    assert roles.count("replica") == 1
+    assert roles.count("engine_core") == 1
+    assert roles.count("engine_worker") == 16
+    assert run_plan.client.startup_only is True
+    assert run_plan.client.streaming is False
+    assert run_plan.scheduler.nodes == 2
+    assert run_plan.scheduler.queue == "debug"
+    assert run_plan.scheduler.walltime == "01:00:00"
 
 
 def test_pp_curves_use_explicit_complete_evidence_contracts() -> None:
