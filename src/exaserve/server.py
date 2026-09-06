@@ -79,24 +79,50 @@ _SENSITIVE_DIAGNOSTIC_PATTERN = re.compile(
     r"(?:^|[^A-Z0-9])(?:access[\s_-]?token|refresh[\s_-]?token|token)"
     r"(?=$|[^A-Z0-9]))"
 )
+_ANSI_ESCAPE_PATTERN = re.compile(
+    r"(?:\x1B\[[0-?]*[ -/]*[@-~]|\x9B[0-?]*[ -/]*[@-~]|"
+    r"\x1B\][^\x07]*(?:\x07|\x1B\\))"
+)
 _ENGINE_STARTUP_PHASES = frozenset(
     {"canonical_bind", "compat_activate", "tree_validate", "backend_create"}
 )
 
 
-def _bounded_diagnostic_text(value: object, *, limit: int = _DIAGNOSTIC_TEXT_LIMIT) -> str:
+def _bounded_diagnostic_text(
+    value: object,
+    *,
+    limit: int = _DIAGNOSTIC_TEXT_LIMIT,
+    preserve_tail: bool = False,
+) -> str:
     """Return printable, secret-safe diagnostic text within an exact bound."""
     if type(limit) is not int or limit < 32:
         raise ValueError("diagnostic text limit must be an integer of at least 32")
+    if type(preserve_tail) is not bool:
+        raise TypeError("preserve_tail must be a boolean")
     if not isinstance(value, str):
         return f"<{type(value).__name__}>"[:limit]
-    text = " ".join("".join(char if char.isprintable() else " " for char in value).split())
+    # Ray colorizes the leading ``ray::Actor.method`` label in a RayTaskError.
+    # Replacing only ESC with whitespace leaves strings such as ``[36mray``
+    # and wastes the small diagnostic budget. Remove complete terminal control
+    # sequences before normalizing the remaining printable text.
+    without_ansi = _ANSI_ESCAPE_PATTERN.sub("", value)
+    text = " ".join("".join(char if char.isprintable() else " " for char in without_ansi).split())
     if _SENSITIVE_DIAGNOSTIC_PATTERN.search(text):
         text = "<redacted sensitive detail>"
     if not text:
         text = "<no detail>"
-    marker = "...[truncated]"
-    return text if len(text) <= limit else text[: limit - len(marker)] + marker
+    if len(text) <= limit:
+        return text
+    if not preserve_tail:
+        marker = "...[truncated]"
+        return text[: limit - len(marker)] + marker
+    # Ray's fixed retry explanation precedes the useful traceback; the final
+    # exception line contains ExaServe's bounded startup-phase wrapper. Keep a
+    # small head for context and spend the rest of the budget on that tail.
+    marker = "...[middle truncated]..."
+    head_size = min(160, (limit - len(marker)) // 3)
+    tail_size = limit - len(marker) - head_size
+    return text[:head_size] + marker + text[-tail_size:]
 
 
 def _bounded_exception_summary(error: Exception) -> str:
@@ -134,7 +160,9 @@ def _public_serve_status_application(name: object, application: object) -> dict:
         deployment_rows.append(
             {
                 "message": _bounded_diagnostic_text(
-                    _public_status_field(deployment, "message", ""), limit=192
+                    _public_status_field(deployment, "message", ""),
+                    limit=768,
+                    preserve_tail=True,
                 ),
                 "name": _bounded_diagnostic_text(deployment_name, limit=128),
                 "status": _public_status_name(

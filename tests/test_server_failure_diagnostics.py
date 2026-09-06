@@ -88,6 +88,55 @@ def test_diagnostic_redaction_covers_identifier_and_prose_secret_labels(detail):
     assert server._bounded_diagnostic_text(detail) == "<redacted sensitive detail>"
 
 
+def test_deployment_diagnostic_strips_ansi_and_preserves_traceback_head_and_tail():
+    traceback = (
+        "The deployment failed to start 3 times in a row. Error:\n"
+        "\x1b[36mray::ServeReplica.initialize_and_get_metadata()\x1b[0m\n"
+        + "frame in ray internals\n"
+        * 200
+        + "RuntimeError: [EngineWorker pid=42] startup phase backend_create failed: "
+        "RuntimeError: exact-root-cause"
+    )
+    failed = SimpleNamespace(
+        applications={
+            "failed": SimpleNamespace(
+                status=_State("DEPLOY_FAILED"),
+                message="application failed",
+                deployments={
+                    "EngineWorker": SimpleNamespace(
+                        status=_State("DEPLOY_FAILED"),
+                        message=traceback,
+                    )
+                },
+            )
+        }
+    )
+
+    encoded = server.serialize_public_serve_status(failed)
+    message = json.loads(encoded)["applications"][0]["deployments"][0]["message"]
+
+    assert len(encoded) <= 4096
+    assert message.startswith("The deployment failed to start 3 times")
+    assert "...[middle truncated]..." in message
+    assert "startup phase backend_create failed" in message
+    assert message.endswith("RuntimeError: exact-root-cause")
+    assert "\x1b" not in message
+    assert "[36m" not in message
+
+
+def test_head_tail_diagnostic_scans_unretained_middle_for_secrets():
+    detail = "safe head " + "x" * 1000 + " API_KEY=must-not-appear " + "safe tail"
+
+    assert (
+        server._bounded_diagnostic_text(
+            detail,
+            limit=128,
+            preserve_tail=True,
+        )
+        == "<redacted sensitive detail>"
+    )
+
+
 def test_public_serve_status_diagnostic_has_a_finite_fetch_budget(monkeypatch):
     release = threading.Event()
     entered = threading.Event()
