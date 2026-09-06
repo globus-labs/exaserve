@@ -204,6 +204,74 @@ def test_run_many_failure_includes_and_prints_public_status(monkeypatch, capsys)
     assert caught.value.__cause__ is None
 
 
+@pytest.mark.parametrize("head_only", [False, True])
+def test_serve_run_failure_includes_tail_preserved_phase_for_every_branch(
+    monkeypatch, capsys, head_only
+):
+    model = SimpleNamespace(route_name="model-route", model_id="model-a")
+    placement = SimpleNamespace(owner_rank=0, replica_index=0)
+    bound_model = SimpleNamespace(model=model, assigned_replicas=1, replicas=[placement])
+    config = SimpleNamespace(
+        models=[model],
+        uses_head_only_serve_proxy=lambda: head_only,
+        node_grouped_null_application_groups=lambda _model: (),
+    )
+    binding = SimpleNamespace(models=[bound_model])
+    ray_message = (
+        "The deployment failed to start 3 times in a row. Error:\n"
+        "\x1b[36mray::ServeReplica.initialize_and_get_metadata()\x1b[0m\n"
+        + "frame in ray internals\n"
+        * 200
+        + "RuntimeError: [EngineWorker pid=42] startup phase backend_create failed: "
+        "RuntimeError: exact-root-cause"
+    )
+    status = SimpleNamespace(
+        applications={
+            "model-route": SimpleNamespace(
+                status=_State("DEPLOY_FAILED"),
+                message="application failed",
+                deployments={
+                    "EngineWorker": SimpleNamespace(
+                        status=_State("DEPLOY_FAILED"),
+                        message=ray_message,
+                    )
+                },
+            )
+        }
+    )
+
+    monkeypatch.setattr(
+        server,
+        "deploy_model",
+        lambda *_args, **_kwargs: (object(), "model-a"),
+    )
+    monkeypatch.setattr(server.serve, "status", lambda: status)
+    monkeypatch.setattr(
+        server.serve,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("AWS_SECRET_ACCESS_KEY=must-not-appear")
+        ),
+    )
+    monkeypatch.setattr(server.tracer, "phase", lambda *_args, **_kwargs: nullcontext())
+
+    with pytest.raises(RuntimeError) as caught:
+        server.deploy_from_canonical_binding(config, {}, binding)
+
+    message = str(caught.value)
+    output = capsys.readouterr().out
+    expected_context = "native HeadOnly" if head_only else "canonical single-replica"
+    assert expected_context in message
+    assert "startup phase backend_create failed" in message
+    assert "exact-root-cause" in message
+    assert "<redacted sensitive detail>" in message
+    assert "must-not-appear" not in message
+    assert "\x1b" not in message
+    assert "[36m" not in message
+    assert message in output
+    assert caught.value.__cause__ is None
+
+
 def _constructor_fixture(monkeypatch, *, phase: str):
     import exaserve.compat.activator as activator
     import exaserve.engines as engines

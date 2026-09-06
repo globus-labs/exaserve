@@ -289,7 +289,8 @@ def serialize_public_serve_status(status: object | None = None) -> str:
     return encoded
 
 
-def _serve_run_many_failure(context: str, error: Exception) -> RuntimeError:
+def _serve_deployment_failure(context: str, error: Exception) -> RuntimeError:
+    """Preserve one bounded public Serve snapshot for any deployment API."""
     status_detail = serialize_public_serve_status()
     message = (
         f"{_bounded_diagnostic_text(context, limit=256)}: "
@@ -2076,7 +2077,13 @@ def deploy_from_canonical_binding(
                 native_replicas=n_rep,
             )
             with tracer.phase("serve.run", model_id=model_id, replicas=n_rep):
-                serve.run(deployment, name=safe_name, route_prefix="/")
+                try:
+                    serve.run(deployment, name=safe_name, route_prefix="/")
+                except Exception as deploy_exc:
+                    raise _serve_deployment_failure(
+                        f"native HeadOnly deployment failed for {n_rep} replicas of {model_id}",
+                        deploy_exc,
+                    ) from None
             print(
                 f"[ExaServe] ✓ native HeadOnly route http://localhost:8000/v1 "
                 f"(model: {model_id}, replicas={n_rep})",
@@ -2125,7 +2132,7 @@ def deploy_from_canonical_binding(
                 try:
                     serve.run_many(targets, wait_for_applications_running=True)
                 except Exception as deploy_exc:
-                    raise _serve_run_many_failure(
+                    raise _serve_deployment_failure(
                         f"node-grouped null deployment failed for {n_rep} replicas of {model_id}",
                         deploy_exc,
                     ) from None
@@ -2145,11 +2152,17 @@ def deploy_from_canonical_binding(
             )
             route_prefix = "/" if use_root_route else f"/{safe_name}"
             with tracer.phase("serve.run", model_id=model_id, replicas=1):
-                serve.run(
-                    deployment,
-                    name=safe_name,
-                    route_prefix=route_prefix,
-                )
+                try:
+                    serve.run(
+                        deployment,
+                        name=safe_name,
+                        route_prefix=route_prefix,
+                    )
+                except Exception as deploy_exc:
+                    raise _serve_deployment_failure(
+                        f"canonical single-replica deployment failed for {model_id}",
+                        deploy_exc,
+                    ) from None
             print(
                 f"[ExaServe] Service available at http://localhost:8000{route_prefix} "
                 f"(model: {model_id}, replicas=1)",
@@ -2187,7 +2200,7 @@ def deploy_from_canonical_binding(
             try:
                 serve.run_many(targets, wait_for_applications_running=True)
             except Exception as deploy_exc:
-                raise _serve_run_many_failure(
+                raise _serve_deployment_failure(
                     f"canonical deployment failed for {n_rep} replicas of {model_id}",
                     deploy_exc,
                 ) from None
