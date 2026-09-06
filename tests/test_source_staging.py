@@ -255,6 +255,23 @@ def test_current_source_validation_rejects_legacy_shape_but_reader_keeps_it():
         validate_source_staging_result(legacy, require_seed_evidence=True)
 
 
+def test_archival_reader_accepts_exact_legacy_state_layout_but_current_gate_rejects_it():
+    from types import SimpleNamespace
+
+    from exaserve.plan.runtime_environment import _legacy_local_state_root
+
+    result = _seeded_source_result()
+    result["local_state_root"] = _legacy_local_state_root(
+        SimpleNamespace(deployment_id=result["deployment_id"]),
+        result["generation"],
+    )
+
+    assert validate_source_staging_result(result) is result
+    assert runtime_paths_from_result(result).state_root == Path(result["local_state_root"])
+    with pytest.raises(SourceStagingError, match="compact local state layout"):
+        validate_source_staging_result(result, require_current_state_layout=True)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

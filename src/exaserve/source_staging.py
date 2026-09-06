@@ -273,10 +273,14 @@ def runtime_paths(
     deployment_id: str,
     generation: int,
     qualified_python: str,
+    state_root: str | os.PathLike | None = None,
 ) -> RuntimePaths:
     from types import SimpleNamespace
 
-    from .plan.runtime_environment import default_local_state_root
+    from .plan.runtime_environment import (
+        _legacy_local_state_root,
+        default_local_state_root,
+    )
 
     if not isinstance(deployment_id, str) or not deployment_id:
         raise SourceStagingError("runtime deployment identity must be non-empty")
@@ -288,7 +292,14 @@ def runtime_paths(
     python = Path(qualified_python)
     if not python.is_absolute() or ".." in python.parts:
         raise SourceStagingError("qualified Python must be absolute and normalized")
-    state = default_local_state_root(SimpleNamespace(deployment_id=deployment_id), generation)
+    identity = SimpleNamespace(deployment_id=deployment_id)
+    current_state = default_local_state_root(identity, generation)
+    legacy_state = _legacy_local_state_root(identity, generation)
+    state = current_state if state_root is None else os.fspath(state_root)
+    if state not in {current_state, legacy_state}:
+        raise SourceStagingError(
+            "local state root is not the exact current or migration-readable legacy identity"
+        )
     return RuntimePaths.from_roots(root_path, state, require_runtime=False)
 
 
@@ -301,6 +312,7 @@ def runtime_paths_from_result(result: object) -> RuntimePaths:
         deployment_id=validated["deployment_id"],
         generation=validated["generation"],
         qualified_python=validated["qualified_python"],
+        state_root=validated["local_state_root"],
     )
     expected = {
         "local_python_root": paths.python_root,
@@ -459,10 +471,13 @@ def validate_source_staging_result(
     expected_run_dir: str | os.PathLike | None = None,
     require_seed_evidence: bool = False,
     expected_seed_evidence: Mapping[str, str | int] | None = None,
+    require_current_state_layout: bool = False,
 ) -> dict:
     """Validate the complete immutable source-staging evidence boundary."""
     if type(require_seed_evidence) is not bool:
         raise TypeError("require_seed_evidence must be a boolean")
+    if type(require_current_state_layout) is not bool:
+        raise TypeError("require_current_state_layout must be a boolean")
     if not isinstance(value, dict):
         raise SourceStagingError("source staging result fields are invalid")
     schema_version = value.get("schema_version")
@@ -572,7 +587,19 @@ def validate_source_staging_result(
         deployment_id=value["deployment_id"],
         generation=value["generation"],
         qualified_python=value["qualified_python"],
+        state_root=value["local_state_root"],
     )
+    if require_current_state_layout:
+        current_paths = runtime_paths(
+            value["local_runtime_root"],
+            deployment_id=value["deployment_id"],
+            generation=value["generation"],
+            qualified_python=value["qualified_python"],
+        )
+        if paths.state_root != current_paths.state_root:
+            raise SourceStagingError(
+                "current source staging requires the compact local state layout"
+            )
     exact_paths = {
         "local_python_root": paths.python_root,
         "local_plan_path": paths.plan_path,
@@ -1762,6 +1789,7 @@ def stage(
             expected_run_dir=run_dir,
             require_seed_evidence=True,
             expected_seed_evidence=expected_seed_evidence,
+            require_current_state_layout=True,
         )
     atomic_create_json(result_path, result)
     return result

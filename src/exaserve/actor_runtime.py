@@ -50,6 +50,7 @@ _INHERITED_ACTOR_ENV = (
     "TORCH_HOME",
     "TRITON_CACHE_DIR",
     "VLLM_CACHE_ROOT",
+    "VLLM_RPC_BASE_PATH",
     "EXASERVE_LOCAL_RUNTIME_ROOT",
     "EXASERVE_LOCAL_STATE_ROOT",
     "EXASERVE_QUALIFIED_PYTHON",
@@ -115,6 +116,7 @@ _PROTECTED_ACTOR_ENV = frozenset(
         "TORCH_HOME",
         "TRITON_CACHE_DIR",
         "VLLM_CACHE_ROOT",
+        "VLLM_RPC_BASE_PATH",
         "RAY_TMPDIR",
         "EXASERVE_LOCAL_RUNTIME_ROOT",
         "EXASERVE_LOCAL_STATE_ROOT",
@@ -164,11 +166,13 @@ def build_actor_runtime_env(
     env_vars = {key: value for key in _INHERITED_ACTOR_ENV if (value := os.environ.get(key))}
     from .plan.runtime_environment import (
         LOCAL_RUNTIME_ROOT_ENV,
+        LOCAL_STATE_ROOT_ENV,
         QUALIFIED_PYTHON_HASH_ENV,
         QUALIFIED_PYTHON_PROFILE_ENV,
         RuntimePathError,
         path_is_shared,
         shared_path_tokens,
+        validate_vllm_rpc_base_path,
     )
 
     runtime_root = env_vars.get(LOCAL_RUNTIME_ROOT_ENV, "")
@@ -193,6 +197,13 @@ def build_actor_runtime_env(
         "EXASERVE_COMPAT_MANIFEST_HASH"
     ):
         raise RuntimeError("actor compatibility source proof has the wrong manifest")
+    try:
+        validate_vllm_rpc_base_path(
+            env_vars.get("VLLM_RPC_BASE_PATH", ""),
+            env_vars.get(LOCAL_STATE_ROOT_ENV, ""),
+        )
+    except RuntimePathError as exc:
+        raise RuntimeError(str(exc)) from exc
     path_keys = {
         "PYTHONPATH",
         "HOME",
@@ -215,6 +226,7 @@ def build_actor_runtime_env(
         "TORCH_HOME",
         "TRITON_CACHE_DIR",
         "VLLM_CACHE_ROOT",
+        "VLLM_RPC_BASE_PATH",
         "RAY_TMPDIR",
         "EXASERVE_LOCAL_RUNTIME_ROOT",
         "EXASERVE_LOCAL_STATE_ROOT",

@@ -1984,3 +1984,39 @@ The applied and independently validated ledger is:
 The formal state remains `TECHNICAL_PASS_SCOPE_PENDING`. Final42 is technically
 qualified at one and two Aurora nodes only; a larger support claim requires an
 owner decision and a new immutable, predeclared scale campaign.
+
+## VC-01 cold-registry and Unix-socket path hardening (2026-09-06)
+
+The first cold, closed-cache real PP canaries showed that vLLM 0.15's model
+registry inspection subprocess terminates with `SIGSEGV` while importing the
+pinned Aurora XPU stack. Reusing the ambient home cache was rejected because it
+would restore unversioned worker Lustre access. VC-01 instead carries reviewed
+Llama and GPT-OSS model-info entries as profile-bound source-capsule resources,
+installs them in each node-local generation cache during MPI source staging,
+and re-verifies them before registration and after stale-process cleanup. Its
+profile binds the cache manifest, installer, model modules and all private vLLM
+sources that define the cache and RPC protocols. Compatibility receipts and
+schema-3 source evidence now enforce those exact identities and installation
+counts. Archived schema-2 evidence remains readable.
+
+Canary `run4/n2` (PBS `8809064`) proved VC-01 removed the registry crash, then
+failed in `backend_create` because vLLM appended a UUID to the legacy 86-byte
+temporary-directory base, creating a 123-byte ZMQ path against libzmq's
+107-byte maximum. The selected correction combines two measures:
+
+- the default state root is a fixed 24-hex SHA-256 identity over exact
+  deployment ID and generation, eliminating caller-controlled/display-name
+  path growth for every mutable runtime consumer;
+- the supported `VLLM_RPC_BASE_PATH` is set explicitly to an already-created,
+  owner-only `state/ipc` directory and is protected/validated across ranks,
+  Serve actors, spawned EngineCore processes and nested vLLM Ray workers.
+
+The bound vLLM `network_utils.py` implementation makes the suffix exactly
+37 bytes; the new 85-byte worst-case path retains 22 bytes of margin. Validation
+rejects an ambient override, wrong location, symlink, permissions other than
+owner-private, shared storage or an excessive byte length before vLLM import.
+Changing the derivation would normally strand pre-change state. The migration
+therefore retains one exact legacy formula solely for archival manifest
+readback and receipt-bound cleanup; fresh composition, staging, replay and
+qualification gates require the compact layout. No arbitrary historical or
+user-supplied state path is accepted.

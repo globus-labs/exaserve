@@ -289,6 +289,41 @@ def test_stale_cleanup_preserves_republished_current_generation_state(tmp_path, 
     assert seed.read_text(encoding="utf-8") == "reviewed"
 
 
+def test_stale_cleanup_removes_exact_pre_compaction_state_receipt(tmp_path, monkeypatch):
+    from exaserve.plan import runtime_environment
+
+    monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(tmp_path / "owned"))
+    current = tmp_path / "current-state"
+    legacy = tmp_path / "legacy-state"
+    legacy.mkdir()
+    (legacy / "stale").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(
+        runtime_environment,
+        "default_local_state_root",
+        lambda _plan, _generation, rank=0: str(current),
+    )
+    monkeypatch.setattr(
+        runtime_environment,
+        "_legacy_local_state_root",
+        lambda _plan, _generation, rank=0: str(legacy),
+    )
+    dead = _sleeping_child()
+    registry = ProcessOwnershipRegistry(deployment_id="current", generation=2, rank=0)
+    receipt = registry.record(
+        "ray",
+        pid=dead.pid,
+        pgid=os.getpgid(dead.pid),
+        argv=dead.args,
+        temp_paths=(str(legacy),),
+    )
+    os.killpg(os.getpgid(dead.pid), 15)
+    dead.wait(timeout=5)
+
+    assert cleanup_stale_owned_processes(deployment_id="current", generation=2, deadline_s=1) == 1
+    assert not os.path.exists(receipt)
+    assert not legacy.exists()
+
+
 def test_normal_release_removes_receipt_and_owned_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("EXASERVE_PROCESS_OWNERSHIP_ROOT", str(tmp_path / "owned"))
     child = _sleeping_child()

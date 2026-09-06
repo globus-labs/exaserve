@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from exaserve.plan.runtime_environment import (
+    _legacy_local_state_root,
     COMPAT_SOURCE_MANIFEST_ENV,
     COMPAT_SOURCE_PROFILE_ENV,
     QUALIFIED_PYTHON_ENV,
@@ -20,10 +23,12 @@ from exaserve.plan.runtime_environment import (
     RuntimePaths,
     assert_worker_launch_is_local,
     closed_runtime_environment,
+    default_local_state_root,
     filesystem_identity,
     parse_filesystem_expectation,
     require_contained_local_path,
     staged_pythonpath,
+    validate_vllm_rpc_base_path,
 )
 
 
@@ -54,11 +59,71 @@ def _plan():
     )
 
 
-def _paths(tmp_path):
+def _paths(tmp_path, *, prepare=True):
     runtime = tmp_path / "runtime"
     for child in ("python", "run", "bin"):
         (runtime / child).mkdir(parents=True, exist_ok=True)
-    return RuntimePaths.from_roots(runtime, tmp_path / "state", policy=_plan())
+    state_token = hashlib.sha256(os.fsencode(tmp_path)).hexdigest()[:12]
+    paths = RuntimePaths.from_roots(
+        runtime,
+        tmp_path.parent / f"s-{state_token}",
+        policy=_plan(),
+    )
+    if prepare:
+        paths.prepare_state(policy=_plan())
+    return paths
+
+
+def test_default_state_root_is_identity_bound_and_leaves_unix_socket_margin():
+    plan = SimpleNamespace(deployment_id="deployment-" + "x" * 1000)
+    generation = 10**30
+    root = default_local_state_root(plan, generation)
+
+    assert re.fullmatch(r"/tmp/exaserve/state/[0-9a-f]{24}", root)
+    assert root == default_local_state_root(plan, generation, rank=99)
+    assert root != default_local_state_root(plan, generation + 1)
+    assert root != default_local_state_root(
+        SimpleNamespace(deployment_id=plan.deployment_id + "-other"),
+        generation,
+    )
+    uuid_suffix = b"/" + b"0" * 36
+    for base in (Path(root) / "tmp", Path(root) / "ipc"):
+        assert 107 - len(os.fsencode(base) + uuid_suffix) >= 16
+
+
+def test_legacy_state_root_derivation_is_stable_for_archival_receipts():
+    plan = SimpleNamespace(deployment_id="deployment")
+
+    assert _legacy_local_state_root(plan, 7) == (
+        "/tmp/exaserve/state/deployment.aee50b18a03c89e4/g7"
+    )
+
+
+def test_vllm_rpc_base_must_remain_exact_and_owner_private(tmp_path):
+    paths = _paths(tmp_path)
+
+    assert validate_vllm_rpc_base_path(paths.ipc, paths.state_root) == str(paths.ipc)
+    paths.ipc.chmod(0o755)
+    with pytest.raises(RuntimePathError, match="owner-private"):
+        validate_vllm_rpc_base_path(paths.ipc, paths.state_root)
+    with pytest.raises(RuntimePathError, match="exact local path"):
+        validate_vllm_rpc_base_path(paths.tmp, paths.state_root)
+
+
+def test_vllm_rpc_base_rejects_overlong_or_symlinked_directory(tmp_path):
+    long_state = tmp_path / ("x" * 80)
+    long_rpc = long_state / "ipc"
+    long_rpc.mkdir(parents=True, mode=0o700)
+    with pytest.raises(RuntimePathError, match="insufficient room"):
+        validate_vllm_rpc_base_path(long_rpc, long_state)
+
+    state = tmp_path / "short"
+    target = state / "target"
+    state.mkdir()
+    target.mkdir(mode=0o700)
+    (state / "ipc").symlink_to(target, target_is_directory=True)
+    with pytest.raises(RuntimePathError, match="symlink"):
+        validate_vllm_rpc_base_path(state / "ipc", state)
 
 
 def test_filesystem_expectation_and_longest_mount_identity_are_typed(tmp_path):
@@ -224,6 +289,7 @@ def test_closed_environment_redirects_every_mutable_root(tmp_path):
             "JUPYTER_CONFIG_DIR": "/home/user/.jupyter",
             "EXASERVE_RUN_PLAN_PATH": "/lus/flare/run.plan.json",
             "ONEAPI_DEVICE_SELECTOR": "level_zero:0",
+            "VLLM_RPC_BASE_PATH": "/home/user/forged-vllm-ipc",
         },
     )
     assert env["PYTHONNOUSERSITE"] == "1"
@@ -235,6 +301,7 @@ def test_closed_environment_redirects_every_mutable_root(tmp_path):
     assert env["NUMBA_CACHE_DIR"] == str(paths.cache / "numba")
     assert env["TORCH_EXTENSIONS_DIR"] == str(paths.cache / "torch_extensions")
     assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["VLLM_RPC_BASE_PATH"] == str(paths.ipc)
     assert env["TRANSFORMERS_OFFLINE"] == "1"
     assert "PYTHONUSERBASE" not in env
     assert "PYTHONSTARTUP" not in env
@@ -253,7 +320,7 @@ def test_closed_environment_redirects_every_mutable_root(tmp_path):
 
 
 def test_prepare_state_rejects_home_symlink_before_chmod_or_child_creation(tmp_path):
-    paths = _paths(tmp_path)
+    paths = _paths(tmp_path, prepare=False)
     paths.state_root.mkdir()
     paths.home.symlink_to("/home", target_is_directory=True)
 

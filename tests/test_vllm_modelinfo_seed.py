@@ -51,6 +51,7 @@ _SUPPORT_PATHS = (
     "vllm/model_executor/models/interfaces_base.py",
     "vllm/model_executor/models/registry.py",
     "vllm/utils/hashing.py",
+    "vllm/utils/network_utils.py",
 )
 
 

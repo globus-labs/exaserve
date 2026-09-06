@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from pathlib import Path
 import socket
 import sys
 import time
@@ -24,7 +26,10 @@ def _restore_shim_environment(tmp_path, monkeypatch):
     # Engine processes now require the distribution transaction's node-local
     # contract.  pytest's tmp_path models one node-local filesystem here.
     monkeypatch.setenv("EXASERVE_LOCAL_RUNTIME_ROOT", str(tmp_path))
-    monkeypatch.setenv("EXASERVE_LOCAL_STATE_ROOT", str(tmp_path))
+    state_token = hashlib.sha256(os.fsencode(tmp_path)).hexdigest()[:12]
+    state_root = tmp_path.parent / f"e-{state_token}"
+    state_root.mkdir(mode=0o700)
+    monkeypatch.setenv("EXASERVE_LOCAL_STATE_ROOT", str(state_root))
     monkeypatch.setenv("EXASERVE_SHARED_ROOTS", "/home:/lus/flare")
     monkeypatch.setenv("EXASERVE_SITE_PROFILE_HASH", "2" * 64)
     monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", sys.executable)
@@ -60,9 +65,13 @@ def _restore_shim_environment(tmp_path, monkeypatch):
         "TORCH_HOME",
         "TRITON_CACHE_DIR",
         "VLLM_CACHE_ROOT",
+        "VLLM_RPC_BASE_PATH",
         "RAY_TMPDIR",
     ):
-        monkeypatch.setenv(key, str(tmp_path))
+        monkeypatch.setenv(key, str(state_root))
+    rpc_base = state_root / "ipc"
+    rpc_base.mkdir(mode=0o700)
+    monkeypatch.setenv("VLLM_RPC_BASE_PATH", str(rpc_base))
     yield
     engine_shim.restore_environment(snapshot)
 
@@ -74,6 +83,10 @@ def _identity(monkeypatch) -> None:
     monkeypatch.setenv("EXASERVE_RECEIPT_REQUIREMENT_ID_ENGINE", "engine/slot0/core")
     monkeypatch.setenv("EXASERVE_RECEIPT_COMPONENT_ID_ENGINE", "engine-slot0/core")
     monkeypatch.setenv("EXASERVE_RECEIPT_RANK", "0")
+
+
+def _state_path(name: str) -> Path:
+    return Path(os.environ["EXASERVE_LOCAL_STATE_ROOT"]) / name
 
 
 def _start_receipt_ingress(tmp_path, monkeypatch):
@@ -105,7 +118,7 @@ def _stage_bootstrap(tmp_path, monkeypatch):
 def test_prepare_uses_the_staged_cross_node_bootstrap(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/pre/existing")
     bootstrap_root = _stage_bootstrap(tmp_path, monkeypatch)
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     engine_shim.prepare_environment(
         str(receipts),
         import_patches=True,
@@ -149,7 +162,7 @@ def test_prepare_rejects_a_tampered_staged_bootstrap(tmp_path, monkeypatch):
     (bootstrap_root / "sitecustomize.py").write_text("# drifted\n")
     with pytest.raises(RuntimeError, match="does not match EN-01"):
         engine_shim.prepare_environment(
-            str(tmp_path / "receipts"),
+            str(_state_path("receipts")),
             import_patches=True,
             deployment_id="d1",
             generation=7,
@@ -181,7 +194,11 @@ def test_engine_bootstrap_installs_overlay_without_eager_target_import(monkeypat
     monkeypatch.setattr(producers, "manifest_hash", lambda profile: "b" * 64)
     monkeypatch.setattr(activator, "CompatibilityActivator", StubActivator)
     monkeypatch.setattr(generated_overlay, "install", install)
-    monkeypatch.setattr(runtime_environment, "require_contained_local_path", lambda *a, **k: "")
+    monkeypatch.setattr(
+        runtime_environment,
+        "require_contained_local_path",
+        lambda path, *_args, **_kwargs: os.fspath(path),
+    )
     monkeypatch.setattr(
         generated_overlay,
         "activate_patch_ids",
@@ -206,7 +223,7 @@ def test_parent_environment_can_be_restored_after_the_engine_spawn(tmp_path, mon
     _stage_bootstrap(tmp_path, monkeypatch)
     snapshot = engine_shim.environment_snapshot()
     engine_shim.prepare_environment(
-        str(tmp_path / "receipts"),
+        str(_state_path("receipts")),
         import_patches=False,
         deployment_id="d1",
         generation=7,
@@ -260,6 +277,56 @@ def test_multiproc_bootstrap_exports_exact_rank_only_during_spawn(monkeypatch):
     }
     assert os.environ[engine_shim.ENGINE_WORKER_KIND_ENV] == "parent-kind"
     assert engine_shim.ENGINE_WORKER_RANK_ENV not in os.environ
+
+
+def test_ray_worker_runtime_env_explicitly_carries_local_rpc_and_cache_roots(monkeypatch):
+    pytest.importorskip("vllm", reason="optional backend plugin is absent from clean wheel gate")
+    from exaserve import _sitecustomize
+    from vllm.v1.executor import ray_executor
+
+    observed = {}
+
+    def original(_self, placement_group, **kwargs):
+        observed["placement_group"] = placement_group
+        observed["kwargs"] = kwargs
+        return "done"
+
+    executor_cls = ray_executor.RayDistributedExecutor
+    monkeypatch.setattr(executor_cls, "_init_workers_ray", original)
+    _sitecustomize._patch_vllm_ray_worker_runtime_env()
+
+    assert (
+        executor_cls._init_workers_ray(
+            object(),
+            "placement",
+            runtime_env={"env_vars": {"EXISTING": "kept"}},
+        )
+        == "done"
+    )
+    env_vars = observed["kwargs"]["runtime_env"]["env_vars"]
+    assert observed["placement_group"] == "placement"
+    assert env_vars["EXISTING"] == "kept"
+    for key in (
+        "EXASERVE_LOCAL_RUNTIME_ROOT",
+        "EXASERVE_LOCAL_STATE_ROOT",
+        "VLLM_CACHE_ROOT",
+        "VLLM_RPC_BASE_PATH",
+    ):
+        assert env_vars[key] == os.environ[key]
+    assert env_vars["EXASERVE_ENGINE_WORKER_KIND"] == "ray"
+
+
+def test_replica_validates_rpc_path_on_its_node_before_engine_import():
+    import inspect
+
+    from exaserve import server
+
+    source = inspect.getsource(server.EngineWorker.func_or_class)
+    rpc_validation = source.index("validate_vllm_rpc_base_path(")
+    compatibility_activation = source.index("CompatibilityActivator().activate")
+    backend_import = source.index("from .engines import EngineSpec")
+
+    assert rpc_validation < compatibility_activation < backend_import
 
 
 def test_worker_receipt_identity_uses_logical_rank_not_physical_gpu(tmp_path, monkeypatch):
@@ -319,7 +386,7 @@ def test_non_pp_engine_writes_exact_v2_receipt(tmp_path, monkeypatch):
     ingress = _start_receipt_ingress(tmp_path, monkeypatch)
     for gate in (PP_PATCH_GATE, RAY_WORKER_PATCH_GATE, MULTIPROC_WORKER_PATCH_GATE):
         monkeypatch.delenv(gate, raising=False)
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),
@@ -395,6 +462,7 @@ def test_bound_serve_actor_rebinds_rank_local_receipt_socket(monkeypatch):
     assert env_vars["EXASERVE_RECEIPT_SOCKET"] == socket_path_for(
         "four-node-test", 17, owner_rank=2
     )
+    assert env_vars["VLLM_RPC_BASE_PATH"] == os.environ["VLLM_RPC_BASE_PATH"]
     assert "EXASERVE_SHARED_ROOTS" not in env_vars
 
 
@@ -449,7 +517,11 @@ def test_dynamic_and_declared_receipt_ownership_are_mutually_exclusive(monkeypat
         "EXASERVE_RECEIPT_RANK",
         "EXASERVE_RECEIPT_SOCKET",
         "EXASERVE_SHARED_ROOTS",
+        "EXASERVE_LOCAL_RUNTIME_ROOT",
+        "EXASERVE_LOCAL_STATE_ROOT",
         "RAY_TMPDIR",
+        "VLLM_CACHE_ROOT",
+        "VLLM_RPC_BASE_PATH",
     ],
 )
 def test_actor_extras_cannot_override_canonical_identity(monkeypatch, field):
@@ -496,7 +568,7 @@ def test_bound_serve_actor_rejects_invalid_receipt_owner_rank(monkeypatch, owner
 def test_engine_delivery_materializes_node_local_diagnostic_directory(tmp_path, monkeypatch):
     _identity(monkeypatch)
     ingress = _start_receipt_ingress(tmp_path, monkeypatch)
-    receipts = tmp_path / "remote-node-receipts"
+    receipts = _state_path("remote-node-receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),
@@ -524,7 +596,7 @@ def test_pp_half_patch_is_failed_and_not_published_as_complete(tmp_path, monkeyp
     monkeypatch.setenv(PP_PATCH_GATE, "1")
     monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "1")
     monkeypatch.setenv(MULTIPROC_WORKER_PATCH_GATE, "0")
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),
@@ -555,7 +627,7 @@ def test_watcher_waits_until_postconditions_pass(tmp_path, monkeypatch):
     monkeypatch.setenv(PP_PATCH_GATE, "1")
     monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "1")
     monkeypatch.setenv(MULTIPROC_WORKER_PATCH_GATE, "0")
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),
@@ -586,7 +658,7 @@ def test_watcher_waits_until_postconditions_pass(tmp_path, monkeypatch):
 
 def test_failed_engine_delivery_cannot_publish_a_success_receipt(tmp_path, monkeypatch):
     _identity(monkeypatch)
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),
@@ -618,7 +690,7 @@ def test_watcher_records_and_logs_the_exact_incomplete_patch_set(tmp_path, monke
     monkeypatch.setenv(PP_PATCH_GATE, "0")
     monkeypatch.setenv(RAY_WORKER_PATCH_GATE, "1")
     monkeypatch.setenv(MULTIPROC_WORKER_PATCH_GATE, "0")
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),
@@ -650,7 +722,7 @@ def test_watcher_records_and_logs_the_exact_incomplete_patch_set(tmp_path, monke
 def test_watcher_silently_expires_for_a_process_without_an_engine_slot(
     tmp_path, monkeypatch, capsys
 ):
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     receipts.mkdir()
     monkeypatch.setenv(engine_shim.RECEIPT_DIR_ENV, str(receipts))
     monkeypatch.setattr(engine_shim, "_build_engine_receipt", lambda **_kwargs: None)
@@ -679,7 +751,7 @@ def test_watcher_rejects_unbounded_timing(timeout_s, poll_s):
 def test_collect_ignores_malformed_receipts(tmp_path, monkeypatch):
     _identity(monkeypatch)
     ingress = _start_receipt_ingress(tmp_path, monkeypatch)
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),
@@ -699,7 +771,7 @@ def test_collect_ignores_malformed_receipts(tmp_path, monkeypatch):
 def test_collect_never_substitutes_a_sibling_engine_receipt(tmp_path, monkeypatch):
     _identity(monkeypatch)
     ingress = _start_receipt_ingress(tmp_path, monkeypatch)
-    receipts = tmp_path / "receipts"
+    receipts = _state_path("receipts")
     _stage_bootstrap(tmp_path, monkeypatch)
     engine_shim.prepare_environment(
         str(receipts),

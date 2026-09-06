@@ -71,11 +71,13 @@ non-legacy vLLM architecture surface:
 | `GptOssForCausalLM` | `vllm/model_executor/models/gpt_oss.py` | `0956d4ef35a5` | `88d67c0015d1badbb4f387a5a0501081` |
 
 The manifest SHA-256 is
-`b297babd63c22943e208740fd208f317e7a27ceb5a65516d227e31c403221d43`.
-It also pins `registry.py`, `envs.py`, `utils/hashing.py`, `interfaces.py`, and
-`interfaces_base.py`, which define the cache location, filename/hash protocol,
-deserialization shape, and `_ModelInfo` semantics. A same-version vendor rebuild
-that changes any of those sources therefore fails before a seed can be trusted.
+`c5e82475960ee3094a19cbda25b25264cbecde472ef9f34adedf59380b73d18c`.
+It also pins `registry.py`, `envs.py`, `utils/hashing.py`,
+`utils/network_utils.py`, `interfaces.py`, and `interfaces_base.py`, which
+define the cache location, filename/hash protocol, deserialization shape,
+`_ModelInfo` semantics, and the supported vLLM RPC-path contract. A same-version
+vendor rebuild that changes any of those sources therefore fails before a seed
+or the compact IPC path can be trusted.
 Source staging validates the manifest, every seed, and every qualified target
 module on each rank; it then installs the entries into that generation's
 node-local `VLLM_CACHE_ROOT` before emitting collective source evidence.
@@ -115,8 +117,8 @@ and one trailing newline. Their resulting committed SHA-256 identities are
 (Llama) and
 `65a10dce2fe8204f45d6ea8635f28602def42ecb483df12275c91b46be278065`
 (GPT-OSS). The compatibility profile additionally binds the exact installer
-source and all five vLLM sources that implement or interpret this private cache
-format.
+source and all six vLLM sources that implement or interpret this private cache
+and RPC-path format.
 
 The cold-cache failure is sealed by 8B diagnostic `run3/n2`, PBS `8808281`:
 vLLM's registry subprocess exited `-11`/`SIGSEGV` while inspecting

@@ -380,6 +380,7 @@ def _constructor_fixture(monkeypatch, *, phase: str):
     import exaserve.engines as engines
     import exaserve.model_staging as model_staging
     import exaserve.plan.io as plan_io
+    import exaserve.plan.runtime_environment as runtime_environment
 
     logical_replica = SimpleNamespace(
         replica_index=0,
@@ -407,6 +408,11 @@ def _constructor_fixture(monkeypatch, *, phase: str):
     )
     monkeypatch.setattr(plan_io, "load_allocation_binding", lambda _path: object())
     monkeypatch.setattr(plan_io, "rank_for_node", lambda *_args: 0)
+    monkeypatch.setattr(
+        runtime_environment,
+        "validate_vllm_rpc_base_path",
+        lambda *_args, **_kwargs: "/tmp/ipc",
+    )
     monkeypatch.setattr(
         plan_io,
         "resolve_replica_receipt_requirement",

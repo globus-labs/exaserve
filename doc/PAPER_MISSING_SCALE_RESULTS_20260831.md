@@ -331,6 +331,39 @@ code/signal and bounded stderr as separate structured fields before choosing
 between a hash-bound distributed cache seed and a correctly isolated
 cache-miss subprocess.
 
+Commit `e6b4780` implemented the selected VC-01 path: reviewed, exact-version
+model-info entries are carried inside the source capsule, distributed by the
+existing MPI transaction, installed in each generation-local vLLM cache, and
+verified before registration and again immediately before Ray. Fresh canary
+`run4/n2`, source snapshot
+`26bfcada75642d1fb09c708aa0cadd76cc3dc00e7cf5a033d1462882a0d6b54b`,
+ran as PBS `8809064`. Both ranks reported the exact VC-01 manifest, two seeded
+architectures and deterministic install-report hash; both pre-Ray
+reverifications passed. The former registry subprocess `SIGSEGV` did not recur
+in run4. Serve exhausted three actor starts; the retained final attempt entered
+vLLM backend creation and failed with the cause below.
+
+`run4/n2` then exposed an independent path-budget defect. Its legacy local
+state root was 82 bytes; vLLM implicitly used the 86-byte `$TMPDIR` and appended
+`/<uuid4>`, producing a 123-byte ZMQ filesystem path. Aurora's libzmq accepts
+at most 107 bytes, so the retained final attempt failed explicitly with
+`ZMQError`. The run is rejected diagnostic evidence: it never reached
+canonical READY, replay was intentionally out of scope for this startup-only
+canary, and it has no paper result. Source staging took 5.4 seconds, model
+broadcast took 83.3 seconds, and cleanup was clean with 2/2 DRAIN and GOODBYE,
+expected rank-launcher code 143, no cleanup error and PBS exit 1.
+
+The correction uses vLLM's supported `VLLM_RPC_BASE_PATH`, projected and
+protected through the closed rank, Serve actor, EngineCore and nested Ray
+worker environments, pointing to a mode-0700 `ipc` child of a compact
+fixed-length state identity. The exact
+`vllm/utils/network_utils.py` implementation of the UUID suffix is included in
+the compatibility hash set. The resulting worst-case path is 85 bytes, leaving
+22 bytes of margin. Exact legacy state derivation remains readable for archived
+source evidence and cleanable for old ownership receipts, while every fresh
+execution gate requires the compact layout. A fresh immutable canary identity
+is required for qualification.
+
 ## Current accepted results
 
 ### Corrected-snapshot HAProxy null-compute startup

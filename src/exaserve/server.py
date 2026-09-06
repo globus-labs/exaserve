@@ -1216,6 +1216,16 @@ class EngineWorker:
                 os.environ.pop("EXASERVE_RECEIPT_COMPONENT_ID_ENGINE", None)
                 os.environ.pop("EXASERVE_RECEIPT_MODEL_ID_ENGINE", None)
                 os.environ.pop("EXASERVE_RECEIPT_DEVICE_IDS_ENGINE", None)
+            if not null_compute and engine_name == "vllm":
+                from .plan.runtime_environment import (
+                    LOCAL_STATE_ROOT_ENV,
+                    validate_vllm_rpc_base_path,
+                )
+
+                validate_vllm_rpc_base_path(
+                    os.environ.get("VLLM_RPC_BASE_PATH", ""),
+                    os.environ.get(LOCAL_STATE_ROOT_ENV, ""),
+                )
         except Exception as exc:
             _raise_engine_startup_failure("canonical_bind", exc)
 

@@ -246,15 +246,21 @@ def _is_owned_temp_path(
     if deployment_id is not None and generation is not None:
         from types import SimpleNamespace
 
-        from ..plan.runtime_environment import default_local_state_root
-
-        expected = default_local_state_root(
-            SimpleNamespace(deployment_id=deployment_id), generation
+        from ..plan.runtime_environment import (
+            _legacy_local_state_root,
+            default_local_state_root,
         )
+
+        identity = SimpleNamespace(deployment_id=deployment_id)
+        expected_roots = {
+            default_local_state_root(identity, generation),
+            _legacy_local_state_root(identity, generation),
+        }
         # State ownership is intentionally exact, not "anything under /tmp".
         # The receipt's deployment/generation fields cryptographically bind
-        # this one directory and stale cleanup re-derives the same path.
-        if absolute == os.path.abspath(expected):
+        # one current or migration-readable legacy directory, and stale cleanup
+        # re-derives the same path rather than trusting the receipt spelling.
+        if absolute in {os.path.abspath(root) for root in expected_roots}:
             return True
     return False
 

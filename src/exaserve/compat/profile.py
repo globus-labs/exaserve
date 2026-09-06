@@ -1074,6 +1074,10 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
             target_file="vllm/utils/hashing.py",
             target_sha256="89b4bd2bd246a5bfdcf00d766ea38a8182376aecfd6b6b7d5c47d96b1559243e",
         ),
+        VLLMModelInfoSupportSourceSpec(
+            target_file="vllm/utils/network_utils.py",
+            target_sha256="25cf36c23561f82a351d959936a45c69c8e73e96e84220c64bca321ad2ace2cf",
+        ),
     )
     modelinfo_seeds = (
         VLLMModelInfoSeedSpec(
@@ -1111,7 +1115,7 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
         patches=patches,
         vllm_modelinfo_seed_manifest_path=("exaserve/resources/vllm_modelinfo/manifest.json"),
         vllm_modelinfo_seed_manifest_hash=(
-            "b297babd63c22943e208740fd208f317e7a27ceb5a65516d227e31c403221d43"
+            "c5e82475960ee3094a19cbda25b25264cbecde472ef9f34adedf59380b73d18c"
         ),
         vllm_modelinfo_installer_path="exaserve/vllm_modelinfo_seed.py",
         vllm_modelinfo_installer_hash=_hash_file(package_dir / "vllm_modelinfo_seed.py"),

@@ -46,7 +46,7 @@ from .state.atomic import (
 PATCH_ID = "VC-01"
 CAPABILITY = "vllm_modelinfo_cache_seed"
 MANIFEST_RELATIVE_PATH = Path("exaserve/resources/vllm_modelinfo/manifest.json")
-EXPECTED_MANIFEST_SHA256 = "b297babd63c22943e208740fd208f317e7a27ceb5a65516d227e31c403221d43"
+EXPECTED_MANIFEST_SHA256 = "c5e82475960ee3094a19cbda25b25264cbecde472ef9f34adedf59380b73d18c"
 NOT_REQUIRED_INSTALL_REPORT_HASH = hashlib.sha256(
     b'{"required":false,"schema_version":1}'
 ).hexdigest()

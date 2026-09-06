@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Mapping
 
 
@@ -29,7 +31,10 @@ LOCAL_EVAL_MANIFEST_ENV = "EXASERVE_LOCAL_EVAL_MANIFEST"
 LOCAL_RUN_PLAN_ENV = "EXASERVE_LOCAL_RUN_PLAN_PATH"
 LOCAL_PLAN_ENV = "EXASERVE_LOCAL_PLAN_PATH"
 
-_SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
+_LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107
+_VLLM_RPC_UUID_SUFFIX_BYTES = 37
+_LEGACY_SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
+
 _SEARCH_PATH_KEYS = (
     "PATH",
     "LD_LIBRARY_PATH",
@@ -195,6 +200,7 @@ _OVERWRITTEN_PATH_KEYS = {
     "TORCH_HOME",
     "TRITON_CACHE_DIR",
     "VLLM_CACHE_ROOT",
+    "VLLM_RPC_BASE_PATH",
     "RAY_TMPDIR",
     "EXASERVE_RUN_LOG_DIR",
     "EXASERVE_RUN_LOG_ROOT",
@@ -213,6 +219,55 @@ _OVERWRITTEN_PATH_KEYS = {
 
 class RuntimePathError(RuntimeError):
     """A managed child would retain or escape to shared storage."""
+
+
+def validate_vllm_rpc_base_path(
+    path: str | os.PathLike[str],
+    state_root: str | os.PathLike[str],
+    *,
+    policy=None,
+) -> str:
+    """Validate vLLM's private generation-local Unix-socket directory."""
+
+    expected = Path(state_root) / "ipc"
+    candidate = Path(path)
+    if os.path.normpath(candidate) != os.path.normpath(expected):
+        raise RuntimePathError(f"VLLM_RPC_BASE_PATH must be the exact local path {expected}")
+    resolved = require_contained_local_path(
+        candidate,
+        state_root,
+        policy=policy,
+        name="vLLM RPC base path",
+        require_exists=True,
+    )
+    if len(os.fsencode(resolved)) + _VLLM_RPC_UUID_SUFFIX_BYTES > (
+        _LINUX_UNIX_SOCKET_PATH_MAX_BYTES
+    ):
+        raise RuntimePathError(
+            "VLLM_RPC_BASE_PATH leaves insufficient room for vLLM's Unix-domain "
+            f"socket suffix: {resolved}"
+        )
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as exc:
+        raise RuntimePathError(f"VLLM_RPC_BASE_PATH is not a safe directory: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise RuntimePathError("VLLM_RPC_BASE_PATH must be an owner-private node-local directory")
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -543,6 +598,7 @@ class RuntimePaths:
     state_root: Path
     home: Path
     tmp: Path
+    ipc: Path
     cache: Path
     logs: Path
     diagnostics: Path
@@ -600,6 +656,7 @@ class RuntimePaths:
             state_root=state,
             home=state / "home",
             tmp=state / "tmp",
+            ipc=state / "ipc",
             cache=state / "cache",
             logs=state / "logs",
             diagnostics=state / "diagnostics",
@@ -629,6 +686,7 @@ class RuntimePaths:
             self.state_root,
             self.home,
             self.tmp,
+            self.ipc,
             self.cache,
             self.logs,
             self.diagnostics,
@@ -739,19 +797,40 @@ class RuntimePaths:
                 )
 
 
-def default_local_state_root(plan, generation: int, rank: int = 0) -> str:
+def _validate_state_identity(generation: int, rank: int) -> None:
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
         raise RuntimePathError("generation must be a non-negative integer")
     if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
         raise RuntimePathError("rank must be a non-negative integer")
+
+
+def _legacy_local_state_root(plan, generation: int, rank: int = 0) -> str:
+    """Reproduce the pre-IPC-hardening path for exact archival cleanup/readback."""
+
+    _validate_state_identity(generation, rank)
     raw = str(plan.deployment_id)
-    safe = _SAFE_ID.sub("_", raw).strip("._")[:24] or "deployment"
+    safe = _LEGACY_SAFE_ID.sub("_", raw).strip("._")[:24] or "deployment"
     identity = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"/tmp/exaserve/state/{safe}.{identity}/g{generation}"
+
+
+def default_local_state_root(plan, generation: int, rank: int = 0) -> str:
+    _validate_state_identity(generation, rank)
+    raw = str(plan.deployment_id)
+    identity = hashlib.sha256(
+        json.dumps(
+            {"deployment_id": raw, "generation": generation},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()[:24]
     # The supported launcher contract is exactly one rank per node. Identical
     # spelling lets the distribution transaction create this directory before
     # the first Python rank process starts, while the physical directories are
-    # naturally distinct on each node-local filesystem.
-    return f"/tmp/exaserve/state/{safe}.{identity}/g{generation}"
+    # naturally distinct on each node-local filesystem. Keep this fixed-length
+    # path compact because vLLM and other runtimes append Unix-socket names,
+    # whose Linux sockaddr_un path limit is only 107 bytes.
+    return f"/tmp/exaserve/state/{identity}"
 
 
 def runtime_paths(
@@ -934,6 +1013,11 @@ def closed_runtime_environment(
         raise RuntimePathError(f"{COMPAT_SOURCE_PROFILE_ENV} does not match DeploymentPlan")
     if selected.get(COMPAT_SOURCE_MANIFEST_ENV) != plan.manifest_hash:
         raise RuntimePathError(f"{COMPAT_SOURCE_MANIFEST_ENV} does not match DeploymentPlan")
+    vllm_rpc_base = validate_vllm_rpc_base_path(
+        paths.ipc,
+        paths.state_root,
+        policy=policy or plan,
+    )
     selected.update(
         {
             LOCAL_RUNTIME_ROOT_ENV: str(paths.root),
@@ -966,6 +1050,7 @@ def closed_runtime_environment(
             "TORCH_HOME": str(paths.cache / "torch"),
             "TRITON_CACHE_DIR": str(paths.cache / "triton"),
             "VLLM_CACHE_ROOT": str(paths.cache / "vllm"),
+            "VLLM_RPC_BASE_PATH": vllm_rpc_base,
             "RAY_TMPDIR": str(paths.ray),
             "EXASERVE_RUN_LOG_DIR": str(paths.logs),
             "EXASERVE_PLAN_PATH": str(paths.plan_path),
@@ -1057,6 +1142,7 @@ def assert_worker_launch_is_local(
         "TORCH_HOME",
         "TRITON_CACHE_DIR",
         "VLLM_CACHE_ROOT",
+        "VLLM_RPC_BASE_PATH",
         "RAY_TMPDIR",
         "EXASERVE_RUN_LOG_DIR",
         "EXASERVE_PLAN_PATH",
@@ -1170,4 +1256,5 @@ __all__ = [
     "shared_roots",
     "shared_path_tokens",
     "staged_pythonpath",
+    "validate_vllm_rpc_base_path",
 ]

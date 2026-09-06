@@ -604,6 +604,7 @@ def _runtime_capsule_context(
         expected_deployment_id=deployment_id,
         expected_generation=generation,
         expected_plan_hash=plan_hash,
+        require_current_state_layout=True,
     )
     context = {
         "python_root": result["local_python_root"],
@@ -1462,6 +1463,7 @@ def _validate_ready_evidence(status, plan, run_dir: Path) -> dict:
         expected_run_dir=run_dir,
         require_seed_evidence=True,
         expected_seed_evidence=seed_evidence,
+        require_current_state_layout=True,
     )
     receipts = source["rank_receipts"]
     engine_evidence = (

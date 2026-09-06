@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -71,8 +72,10 @@ def _give_local_runtime(root, tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     for child in ("python", "run", "bin"):
         (runtime / child).mkdir(parents=True, exist_ok=True)
-    state = tmp_path / "state"
+    state_token = hashlib.sha256(os.fsencode(tmp_path)).hexdigest()[:12]
+    state = tmp_path.parent / f"c-{state_token}"
     root.local_runtime_paths = RuntimePaths.from_roots(runtime, state, policy=root.plan)
+    root.local_runtime_paths.prepare_state(policy=root.plan)
     monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", sys.executable)
     monkeypatch.setenv(QUALIFIED_PYTHON_HASH_ENV, "d" * 64)
     monkeypatch.setenv(QUALIFIED_PYTHON_PROFILE_ENV, root.plan.site_profile_hash)

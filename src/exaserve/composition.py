@@ -715,6 +715,7 @@ class CompositionRoot:
                     expected_run_dir=self.run_dir,
                     require_seed_evidence=True,
                     expected_seed_evidence=expected_seed_evidence,
+                    require_current_state_layout=True,
                 )
             except SourceStagingError as exc:
                 return False, str(exc)

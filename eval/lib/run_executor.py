@@ -623,6 +623,7 @@ def _validated_replay_capsule_environment(
         expected_compatibility_manifest_hash=compatibility_manifest_hash,
         require_seed_evidence=True,
         expected_seed_evidence=seed_evidence,
+        require_current_state_layout=True,
     )
     if len(result["rank_receipts"]) != expected_ranks:
         raise RuntimeError("source capsule receipt rank count disagrees with the replay allocation")
@@ -705,6 +706,7 @@ def _closed_replay_worker_environment(run_plan, capsule_environment: dict[str, s
         "TORCH_HOME",
         "TRITON_CACHE_DIR",
         "VLLM_CACHE_ROOT",
+        "VLLM_RPC_BASE_PATH",
         "RAY_TMPDIR",
         "PYTHONPATH",
         "PYTHONNOUSERSITE",

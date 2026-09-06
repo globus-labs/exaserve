@@ -151,7 +151,9 @@ def verify_engine_bootstrap(engine_kind: str) -> None:
         raise RuntimeError(f"unsupported engine shim kind {engine_kind!r}")
     from ..plan.runtime_environment import (
         LOCAL_RUNTIME_ROOT_ENV,
+        LOCAL_STATE_ROOT_ENV,
         require_contained_local_path,
+        validate_vllm_rpc_base_path,
     )
 
     runtime_root = os.environ.get(LOCAL_RUNTIME_ROOT_ENV, "")
@@ -162,6 +164,10 @@ def verify_engine_bootstrap(engine_kind: str) -> None:
         os.path.join(runtime_root, "python"),
         name="engine ExaServe module",
         require_exists=True,
+    )
+    validate_vllm_rpc_base_path(
+        os.environ.get("VLLM_RPC_BASE_PATH", ""),
+        os.environ.get(LOCAL_STATE_ROOT_ENV, ""),
     )
     from .activator import CompatibilityActivator
     from .producers import manifest_hash
