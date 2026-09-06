@@ -1,6 +1,6 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress; last updated 2026-09-05**. This document is an evidence
+Status: **in progress; last updated 2026-09-06**. This document is an evidence
 ledger, not a completed paper reproduction claim. A number appears in an
 accepted table only after the immutable run bundle, terminal state, result
 manifest, readiness evidence, and shutdown evidence all pass the repository's
@@ -119,13 +119,15 @@ rank launcher was terminated with the expected 143, and the shutdown report
 records `clean=true`, no errors and no exhausted deadline. Stable immutable
 model caches were preserved; no attempt candidate required removal.
 
-The retained Ray application message collapsed the actual constructor error
+The retained Ray application message collapsed the actual actor-start failure
 to `Failed to update the deployments`, while Ray kept the detailed deployment
-message only in the now-gone node-local controller logs. Static ordering and
-the last actor output localize the fault to replica compatibility activation,
-before `VLLMEngine.create`, but the immutable artifact cannot prove which
-postcondition failed. Commit `b5a43f6` therefore does not invent a retroactive
-cause. It (1) applies PP-gated SC-11 to the inherited
+message only in the now-gone node-local controller logs. The absence of a
+retained `VLLMEngine` stdout line is not phase evidence: the later successful
+null canary also retained Ray/IPEX worker output but not its ordinary
+`EngineWorker` constructor prints. The immutable artifact therefore cannot
+distinguish pre-constructor bootstrap, canonical binding, compatibility
+activation, tree validation or backend creation. Commit `b5a43f6` did not
+invent a retroactive cause. It (1) applies PP-gated SC-11 to the inherited
 `ray_head` and `ray_worker` roles before Ray's early Intel accelerator import,
 (2) stops overriding Ray's node-owned `RAY_TMPDIR` through actor `runtime_env`,
 and (3) adds bounded public `serve.status()` deployment diagnostics plus named
@@ -170,9 +172,93 @@ model staging, vLLM/EngineCore initialization, replay, or throughput.
 
 The full PP2 paper campaign was then materialized as `run8` from the same
 `a8ed2c2d...59f2670` source snapshot. Its n4/n8/n16/n32/n64/n128/n256 cells
-are immutable distinct plans. The n4 gate was submitted as PBS `8808137` in
-the capacity queue; all larger `run8` cells remain unsubmitted pending its
-terminal evidence. No `run8` cell is a paper result at this update.
+are immutable distinct plans. The n4 gate ran as PBS `8808137` in the
+capacity queue and is rejected negative evidence. Source capsule distribution
+and verification passed on 4/4 ranks in 4.5 seconds. Head-owned source-model
+verification took 974.94 seconds. Shard-aware distribution then sent the
+408,748,312,778-byte stage-0 tree only to ranks 0 and 2 in 344.84 seconds and
+the 407,607,560,984-byte stage-1 tree only to ranks 1 and 3 in 270.74 seconds.
+Every target published its exact immutable 102-file receipt; the model entry
+took 1,873.7709 seconds and the complete model-broadcast step took 2,849.9674
+seconds (2,850.7 seconds at the composition-step boundary). Ray subsequently
+proved the exact four-node/48-GPU cluster and all four proxy-anchor
+applications reached RUNNING.
+
+Both single-replica PP applications then failed deterministically. Each
+application exhausted exactly three actor-start attempts before entering
+`DEPLOY_FAILED`; the six observed actor PIDs were distinct. The retained public
+status recorded both failed applications and deployments, but the then-current
+serializer kept only the first 192 characters of each Ray deployment message.
+That prefix ended inside Ray's fixed retry/traceback preamble, before the causal
+tail. Consequently `run8/n4` does **not** prove that failure occurred before
+`EngineWorker.__init__`, compatibility activation, `validate_node_local_tree`,
+or `VLLMEngine.create`. Missing ordinary vLLM stdout is likewise not proof of
+any one boundary.
+
+`run8/n4` never reached canonical READY, HAProxy gateway launch or replay, and
+its `results/` directory is empty. Cleanup nevertheless completed: all 4/4
+ranks acknowledged DRAIN and GOODBYE, the deployment exited 1, the rank
+launcher was reaped with its expected shutdown code 143, and the shutdown
+report records `clean=true`, no errors and no exhausted deadline. PBS also
+terminated with exit 1. The unsubmitted `run8` n8/n16/n32/n64/n128/n256 plans
+bind the same source snapshot and causal-evidence defect; they are
+operationally superseded and must not be submitted or reused. No `run8` cell
+is a paper result.
+
+Commit `5401cbd` corrects the diagnostic loss without changing deployment
+semantics: it strips complete ANSI sequences and retains a bounded message
+head plus the causal traceback tail, where the named `EngineWorker` phase and
+root exception appear. Commit `ec48442` adds the validation-only
+`pp8b_real_engine_canary_2node` specification: two nodes, one TP8 x PP2 real
+8B replica and startup-only lifecycle. It is the inexpensive full-path probe
+for engine-core binding, immutable tree validation, vLLM/EngineCore creation,
+all 16 Ray engine workers, receipts and cleanup. The fix and specification are
+committed. Its first execution and the diagnostic-coverage defect that it
+exposed are recorded below; neither constitutes paper evidence.
+
+### Real 8B PP diagnostic canary and single-replica coverage gap
+
+The real-engine canary was materialized as
+`pp8b_real_engine_canary_2node/run0/n2` from commit `ec48442`, source snapshot
+`8f668a112c46974e332f1ac8e62b068a4b0193c878ade7a0fd87d9769e6c93d8`,
+and submitted as PBS `8808210` in the debug queue. It is rejected diagnostic
+evidence, not a paper workload result.
+
+All finite staging gates passed. Source-capsule distribution and verification
+completed on 2/2 ranks in 4.2 seconds. Head-owned source-model verification
+took 31.27 seconds. Shard-aware transfer sent the 9,987,887,987-byte,
+14-file stage-0 tree only to rank 0 in 7.01 seconds and the
+11,095,244,439-byte, 15-file stage-1 tree only to rank 1 in 5.34 seconds. Both
+targets published exact immutable receipts; their verification times were
+15.529840 and 17.159565 seconds, respectively. The model entry took 48.7920
+seconds, the sealed model-broadcast result records 81.2804 seconds total, and
+the composition step completed in 82.0 seconds. This reproducer therefore
+reached the real-engine branch with roughly 21.1 GB of stage payload rather
+than rebroadcasting the approximately 816 GB 405B pair.
+
+The one PP application then started three distinct actors (PIDs 106098,
+106211 and 106326) and entered `DEPLOY_FAILED`. The run did not reach canonical
+READY, gateway launch or replay; `results/` is empty. It preserves no supported
+claim about whether the actor failed in canonical binding, compatibility
+activation, tree validation or backend creation. Cleanup was complete: 2/2
+ranks acknowledged DRAIN and GOODBYE, the deployment exited 1, the rank
+launcher was reaped with expected code 143, and the shutdown report records
+`clean=true`, no errors and no exhausted deadline. PBS exited 1.
+
+The canary also proves a separate diagnostic-coverage defect. Commit
+`5401cbd` made the multi-application `serve.run_many` failure wrapper preserve
+the bounded causal traceback tail, but `deploy_from_canonical_binding` sends
+`n_rep == 1` through a direct, unwrapped `serve.run` branch. Although Ray's
+public `serve.run` delegates internally to its own multi-run implementation,
+the ExaServe wrapper and `serialize_public_serve_status` never executed. The
+retained traceback goes directly from `deploy_from_canonical_binding` into
+Ray's `serve.run` and contains neither `serve_status=` nor a causal-tail
+snapshot. This is a proven coverage bug, not evidence about the underlying
+actor failure. Commit `c5dd69a` routes both `serve.run` branches and both
+`serve.run_many` branches through the same bounded public-status diagnostic.
+Fresh canary `run1/n2` was materialized from that commit and submitted as PBS
+`8808227`; it has no terminal outcome at this update. Rejected `run0/n2`
+remains immutable and must not be rerun.
 
 ## Current accepted results
 
@@ -424,12 +510,23 @@ throughput for a 2x node/replica increase.
   number.
 - PP2 `run7/n4`, PBS job `8807877`, completed exact source and shard-aware
   model distribution and formed the exact four-node Ray cluster, but both
-  `EngineWorker` applications exhausted three pre-`VLLMEngine` constructor
-  attempts. It never reached READY or replay and `results/` is empty. Its clean
-  4/4 DRAIN/GOODBYE shutdown is failure evidence only. The retained application
-  error omitted Ray's detailed constructor message, so this bundle cannot be
-  used to claim a more specific runtime cause than the compatibility-activation
-  interval documented above.
+  `EngineWorker` applications exhausted three actor-start attempts. It never
+  reached READY or replay and `results/` is empty. Its clean 4/4
+  DRAIN/GOODBYE shutdown is failure evidence only. The retained application
+  error omitted Ray's detailed constructor message; absence of ordinary actor
+  stdout cannot narrow the failure to a pre-vLLM or compatibility phase.
+- PP2 `run8/n4`, PBS job `8808137`, again completed exact source/model
+  distribution and four-node Ray formation before both PP applications failed
+  after three actor attempts each. Its status serializer retained the Ray
+  traceback prefix but truncated the causal tail. It has no READY, replay or
+  result artifact and exited 1, although 4/4 DRAIN/GOODBYE cleanup was clean.
+  All larger unsubmitted `run8` cells are operationally superseded with it.
+- The real 8B PP canary `run0/n2`, PBS job `8808210`, completed exact source
+  and approximately 21.1 GB shard-aware staging before its one application
+  exhausted three actor-start attempts. It has no READY or result artifact and
+  exited 1 with clean 2/2 DRAIN/GOODBYE. Its single-replica `serve.run` branch
+  bypassed the new causal-tail serializer, so it diagnoses a coverage defect
+  but does not establish the actor's root-cause phase.
 - PP2 `run2` 4- and 8-node successes use the superseded 0.90 setting; the final
   low-node values come from `run3` at 0.95.
 - Three historical streaming PP2 cells were produced while their nominal
@@ -451,14 +548,23 @@ The corrected-snapshot null-compute n32 pair is now complete as `run10/n32`
 and `run11/n32`. PP2 `run7/n4`, PBS `8807877`, is the newest immutable failure
 and must likewise never be reset or resubmitted. The two-node PP canary
 `run1/n2` is accepted qualification evidence only. PP2 `run8/n4`, PBS
-`8808137`, is the active fresh paper-workload gate.
+`8808137`, is also rejected and its larger siblings are superseded without
+submission. Commit `5401cbd` contains the causal-tail diagnostic correction;
+commit `ec48442` contains the real-engine 8B PP canary. Its immutable
+`run0/n2`, PBS `8808210`, reproduced the actor-start failure but also proved
+that the single-replica `serve.run` branch bypasses that correction. Commit
+`c5dd69a` closes that coverage gap; fresh `run1/n2`, PBS `8808227`, is the
+active diagnostic identity.
 
-1. Adjudicate immutable PP2 `run8/n4` when PBS `8808137` terminates. It must
-   preserve detailed public Serve deployment status on failure and must reach
-   two successful replays before a PP n256 job is submitted. Do not reset or
-   resubmit the identity if it fails; materialize a replacement only after a
-   concrete correction.
-2. For the current largest-scale bring-up objective, use the already-proven
+1. Adjudicate two-node 8B real-engine PP canary `run1/n2`, PBS `8808227`. It
+   must either reach exact startup-only READY and clean terminal evidence or
+   preserve the named causal phase and traceback tail. It is qualification
+   evidence, never a paper result; rejected `run0/n2` must not be reset or
+   rerun.
+2. Only after that diagnosis, materialize a fresh 405B PP run group and run its
+   n4 cell. The n4 workload must complete both replays before its n256 cell is
+   submitted; no rejected `run7`/`run8` identity may be reset or reused.
+3. For the current largest-scale bring-up objective, use the already-proven
    `run10`/`run11` null snapshot to run its two independently materialized n256
    lifecycles, and jump from the accepted fresh PP n4 gate directly to PP n256.
    Do not replay every intermediate scale merely as a launch prerequisite.
@@ -466,7 +572,7 @@ and must likewise never be reset or resubmitted. The two-node PP canary
    required later for a homogeneous final curve; until they exist, preserve
    prior measurements separately and label any combined output explicitly as
    a mixed-campaign comparison.
-3. Render the strict null startup table and full PP2 figure. Both consumers must
+4. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
-4. Replace all `pending` rows in this ledger with sealed evidence or an explicit
+5. Replace all `pending` rows in this ledger with sealed evidence or an explicit
    externally blocked disposition, then run the complete release gate.
