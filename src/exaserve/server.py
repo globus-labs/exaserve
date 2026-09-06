@@ -29,7 +29,10 @@ import uuid
 from typing import Optional, List, Dict, Any
 
 from .exception_notes import add_exception_note
-from .diagnostic_text import bounded_diagnostic_text as _bounded_diagnostic_text
+from .diagnostic_text import (
+    REGISTRY_DIAGNOSTIC_NOTE_PREFIX,
+    bounded_diagnostic_text as _bounded_diagnostic_text,
+)
 from .actor_runtime import build_actor_runtime_env
 
 import random
@@ -96,6 +99,8 @@ def _bounded_exception_summary(
     notes = getattr(error, "__notes__", ())
     if isinstance(notes, (tuple, list)):
         for note in notes[-4:]:
+            if isinstance(note, str) and note.startswith(REGISTRY_DIAGNOSTIC_NOTE_PREFIX):
+                continue
             parts.append(
                 "note: "
                 + _bounded_diagnostic_text(
@@ -104,11 +109,102 @@ def _bounded_exception_summary(
                     preserve_tail=True,
                 )
             )
+    registry = _registry_diagnostic(error)
+    if registry is not None:
+        parts.append(_render_registry_diagnostic(registry))
     return _bounded_diagnostic_text(
         " ".join(parts),
         limit=limit,
         preserve_tail=preserve_tail,
     )
+
+
+def _diagnostic_parts_text(value: object, *, limit: int) -> str:
+    if not isinstance(value, Mapping) or set(value) != {"head", "tail", "truncated"}:
+        return "<invalid diagnostic parts>"
+    head = value.get("head")
+    tail = value.get("tail")
+    truncated = value.get("truncated")
+    if not isinstance(head, str) or not isinstance(tail, str) or type(truncated) is not bool:
+        return "<invalid diagnostic parts>"
+    if not tail:
+        return _bounded_diagnostic_text(head, limit=limit)
+    marker = " ...[middle omitted]... " if truncated else ""
+    return _bounded_diagnostic_text(
+        head + marker + tail,
+        limit=limit,
+        preserve_tail=True,
+    )
+
+
+def _registry_diagnostic(error: Exception) -> dict | None:
+    notes = getattr(error, "__notes__", ())
+    if not isinstance(notes, (tuple, list)):
+        return None
+    for note in reversed(notes):
+        if not isinstance(note, str) or not note.startswith(REGISTRY_DIAGNOSTIC_NOTE_PREFIX):
+            continue
+        try:
+            candidate = json.loads(note.removeprefix(REGISTRY_DIAGNOSTIC_NOTE_PREFIX))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _render_registry_diagnostic(value: object) -> str:
+    expected = {"schema_version", "logger", "message", "exception", "cause"}
+    if not isinstance(value, Mapping) or set(value) != expected or value.get("schema_version") != 1:
+        return "vllm_registry=<invalid structured diagnostic>"
+    logger_name = _bounded_diagnostic_text(value.get("logger"), limit=96)
+    logger_message = _diagnostic_parts_text(value.get("message"), limit=128)
+    fields = [f"vllm_registry_logger={logger_name}", f"logger_message={logger_message}"]
+
+    exception = value.get("exception")
+    if isinstance(exception, Mapping) and set(exception) == {"type", "text"}:
+        exception_type = _bounded_diagnostic_text(exception.get("type"), limit=64)
+        exception_text = _diagnostic_parts_text(exception.get("text"), limit=128)
+        fields.append(f"registry_exception={exception_type}:{exception_text}")
+
+    cause = value.get("cause")
+    if isinstance(cause, Mapping) and set(cause) == {
+        "type",
+        "text",
+        "returncode",
+        "signal",
+        "stderr",
+    }:
+        cause_type = _bounded_diagnostic_text(cause.get("type"), limit=64)
+        cause_text = _diagnostic_parts_text(cause.get("text"), limit=128)
+        fields.append(f"registry_cause={cause_type}:{cause_text}")
+        stderr = cause.get("stderr")
+        if isinstance(stderr, Mapping):
+            stderr_head = _bounded_diagnostic_text(stderr.get("head"), limit=96)
+            stderr_tail = _bounded_diagnostic_text(
+                stderr.get("tail"),
+                limit=192,
+                preserve_tail=True,
+            )
+            fields.extend(
+                (
+                    f"registry_stderr_head={stderr_head}",
+                    f"registry_stderr_tail={stderr_tail}",
+                )
+            )
+        returncode = cause.get("returncode")
+        safe_returncode = returncode if type(returncode) is int else None
+        signal_name = (
+            _bounded_diagnostic_text(cause.get("signal"), limit=64)
+            if cause.get("signal") is not None
+            else "none"
+        )
+        # Repeat exit identity last so an outer traceback tail cannot discard
+        # the one fact that distinguishes a Python error from a native crash.
+        fields.append(
+            f"registry_exit_type={cause_type},returncode={safe_returncode},signal={signal_name}"
+        )
+    return "; ".join(fields)
 
 
 def _public_status_field(value: object, name: str, default=None):
@@ -138,7 +234,7 @@ def _public_serve_status_application(name: object, application: object) -> dict:
             {
                 "message": _bounded_diagnostic_text(
                     _public_status_field(deployment, "message", ""),
-                    limit=768,
+                    limit=1280,
                     preserve_tail=True,
                 ),
                 "name": _bounded_diagnostic_text(deployment_name, limit=128),
@@ -228,15 +324,30 @@ def serialize_public_serve_status(status: object | None = None) -> str:
         total = len(rows)
         selected: list[dict] = []
         for row in rows[:_SERVE_STATUS_APPLICATION_LIMIT]:
-            candidate = {
-                "application_count": total,
-                "applications": [*selected, row],
-                "omitted_application_count": total - len(selected) - 1,
-            }
-            encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+            candidate_row = row
+            while True:
+                candidate = {
+                    "application_count": total,
+                    "applications": [*selected, candidate_row],
+                    "omitted_application_count": total - len(selected) - 1,
+                }
+                encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+                deployments = candidate_row["deployments"]
+                if len(encoded) <= _SERVE_STATUS_DIAGNOSTIC_LIMIT or len(deployments) <= 1:
+                    break
+                # Deployment rows are already failure-first. Discard the
+                # least useful one until this application can fit rather than
+                # dropping the entire failed application from the snapshot.
+                candidate_row = {
+                    **candidate_row,
+                    "deployments": deployments[:-1],
+                    "omitted_deployment_count": candidate_row["deployment_count"]
+                    - len(deployments)
+                    + 1,
+                }
             if len(encoded) > _SERVE_STATUS_DIAGNOSTIC_LIMIT:
                 break
-            selected.append(row)
+            selected.append(candidate_row)
         payload = {
             "application_count": total,
             "applications": selected,
@@ -280,9 +391,11 @@ def _serve_deployment_failure(context: str, error: Exception) -> RuntimeError:
 def _raise_engine_startup_failure(name: str, error: Exception) -> None:
     if name not in _ENGINE_STARTUP_PHASES:
         raise ValueError(f"unknown EngineWorker startup phase {name!r}")
+    has_registry_diagnostic = _registry_diagnostic(error) is not None
     message = (
         f"[EngineWorker pid={os.getpid()}] startup phase {name} failed: "
-        f"{_bounded_exception_summary(error, limit=400, preserve_tail=True)}"
+        f"{_bounded_exception_summary(error, limit=(1050 if has_registry_diagnostic else 400), preserve_tail=True)}"
+        f"; startup_phase={name}"
     )
     print(message, flush=True)
     # Chaining would re-render the original, potentially secret-bearing and

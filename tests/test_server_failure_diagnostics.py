@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import nullcontext
 import json
 import logging
+import signal
+import subprocess
 import threading
 from types import SimpleNamespace
 
@@ -74,6 +76,35 @@ def test_public_serve_status_diagnostic_is_bounded_and_prioritizes_failure(monke
     assert "must-not-appear" not in encoded
 
 
+def test_status_budget_trims_low_priority_deployments_not_failed_application():
+    deployments = {
+        f"failed-{index}": SimpleNamespace(
+            status=_State("DEPLOY_FAILED"),
+            message=f"root-cause-{index} " + "x" * 10_000,
+        )
+        for index in range(4)
+    }
+    status = SimpleNamespace(
+        applications={
+            "failed-app": SimpleNamespace(
+                status=_State("DEPLOY_FAILED"),
+                message="application failed",
+                deployments=deployments,
+            )
+        }
+    )
+
+    encoded = server.serialize_public_serve_status(status)
+    payload = json.loads(encoded)
+
+    assert len(encoded) <= 4096
+    assert payload["applications"][0]["name"] == "failed-app"
+    retained = payload["applications"][0]["deployments"]
+    assert retained
+    assert retained[0]["name"] == "failed-0"
+    assert payload["applications"][0]["omitted_deployment_count"] > 0
+
+
 @pytest.mark.parametrize(
     "detail",
     [
@@ -141,13 +172,24 @@ def test_head_tail_diagnostic_scans_unretained_middle_for_secrets():
 def test_async_engine_args_registry_failure_survives_phase_and_status_tail(capsys):
     from exaserve.engines import vllm as vllm_module
 
+    stderr_head = "REGISTRY-STDERR-HEAD architecture probe began"
+    stderr_tail = "REGISTRY-STDERR-TAIL native probe terminated"
+    stderr = stderr_head + "\n" + "ordinary subprocess detail\n" * 100 + stderr_tail
+
     class FakeArgs:
         def __init__(self):
+            subprocess_error = subprocess.CalledProcessError(
+                -signal.SIGSEGV,
+                ["python", "-m", "vllm.model_executor.models.registry"],
+                stderr=stderr.encode(),
+            )
             try:
-                raise RuntimeError("registry subprocess stderr exact-root")
+                raise RuntimeError(f"Error raised in subprocess:\n{stderr}") from subprocess_error
             except RuntimeError:
                 logging.getLogger("vllm.model_executor.models.registry").exception(
-                    "Error in inspecting model architecture"
+                    "logger safe head "
+                    + "ordinary logger detail " * 40
+                    + "API_KEY=must-not-appear logger safe tail"
                 )
             raise ValueError("Model architectures failed to be inspected")
 
@@ -173,27 +215,28 @@ def test_async_engine_args_registry_failure_survives_phase_and_status_tail(capsy
         + "frame in ray internals\n" * 200
         + phase_message
     )
-    status = SimpleNamespace(
-        applications={
-            "failed": SimpleNamespace(
-                status=_State("DEPLOY_FAILED"),
-                message="application failed",
-                deployments={
-                    "EngineWorker": SimpleNamespace(
-                        status=_State("DEPLOY_FAILED"),
-                        message=ray_message,
-                    )
-                },
-            )
-        }
-    )
+    status = _fake_serve_status()
+    status.applications["failed-last"].deployments["EngineWorker"].message = ray_message
     encoded = server.serialize_public_serve_status(status)
-    message = json.loads(encoded)["applications"][0]["deployments"][0]["message"]
+    payload = json.loads(encoded)
+    message = payload["applications"][0]["deployments"][0]["message"]
 
-    assert len(phase_message) < 512
+    assert len(encoded) <= 4096
+    assert payload["applications"][0]["name"] == "failed-last"
+    assert len(phase_message) < 1280
     assert "startup phase backend_create failed" in message
+    assert "startup_phase=backend_create" in message
     assert "Model architectures failed to be inspected" in message
-    assert "registry subprocess stderr exact-root" in message
+    assert "logger_message=<redacted sensitive detail>" in message
+    assert "registry_exit_type=CalledProcessError" in message
+    assert f"returncode={-signal.SIGSEGV}" in message
+    assert "signal=SIGSEGV" in message
+    assert stderr_head in message
+    assert stderr_tail in message
+    assert f"registry_stderr_head={stderr_head}" in message
+    assert message.rsplit("registry_stderr_tail=", 1)[1].split(";", 1)[0].endswith(stderr_tail)
+    assert "must-not-appear" not in phase_message
+    assert "must-not-appear" not in encoded
     assert phase_message in capsys.readouterr().out
 
 

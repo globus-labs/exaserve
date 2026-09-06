@@ -8,9 +8,11 @@ inside ``create()`` / generation (transformers-pin isolation).
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import logging
 import os
 import platform
+import signal as signal_module
 import sys
 import threading
 import time
@@ -27,7 +29,11 @@ from .base import (
     merge_engine_kwargs,
 )
 from ..exception_notes import add_exception_note
-from ..diagnostic_text import bounded_diagnostic_text
+from ..diagnostic_text import (
+    REGISTRY_DIAGNOSTIC_NOTE_PREFIX,
+    bounded_diagnostic_text,
+    diagnostic_head_tail,
+)
 
 
 _VLLM_REGISTRY_LOGGER = "vllm.model_executor.models.registry"
@@ -38,27 +44,100 @@ class _RegistryDiagnosticHandler(logging.Handler):
 
     def __init__(self) -> None:
         super().__init__(level=logging.ERROR)
-        self._messages: list[str] = []
-        self.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        self._latest: dict[str, object] | None = None
+
+    @staticmethod
+    def _exception_text(error: BaseException) -> str:
+        try:
+            return str(error)
+        except Exception:
+            return "<unprintable exception detail>"
+
+    @classmethod
+    def _exception_row(cls, error: BaseException) -> dict[str, object]:
+        return {
+            "type": bounded_diagnostic_text(type(error).__name__, limit=96),
+            "text": diagnostic_head_tail(
+                cls._exception_text(error),
+                head_limit=96,
+                tail_limit=160,
+            ),
+        }
+
+    @classmethod
+    def _cause_row(cls, error: BaseException) -> dict[str, object] | None:
+        cause = error.__cause__
+        if cause is None and not error.__suppress_context__:
+            cause = error.__context__
+        if cause is None and hasattr(error, "returncode"):
+            cause = error
+        if cause is None:
+            return None
+        row = cls._exception_row(cause)
+        returncode = getattr(cause, "returncode", None)
+        row["returncode"] = returncode if type(returncode) is int else None
+        signal_name = None
+        if type(returncode) is int and returncode < 0:
+            try:
+                signal_name = signal_module.Signals(-returncode).name
+            except ValueError:
+                signal_name = f"SIGNAL_{-returncode}"
+        row["signal"] = signal_name
+        stderr = getattr(cause, "stderr", None)
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        elif stderr is not None and not isinstance(stderr, str):
+            try:
+                stderr = str(stderr)
+            except Exception:
+                stderr = "<unprintable subprocess stderr>"
+        row["stderr"] = (
+            diagnostic_head_tail(stderr, head_limit=128, tail_limit=256)
+            if stderr is not None
+            else None
+        )
+        return row
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            rendered = self.format(record)
+            message = record.getMessage()
         except Exception:
-            rendered = "<unprintable vLLM registry diagnostic>"
-        safe = bounded_diagnostic_text(rendered, limit=2048, preserve_tail=True)
-        self._messages.append(safe)
-        del self._messages[:-4]
+            message = "<unprintable vLLM registry log message>"
+        error = (
+            record.exc_info[1]
+            if isinstance(record.exc_info, tuple)
+            and len(record.exc_info) == 3
+            and isinstance(record.exc_info[1], BaseException)
+            else None
+        )
+        self._latest = {
+            "schema_version": 1,
+            "logger": _VLLM_REGISTRY_LOGGER,
+            "message": diagnostic_head_tail(
+                message,
+                head_limit=96,
+                tail_limit=96,
+            ),
+            "exception": self._exception_row(error) if error is not None else None,
+            "cause": self._cause_row(error) if error is not None else None,
+        }
 
     def attach_to(self, error: BaseException) -> None:
-        if not self._messages:
+        if self._latest is None:
             return
-        summary = bounded_diagnostic_text(
-            " ".join(self._messages),
-            limit=2048,
-            preserve_tail=True,
+        payload = dict(self._latest)
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        add_exception_note(error, f"vLLM model-registry diagnostic: {summary}")
+        try:
+            add_exception_note(error, REGISTRY_DIAGNOSTIC_NOTE_PREFIX + encoded)
+        except Exception:
+            # Diagnostics must never replace the actual constructor failure.
+            # Some extension exceptions reject custom state even though normal
+            # Python exceptions support ``add_note``/``__notes__``.
+            return
 
 
 @contextmanager

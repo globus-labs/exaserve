@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import signal
+import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -21,6 +24,17 @@ from exaserve.engines.base import (
 from exaserve.engines.sglang import SGLangEngine
 from exaserve.engines.vllm import VLLMEngine
 from exaserve.engines import vllm as vllm_module
+from exaserve.diagnostic_text import REGISTRY_DIAGNOSTIC_NOTE_PREFIX
+
+
+def _registry_diagnostic(error: BaseException) -> dict:
+    notes = [
+        note
+        for note in getattr(error, "__notes__", ())
+        if note.startswith(REGISTRY_DIAGNOSTIC_NOTE_PREFIX)
+    ]
+    assert len(notes) == 1
+    return json.loads(notes[0].removeprefix(REGISTRY_DIAGNOSTIC_NOTE_PREFIX))
 
 
 def test_extra_engine_kwargs_cannot_override_owned_fields():
@@ -107,14 +121,50 @@ def test_vllm_registry_log_capture_is_scoped_bounded_and_secret_safe():
     logger = logging.getLogger("vllm.model_executor.models.registry")
     original_handlers = list(logger.handlers)
     error = RuntimeError("outer failure")
+    stderr_head = "registry-stderr-head probe started"
+    stderr_tail = "registry-stderr-tail native crash"
+    stderr = stderr_head + "\n" + "ordinary probe output\n" * 80 + stderr_tail
 
     with vllm_module._capture_registry_diagnostics() as capture:
-        logger.error("safe head API_KEY=must-not-appear safe causal tail")
+        subprocess_error = subprocess.CalledProcessError(
+            -signal.SIGSEGV,
+            ["python", "-m", "vllm.model_executor.models.registry"],
+            stderr=stderr.encode(),
+        )
+        try:
+            raise RuntimeError(f"Error raised in subprocess:\n{stderr}") from subprocess_error
+        except RuntimeError:
+            logger.exception("safe head API_KEY=must-not-appear safe causal tail")
         capture.attach_to(error)
 
     assert logger.handlers == original_handlers
-    assert error.__notes__ == ["vLLM model-registry diagnostic: <redacted sensitive detail>"]
+    payload = _registry_diagnostic(error)
+    assert payload["message"]["head"] == "<redacted sensitive detail>"
+    assert payload["exception"]["type"] == "RuntimeError"
+    assert payload["cause"]["type"] == "CalledProcessError"
+    assert payload["cause"]["returncode"] == -signal.SIGSEGV
+    assert payload["cause"]["signal"] == "SIGSEGV"
+    assert payload["cause"]["stderr"]["head"].startswith(stderr_head)
+    assert payload["cause"]["stderr"]["tail"].endswith(stderr_tail)
+    assert payload["cause"]["stderr"]["truncated"] is True
     assert "must-not-appear" not in error.__notes__[0]
+
+
+def test_vllm_registry_capture_does_not_require_custom_exception_attributes():
+    class RestrictiveError(RuntimeError):
+        def __setattr__(self, name, value):
+            if name != "__notes__":
+                raise AttributeError("custom exception attributes are disabled")
+            return super().__setattr__(name, value)
+
+    logger = logging.getLogger("vllm.model_executor.models.registry")
+    error = RestrictiveError("original constructor failure")
+
+    with vllm_module._capture_registry_diagnostics() as capture:
+        logger.error("registry probe failed")
+        capture.attach_to(error)
+
+    assert _registry_diagnostic(error)["message"]["head"] == "registry probe failed"
 
 
 def test_sglang_empty_stream_is_not_rendered_as_a_success(monkeypatch):
@@ -295,8 +345,20 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
         def __init__(self, **kwargs):
             created["args"] = kwargs
             if args_fail:
+                stderr = (
+                    "args-registry-stderr-head\n"
+                    + "probe frame\n" * 80
+                    + "args-registry-stderr-tail"
+                )
+                subprocess_error = subprocess.CalledProcessError(
+                    -signal.SIGSEGV,
+                    ["python", "-m", "vllm.model_executor.models.registry"],
+                    stderr=stderr,
+                )
                 try:
-                    raise RuntimeError("registry subprocess stderr args-root")
+                    raise RuntimeError(
+                        f"Error raised in subprocess:\n{stderr}"
+                    ) from subprocess_error
                 except RuntimeError:
                     logging.getLogger("vllm.model_executor.models.registry").exception(
                         "Error in inspecting model architecture"
@@ -362,19 +424,16 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
     if args_fail:
         with pytest.raises(ValueError, match="architectures failed") as caught:
             backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
-        assert any(
-            "vLLM model-registry diagnostic" in note
-            and "registry subprocess stderr args-root" in note
-            for note in caught.value.__notes__
-        )
+        diagnostic = _registry_diagnostic(caught.value)
+        assert diagnostic["cause"]["returncode"] == -signal.SIGSEGV
+        assert diagnostic["cause"]["signal"] == "SIGSEGV"
+        assert diagnostic["cause"]["stderr"]["head"].startswith("args-registry-stderr-head")
+        assert diagnostic["cause"]["stderr"]["tail"].endswith("args-registry-stderr-tail")
     elif constructor_fails:
         with pytest.raises(RuntimeError, match="vLLM constructor failed") as caught:
             backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
-        assert any(
-            "vLLM model-registry diagnostic" in note
-            and "registry subprocess stderr exact-root" in note
-            for note in caught.value.__notes__
-        )
+        diagnostic = _registry_diagnostic(caught.value)
+        assert diagnostic["exception"]["text"]["head"] == ("registry subprocess stderr exact-root")
     elif shim_fails:
         with pytest.raises(RuntimeError, match="compatibility bootstrap"):
             backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
