@@ -340,16 +340,25 @@ cache-miss subprocess.
 | 32 | 384 | 29.369, 28.841 | 29.105 +/- 0.374 | 10.500, 10.600 | 19.827, 20.027 | accepted corrected pair |
 | 64 | 768 | pending | pending | pending | pending | not run from corrected snapshot |
 | 128 | 1,536 | pending | pending | pending | pending | not run from corrected snapshot |
-| 256 | 3,072 | pending | pending | pending | pending | not run from corrected snapshot |
+| 256 | 3,072 | 548.627, 554.752 | 551.690 +/- 4.331 | 513.099, 521.492 | 533.038, 540.773 | accepted corrected pair |
 
 | Trial | PBS job | Result-manifest SHA-256 |
 |---|---|---|
 | run10/n32 | 8807652 | `ae4415f0d11234ad55fba4cc62a3569d75a8f3f6049101c1eee573df591cb863` |
 | run11/n32 | 8807874 | `d9c4361b1e7d08f00e520533be7581a4516494cda4e853c132e46e17119b7609` |
+| run10/n256 | 8808097 | `c8ff5f822f08cf63086781a55e213a9ee5e4af8b2145aed5ca62ccdacf41496d` |
+| run11/n256 | 8808106 | `2b80b62078ad94a50568886e8365379d0806e97c6d0d369217bb633194f4e82c` |
 
-Both rows use source snapshot
+All four rows use source snapshot
 `7298aefce67c5b1a7a820dc0f20e5135abc6a967a3d33ea3edc6239bd4d2aa6b`.
-No corrected-snapshot number exists yet above 32 nodes.
+Both corrected n256 lifecycles passed the fail-closed paper consumer and proved
+256/256 ranks, 3,072/3,072 replicas, 512 exact Serve applications and
+3,586/3,586 receipt slots. Each published all seven required result entries,
+clean `STOPPED` terminal evidence and a shutdown report with 256/256 DRAIN and
+GOODBYE, no errors and no exhausted deadline. PBS jobs `8808097` and `8808106`
+exited 0 after 16:02 and 16:24, respectively. Corrected-snapshot n64 and n128
+pairs remain unrun; they are not prerequisites for the current largest-scale
+bring-up objective but remain necessary for a homogeneous final curve.
 
 ### Preserved pre-hardening HAProxy null-compute startup
 
@@ -627,8 +636,9 @@ materialized `run7/n256` trial B bundle, failed before Ray startup and is
 rejected above. The failed bundle is immutable negative evidence and must not
 be reset, resubmitted, or silently replaced in the paper consumer.
 
-The corrected-snapshot null-compute n32 pair is now complete as `run10/n32`
-and `run11/n32`. PP2 `run7/n4`, PBS `8807877`, is the newest immutable failure
+The corrected-snapshot null-compute n32 and n256 pairs are now complete as
+`run10`/`run11`; both n256 jobs passed strict paper acceptance. PP2 `run7/n4`,
+PBS `8807877`, is the newest immutable failure
 and must likewise never be reset or resubmitted. The two-node PP canary
 `run1/n2` is accepted qualification evidence only. PP2 `run8/n4`, PBS
 `8808137`, is also rejected and its larger siblings are superseded without
