@@ -22,7 +22,6 @@ from collections import deque
 import json
 import math
 import os
-import re
 import socket
 import threading
 import time
@@ -30,6 +29,7 @@ import uuid
 from typing import Optional, List, Dict, Any
 
 from .exception_notes import add_exception_note
+from .diagnostic_text import bounded_diagnostic_text as _bounded_diagnostic_text
 from .actor_runtime import build_actor_runtime_env
 
 import random
@@ -68,70 +68,47 @@ _CORE_ENV_EXPECTED = (
     "RAY_SERVE_MAX_DEPLOYMENT_CONSTRUCTOR_RETRY_COUNT",
 )
 
-_DIAGNOSTIC_TEXT_LIMIT = 320
 _SERVE_STATUS_DIAGNOSTIC_LIMIT = 4096
 _SERVE_STATUS_FETCH_TIMEOUT_S = 10.0
 _SERVE_STATUS_APPLICATION_LIMIT = 16
 _SERVE_STATUS_DEPLOYMENT_LIMIT = 4
-_SENSITIVE_DIAGNOSTIC_PATTERN = re.compile(
-    r"(?i)(?:password|passwd|secret|credential|authorization|bearer|"
-    r"api[\s_-]?key|master[\s_-]?key|private[\s_-]?key|access[\s_-]?key|"
-    r"(?:^|[^A-Z0-9])(?:access[\s_-]?token|refresh[\s_-]?token|token)"
-    r"(?=$|[^A-Z0-9]))"
-)
-_ANSI_ESCAPE_PATTERN = re.compile(
-    r"(?:\x1B\[[0-?]*[ -/]*[@-~]|\x9B[0-?]*[ -/]*[@-~]|"
-    r"\x1B\][^\x07]*(?:\x07|\x1B\\))"
-)
 _ENGINE_STARTUP_PHASES = frozenset(
     {"canonical_bind", "compat_activate", "tree_validate", "backend_create"}
 )
 
 
-def _bounded_diagnostic_text(
-    value: object,
+def _bounded_exception_summary(
+    error: Exception,
     *,
-    limit: int = _DIAGNOSTIC_TEXT_LIMIT,
+    limit: int = 320,
     preserve_tail: bool = False,
 ) -> str:
-    """Return printable, secret-safe diagnostic text within an exact bound."""
-    if type(limit) is not int or limit < 32:
-        raise ValueError("diagnostic text limit must be an integer of at least 32")
-    if type(preserve_tail) is not bool:
-        raise TypeError("preserve_tail must be a boolean")
-    if not isinstance(value, str):
-        return f"<{type(value).__name__}>"[:limit]
-    # Ray colorizes the leading ``ray::Actor.method`` label in a RayTaskError.
-    # Replacing only ESC with whitespace leaves strings such as ``[36mray``
-    # and wastes the small diagnostic budget. Remove complete terminal control
-    # sequences before normalizing the remaining printable text.
-    without_ansi = _ANSI_ESCAPE_PATTERN.sub("", value)
-    text = " ".join("".join(char if char.isprintable() else " " for char in without_ansi).split())
-    if _SENSITIVE_DIAGNOSTIC_PATTERN.search(text):
-        text = "<redacted sensitive detail>"
-    if not text:
-        text = "<no detail>"
-    if len(text) <= limit:
-        return text
-    if not preserve_tail:
-        marker = "...[truncated]"
-        return text[: limit - len(marker)] + marker
-    # Ray's fixed retry explanation precedes the useful traceback; the final
-    # exception line contains ExaServe's bounded startup-phase wrapper. Keep a
-    # small head for context and spend the rest of the budget on that tail.
-    marker = "...[middle truncated]..."
-    head_size = min(160, (limit - len(marker)) // 3)
-    tail_size = limit - len(marker) - head_size
-    return text[:head_size] + marker + text[-tail_size:]
-
-
-def _bounded_exception_summary(error: Exception) -> str:
     error_type = _bounded_diagnostic_text(type(error).__name__, limit=96)
     try:
-        detail = _bounded_diagnostic_text(str(error))
+        detail = _bounded_diagnostic_text(
+            str(error),
+            limit=2048,
+            preserve_tail=preserve_tail,
+        )
     except Exception:
         detail = "<unprintable detail>"
-    return f"{error_type}: {detail}"
+    parts = [f"{error_type}: {detail}"]
+    notes = getattr(error, "__notes__", ())
+    if isinstance(notes, (tuple, list)):
+        for note in notes[-4:]:
+            parts.append(
+                "note: "
+                + _bounded_diagnostic_text(
+                    note,
+                    limit=2048,
+                    preserve_tail=True,
+                )
+            )
+    return _bounded_diagnostic_text(
+        " ".join(parts),
+        limit=limit,
+        preserve_tail=preserve_tail,
+    )
 
 
 def _public_status_field(value: object, name: str, default=None):
@@ -305,7 +282,7 @@ def _raise_engine_startup_failure(name: str, error: Exception) -> None:
         raise ValueError(f"unknown EngineWorker startup phase {name!r}")
     message = (
         f"[EngineWorker pid={os.getpid()}] startup phase {name} failed: "
-        f"{_bounded_exception_summary(error)}"
+        f"{_bounded_exception_summary(error, limit=400, preserve_tail=True)}"
     )
     print(message, flush=True)
     # Chaining would re-render the original, potentially secret-bearing and

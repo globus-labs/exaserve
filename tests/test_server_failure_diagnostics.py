@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import json
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -135,6 +136,65 @@ def test_head_tail_diagnostic_scans_unretained_middle_for_secrets():
         )
         == "<redacted sensitive detail>"
     )
+
+
+def test_async_engine_args_registry_failure_survives_phase_and_status_tail(capsys):
+    from exaserve.engines import vllm as vllm_module
+
+    class FakeArgs:
+        def __init__(self):
+            try:
+                raise RuntimeError("registry subprocess stderr exact-root")
+            except RuntimeError:
+                logging.getLogger("vllm.model_executor.models.registry").exception(
+                    "Error in inspecting model architecture"
+                )
+            raise ValueError("Model architectures failed to be inspected")
+
+    captured_error = None
+    try:
+        with vllm_module._capture_registry_diagnostics() as capture:
+            try:
+                FakeArgs()
+            except ValueError as engine_error:
+                capture.attach_to(engine_error)
+                raise
+    except ValueError as engine_error:
+        captured_error = engine_error
+    else:  # pragma: no cover - fixture contract
+        raise AssertionError("FakeArgs did not fail")
+
+    assert captured_error is not None
+    with pytest.raises(RuntimeError) as phase_failure:
+        server._raise_engine_startup_failure("backend_create", captured_error)
+    phase_message = str(phase_failure.value)
+    ray_message = (
+        "The deployment failed to start 3 times in a row. Error:\n"
+        + "frame in ray internals\n" * 200
+        + phase_message
+    )
+    status = SimpleNamespace(
+        applications={
+            "failed": SimpleNamespace(
+                status=_State("DEPLOY_FAILED"),
+                message="application failed",
+                deployments={
+                    "EngineWorker": SimpleNamespace(
+                        status=_State("DEPLOY_FAILED"),
+                        message=ray_message,
+                    )
+                },
+            )
+        }
+    )
+    encoded = server.serialize_public_serve_status(status)
+    message = json.loads(encoded)["applications"][0]["deployments"][0]["message"]
+
+    assert len(phase_message) < 512
+    assert "startup phase backend_create failed" in message
+    assert "Model architectures failed to be inspected" in message
+    assert "registry subprocess stderr exact-root" in message
+    assert phase_message in capsys.readouterr().out
 
 
 def test_public_serve_status_diagnostic_has_a_finite_fetch_budget(monkeypatch):

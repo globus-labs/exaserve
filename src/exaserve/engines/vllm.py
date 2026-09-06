@@ -7,6 +7,8 @@ inside ``create()`` / generation (transformers-pin isolation).
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import logging
 import os
 import platform
 import sys
@@ -25,6 +27,52 @@ from .base import (
     merge_engine_kwargs,
 )
 from ..exception_notes import add_exception_note
+from ..diagnostic_text import bounded_diagnostic_text
+
+
+_VLLM_REGISTRY_LOGGER = "vllm.model_executor.models.registry"
+
+
+class _RegistryDiagnosticHandler(logging.Handler):
+    """Capture only vLLM's swallowed model-registry exception records."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self._messages: list[str] = []
+        self.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            rendered = self.format(record)
+        except Exception:
+            rendered = "<unprintable vLLM registry diagnostic>"
+        safe = bounded_diagnostic_text(rendered, limit=2048, preserve_tail=True)
+        self._messages.append(safe)
+        del self._messages[:-4]
+
+    def attach_to(self, error: BaseException) -> None:
+        if not self._messages:
+            return
+        summary = bounded_diagnostic_text(
+            " ".join(self._messages),
+            limit=2048,
+            preserve_tail=True,
+        )
+        add_exception_note(error, f"vLLM model-registry diagnostic: {summary}")
+
+
+@contextmanager
+def _capture_registry_diagnostics():
+    """Observe one engine construction without changing vLLM logger policy."""
+
+    logger = logging.getLogger(_VLLM_REGISTRY_LOGGER)
+    handler = _RegistryDiagnosticHandler()
+    logger.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
 
 
 class VLLMEngine(EngineBackend):
@@ -173,50 +221,57 @@ class VLLMEngine(EngineBackend):
             from vllm.engine.arg_utils import AsyncEngineArgs
             from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-            args_start = time.monotonic()
-            engine_args = AsyncEngineArgs(**engine_kwargs)
-            # PR-022: honor the operator's enable_log_requests setting. The
-            # hasattr guard remains for vLLM versions that lack the field.
-            if hasattr(engine_args, "enable_log_requests"):
-                engine_args.enable_log_requests = spec.enable_log_requests
-            elif hasattr(engine_args, "disable_log_requests"):
-                engine_args.disable_log_requests = not spec.enable_log_requests
-            engine_args_elapsed = time.monotonic() - args_start
-
-            print(
-                f"[VLLMEngine pid={pid}] Creating vLLM engine for {spec.model_id}...",
-                flush=True,
-            )
-            engine_start = time.monotonic()
-            extra_engine_kwargs: Dict[str, Any] = {}
-            if self._collect_stats:
-                assert CollectingStatLogger is not None
-                extra_engine_kwargs["stat_loggers"] = [CollectingStatLogger]
-            shim_parent_environment = _shim.environment_snapshot()
-            try:
-                _shim.prepare_environment(
-                    self._engine_receipt_dir,
-                    import_patches=(pp > 1 or spec.tensor_parallel_size > 1),
-                    deployment_id=os.environ.get("EXASERVE_DEPLOYMENT_ID", "unknown"),
-                    generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
-                    vendor=os.environ.get("EXASERVE_VENDOR", "xpu"),
-                    engine_kind="vllm",
-                    versions=_shim_versions,
-                )
-                self.engine = AsyncLLMEngine.from_engine_args(engine_args, **extra_engine_kwargs)
-            finally:
-                # EngineCore has inherited the startup shim. Leaving it installed
-                # here would inject sitecustomize into unrelated subprocesses.
-                active_error = sys.exc_info()[1]
+            with _capture_registry_diagnostics() as registry_diagnostics:
                 try:
-                    _shim.restore_environment(shim_parent_environment)
-                except BaseException as restore_exc:
-                    if active_error is None:
-                        raise
-                    add_exception_note(
-                        active_error,
-                        f"engine shim environment restoration also failed: {restore_exc}",
+                    args_start = time.monotonic()
+                    engine_args = AsyncEngineArgs(**engine_kwargs)
+                    # PR-022: honor the operator's enable_log_requests setting. The
+                    # hasattr guard remains for vLLM versions that lack the field.
+                    if hasattr(engine_args, "enable_log_requests"):
+                        engine_args.enable_log_requests = spec.enable_log_requests
+                    elif hasattr(engine_args, "disable_log_requests"):
+                        engine_args.disable_log_requests = not spec.enable_log_requests
+                    engine_args_elapsed = time.monotonic() - args_start
+
+                    print(
+                        f"[VLLMEngine pid={pid}] Creating vLLM engine for {spec.model_id}...",
+                        flush=True,
                     )
+                    engine_start = time.monotonic()
+                    extra_engine_kwargs: Dict[str, Any] = {}
+                    if self._collect_stats:
+                        assert CollectingStatLogger is not None
+                        extra_engine_kwargs["stat_loggers"] = [CollectingStatLogger]
+                    shim_parent_environment = _shim.environment_snapshot()
+                    try:
+                        _shim.prepare_environment(
+                            self._engine_receipt_dir,
+                            import_patches=(pp > 1 or spec.tensor_parallel_size > 1),
+                            deployment_id=os.environ.get("EXASERVE_DEPLOYMENT_ID", "unknown"),
+                            generation=int(os.environ.get("EXASERVE_GENERATION", "0") or 0),
+                            vendor=os.environ.get("EXASERVE_VENDOR", "xpu"),
+                            engine_kind="vllm",
+                            versions=_shim_versions,
+                        )
+                        self.engine = AsyncLLMEngine.from_engine_args(
+                            engine_args, **extra_engine_kwargs
+                        )
+                    finally:
+                        # EngineCore has inherited the startup shim. Leaving it installed
+                        # here would inject sitecustomize into unrelated subprocesses.
+                        active_error = sys.exc_info()[1]
+                        try:
+                            _shim.restore_environment(shim_parent_environment)
+                        except BaseException as restore_exc:
+                            if active_error is None:
+                                raise
+                            add_exception_note(
+                                active_error,
+                                f"engine shim environment restoration also failed: {restore_exc}",
+                            )
+                except BaseException as engine_exc:
+                    registry_diagnostics.attach_to(engine_exc)
+                    raise
             return engine_args_elapsed, time.monotonic() - engine_start
 
         try:

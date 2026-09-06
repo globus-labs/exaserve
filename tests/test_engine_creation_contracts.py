@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from types import ModuleType, SimpleNamespace
@@ -19,6 +20,7 @@ from exaserve.engines.base import (
 )
 from exaserve.engines.sglang import SGLangEngine
 from exaserve.engines.vllm import VLLMEngine
+from exaserve.engines import vllm as vllm_module
 
 
 def test_extra_engine_kwargs_cannot_override_owned_fields():
@@ -99,6 +101,20 @@ def test_vllm_empty_stream_is_not_rendered_as_a_success(monkeypatch):
 
     with pytest.raises(RuntimeError, match="ended without an output"):
         asyncio.run(consume())
+
+
+def test_vllm_registry_log_capture_is_scoped_bounded_and_secret_safe():
+    logger = logging.getLogger("vllm.model_executor.models.registry")
+    original_handlers = list(logger.handlers)
+    error = RuntimeError("outer failure")
+
+    with vllm_module._capture_registry_diagnostics() as capture:
+        logger.error("safe head API_KEY=must-not-appear safe causal tail")
+        capture.attach_to(error)
+
+    assert logger.handlers == original_handlers
+    assert error.__notes__ == ["vLLM model-registry diagnostic: <redacted sensitive detail>"]
+    assert "must-not-appear" not in error.__notes__[0]
 
 
 def test_sglang_empty_stream_is_not_rendered_as_a_success(monkeypatch):
@@ -246,11 +262,17 @@ def test_sglang_releases_the_port_when_engine_creation_fails(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("constructor_fails", "stats_startup_fails", "shim_fails"),
-    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+    ("args_fail", "constructor_fails", "stats_startup_fails", "shim_fails"),
+    [
+        (False, False, False, False),
+        (True, False, False, False),
+        (False, True, False, False),
+        (False, False, True, False),
+        (False, False, False, True),
+    ],
 )
 def test_vllm_default_creation_is_import_light_and_releases_its_lease(
-    monkeypatch, constructor_fails, stats_startup_fails, shim_fails
+    monkeypatch, args_fail, constructor_fails, stats_startup_fails, shim_fails
 ):
     created: dict = {}
 
@@ -272,6 +294,14 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
     class FakeArgs:
         def __init__(self, **kwargs):
             created["args"] = kwargs
+            if args_fail:
+                try:
+                    raise RuntimeError("registry subprocess stderr args-root")
+                except RuntimeError:
+                    logging.getLogger("vllm.model_executor.models.registry").exception(
+                        "Error in inspecting model architecture"
+                    )
+                raise ValueError("Model architectures failed to be inspected")
 
     class FakeAsyncEngine:
         @staticmethod
@@ -279,6 +309,12 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
             created["engine"] = (args, kwargs)
             created["vllm_port"] = os.environ.get("VLLM_PORT")
             if constructor_fails:
+                try:
+                    raise RuntimeError("registry subprocess stderr exact-root")
+                except RuntimeError:
+                    logging.getLogger("vllm.model_executor.models.registry").exception(
+                        "Error in inspecting model architecture"
+                    )
                 raise RuntimeError("vLLM constructor failed")
             return FakeCreatedEngine()
 
@@ -323,9 +359,22 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
     monkeypatch.setattr(shim, "restore_environment", lambda _snapshot: None)
 
     backend = VLLMEngine()
-    if constructor_fails:
-        with pytest.raises(RuntimeError, match="vLLM constructor failed"):
+    if args_fail:
+        with pytest.raises(ValueError, match="architectures failed") as caught:
             backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
+        assert any(
+            "vLLM model-registry diagnostic" in note
+            and "registry subprocess stderr args-root" in note
+            for note in caught.value.__notes__
+        )
+    elif constructor_fails:
+        with pytest.raises(RuntimeError, match="vLLM constructor failed") as caught:
+            backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
+        assert any(
+            "vLLM model-registry diagnostic" in note
+            and "registry subprocess stderr exact-root" in note
+            for note in caught.value.__notes__
+        )
     elif shim_fails:
         with pytest.raises(RuntimeError, match="compatibility bootstrap"):
             backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
@@ -344,7 +393,7 @@ def test_vllm_default_creation_is_import_light_and_releases_its_lease(
         backend.create(EngineSpec(model_id="m", local_path="/m", device_ids=[2]))
 
     assert created["args"]["master_port"] == lease.port
-    if not shim_fails:
+    if not shim_fails and not args_fail:
         assert created["vllm_port"] == str(lease.port)
     assert created["args"]["trust_remote_code"] is False
     assert lease.released
