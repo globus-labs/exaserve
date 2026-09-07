@@ -414,6 +414,78 @@ fresh run-group identity is required after the MPI replay implementation is
 corrected and independently qualified; neither service readiness nor locally
 completed requests may be promoted into a paper number.
 
+### MPI replay qualification and accepted current-snapshot n4
+
+Commit `2473120` corrected every affected replay-aggregation path and added the
+runtime dependency to the compatibility proof. Both accepted runs below use
+source snapshot
+`7efc01f898e51f72c73f84bc6c044d29516c02cfd8780a7cfc393dd041cb5059`,
+compatibility profile
+`6d94ba4e872261657ea9f1f760521f4b3975d8284957c497f190b4033d6fa2f3`,
+and compatibility manifest
+`85c479ab5d3792ae0a54e9be7b2ed84a6ae1bd7f4a6def3e92f7179aaf1ada1b`.
+Their site-profile hash is
+`ca45bed2369f6c9d5ffa39c04ad1bb0063d328e756bab213cd3eba96ed140614`.
+That profile binds Aurora's mpi4py 4.1.1. The implementation uses the supported
+typed-buffer `Ireduce` operation for bounded reductions and identity-checked
+nonblocking point-to-point messages for summary evidence; it retains one
+absolute deadline and fails closed on missing or malformed rank evidence.
+
+The dedicated full-replay qualification
+`nullcompute_haproxy_mpi_summary_2node/run0/n2`, PBS `8809217`, is **accepted
+qualification evidence only, not a 405B paper result**. Its exact source
+capsule manifest is
+`9afdb594b11ab91e5aeaf04f943f725dd0217f308b2e3a797fbd1f57adeb2dbd`;
+source staging completed on 2/2 ranks in 3.6225 seconds. Canonical READY was
+published 52.762 seconds after the generation anchor and proved two exact Ray
+nodes, four Serve applications, 24/24 null-compute replicas, 30/30 receipt
+slots, two healthy proxies and a successful routed canary. The real two-rank,
+sum-only, non-streaming replay scheduled and completed 2/2 requests with zero
+errors. Its aggregation evidence names ranks 0 and 1, no missing ranks, and
+`mpi_summary_p2p` for both authenticated summary shards. The complete
+four-entry ResultManifest hash is
+`3964ef34ac8b6d4c1f757a1f0e2bb6b581602d62a761c3e7304945de23d339cf`.
+PBS exited 0 after 00:01:41; shutdown reached clean `STOPPED` after 2/2 DRAIN
+and GOODBYE, with no error or exhausted deadline. This closes the live MPI
+dispatch-end and sum-only summary qualification gate that `run9` lacked.
+
+Fresh 405B paper cell `pp405b_pp2_haproxy_nostream_v040/run10/n4`, PBS
+`8809232`, is **accepted paper evidence**. Its exact source capsule manifest is
+`9053759c51d99ffff5945d608e904e707be670433eddae05db3a3551b24aee58`.
+Source staging completed on 4/4 ranks in 3.678914 seconds (4.7 seconds at the
+composition-step boundary), with the exact profile and manifest above on every
+rank. Head-only verification of the existing source model took 855.90 seconds.
+Shard-aware distribution then sent the 380.68-GiB stage 0 only to ranks 0 and
+2 in 397.18 seconds and the 379.61-GiB stage 1 only to ranks 1 and 3 in 289.17
+seconds; all four target receipts passed. The model entry took 1,945.9411
+seconds, the sealed model-broadcast result records 2,803.0873 seconds total,
+and the composition boundary records 2,803.9 seconds.
+
+Canonical READY was published 3,419.503 seconds after the generation anchor
+and proved four exact Ray nodes/48 GPUs, six exact Serve applications, two
+405B TP8 x PP2 replicas with 32 model workers, 46/46 receipt slots, four
+healthy proxies and a successful routed canary. The two EngineCore records
+reported 273,280 and 268,352 KV-cache tokens and initialization times of
+331.57 and 419.81 seconds. Both required non-streaming replays completed all
+96/96 requests with zero errors. Warmup replay 0 recorded 0.717452 successful
+RPS, p50 16.613 seconds and p99 26.965 seconds; reported replay 1 recorded
+0.717952 successful RPS, p50 14.384 seconds and p99 15.713 seconds. Each
+replay's raw gather authenticated all four ranks with no missing shard. The
+complete four-entry ResultManifest hash is
+`149e8cb4c9df6757286ad2cf14d26ebde685c2e467e2e7dc7d5dde5bb5af2120`.
+PBS exited 0 after 01:08:50, and teardown published clean `STOPPED` after 4/4
+DRAIN and GOODBYE, with no errors or exhausted deadline.
+
+The same immutable `run10` group has submitted its n256 cell as PBS `8809332`.
+It binds the same commit, source snapshot, compatibility profile and
+compatibility manifest; its deployment-plan hash is
+`344e3591c8a0dfc6853e7cead2a409e64b6808db81691a9f155729f5f8d8527b`
+and run-semantic hash is
+`d748a4d24176cb806a305eae45d3e4e3576d5dd3148bccfbc4808ad2ce3bd848`.
+It is currently queued for 256 nodes with a four-hour walltime and has not
+started. It has no READY, replay, result-manifest or cleanup evidence and is
+therefore **not accepted**; scheduler state alone is not a paper result.
+
 ## Current accepted results
 
 ### Corrected-snapshot HAProxy null-compute startup
@@ -500,29 +572,47 @@ accepted cell.
 
 | Nodes | PP replicas | Requests | Errors | Successful RPS | p50 (s) | p99 (s) | Status |
 |---:|---:|---:|---:|---:|---:|---:|---|
-| 4 | 2 | 96/96 | 0 | 0.719703 | 14.950 | 17.611 | accepted |
+| 4 | 2 | 96/96 | 0 | 0.717952 | 14.384 | 15.713 | accepted current-snapshot `run10` |
 | 8 | 4 | 192/192 | 0 | 1.437971 | 14.579 | 17.412 | accepted |
 | 16 | 8 | 384/384 | 0 | 2.741455 | 14.890 | 24.384 | accepted |
 | 32 | 16 | 768/768 | 0 | 5.339415 | 15.106 | 29.495 | accepted |
 | 64 | 32 | 1,536/1,536 | 0 | 10.750777 | 14.785 | 24.624 | accepted |
 | 128 | 64 | 3,072/3,072 | 0 | 20.739459 | 15.071 | 31.018 | accepted |
-| 256 | 128 | pending | pending | pending | pending | pending | not run |
+| 256 | 128 | pending | pending | pending | pending | pending | queued as PBS `8809332`; not accepted |
 
-The accepted low-node cells are immutable `run3` artifacts from source snapshot
+The accepted n4 cell is now the immutable `run10` artifact from source snapshot
+`7efc01f898e51f72c73f84bc6c044d29516c02cfd8780a7cfc393dd041cb5059`
+at commit `2473120`; its complete ResultManifest hash is
+`149e8cb4c9df6757286ad2cf14d26ebde685c2e467e2e7dc7d5dde5bb5af2120`.
+The former `run3/n4` value remains preserved accepted historical evidence, but
+the current table deliberately selects the newly qualified implementation.
+The accepted n8 and n16 cells remain immutable `run3` artifacts from source
+snapshot
 `160036b8367213da1d317ca9270de8c5016a471048842daea2ed1d8fe9b64b71`
-at commit `eabf59c`. The 32-node and larger cells are pinned to
+at commit `eabf59c`. The accepted n32 through n128 cells are pinned to
 `run4`, snapshot
 `a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1`
-at commit `4d009c1`. This split is a reviewed compatibility waiver, not an
+at commit `4d009c1`. The queued n256 cell returns to `run10` and is not part of
+the accepted table until its complete evidence passes. This split is a
+reviewed compatibility waiver, not an
 unnoticed mix: the grouped-application behavior is admitted only for dense
 TP1/PP1 `null_compute` plans. Its shared HAProxy route renderer retains `_r` as
 the default and therefore preserves the PP2 route/configuration behavior; the
 remaining change replaces lossy materialized deployment IDs. The PP2 model,
 placement, gateway, replay, and offered-load semantics are unchanged. The
-figure consumer must pin both exact source hashes and reject any third
-snapshot. `run3/n128` must never be selected because its legacy truncated
+figure consumer must pin the exact node-to-source mapping above and reject any
+unreviewed snapshot. `run3/n128` must never be selected because its legacy truncated
 deployment ID aliases `run3/n16`; all `run4` identities are bounded and
 collision resistant.
+
+For current-snapshot `run10/n4`, warmup replay 0 completed 96/96 requests with
+zero errors at 0.717452 successful RPS (p50 16.613 seconds, p99 26.965
+seconds). Reported replay 1 completed 96/96 with zero errors at 0.717952
+successful RPS (p50 14.384 seconds, p99 15.713 seconds). Canonical READY
+contained six Serve applications, two TP8 x PP2 replicas, four healthy
+proxies and 46/46 exact receipt slots. PBS job `8809232` exited 0 after
+01:08:50, and teardown published clean `STOPPED` after DRAIN and GOODBYE from
+all four ranks.
 
 The accepted n32 cell is PBS job `8793104` (exit 0, walltime 47:24) with
 result-manifest hash
@@ -666,6 +756,15 @@ throughput for a 2x node/replica increase.
     site runtime, fail closed on missing or malformed rank evidence, and pass
     an actual multi-rank full-replay canary before another 405B submission.
 
+    Commit `2473120` and source snapshot `7efc01f8...b5059` close this defect:
+    mpi4py 4.1.1 is profile-bound, supported typed reductions and bounded
+    identity-checked point-to-point summary evidence replace the nonexistent
+    calls, and the implementation retains a shared absolute deadline. Live
+    canary `run0/n2` (PBS `8809217`) exercised the two-rank sum-only path, then
+    405B `run10/n4` (PBS `8809232`) completed both four-rank raw-result
+    aggregations. Both runs are accepted in their distinct qualification and
+    paper-evidence roles above.
+
 ## Rejected evidence that must not enter the paper
 
 - Per-replica null-compute `run2`/`run3` 32- and 64-node results predate the
@@ -739,30 +838,27 @@ be reset, resubmitted, or silently replaced in the paper consumer.
 
 The corrected-snapshot null-compute n32 and n256 pairs are now complete as
 `run10`/`run11`; both n256 jobs passed strict paper acceptance. Real-engine
-canary `run5/n2`, PBS `8809101`, is the newest accepted PP startup
-qualification, but it deliberately has no replay and is not a paper cell. The
-newest 405B attempt is rejected `run9/n4`, PBS `8809113`: it reached exact
-READY, then exposed the replay client's invalid mpi4py collective before either
-replay could be published. Rejected `run7`, `run8` and `run9` identities remain
-immutable and must not be reset or reused.
+canary `run5/n2`, PBS `8809101`, remains accepted PP startup qualification, but
+it deliberately has no replay and is not a paper cell. Rejected 405B
+`run9/n4`, PBS `8809113`, remains the immutable record of the invalid mpi4py
+collective. Its replacement gates are now complete: full-replay MPI canary
+`run0/n2`, PBS `8809217`, passed as qualification evidence, and fresh 405B
+`run10/n4`, PBS `8809232`, passed as an accepted paper cell. Rejected `run7`,
+`run8` and `run9` identities remain immutable and must not be reset or reused.
 
-1. Correct every affected replay aggregation path against the qualified site
-   mpi4py API and exercise both dispatch-end and summary aggregation in a fresh,
-   inexpensive multi-rank full-replay canary. Preserve the absolute deadline
-   and fail-closed rank-evidence contract; unit-test doubles alone are not
-   qualification.
-2. After that canary passes, materialize a fresh 405B PP run group from the
-   corrected source and submit only its n4 cell. It must reach exact READY,
-   complete and publish both replays, pass the strict result consumer, and
-   publish clean terminal evidence before its n256 cell is submitted.
-3. For the current largest-scale bring-up objective, jump from that accepted
-   fresh PP n4 gate directly to a freshly materialized PP n256 cell.
-   Do not replay every intermediate scale merely as a launch prerequisite.
-   The corrected n64/n128 null pairs and PP n8/n16/n32/n64/n128 cells remain
-   required later for a homogeneous final curve; until they exist, preserve
+1. Monitor the already-submitted 405B `run10/n256`, PBS `8809332`. It is the
+   only active prerequisite for the current largest-scale bring-up objective.
+   At this update it remains queued and unaccepted; accept it only after exact
+   READY, both complete replays, a complete authenticated ResultManifest, and
+   clean terminal evidence. Do not submit a duplicate merely because it is
+   waiting for 256 free nodes.
+2. After the n256 disposition is sealed, fill the intermediate homogeneous
+   curve: corrected-snapshot null-compute n64/n128 pairs and current-snapshot
+   PP n8/n16/n32/n64/n128 cells. These are still required for the final curve,
+   but they are not launch prerequisites for n256. Until they exist, preserve
    prior measurements separately and label any combined output explicitly as
    a mixed-campaign comparison.
-4. Render the strict null startup table and full PP2 figure. Both consumers must
+3. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
-5. Replace all `pending` rows in this ledger with sealed evidence or an explicit
+4. Replace all `pending` rows in this ledger with sealed evidence or an explicit
    externally blocked disposition, then run the complete release gate.

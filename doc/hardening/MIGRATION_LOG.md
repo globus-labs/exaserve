@@ -2067,3 +2067,71 @@ by an actual multi-rank full-replay canary. `run9` and its unsubmitted larger
 cells remain immutable and operationally superseded. A fresh run-group identity
 is mandatory after that fix; none of this rejected attempt's READY or
 rank-local request evidence may be promoted to a paper measurement.
+
+Commit `2473120` applied that correction across dispatch-end and summary
+aggregation. It uses mpi4py's supported typed-buffer `Ireduce`, transfers
+variable summary evidence through bounded identity-checked nonblocking
+point-to-point messages, retains one absolute deadline, and fails closed on
+missing or malformed rank evidence. The compatibility profile now binds
+mpi4py 4.1.1. The resulting immutable executions use source snapshot
+`7efc01f898e51f72c73f84bc6c044d29516c02cfd8780a7cfc393dd041cb5059`,
+compatibility profile
+`6d94ba4e872261657ea9f1f760521f4b3975d8284957c497f190b4033d6fa2f3`,
+and compatibility manifest
+`85c479ab5d3792ae0a54e9be7b2ed84a6ae1bd7f4a6def3e92f7179aaf1ada1b`.
+The common site-profile hash is
+`ca45bed2369f6c9d5ffa39c04ad1bb0063d328e756bab213cd3eba96ed140614`.
+
+The dedicated two-rank full-replay canary
+`nullcompute_haproxy_mpi_summary_2node/run0/n2` ran as PBS `8809217` and is
+accepted **qualification evidence, not a 405B paper result**. Its exact source
+capsule manifest is
+`9afdb594b11ab91e5aeaf04f943f725dd0217f308b2e3a797fbd1f57adeb2dbd`;
+source staging passed on 2/2 ranks in 3.6225 seconds. Canonical READY occurred
+52.762 seconds after the generation anchor and proved two exact Ray nodes,
+four Serve applications, 24/24 null replicas, 30/30 receipts, two healthy
+proxies and a routed canary. The real sum-only non-streaming replay completed
+2/2 requests with zero errors. Its summary evidence authenticated ranks 0 and
+1 with no missing rank and `mpi_summary_p2p` transport. The complete
+four-entry ResultManifest hash is
+`3964ef34ac8b6d4c1f757a1f0e2bb6b581602d62a761c3e7304945de23d339cf`.
+PBS exited 0 after 00:01:41; teardown reached clean `STOPPED` after 2/2 DRAIN
+and GOODBYE, with no errors or exhausted deadline. This closes the live MPI
+aggregation gate independently of the expensive model workload.
+
+The fresh 405B gate `pp405b_pp2_haproxy_nostream_v040/run10/n4`, PBS
+`8809232`, is accepted **paper evidence**. Its source capsule manifest is
+`9053759c51d99ffff5945d608e904e707be670433eddae05db3a3551b24aee58`.
+Source staging passed on 4/4 ranks in 3.678914 seconds (4.7 seconds at the
+composition boundary). Head-only source-model verification took 855.90
+seconds. Stage-aware distribution sent 380.68 GiB only to ranks 0 and 2 in
+397.18 seconds and 379.61 GiB only to ranks 1 and 3 in 289.17 seconds; all
+target receipts passed. The model entry took 1,945.9411 seconds, the sealed
+model-broadcast total was 2,803.0873 seconds, and its composition boundary was
+2,803.9 seconds.
+
+Canonical READY occurred 3,419.503 seconds after the generation anchor and
+proved four exact Ray nodes/48 GPUs, six Serve applications, two TP8 x PP2
+405B replicas with 32 workers, 46/46 receipts, four healthy proxies and a
+successful routed canary. EngineCore reported 273,280 and 268,352 KV-cache
+tokens with initialization times of 331.57 and 419.81 seconds. Warmup replay 0
+completed 96/96 requests with zero errors at 0.717452 successful RPS, p50
+16.613 seconds and p99 26.965 seconds. Reported replay 1 completed 96/96 with
+zero errors at 0.717952 successful RPS, p50 14.384 seconds and p99 15.713
+seconds. Each raw-result gather authenticated all four ranks. The complete
+four-entry ResultManifest hash is
+`149e8cb4c9df6757286ad2cf14d26ebde685c2e467e2e7dc7d5dde5bb5af2120`.
+PBS exited 0 after 01:08:50; shutdown published clean `STOPPED` after 4/4 DRAIN
+and GOODBYE, with no errors or exhausted deadline.
+
+The MPI canary and n4 paper gate are therefore complete. The same immutable
+`run10` group submitted n256 as PBS `8809332`; its deployment-plan hash is
+`344e3591c8a0dfc6853e7cead2a409e64b6808db81691a9f155729f5f8d8527b`
+and run-semantic hash is
+`d748a4d24176cb806a305eae45d3e4e3576d5dd3148bccfbc4808ad2ce3bd848`.
+It is queued for 256 nodes and four hours and has not started, so it has no
+READY, replay, result-manifest or cleanup evidence and is not accepted. This is
+the only queued prerequisite for the current largest-scale objective. Once its
+disposition is sealed, the remaining current-snapshot PP n8/n16/n32/n64/n128
+cells and corrected null n64/n128 pairs are still required to complete a
+homogeneous curve; they are not prerequisites for launching n256.
