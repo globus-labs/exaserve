@@ -112,6 +112,7 @@ def test_profile_id_changes_with_manifest_or_versions():
     assert a.profile_id != b.profile_id
     c = _profile(patches=a.patches[:2])
     assert a.profile_id != c.profile_id
+    assert _profile(mpi4py="4.1.1").profile_id != a.profile_id
     assert _profile().profile_id == a.profile_id  # deterministic
 
 
@@ -120,6 +121,9 @@ def test_environment_mismatch_fails_closed():
     p.verify_environment({"python": "3.12.12", "ray": "2.53.0", "vllm": "0.15.0"})
     with pytest.raises(ProfileMismatch, match="ray"):
         p.verify_environment({"python": "3.12.12", "ray": "2.49.1", "vllm": "0.15.0"})
+    bound = _profile(mpi4py="4.1.1")
+    with pytest.raises(ProfileMismatch, match="mpi4py"):
+        bound.verify_environment({"python": "3.12.12", "ray": "2.53.0", "vllm": "0.15.0"})
 
 
 def test_required_patch_ids_are_per_role():
@@ -344,6 +348,7 @@ def test_arbitrary_compatibility_proof_cannot_bypass_identity(monkeypatch):
 
 def test_default_manifest_has_every_required_wp3_identity_field():
     p = default_profile("xpu")
+    assert p.mpi4py == "4.1.1"
     assert {patch.patch_id for patch in p.patches} == {
         "SC-01",
         "SC-02",

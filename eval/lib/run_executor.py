@@ -160,6 +160,7 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
 
         write_run_state(run_plan, "replaying", base_urls=base_urls)
         arms = list(getattr(run_plan.client, "dispatch_topologies", []) or [])
+        replay_failure = None
         if arms:
             # Dispatch-topology ablation: one replay pass per arm against the
             # SAME bring-up, so the arms differ only in which node(s) each
@@ -184,6 +185,14 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
                     # which already paid for the bring-up.
                     if exit_code == 0:
                         exit_code = rc
+                        from .replay_failure import capture_replay_process_failure
+
+                        replay_failure = capture_replay_process_failure(
+                            run_plan,
+                            exit_code=rc,
+                            topology_arm=arm,
+                            log_name=f"replay_{arm}.log",
+                        )
         else:
             # "direct" means node-local dispatch (the default); mesh must be
             # asked for explicitly. Always pass it so the arm is on the record.
@@ -196,6 +205,15 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
                 ),
                 runtime_generation=launched.monitor.expected_generation,
             )
+            if exit_code != 0:
+                from .replay_failure import capture_replay_process_failure
+
+                replay_failure = capture_replay_process_failure(
+                    run_plan,
+                    exit_code=exit_code,
+                    topology_arm=None,
+                    log_name="replay.log",
+                )
         heartbeat.ensure_held()
         if exit_code == 0:
             # Collect per-replica vLLM stats before tearing down the cluster.
@@ -326,10 +344,57 @@ def _execute_run_locked(run_plan, adapter, ctx, heartbeat) -> int:
                 )
                 return 3
         else:
-            adapter.stop(ctx, launched)
+            if replay_failure is None:
+                raise RuntimeError("nonzero replay exit has no structured first cause")
+            owned_launch = launched
+            cleanup_failures = []
+            cleanup_succeeded = False
+            for cleanup_attempt in (1, 2):
+                try:
+                    adapter.stop(ctx, owned_launch)
+                    cleanup_succeeded = True
+                    break
+                except Exception as cleanup_exc:
+                    cleanup_failures.append(
+                        f"attempt {cleanup_attempt}: {type(cleanup_exc).__name__}: {cleanup_exc}"
+                    )
+            # The bounded retry outcome is final before terminal publication;
+            # never mutate cleanup truth after consumers can read FAILED.
             launched = None
+            cleanup_error = None if cleanup_succeeded else "; ".join(cleanup_failures)
+            if cleanup_succeeded and cleanup_failures:
+                print(
+                    "[run_executor] backend cleanup recovered on its bounded retry",
+                    file=sys.stderr,
+                    flush=True,
+                )
             heartbeat.ensure_held()
-            write_run_state(run_plan, "failed", base_urls=base_urls, exit_code=exit_code)
+            failure_payload = {
+                "base_urls": base_urls,
+                "exit_code": exit_code,
+                "failure": replay_failure,
+            }
+            if cleanup_error is not None:
+                failure_payload["cleanup_error"] = cleanup_error
+            from .replay_failure import (
+                DETAIL as REPLAY_PROCESS_EXITED_DETAIL,
+                REASON_CODE as REPLAY_PROCESS_EXITED,
+            )
+
+            write_run_state(
+                run_plan,
+                "failed",
+                reason_code=REPLAY_PROCESS_EXITED,
+                detail=REPLAY_PROCESS_EXITED_DETAIL,
+                **failure_payload,
+            )
+            if cleanup_error is not None:
+                print(
+                    f"[run_executor] replay exited {exit_code}; backend cleanup also failed: "
+                    f"{cleanup_error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         return exit_code
     except (KeyboardInterrupt, SystemExit) as exc:
         # Operator/scheduler cancellation is a terminal result, not an
@@ -723,6 +788,7 @@ def _closed_replay_worker_environment(run_plan, capsule_environment: dict[str, s
         "EXASERVE_ALLOCATION_BINDING_PATH",
         "EXASERVE_RUN_LOG_DIR",
         "EXASERVE_COMPAT_PROFILE_ID",
+        "EXASERVE_VENDOR",
         "EXASERVE_COMPAT_OVERLAY_ROOT",
         "EXASERVE_COMPAT_SOURCES_NODE_PROFILE",
         "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST",
@@ -1317,7 +1383,13 @@ def _valid_gather_evidence(gather, expected_ranks: int) -> bool:
             or not isinstance(digest, str)
             or len(digest) != 64
             or any(char not in "0123456789abcdef" for char in digest)
-            or shard.get("transport") not in {"in_memory", "mpi_chunked", "mpi_reduce"}
+            or shard.get("transport")
+            not in {
+                "in_memory",
+                "mpi_chunked",
+                "mpi_reduce",  # historical sum-only result artifacts
+                "mpi_summary_p2p",
+            }
         ):
             return False
         seen.append(rank)

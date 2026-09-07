@@ -16,6 +16,7 @@ and therefore its SHA-256 identity. Prefixes below are for review only.
 | Python | 3.12.12 | Aurora frameworks 2025.3.1 |
 | Ray | 2.53.0 | 4,829 recorded files; non-pure cp312 wheel; no runtime `direct_url` provenance |
 | vLLM | 0.15.0+xpu | 3,014 recorded files; pure Python wheel; original build URI recorded but absent at runtime |
+| mpi4py | 4.1.1 | Aurora frameworks 2025.3.1; exact replay/staging MPI API identity |
 | ExaServe | 0.4.0 | exact release wheel/source identity supplied by the run bundle |
 
 ## Active entries

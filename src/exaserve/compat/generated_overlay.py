@@ -24,6 +24,7 @@ from .profile import (
     CompatibilityProfile,
     ProfileMismatch,
     default_profile,
+    observed_versions,
     verify_installed_sources_once,
 )
 
@@ -585,13 +586,7 @@ def install_from_environment() -> dict | None:
     if profile.profile_id != expected:
         raise GeneratedOverlayError("compatibility overlay profile identity mismatch")
     try:
-        profile.verify_environment(
-            {
-                "python": __import__("platform").python_version(),
-                "ray": __import__("importlib.metadata", fromlist=["version"]).version("ray"),
-                "vllm": __import__("importlib.metadata", fromlist=["version"]).version("vllm"),
-            }
-        )
+        profile.verify_environment(observed_versions())
         verify_installed_sources_once(profile)
     except ProfileMismatch as exc:
         raise GeneratedOverlayError(str(exc)) from exc

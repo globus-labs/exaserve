@@ -1096,13 +1096,21 @@ def _validate_materialized_trace(
         raise ValueError("materialized trace content disagrees with canonical RunPlan")
 
 
-def write_run_state(run_plan: RunMaterialization, status: str, **extra: Any) -> None:
+def write_run_state(
+    run_plan: RunMaterialization,
+    status: str,
+    *,
+    reason_code: str | None = None,
+    detail: str | None = None,
+    **extra: Any,
+) -> None:
     """Publish one canonical RunStatus transition/update, fail closed."""
     from exaserve.state.status import RunState, StatusStore
 
     store = StatusStore.run(run_plan.bundle.state_path)
     phase = str(status).strip().lower()
-    _validate_run_state_payload(run_plan, phase, extra)
+    _validate_run_state_payload(run_plan, phase, extra, reason_code=reason_code, detail=detail)
+    resolved_reason_code = reason_code or phase.upper()
     record = store.load()
     if phase == "materialized":
         if record is not None:
@@ -1148,7 +1156,11 @@ def write_run_state(run_plan: RunMaterialization, status: str, **extra: Any) -> 
     target = target_by_phase.get(phase)
     if target is None or target == state:
         store.update(
-            state, reason_code=phase.upper(), data_update=data, expected_revision=record.revision
+            state,
+            reason_code=resolved_reason_code,
+            detail=detail,
+            data_update=data,
+            expected_revision=record.revision,
         )
         return
     # A direct in-allocation execution may legitimately begin before a
@@ -1165,14 +1177,20 @@ def write_run_state(run_plan: RunMaterialization, status: str, **extra: Any) -> 
     store.transition(
         state,
         target,
-        reason_code=phase.upper(),
+        reason_code=resolved_reason_code,
+        detail=detail,
         data_update=data,
         expected_revision=record.revision,
     )
 
 
 def _validate_run_state_payload(
-    run_plan: RunMaterialization, phase: str, extra: dict[str, Any]
+    run_plan: RunMaterialization,
+    phase: str,
+    extra: dict[str, Any],
+    *,
+    reason_code: str | None = None,
+    detail: str | None = None,
 ) -> None:
     """Strict phase data and terminal ResultManifest coupling."""
     allowed = {
@@ -1203,7 +1221,7 @@ def _validate_run_state_payload(
             "incomplete_reasons",
             "result_manifest_hash",
         },
-        "failed": {"base_urls", "exit_code", "error", "cleanup_error"},
+        "failed": {"base_urls", "exit_code", "error", "cleanup_error", "failure"},
         "cancelled": {"error", "cleanup_error"},
         "invalid": {"last_submit_error", "submit_attempts", "error"},
     }
@@ -1212,6 +1230,30 @@ def _validate_run_state_payload(
     unknown = sorted(set(extra) - allowed[phase])
     if unknown:
         raise ValueError(f"RunStatus {phase} has unknown fields: {unknown}")
+    from .replay_failure import DETAIL as REPLAY_PROCESS_EXITED_DETAIL
+    from .replay_failure import REASON_CODE as REPLAY_PROCESS_EXITED
+
+    if reason_code is not None and (
+        phase != "failed" or reason_code != REPLAY_PROCESS_EXITED or "failure" not in extra
+    ):
+        raise ValueError("RunStatus reason_code override is not an allowed replay failure")
+    if reason_code == REPLAY_PROCESS_EXITED:
+        if detail != REPLAY_PROCESS_EXITED_DETAIL:
+            raise ValueError("RunStatus replay failure detail is not the controlled value")
+    elif detail is not None:
+        raise ValueError("RunStatus detail is only allowed for a typed replay failure")
+    if "failure" in extra:
+        if reason_code != REPLAY_PROCESS_EXITED:
+            raise ValueError("structured replay failure requires its typed reason_code")
+        if "exit_code" not in extra:
+            raise ValueError("structured replay failure requires RunStatus exit_code")
+        from .replay_failure import validate_replay_process_failure
+
+        validate_replay_process_failure(
+            run_plan,
+            extra["failure"],
+            status_exit_code=extra["exit_code"],
+        )
     for key in (
         "submit_attempt",
         "submit_attempts",

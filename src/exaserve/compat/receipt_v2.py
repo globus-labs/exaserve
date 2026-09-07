@@ -495,6 +495,8 @@ class ExactReceiptLedger:
             "ray": self.profile.ray,
             "vllm": self.profile.vllm,
         }
+        if self.profile.mpi4py:
+            expected_versions["mpi4py"] = self.profile.mpi4py
         mismatched_versions = {
             key: (wanted, receipt.observed_versions.get(key))
             for key, wanted in expected_versions.items()

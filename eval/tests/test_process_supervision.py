@@ -649,12 +649,22 @@ class _ImmediateRequest:
         return True, self.value
 
 
+class _ImmediateBufferRequest:
+    def Test(self):
+        return True
+
+
 class _NeverRequest:
     def test(self):
         return False, None
 
     def cancel(self):
         return None
+
+
+class _NeverBufferRequest:
+    def Test(self):
+        return False
 
 
 class _SendComm:
@@ -679,27 +689,66 @@ class _ReceiveComm:
 
 
 class _SummaryComm:
-    def ireduce(self, value, *, op, root):
+    def __init__(self, remote_summary, *, reduction_offset=0, reduction_never=False):
+        self.remote_summary = remote_summary
+        self.reduction_offset = reduction_offset
+        self.reduction_never = reduction_never
+
+    def Ireduce(self, send, receive, *, op, root):
         from mpi4py import MPI
 
-        assert root == 0
-        return _ImmediateRequest(value * 2 if op == MPI.SUM else value)
+        assert root == 0 and op == MPI.SUM
+        assert send[1] is MPI.UINT64_T and receive[1] is MPI.UINT64_T
+        for index, value in enumerate(send[0]):
+            receive[0][index] = (value * 2 + self.reduction_offset) & ((1 << 64) - 1)
+        return _NeverBufferRequest() if self.reduction_never else _ImmediateBufferRequest()
 
-    def igather(self, value, *, root):
-        assert root == 0
-        peer = {
-            "evidence": dict(value["evidence"], rank=1),
-            "latency_histogram": dict(value["latency_histogram"]),
-        }
-        return _ImmediateRequest([value, peer])
+    def irecv(self, *, source, tag):
+        assert source == 1 and tag == 27182
+        if self.remote_summary is None:
+            return _NeverRequest()
+        return _ImmediateRequest(
+            ("summary", 0, source, _encode_gather_payload(self.remote_summary))
+        )
+
+
+class _SummarySenderComm:
+    def __init__(self):
+        self.messages = []
+
+    def Ireduce(self, send, receive, *, op, root):
+        from mpi4py import MPI
+
+        assert send[1] is MPI.UINT64_T and receive is None
+        assert op == MPI.SUM and root == 0
+        return _ImmediateBufferRequest()
+
+    def isend(self, message, *, dest, tag):
+        assert dest == 0 and tag == 27182
+        self.messages.append(message)
+        return _ImmediateRequest()
+
+
+class _SummaryMessageComm(_SummaryComm):
+    def __init__(self, remote_summary, message):
+        super().__init__(remote_summary)
+        self.message = message
+
+    def irecv(self, *, source, tag):
+        assert source == 1 and tag == 27182
+        return _ImmediateRequest(self.message)
 
 
 class _MaxComm:
-    def ireduce(self, _value, *, op, root):
+    def Ireduce(self, send, receive, *, op, root):
         from mpi4py import MPI
 
         assert op == MPI.MAX and root == 0
-        return _ImmediateRequest(9.0)
+        assert send[1] is MPI.DOUBLE
+        if receive is not None:
+            assert receive[1] is MPI.DOUBLE
+            receive[0][0] = 9.0
+        return _ImmediateBufferRequest()
 
 
 def _raw_record(request_id="request-1"):
@@ -758,7 +807,7 @@ def test_multi_rank_mpi_transfer_timeout_fails_closed():
 
 
 def _install_fake_mpi(monkeypatch):
-    mpi = SimpleNamespace(SUM=object(), MAX=object())
+    mpi = SimpleNamespace(SUM=object(), MAX=object(), UINT64_T=object(), DOUBLE=object())
     monkeypatch.setitem(sys.modules, "mpi4py", SimpleNamespace(MPI=mpi))
     return mpi
 
@@ -781,7 +830,7 @@ def test_multi_rank_summary_uses_bounded_mpi_reductions(monkeypatch):
         },
     )
     reduced = _reduce_summary_via_mpi(
-        _SummaryComm(),
+        _SummaryComm(summary),
         summary,
         run_index=0,
         rank=0,
@@ -793,7 +842,139 @@ def test_multi_rank_summary_uses_bounded_mpi_reductions(monkeypatch):
     assert reduced["total_output_tokens"] == 8
     assert reduced["p99_s"] == pytest.approx(1.0)
     assert _LAST_GATHER_META["complete"] is True
-    assert {item["transport"] for item in _LAST_GATHER_META["shards"]} == {"mpi_reduce"}
+    assert {item["transport"] for item in _LAST_GATHER_META["shards"]} == {"mpi_summary_p2p"}
+    from eval.lib.run_executor import _valid_gather_evidence
+
+    assert _valid_gather_evidence(_LAST_GATHER_META, 2)
+    legacy = {
+        **_LAST_GATHER_META,
+        "shards": [{**item, "transport": "mpi_reduce"} for item in _LAST_GATHER_META["shards"]],
+    }
+    assert _valid_gather_evidence(legacy, 2)
+
+
+def test_multi_rank_summary_sender_uses_bounded_canonical_message(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    sender = _SummarySenderComm()
+
+    assert (
+        _reduce_summary_via_mpi(
+            sender,
+            summary,
+            run_index=3,
+            rank=1,
+            mpi_size=2,
+            is_root=False,
+            timeout_s=0.1,
+        )
+        is None
+    )
+    assert sender.messages == [("summary", 3, 1, _encode_gather_payload(summary))]
+
+
+def test_multi_rank_summary_timeout_fails_closed(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    with pytest.raises(RuntimeError, match=r"pending operations.*uint64-reduction"):
+        _reduce_summary_via_mpi(
+            _SummaryComm(summary, reduction_never=True),
+            summary,
+            run_index=0,
+            rank=0,
+            mpi_size=2,
+            is_root=True,
+            timeout_s=0.01,
+        )
+    assert _LAST_GATHER_META["complete"] is False
+
+
+def test_multi_rank_summary_missing_rank_fails_closed(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    with pytest.raises(RuntimeError, match=r"summary-rank-1"):
+        _reduce_summary_via_mpi(
+            _SummaryComm(None),
+            summary,
+            run_index=0,
+            rank=0,
+            mpi_size=2,
+            is_root=True,
+            timeout_s=0.01,
+        )
+    assert _LAST_GATHER_META["missing_ranks"] == [1]
+
+
+def test_multi_rank_summary_rejects_reduction_disagreement(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    with pytest.raises(RuntimeError, match="disagrees with exact rank evidence"):
+        _reduce_summary_via_mpi(
+            _SummaryComm(summary, reduction_offset=1),
+            summary,
+            run_index=0,
+            rank=0,
+            mpi_size=2,
+            is_root=True,
+            timeout_s=0.1,
+        )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        ("wrong-kind", 0, 1, b"{}"),
+        ("summary", 0, 7, b"{}"),
+        ("summary", 0, 1, b"x" * ((1 << 20) + 1)),
+    ],
+)
+def test_multi_rank_summary_rejects_malformed_or_oversized_evidence(monkeypatch, message):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    with pytest.raises(RuntimeError, match="invalid MPI summary message"):
+        _reduce_summary_via_mpi(
+            _SummaryMessageComm(summary, message),
+            summary,
+            run_index=0,
+            rank=0,
+            mpi_size=2,
+            is_root=True,
+            timeout_s=0.1,
+        )
+
+
+def test_multi_rank_summary_rejects_noncanonical_evidence(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    encoded = json.dumps(
+        {"schema_version": 1, "kind": "summary", "summary": summary}, indent=2
+    ).encode()
+    with pytest.raises(RuntimeError, match="non-canonical"):
+        _reduce_summary_via_mpi(
+            _SummaryMessageComm(summary, ("summary", 0, 1, encoded)),
+            summary,
+            run_index=0,
+            rank=0,
+            mpi_size=2,
+            is_root=True,
+            timeout_s=0.1,
+        )
+
+
+def test_multi_rank_summary_rejects_uint64_aggregate_overflow(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    summary["total_input_tokens"] = (1 << 64) - 1
+    with pytest.raises(RuntimeError, match="aggregate exceeds UINT64_MAX"):
+        _reduce_summary_via_mpi(
+            _SummaryComm(summary),
+            summary,
+            run_index=0,
+            rank=0,
+            mpi_size=2,
+            is_root=True,
+            timeout_s=0.1,
+        )
 
 
 def test_same_rank_go_process_summaries_merge_histograms_not_quantile_maxima():
@@ -838,6 +1019,22 @@ def test_dispatch_end_uses_the_latest_rank_not_rank_zero(monkeypatch):
     )
 
 
+def test_dispatch_end_non_root_uses_no_receive_buffer(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    assert (
+        _reduce_dispatch_end_via_mpi(_MaxComm(), 2.0, mpi_size=2, is_root=False, timeout_s=0.1)
+        is None
+    )
+
+
+def test_dispatch_end_rejects_unbounded_deadline(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    with pytest.raises(ValueError, match="finite and positive"):
+        _reduce_dispatch_end_via_mpi(
+            _MaxComm(), 2.0, mpi_size=2, is_root=True, timeout_s=float("inf")
+        )
+
+
 def test_mpi_import_failure_cannot_create_independent_roots(monkeypatch):
     import builtins
 
@@ -869,6 +1066,31 @@ def test_mpi_import_failure_rejects_launcher_rank_without_size_hint(monkeypatch)
     monkeypatch.setattr(builtins, "__import__", reject_mpi)
     with pytest.raises(RuntimeError, match="requires mpi4py"):
         _init_mpi()
+
+
+def test_mpi_version_mismatch_fails_before_runtime_import(monkeypatch):
+    import builtins
+    from importlib import metadata
+
+    real_import = builtins.__import__
+    real_version = metadata.version
+    imported_runtime = False
+
+    def version(name):
+        return "9.9.9" if name == "mpi4py" else real_version(name)
+
+    def observe_import(name, *args, **kwargs):
+        nonlocal imported_runtime
+        if name == "mpi4py":
+            imported_runtime = True
+            raise AssertionError("MPI runtime imported before version proof")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(metadata, "version", version)
+    monkeypatch.setattr(builtins, "__import__", observe_import)
+    with pytest.raises(RuntimeError, match="does not match the compatibility profile"):
+        _init_mpi()
+    assert imported_runtime is False
 
 
 class _RootScatterComm:

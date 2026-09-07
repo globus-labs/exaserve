@@ -99,7 +99,12 @@ def _receipt(
         executable_hash=H,
         argv_hash=H,
         prepared_environment_hash=H,
-        observed_versions={"python": profile.python, "ray": profile.ray, "vllm": profile.vllm},
+        observed_versions={
+            "python": profile.python,
+            "ray": profile.ray,
+            "vllm": profile.vllm,
+            "mpi4py": profile.mpi4py,
+        },
         observed_package_hashes=package_hashes,
         observed_source_hashes=source_hashes,
         patch_results=(patches if patches is not None else {"SC-01": PatchResult("APPLIED", True)}),
@@ -274,6 +279,27 @@ def test_ledger_rejects_every_mismatched_semantic_identity(field, value, reason)
         receipt, required_patch_ids={"SC-01"}, session_rank=0, session_node="n0"
     )
     assert not ok and reason in detail
+
+
+@pytest.mark.parametrize("observed", [{}, {"mpi4py": "4.1.0"}])
+def test_ledger_rejects_missing_or_drifted_mpi4py_identity(observed):
+    from dataclasses import replace
+
+    plan = _plan()
+    binding = _binding(plan)
+    receipt = _receipt(
+        plan, binding, requirement="rank0/ray_head", role="ray_head", rank=0, node="n0"
+    )
+    versions = dict(receipt.observed_versions)
+    if observed:
+        versions.update(observed)
+    else:
+        versions.pop("mpi4py")
+    receipt = replace(receipt, observed_versions=versions, receipt_hash="").finalize()
+    ok, detail = ExactReceiptLedger(plan, binding).accept(
+        receipt, required_patch_ids={"SC-01"}, session_rank=0, session_node="n0"
+    )
+    assert not ok and "mpi4py" in detail
 
 
 def test_ledger_rejects_component_substitution_within_a_valid_slot():

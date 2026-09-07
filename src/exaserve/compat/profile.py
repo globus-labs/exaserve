@@ -1,9 +1,9 @@
 """Immutable compatibility profile (plan WP3.4/WP3.10, audit IMP-B04).
 
-A profile pins the exact base environment (python/ray/vllm/vendor) and the
-patch manifest that may be applied to it. Its ``profile_id`` is a SHA-256 over
-the canonical normalized manifest plus base-environment identity, so any drift
-in either produces a different id and therefore a receipt mismatch.
+A profile pins the exact base environment (Python/Ray/vLLM/mpi4py/vendor) and
+the patch manifest that may be applied to it. Its ``profile_id`` is a SHA-256
+over the canonical normalized manifest plus base-environment identity, so any
+drift in either produces a different id and therefore a receipt mismatch.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from typing import Any, Mapping
 from .._version import __version__ as EXASERVE_VERSION
 
 SCHEMA_VERSION = 1
+AURORA_MPI4PY_VERSION = "4.1.1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 # Compatibility gates are part of the hash-bearing profile contract. Keep
@@ -231,6 +232,9 @@ class CompatibilityProfile:
     vllm: str
     vendor: str
     patches: tuple[PatchSpec, ...]
+    # Empty only for historical schema-v1 artifacts created before the replay
+    # MPI runtime became part of the qualified environment identity.
+    mpi4py: str = ""
     # Empty defaults keep pre-VC-01 profile artifacts reconstructable. New
     # Aurora profiles provide all three fields and include them in profile_id.
     vllm_modelinfo_seed_manifest_path: str = ""
@@ -256,6 +260,8 @@ class CompatibilityProfile:
         for name in ("name", "python", "ray", "vllm", "vendor"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise ProfileMismatch(f"compatibility.{name} must be non-empty")
+        if not isinstance(self.mpi4py, str):
+            raise ProfileMismatch("compatibility.mpi4py must be text")
         if not isinstance(self.patches, (tuple, list)) or any(
             not isinstance(patch, PatchSpec) for patch in self.patches
         ):
@@ -354,6 +360,10 @@ class CompatibilityProfile:
     def canonical(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("profile_id", None)
+        if not self.mpi4py:
+            # Preserve the identity of historical profile artifacts that did
+            # not yet bind the replay MPI Python distribution.
+            data.pop("mpi4py", None)
         if not self.vllm_modelinfo_seeds:
             # CompatibilityProfile artifacts created before VC-01 did not
             # encode these additive defaults. Omitting the empty extension
@@ -411,7 +421,7 @@ class CompatibilityProfile:
         (warn-only, ``strict=False`` default) never was.
         """
         mismatches = []
-        for key in ("python", "ray", "vllm"):
+        for key in ("python", "ray", "vllm", "mpi4py"):
             want = getattr(self, key)
             got = observed.get(key)
             if want and got and want != got:
@@ -657,11 +667,17 @@ def _qualified_python_node_proof_is_trusted() -> bool:
     return _preverified_qualified_python_hash(sys.executable) is not None
 
 
-def _observed_versions() -> dict[str, str]:
+def observed_versions() -> dict[str, str]:
+    """Discover qualified distribution versions without importing runtimes."""
+
     import platform
 
     observed = {"python": platform.python_version()}
-    for distribution, key in (("ray", "ray"), ("vllm", "vllm")):
+    for distribution, key in (
+        ("ray", "ray"),
+        ("vllm", "vllm"),
+        ("mpi4py", "mpi4py"),
+    ):
         try:
             observed[key] = metadata.version(distribution)
         except metadata.PackageNotFoundError:
@@ -1113,6 +1129,7 @@ def default_profile(vendor: str = "xpu") -> CompatibilityProfile:
         vllm="0.15.0+xpu",
         vendor=vendor,
         patches=patches,
+        mpi4py=AURORA_MPI4PY_VERSION,
         vllm_modelinfo_seed_manifest_path=("exaserve/resources/vllm_modelinfo/manifest.json"),
         vllm_modelinfo_seed_manifest_hash=(
             "c5e82475960ee3094a19cbda25b25264cbecde472ef9f34adedf59380b73d18c"

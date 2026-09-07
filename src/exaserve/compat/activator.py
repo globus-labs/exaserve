@@ -23,6 +23,7 @@ from .profile import (
     CompatibilityProfile,
     ProfileMismatch,
     default_profile,
+    observed_versions,
     verify_installed_sources_once,
 )
 
@@ -217,21 +218,10 @@ class CompatibilityActivator:
                 f"process compatibility role {declared_role!r} cannot activate as {role!r}"
             )
         if verify_environment:
-            observed = {}
-            import platform
-            from importlib import metadata
-
-            observed["python"] = platform.python_version()
-            for distribution, key in (("ray", "ray"), ("vllm", "vllm")):
-                try:
-                    # Distribution metadata proves the base environment without
-                    # importing either version-sensitive package before the
-                    # profile has been verified.
-                    observed[key] = metadata.version(distribution)
-                except metadata.PackageNotFoundError:
-                    pass
             try:
-                self.profile.verify_environment(observed)
+                # Distribution metadata proves the base environment without
+                # importing version-sensitive runtimes before profile proof.
+                self.profile.verify_environment(observed_versions())
                 verify_installed_sources_once(self.profile)
             except ProfileMismatch as exc:
                 raise ActivationError(str(exc)) from exc

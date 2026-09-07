@@ -271,7 +271,12 @@ def _observed_versions_cached() -> tuple[tuple[str, str], ...]:
     from importlib import metadata
 
     observed = {"python": platform.python_version()}
-    for distribution, key in (("ray", "ray"), ("vllm", "vllm"), ("torch", "torch")):
+    for distribution, key in (
+        ("ray", "ray"),
+        ("vllm", "vllm"),
+        ("torch", "torch"),
+        ("mpi4py", "mpi4py"),
+    ):
         try:
             observed[key] = metadata.version(distribution)
         except metadata.PackageNotFoundError:

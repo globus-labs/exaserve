@@ -5,3 +5,4 @@ ray[serve]==2.53.0
 vllm==0.15.0+xpu
 torch==2.10.0a0+git449b176
 transformers==4.57.6
+mpi4py==4.1.1

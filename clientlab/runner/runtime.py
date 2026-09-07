@@ -48,7 +48,6 @@ from exaserve.state.atomic import (
     atomic_create_json,
     atomic_create_or_verify_bytes,
     atomic_create_or_verify_json,
-    atomic_create_or_verify_text,
     atomic_create_or_verify_yaml,
     atomic_write_json,
     atomic_write_text,

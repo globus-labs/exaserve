@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from pathlib import Path
+import shutil
 import sys
+import tempfile
 from exaserve.composition import CompositionRoot
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import build_allocation_binding
@@ -14,7 +17,15 @@ from exaserve.plan.runtime_binding import (
 from exaserve.site import default_site_profile
 
 
-def _bound_plan(monkeypatch):
+def _bound_plan(monkeypatch, request):
+    scratch = Path(tempfile.mkdtemp(prefix="exaserve-ng-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(scratch, ignore_errors=True))
+    runtime_root = scratch / "runtime"
+    state_root = scratch / "state"
+    (runtime_root / "python" / "overlay").mkdir(parents=True, mode=0o700)
+    (runtime_root / "run").mkdir(mode=0o700)
+    for relative in ("ipc", "home", "tmp"):
+        (state_root / relative).mkdir(parents=True, mode=0o700)
     plan = compile_deployment_plan(
         {
             "num_nodes": 2,
@@ -54,8 +65,9 @@ def _bound_plan(monkeypatch):
         "EXASERVE_PLAN_HASH": plan.deployment_plan_hash,
         "EXASERVE_SITE_PROFILE_HASH": plan.site_profile_hash,
         "EXASERVE_ALLOCATION_BINDING_HASH": binding.allocation_binding_hash,
-        "EXASERVE_LOCAL_RUNTIME_ROOT": "/tmp/exaserve-test-runtime",
-        "EXASERVE_LOCAL_STATE_ROOT": "/tmp/exaserve-test-state",
+        "EXASERVE_LOCAL_RUNTIME_ROOT": str(runtime_root),
+        "EXASERVE_LOCAL_STATE_ROOT": str(state_root),
+        "VLLM_RPC_BASE_PATH": str(state_root / "ipc"),
         "EXASERVE_QUALIFIED_PYTHON": sys.executable,
         "EXASERVE_QUALIFIED_PYTHON_SHA256": "a" * 64,
         "EXASERVE_QUALIFIED_PYTHON_SITE_PROFILE_HASH": plan.site_profile_hash,
@@ -63,26 +75,24 @@ def _bound_plan(monkeypatch):
         "EXASERVE_COMPAT_MANIFEST_HASH": plan.manifest_hash,
         "EXASERVE_COMPAT_SOURCES_NODE_PROFILE": plan.compatibility_profile_hash,
         "EXASERVE_COMPAT_SOURCES_NODE_MANIFEST": plan.manifest_hash,
-        "EXASERVE_COMPAT_OVERLAY_ROOT": "/tmp/exaserve-test-runtime/python/overlay",
-        "EXASERVE_PLAN_PATH": "/tmp/exaserve-test-runtime/run/deployment.plan.json",
-        "EXASERVE_SITE_PROFILE_PATH": "/tmp/exaserve-test-runtime/run/site.profile.json",
-        "EXASERVE_ALLOCATION_BINDING_PATH": (
-            "/tmp/exaserve-test-runtime/run/allocation_binding.json"
-        ),
-        "PYTHONPATH": "/tmp/exaserve-test-runtime/python",
+        "EXASERVE_COMPAT_OVERLAY_ROOT": str(runtime_root / "python" / "overlay"),
+        "EXASERVE_PLAN_PATH": str(runtime_root / "run" / "deployment.plan.json"),
+        "EXASERVE_SITE_PROFILE_PATH": str(runtime_root / "run" / "site.profile.json"),
+        "EXASERVE_ALLOCATION_BINDING_PATH": (str(runtime_root / "run" / "allocation_binding.json")),
+        "PYTHONPATH": str(runtime_root / "python"),
         "PYTHONNOUSERSITE": "1",
         "PYTHONSAFEPATH": "1",
-        "HOME": "/tmp/exaserve-test-state/home",
-        "TMPDIR": "/tmp/exaserve-test-state/tmp",
+        "HOME": str(state_root / "home"),
+        "TMPDIR": str(state_root / "tmp"),
     }.items():
         monkeypatch.setenv(key, value)
     return plan, bound
 
 
-def test_node_group_graph_has_one_twelve_replica_app_per_rank(monkeypatch):
+def test_node_group_graph_has_one_twelve_replica_app_per_rank(monkeypatch, request):
     from exaserve import server
 
-    plan, bound = _bound_plan(monkeypatch)
+    plan, bound = _bound_plan(monkeypatch, request)
     deploy_calls = []
     run_targets = []
 
@@ -124,10 +134,10 @@ def test_node_group_graph_has_one_twelve_replica_app_per_rank(monkeypatch):
     assert observed_run_many[0][1] == {"wait_for_applications_running": True}
 
 
-def test_node_group_actor_options_pin_rank_and_resolve_replica_dynamically(monkeypatch):
+def test_node_group_actor_options_pin_rank_and_resolve_replica_dynamically(monkeypatch, request):
     from exaserve import server
 
-    plan, bound = _bound_plan(monkeypatch)
+    plan, bound = _bound_plan(monkeypatch, request)
     captured = {}
 
     class BoundWorker:
@@ -163,8 +173,10 @@ def test_node_group_actor_options_pin_rank_and_resolve_replica_dynamically(monke
     assert captured["bind"]["replica_index"] == -1
 
 
-def test_node_group_gateway_keeps_node_backends_and_group_route_count(monkeypatch, tmp_path):
-    plan, _bound = _bound_plan(monkeypatch)
+def test_node_group_gateway_keeps_node_backends_and_group_route_count(
+    monkeypatch, tmp_path, request
+):
+    plan, _bound = _bound_plan(monkeypatch, request)
     root = CompositionRoot(plan=plan, generation=7, run_dir=str(tmp_path), log=lambda *_: None)
     root.bind_allocation(["n0", "n1"], "job")
     endpoints = root._gateway_backend_endpoints()

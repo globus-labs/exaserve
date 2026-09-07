@@ -655,7 +655,6 @@ def validate_source_staging_result(
     result_ids = {item["result_id"] for item in receipts}
     if len(attempt_ids) != 1 or len(result_ids) != len(receipts):
         raise SourceStagingError("source receipts have inconsistent attempt/result identity")
-    attempt_id = next(iter(attempt_ids))
     expected_target = value["local_runtime_root"]
     for receipt in receipts:
         receipt_has_seed_evidence = _MODELINFO_SEED_EVIDENCE_FIELDS <= set(receipt)
@@ -1069,22 +1068,13 @@ def _qualified_executable_evidence(path: Path, *, profile) -> dict:
 
 
 def _compatibility_evidence(runtime_root: Path, *, state_root: Path | None) -> dict:
-    import platform
-    from importlib import metadata
-
     from .compat.producers import manifest_hash
-    from .compat.profile import default_profile
+    from .compat.profile import default_profile, observed_versions
     from .plan.io import load_deployment_plan
 
     plan = load_deployment_plan(str(runtime_root / "run" / "deployment.plan.json"))
     profile = default_profile(plan.vendor)
-    observed = {"python": platform.python_version()}
-    for distribution in ("ray", "vllm"):
-        try:
-            observed[distribution] = metadata.version(distribution)
-        except metadata.PackageNotFoundError:
-            pass
-    profile.verify_environment(observed)
+    profile.verify_environment(observed_versions())
     profile.verify_installed_sources()
     from .vllm_modelinfo_seed import (
         expected_source_seed_evidence,

@@ -2020,3 +2020,50 @@ therefore retains one exact legacy formula solely for archival manifest
 readback and receipt-bound cleanup; fresh composition, staging, replay and
 qualification gates require the compact layout. No arbitrary historical or
 user-supplied state path is accepted.
+
+## PP replay qualification after VC-01 and IPC compaction (2026-09-07)
+
+Real-engine canary `pp8b_real_engine_canary_2node/run5/n2` (PBS `8809101`)
+qualified the combined VC-01 and compact IPC-state implementation from commit
+`23c6822`, source snapshot
+`e8b9861b1434878be609369771a05ff637b721810e36e80cd4a59adffb71ecfd`.
+Its complete seven-entry ResultManifest hash is
+`10a8f24d3ef572cdad71359938f07d0d694352c5621a1eee58409ef9380880fe`.
+Both ranks installed and re-verified the exact VC-01 seeds in
+`/tmp/exaserve/state/da8b3546d33eaed2cbda1d8f`; the registry subprocess
+`SIGSEGV` and overlength ZMQ path did not recur. The run reached exact
+two-node/24-GPU READY with one TP8 x PP2 engine, 16 model workers, 24/24
+receipts, two healthy proxies and a successful routed canary. READY-after-trace
+was 427.3946 seconds; canonical model deployment was 410.6481 seconds, including
+375.9758 seconds for engine creation. PBS exited 0 after 13:33 and shutdown
+published clean `STOPPED` after 2/2 DRAIN and GOODBYE. This is accepted
+startup-only qualification evidence, not a 405B replay or paper result.
+
+The follow-on 405B non-streaming PP attempt
+`pp405b_pp2_haproxy_nostream_v040/run9/n4` (PBS `8809113`) used the same source
+snapshot. It proved 4/4 exact source/VC-01 staging in 6.6 seconds, 909.69-second
+head-only model verification, and shard-aware distribution of the 380.68-GiB
+stage 0 only to ranks 0 and 2 and the 379.61-GiB stage 1 only to ranks 1 and 3.
+The model-broadcast wrapper completed in 2,805.5 seconds. The exact four-node
+Ray cluster then formed two live 405B TP8 x PP2 engines with 32 workers, and
+canonical READY proved six applications, 46/46 receipts, four healthy proxies
+and a routed canary. Canonical model deployment took 504.67 seconds. The former
+registry and IPC failures did not recur.
+
+The run is nevertheless rejected. During replay 0, after rank 0's four local Go
+processes had each saved six completed local result rows,
+`eval/lib/replay_engine.py` called lowercase `Intracomm.ireduce`. Aurora
+frameworks supplied mpi4py 4.1.1, whose nonblocking typed-buffer reduction is
+uppercase `Ireduce`, so the client raised `AttributeError` before global
+aggregation or result publication. Replay 1 never ran, no ResultManifest
+exists, and the run status is `FAILED` with exit 143. Cleanup is valid failure
+evidence: 4/4 ranks acknowledged DRAIN and GOODBYE, the deployment published
+`STOPPED`, and its shutdown report is clean with no errors or exhausted
+deadline. Test doubles had implemented the nonexistent lowercase collective,
+the adjacent summary path also uses unsupported lowercase `ireduce`/`igather`,
+and the source/profile did not bind mpi4py's version. All affected aggregation
+paths must therefore be corrected against a bound site runtime and exercised
+by an actual multi-rank full-replay canary. `run9` and its unsubmitted larger
+cells remain immutable and operationally superseded. A fresh run-group identity
+is mandatory after that fix; none of this rejected attempt's READY or
+rank-local request evidence may be promoted to a paper measurement.

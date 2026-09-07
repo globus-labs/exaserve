@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 
 from .control.finite_process import FiniteProcessError, run_finite
 from .exception_notes import add_exception_note
-from .model_paths import get_model_storage_name, get_model_storage_path, iter_unique_model_ids
+from .model_paths import get_model_storage_name, iter_unique_model_ids
 from .model_staging import (
     COMPLETION_MARKER,
     check_model_exists,

@@ -350,6 +350,7 @@ def test_default_profile_binds_current_seed_surface_and_manifest():
         vendor="xpu",
         patches=(),
     )
+    assert "mpi4py" not in legacy.canonical()
     assert not any(key.startswith("vllm_modelinfo") for key in legacy.canonical())
 
 

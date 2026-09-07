@@ -48,7 +48,12 @@ def _simulate_qualified_dependency_observation(monkeypatch):
     monkeypatch.setattr(
         producers,
         "_observed_versions",
-        lambda: {"python": profile.python, "ray": profile.ray, "vllm": profile.vllm},
+        lambda: {
+            "python": profile.python,
+            "ray": profile.ray,
+            "vllm": profile.vllm,
+            "mpi4py": profile.mpi4py,
+        },
     )
 
 

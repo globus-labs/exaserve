@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from array import array
 import asyncio
 import concurrent.futures
 import glob
@@ -8,7 +9,6 @@ import json
 import math
 import os
 import pathlib
-import re
 import shutil
 import signal
 import subprocess
@@ -45,31 +45,61 @@ def _init_mpi():
     # Importing ``mpi4py.MPI`` can initialize the site MPI runtime. Keep that
     # side effect inside the executable path rather than module import so
     # planners, tests, and analysis tools remain safe on a login node.
+    launcher_sizes = []
+    for name in ("PMI_SIZE", "PMIX_SIZE", "OMPI_COMM_WORLD_SIZE", "SLURM_NTASKS"):
+        raw = os.environ.get(name, "")
+        if raw:
+            try:
+                launcher_sizes.append(int(raw))
+            except ValueError as exc:
+                raise RuntimeError(f"launcher {name} is not an integer: {raw!r}") from exc
+    launcher_rank_names = (
+        "PALS_RANKID",
+        "PMI_RANK",
+        "PMIX_RANK",
+        "OMPI_COMM_WORLD_RANK",
+        "SLURM_PROCID",
+    )
+    launcher_rank_present = any(name in os.environ for name in launcher_rank_names)
+    launcher_requires_mpi = launcher_rank_present or any(size > 1 for size in launcher_sizes)
+
+    from importlib import metadata
+
+    try:
+        observed_mpi4py = metadata.version("mpi4py")
+    except metadata.PackageNotFoundError:
+        observed_mpi4py = None
+    if observed_mpi4py is None:
+        if launcher_requires_mpi:
+            raise RuntimeError(
+                "multi-rank replay requires mpi4py from the qualified compatibility profile"
+            )
+        return None, 0, 1
+
+    from exaserve.compat.profile import default_profile
+
+    profile = default_profile(os.environ.get("EXASERVE_VENDOR", "xpu"))
+    if observed_mpi4py != profile.mpi4py:
+        raise RuntimeError(
+            "replay MPI environment does not match the compatibility profile: "
+            f"mpi4py profile={profile.mpi4py!r} runtime={observed_mpi4py!r}"
+        )
+    declared_profile = os.environ.get("EXASERVE_COMPAT_PROFILE_ID", "")
+    if declared_profile and declared_profile != profile.profile_id:
+        raise RuntimeError("replay MPI compatibility profile identity mismatch")
     try:
         from mpi4py import MPI
     except ImportError as exc:  # pragma: no cover - optional dependency
-        launcher_sizes = []
-        for name in ("PMI_SIZE", "PMIX_SIZE", "OMPI_COMM_WORLD_SIZE", "SLURM_NTASKS"):
-            raw = os.environ.get(name, "")
-            if raw:
-                try:
-                    launcher_sizes.append(int(raw))
-                except ValueError:
-                    raise RuntimeError(f"launcher {name} is not an integer: {raw!r}") from exc
-        launcher_rank_names = (
-            "PALS_RANKID",
-            "PMI_RANK",
-            "PMIX_RANK",
-            "OMPI_COMM_WORLD_RANK",
-            "SLURM_PROCID",
-        )
-        launcher_rank_present = any(name in os.environ for name in launcher_rank_names)
         if launcher_rank_present or any(size > 1 for size in launcher_sizes):
             raise RuntimeError(
                 "multi-rank replay requires mpi4py; refusing independent roots"
             ) from exc
         return None, 0, 1
     comm = MPI.COMM_WORLD
+    if comm.Get_size() > 1 and declared_profile != profile.profile_id:
+        raise RuntimeError(
+            "multi-rank replay requires its exact plan-bound compatibility profile identity"
+        )
     return comm, comm.Get_rank(), comm.Get_size()
 
 
@@ -91,9 +121,12 @@ def _mpi_gather(comm, value, root=0):
 
 
 _RESULT_TAG = 27181
+_SUMMARY_TAG = 27182
 _RESULT_CHUNK_BYTES = 1 << 20
+_SUMMARY_BYTES = 1 << 20
 _TRACE_BATCH_BYTES = 1 << 20
 _TRACE_ROW_BYTES = 16 << 20
+_UINT64_MAX = (1 << 64) - 1
 
 
 def _request_test(request):
@@ -101,6 +134,17 @@ def _request_test(request):
     if isinstance(outcome, tuple) and len(outcome) == 2:
         return bool(outcome[0]), outcome[1]
     return bool(outcome), None
+
+
+def _buffer_request_test(request) -> bool:
+    """Test a typed-buffer collective without object-request semantics."""
+
+    outcome = request.Test()
+    if isinstance(outcome, tuple):
+        if not outcome:
+            raise RuntimeError("MPI buffer request returned an empty Test result")
+        outcome = outcome[0]
+    return bool(outcome)
 
 
 def _cancel_requests(requests) -> None:
@@ -516,11 +560,18 @@ def _reduce_summary_via_mpi(
     is_root: bool,
     timeout_s: float,
 ):
-    """Reduce fixed-size Go summaries and gather exact rank evidence."""
+    """Reduce fixed-size totals and transfer bounded exact rank summaries.
+
+    mpi4py exposes nonblocking object point-to-point operations, but only
+    typed-buffer nonblocking collectives.  Keep the fixed counters in one
+    ``UINT64_T`` reduction and carry each canonical summary as one bounded
+    object message.  Root validates both paths against one another before it
+    publishes completeness evidence.
+    """
+    _LAST_GATHER_META.clear()
     if comm is None or mpi_size <= 1:
         summary = _validate_go_summary(local_summary)
         encoded = _encode_gather_payload(summary)
-        _LAST_GATHER_META.clear()
         _LAST_GATHER_META.update(
             {
                 "schema_version": 1,
@@ -558,6 +609,20 @@ def _reduce_summary_via_mpi(
         or timeout_s <= 0
     ):
         raise ValueError("MPI summary deadline must be finite and positive")
+    if (
+        isinstance(run_index, bool)
+        or not isinstance(run_index, int)
+        or run_index < 0
+        or isinstance(rank, bool)
+        or not isinstance(rank, int)
+        or isinstance(mpi_size, bool)
+        or not isinstance(mpi_size, int)
+        or mpi_size < 2
+        or not 0 <= rank < mpi_size
+        or not isinstance(is_root, bool)
+        or is_root != (rank == 0)
+    ):
+        raise ValueError("MPI summary rank/run identity is invalid")
     summary = _validate_go_summary(local_summary)
     try:
         from mpi4py import MPI
@@ -575,59 +640,139 @@ def _reduce_summary_via_mpi(
         raise ValueError("multi-rank summary requires a mergeable latency_histogram")
     if summary.get("latency_quantile_method") != LATENCY_QUANTILE_METHOD:
         raise ValueError("multi-rank summary has no supported latency quantile method")
-    requests = {field: comm.ireduce(summary[field], op=MPI.SUM, root=0) for field in sum_fields}
     encoded = _encode_gather_payload(summary)
-    evidence_request = comm.igather(
-        {
-            "evidence": {
-                "rank": rank,
-                "size_bytes": len(encoded),
-                "sha256": hashlib.sha256(encoded).hexdigest(),
-                "transport": "mpi_reduce",
-            },
-            "latency_histogram": histogram,
-        },
+    if not encoded or len(encoded) > _SUMMARY_BYTES:
+        raise ValueError(
+            f"rank {rank} MPI summary is empty or exceeds the {_SUMMARY_BYTES}-byte bound"
+        )
+    totals = [summary[field] for field in sum_fields]
+    if any(value > _UINT64_MAX for value in totals):
+        raise ValueError(f"rank {rank} MPI summary counter exceeds UINT64_MAX")
+    send_totals = array("Q", totals)
+    if send_totals.itemsize != 8:
+        raise RuntimeError("platform unsigned-long-long is not a 64-bit MPI counter")
+    receive_totals = array("Q", [0] * len(sum_fields)) if is_root else None
+    deadline = time.monotonic() + timeout_s
+    reduction = comm.Ireduce(
+        [send_totals, MPI.UINT64_T],
+        [receive_totals, MPI.UINT64_T] if receive_totals is not None else None,
+        op=MPI.SUM,
         root=0,
     )
-    deadline = time.monotonic() + timeout_s
-    values = {}
-    pending = dict(requests)
-    pending["evidence"] = evidence_request
+    reduction_pending = True
+    summaries = {0: summary} if is_root else {}
+    evidence = (
+        {
+            0: {
+                "rank": 0,
+                "size_bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "transport": "mpi_summary_p2p",
+            }
+        }
+        if is_root
+        else {}
+    )
+    if is_root:
+        pending = {
+            other: comm.irecv(source=other, tag=_SUMMARY_TAG) for other in range(1, mpi_size)
+        }
+    else:
+        pending = {
+            rank: comm.isend(
+                ("summary", run_index, rank, encoded),
+                dest=0,
+                tag=_SUMMARY_TAG,
+            )
+        }
     try:
-        while pending and time.monotonic() < deadline:
+        while (reduction_pending or pending) and time.monotonic() < deadline:
             progressed = False
-            for field, request in list(pending.items()):
-                complete, value = _request_test(request)
+            if reduction_pending and _buffer_request_test(reduction):
+                reduction_pending = False
+                progressed = True
+            for other, request in list(pending.items()):
+                complete, message = _request_test(request)
                 if complete:
                     progressed = True
-                    values[field] = value
-                    del pending[field]
-            if pending and not progressed:
+                    del pending[other]
+                    if not is_root:
+                        continue
+                    if (
+                        not isinstance(message, tuple)
+                        or len(message) != 4
+                        or message[0] != "summary"
+                        or message[1] != run_index
+                        or message[2] != other
+                        or type(message[3]) is not bytes
+                        or not message[3]
+                        or len(message[3]) > _SUMMARY_BYTES
+                    ):
+                        raise RuntimeError(f"rank {other} sent an invalid MPI summary message")
+                    content = message[3]
+                    remote = _decode_gather_payload(content)
+                    if not isinstance(remote, dict) or _encode_gather_payload(remote) != content:
+                        raise RuntimeError(f"rank {other} sent a non-canonical MPI summary payload")
+                    if remote.get(
+                        "latency_quantile_method"
+                    ) != LATENCY_QUANTILE_METHOD or not isinstance(
+                        remote.get("latency_histogram"), dict
+                    ):
+                        raise RuntimeError(
+                            f"rank {other} sent an unsupported MPI summary estimator"
+                        )
+                    summaries[other] = remote
+                    evidence[other] = {
+                        "rank": other,
+                        "size_bytes": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "transport": "mpi_summary_p2p",
+                    }
+            if (reduction_pending or pending) and not progressed:
                 time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
     except BaseException:
+        # MPI does not portably cancel a nonblocking collective.  Cancel only
+        # object point-to-point requests; the enclosing replay process-group
+        # supervisor supplies the hard failure/termination bound.
         _cancel_requests(pending.values())
         raise
-    if pending:
+    if reduction_pending or pending:
         _cancel_requests(pending.values())
+        if is_root:
+            _LAST_GATHER_META.update(
+                {
+                    "schema_version": 1,
+                    "expected_ranks": mpi_size,
+                    "collected_ranks": sorted(summaries),
+                    "missing_ranks": sorted(pending),
+                    "complete": False,
+                    "shards": [evidence[item] for item in sorted(evidence)],
+                }
+            )
+        operations = (["uint64-reduction"] if reduction_pending else []) + [
+            f"summary-rank-{other}" for other in sorted(pending)
+        ]
         raise RuntimeError(
             f"run {run_index} MPI summary reduction exceeded its {timeout_s:.3f}s deadline; "
-            f"pending operations {sorted(pending)}"
+            f"pending operations {operations}"
         )
     if not is_root:
         return None
-    gathered = values.pop("evidence")
-    if (
-        not isinstance(gathered, list)
-        or len(gathered) != mpi_size
-        or any(
-            not isinstance(item, dict) or set(item) != {"evidence", "latency_histogram"}
-            for item in gathered
-        )
-        or [item["evidence"].get("rank") for item in gathered] != list(range(mpi_size))
-    ):
+    if sorted(summaries) != list(range(mpi_size)):
         raise RuntimeError("MPI summary reduction returned incomplete rank evidence")
-    evidence = [item["evidence"] for item in gathered]
-    merged_histogram = _merge_latency_histograms([item["latency_histogram"] for item in gathered])
+    python_totals = [
+        sum(summaries[item][field] for item in range(mpi_size)) for field in sum_fields
+    ]
+    if any(value > _UINT64_MAX for value in python_totals):
+        raise RuntimeError("MPI summary aggregate exceeds UINT64_MAX")
+    assert receive_totals is not None
+    reduced_totals = list(receive_totals)
+    if reduced_totals != python_totals:
+        raise RuntimeError("typed MPI summary reduction disagrees with exact rank evidence")
+    values = dict(zip(sum_fields, reduced_totals))
+    merged_histogram = _merge_latency_histograms(
+        [summaries[item]["latency_histogram"] for item in range(mpi_size)]
+    )
     expected_successes = values["requests_completed"] - values["errors"]
     if merged_histogram["count"] != expected_successes:
         raise RuntimeError("MPI summary latency histogram count disagrees with successful requests")
@@ -639,7 +784,7 @@ def _reduce_summary_via_mpi(
             "collected_ranks": list(range(mpi_size)),
             "missing_ranks": [],
             "complete": True,
-            "shards": evidence,
+            "shards": [evidence[item] for item in range(mpi_size)],
         }
     )
     return {
@@ -659,17 +804,38 @@ def _reduce_dispatch_end_via_mpi(
     timeout_s: float,
 ) -> float | None:
     _result_number(local_last_fire_time, field="dispatch last_fire_time")
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(float(timeout_s))
+        or timeout_s <= 0
+    ):
+        raise ValueError("MPI dispatch-end deadline must be finite and positive")
     if comm is None or mpi_size <= 1:
         return float(local_last_fire_time)
     from mpi4py import MPI
 
-    request = comm.ireduce(float(local_last_fire_time), op=MPI.MAX, root=0)
-    value = _wait_request(
-        request,
-        deadline=time.monotonic() + timeout_s,
-        label="distributed dispatch-end reduction",
+    send_value = array("d", [float(local_last_fire_time)])
+    receive_value = array("d", [0.0]) if is_root else None
+    deadline = time.monotonic() + timeout_s
+    request = comm.Ireduce(
+        [send_value, MPI.DOUBLE],
+        [receive_value, MPI.DOUBLE] if receive_value is not None else None,
+        op=MPI.MAX,
+        root=0,
     )
-    return float(value) if is_root else None
+    while time.monotonic() < deadline:
+        if _buffer_request_test(request):
+            if not is_root:
+                return None
+            assert receive_value is not None
+            reduced = float(receive_value[0])
+            _result_number(reduced, field="global dispatch last_fire_time")
+            return reduced
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    # Nonblocking collective cancellation is not portable.  Raising lets the
+    # supervised mpiexec boundary terminate the complete rank set.
+    raise RuntimeError("distributed dispatch-end reduction exceeded its absolute MPI deadline")
 
 
 def _encode_gather_payload(results) -> bytes:

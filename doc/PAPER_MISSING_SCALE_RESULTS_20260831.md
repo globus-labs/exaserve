@@ -1,6 +1,6 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress; last updated 2026-09-06**. This document is an evidence
+Status: **in progress; last updated 2026-09-07**. This document is an evidence
 ledger, not a completed paper reproduction claim. A number appears in an
 accepted table only after the immutable run bundle, terminal state, result
 manifest, readiness evidence, and shutdown evidence all pass the repository's
@@ -364,6 +364,56 @@ source evidence and cleanable for old ownership receipts, while every fresh
 execution gate requires the compact layout. A fresh immutable canary identity
 is required for qualification.
 
+### Compact-state PP qualification and first 405B replay attempt
+
+Fresh real-engine canary `run5/n2`, PBS `8809101`, was materialized from commit
+`23c6822` with source snapshot
+`e8b9861b1434878be609369771a05ff637b721810e36e80cd4a59adffb71ecfd`.
+It is **accepted startup-only qualification evidence**, not a 405B paper
+measurement. The complete seven-entry ResultManifest hash is
+`10a8f24d3ef572cdad71359938f07d0d694352c5621a1eee58409ef9380880fe`.
+The run proved the exact two-node/24-GPU Ray membership, one TP8 x PP2 real
+engine with 16 workers, 24/24 receipt slots, two healthy Serve proxies and a
+successful routed model canary. Both ranks installed and re-verified the exact
+VC-01 seed set in compact node-local state at
+`/tmp/exaserve/state/da8b3546d33eaed2cbda1d8f`; neither the registry
+`SIGSEGV` nor the overlength ZMQ path recurred. Canonical READY was 427.3946
+seconds after trace start, the trace total was 414.3199 seconds, and canonical
+model deployment took 410.6481 seconds, including 375.9758 seconds for engine
+creation. PBS exited 0 after 13:33; teardown published clean `STOPPED` with 2/2
+DRAIN and GOODBYE, no errors and no exhausted deadline.
+
+The first full 405B attempt from that same source snapshot was
+`pp405b_pp2_haproxy_nostream_v040/run9/n4`, PBS `8809113`. Source staging
+completed on 4/4 ranks in 6.6 seconds with exact VC-01 verification. Head-only
+model verification took 909.69 seconds. Shard-aware distribution sent the
+380.68-GiB stage 0 only to ranks 0 and 2 in 345.07 seconds and the 379.61-GiB
+stage 1 only to ranks 1 and 3 in 291.96 seconds; the model-broadcast wrapper
+completed in 2,805.5 seconds. The exact four-node Ray cluster then created two
+405B TP8 x PP2 replicas and all 32 model workers. Their EngineCore startup
+records reported 315,136 and 338,752 KV-cache tokens; canonical model deployment
+took 504.67 seconds. READY proved four rank sessions, six Serve applications,
+46/46 receipts, four healthy proxies, two models at target and a successful
+routed canary. These facts qualify the corrected registry and IPC paths for the
+405B topology, but do not qualify a paper result.
+
+`run9/n4` is **rejected non-paper evidence**. During replay 0, rank 0's four Go
+dispatch processes each saved six completed local result rows. Before global
+aggregation or publication, the Python replay client called lowercase
+`Intracomm.ireduce`; Aurora frameworks supplied mpi4py 4.1.1, which exposes the
+typed nonblocking collective as uppercase `Ireduce`, so rank 0 failed with
+`AttributeError` at
+`eval/lib/replay_engine.py:666` and PALS terminated its peers. No replay result
+or ResultManifest was published, replay 1 never ran, and the run status is
+`FAILED` with exit 143. Failure teardown was nevertheless bounded and clean:
+4/4 ranks acknowledged DRAIN and GOODBYE, the deployment published `STOPPED`,
+the shutdown report records no errors and no exhausted deadline, and the
+expected rank-launcher return code is 143. The immutable `run9` identity and
+its unsubmitted larger cells bind the defective source and are superseded. A
+fresh run-group identity is required after the MPI replay implementation is
+corrected and independently qualified; neither service readiness nor locally
+completed requests may be promoted into a paper number.
+
 ## Current accepted results
 
 ### Corrected-snapshot HAProxy null-compute startup
@@ -603,6 +653,18 @@ throughput for a 2x node/replica increase.
    already-terminal deployment as a readiness timeout because cleanup was still
    in progress. Both availability and terminal-cause propagation must be fixed
    and qualified before another 256-node attempt.
+10. **Replay tests encoded an mpi4py API that the site runtime does not
+    provide.** The first current-snapshot 405B service reached exact READY, but
+    replay then called lowercase object collective `Intracomm.ireduce` (and the
+    adjacent summary path also calls `igather`). mpi4py 4.1.1 provides uppercase
+    typed-buffer `Ireduce`/`Igather`; the test doubles had implemented the
+    nonexistent lowercase methods and therefore masked the integration defect.
+    The `run9` source/profile also did not bind the mpi4py version, leaving this
+    execution dependency outside its compatibility proof. `run9/n4` is
+    immutable negative evidence. The replacement must retain the existing
+    absolute aggregation deadline, bind and use APIs present in the qualified
+    site runtime, fail closed on missing or malformed rank evidence, and pass
+    an actual multi-rank full-replay canary before another 405B submission.
 
 ## Rejected evidence that must not enter the paper
 
@@ -652,6 +714,12 @@ throughput for a 2x node/replica increase.
   native cause: vLLM's cold `LlamaForCausalLM` registry helper died with
   `returncode=-11`/`SIGSEGV` during `backend_create`. It has no READY/result
   and ended with clean 2/2 DRAIN/GOODBYE.
+- PP2 `run9/n4`, PBS job `8809113`, proved exact four-node 405B READY and clean
+  service shutdown, but failed during replay 0 on nonexistent mpi4py method
+  `Intracomm.ireduce`. It published no replay result or ResultManifest; replay 1
+  never ran. The locally saved rank-0 request records and READY evidence are
+  diagnostic only, not a paper measurement. All unsubmitted larger `run9`
+  cells bind the same defective source snapshot and are superseded.
 - PP2 `run2` 4- and 8-node successes use the superseded 0.90 setting; the final
   low-node values come from `run3` at 0.95.
 - Three historical streaming PP2 cells were produced while their nominal
@@ -670,36 +738,25 @@ rejected above. The failed bundle is immutable negative evidence and must not
 be reset, resubmitted, or silently replaced in the paper consumer.
 
 The corrected-snapshot null-compute n32 and n256 pairs are now complete as
-`run10`/`run11`; both n256 jobs passed strict paper acceptance. PP2 `run7/n4`,
-PBS `8807877`, is the newest immutable failure
-and must likewise never be reset or resubmitted. The two-node PP canary
-`run1/n2` is accepted qualification evidence only. PP2 `run8/n4`, PBS
-`8808137`, is also rejected and its larger siblings are superseded without
-submission. Commit `5401cbd` contains the causal-tail diagnostic correction;
-commit `ec48442` contains the real-engine 8B PP canary. Its immutable
-`run0/n2`, PBS `8808210`, reproduced the actor-start failure but also proved
-that the single-replica `serve.run` branch bypasses that correction. Commit
-`c5dd69a` closes that coverage gap; rejected `run1/n2`, PBS `8808227`, then
-localized the failure to `backend_create`/vLLM model-registry inspection.
-Rejected `f201923` canary `run2/n2`, PBS `8808252`, fired its registry logger
-hook but lost subprocess exit/cause to nested text truncation. Rejected
-`a970d38` canary `run3/n2`, PBS `8808281`, then proved the cold registry helper
-dies with SIGSEGV. All four 8B canary identities are immutable negative
-evidence.
+`run10`/`run11`; both n256 jobs passed strict paper acceptance. Real-engine
+canary `run5/n2`, PBS `8809101`, is the newest accepted PP startup
+qualification, but it deliberately has no replay and is not a paper cell. The
+newest 405B attempt is rejected `run9/n4`, PBS `8809113`: it reached exact
+READY, then exposed the replay client's invalid mpi4py collective before either
+replay could be published. Rejected `run7`, `run8` and `run9` identities remain
+immutable and must not be reset or reused.
 
-1. Ship reviewed, exact-version vLLM model-info seeds inside the immutable
-   source capsule, bind their seed and target-module SHA-256 identities into
-   the compatibility profile, and install/verify them on every node's local
-   `VLLM_CACHE_ROOT` before Ray starts. Prove a cold local cache never launches
-   the SIGSEGV registry subprocess, then materialize a fresh two-node 8B
-   real-engine PP canary. Do not restore ambient shared-home model-info caches
-   or reuse rejected `run0`/`run1`/`run2`/`run3` identities.
-2. Only after that diagnosis, materialize a fresh 405B PP run group and run its
-   n4 cell. The n4 workload must complete both replays before its n256 cell is
-   submitted; no rejected `run7`/`run8` identity may be reset or reused.
-3. For the current largest-scale bring-up objective, use the already-proven
-   `run10`/`run11` null snapshot to run its two independently materialized n256
-   lifecycles, and jump from the accepted fresh PP n4 gate directly to PP n256.
+1. Correct every affected replay aggregation path against the qualified site
+   mpi4py API and exercise both dispatch-end and summary aggregation in a fresh,
+   inexpensive multi-rank full-replay canary. Preserve the absolute deadline
+   and fail-closed rank-evidence contract; unit-test doubles alone are not
+   qualification.
+2. After that canary passes, materialize a fresh 405B PP run group from the
+   corrected source and submit only its n4 cell. It must reach exact READY,
+   complete and publish both replays, pass the strict result consumer, and
+   publish clean terminal evidence before its n256 cell is submitted.
+3. For the current largest-scale bring-up objective, jump from that accepted
+   fresh PP n4 gate directly to a freshly materialized PP n256 cell.
    Do not replay every intermediate scale merely as a launch prerequisite.
    The corrected n64/n128 null pairs and PP n8/n16/n32/n64/n128 cells remain
    required later for a homogeneous final curve; until they exist, preserve
