@@ -568,12 +568,32 @@ so assertion reporting restores its guards. Log SHA-256:
 `05e710af9538be4fabad8b99011300d884bfb4706bfe66ec993492104d35323e`.
 
 The application-level large-message canary
-`nullcompute_haproxy_mpi_large_raw_2node/run0/n2`, PBS `8811748`, is submitted
-from `0a83547`, source snapshot
+`nullcompute_haproxy_mpi_large_raw_2node/run0/n2`, PBS `8811748`, is now
+**accepted qualification evidence, not a 405B paper measurement**. It uses
+commit `0a83547`, source snapshot
 `5d85794f26a54596dc4ddb237996652171b9cd78d21751c8235bf0e25f8d365f`.
-It requires two raw-result replays with 1,536 records per client rank and
-512-token prompts to force multiple large chunks. Its outcome is pending.
+Both raw-result replays completed 3,072/3,072 requests with zero errors,
+1,536 records per client rank and 512-token prompts. Each replay authenticated
+both ranks with no missing shard. Replay 0's rank-0/rank-1 evidence covers
+4,178,207/4,174,243 bytes; replay 1 covers 4,178,195/4,174,237 bytes. The
+remote rank therefore exercised multiple real MPI chunks above the former
+32-KiB limit. The complete four-entry ResultManifest hash is
+`075e8c966de5d09cfd4d6f9a51da61f7813691f72d84c0fc158a9fc1bc4e2fba`,
+published at `2026-09-08T20:43:28.998169+00:00`; all artifact byte lengths and
+hashes match. PBS finished with state `F`, exit 0 and used walltime
+`00:02:50`. Both ranks acknowledged DRAIN and GOODBYE; terminal state is
+`STOPPED`, with clean shutdown, no errors and no exhausted deadline. This
+closes the application-level large-message qualification gate.
 
+Fresh 405B `run11/n256` was submitted as PBS `8811810` at
+`2026-09-08T20:45:34.856363+00:00`, with scheduler identity
+`es-f95c91077a52`. It binds the same `0a83547` source snapshot as the accepted
+canary. Its deployment-plan hash is
+`6d766b70b742eaec6006460d0953638bd1baf47cffb620bdf0eaa835b6573464`
+and run-semantic hash is
+`79eb6bfb8a4666e5c6f99dfb2555f74a619a65325d2a9132bd6af89d786f0b3e`.
+Its state is `SUBMITTED`; no accepted n256 result exists yet. The rejected
+`run10/n256` remains immutable negative evidence.
 
 ## Current accepted results
 
@@ -667,7 +687,7 @@ accepted cell.
 | 32 | 16 | 768/768 | 0 | 5.339415 | 15.106 | 29.495 | accepted |
 | 64 | 32 | 1,536/1,536 | 0 | 10.750777 | 14.785 | 24.624 | accepted |
 | 128 | 64 | 3,072/3,072 | 0 | 20.739459 | 15.071 | 31.018 | accepted |
-| 256 | 128 | pending | pending | pending | pending | pending | PBS `8809332` rejected after replay-parent SIGSEGV; rerun required |
+| 256 | 128 | pending | pending | pending | pending | pending | `run10` rejected; fresh `run11` submitted as PBS `8811810`, not accepted |
 
 The accepted n4 cell is now the immutable `run10` artifact from source snapshot
 `7efc01f898e51f72c73f84bc6c044d29516c02cfd8780a7cfc393dd041cb5059`
@@ -681,8 +701,8 @@ snapshot
 at commit `eabf59c`. The accepted n32 through n128 cells are pinned to
 `run4`, snapshot
 `a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1`
-at commit `4d009c1`. The rejected n256 cell is `run10`; it has no accepted
-result and requires a fresh identity after the receive-path fix. This split is a
+at commit `4d009c1`. The rejected n256 cell is `run10`; its fresh replacement
+is `run11`, PBS `8811810`, and has no accepted result yet. This split is a
 reviewed compatibility waiver, not an
 unnoticed mix: the grouped-application behavior is admitted only for dense
 TP1/PP1 `null_compute` plans. Its shared HAProxy route renderer retains `_r` as
@@ -943,13 +963,13 @@ collective. Its replacement gates are now complete: full-replay MPI canary
 `run10/n4`, PBS `8809232`, passed as an accepted paper cell. Rejected `run7`,
 `run8` and `run9` identities remain immutable and must not be reset or reused.
 
-1. Preserve the rejected 405B `run10/n256`, PBS `8809332`, and correct the
-   replay receive-size contract. Use a discriminating compute-node MPI test
-   above 32 KiB, including bounded failure handling, before materializing a
-   fresh run group and returning directly to n256. Exact READY, both complete
-   replays, a complete authenticated ResultManifest and clean terminal
-   evidence remain mandatory; successful service startup alone does not
-   complete the largest-scale objective.
+1. Monitor the submitted 405B `run11/n256`, PBS `8811810`. The receive fix,
+   differential compute probe, full suite and application-level large-message
+   MPI canary have passed; the fresh campaign returns directly to n256.
+   Exact READY, both complete replays, a complete authenticated ResultManifest
+   and clean terminal evidence remain mandatory. Preserve rejected
+   `run10/n256`, PBS `8809332`, as immutable negative evidence; the new
+   submission is not an accepted result until its own evidence passes.
 2. After the n256 disposition is sealed, fill the intermediate homogeneous
    curve: corrected-snapshot null-compute n64/n128 pairs and current-snapshot
    PP n8/n16/n32/n64/n128 cells. These are still required for the final curve,

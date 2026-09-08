@@ -2219,8 +2219,31 @@ so assertion reporting restores its guards. Log SHA-256:
 `05e710af9538be4fabad8b99011300d884bfb4706bfe66ec993492104d35323e`.
 
 The application-level large-message canary
-`nullcompute_haproxy_mpi_large_raw_2node/run0/n2`, PBS `8811748`, is submitted
-from `0a83547`, source snapshot
+`nullcompute_haproxy_mpi_large_raw_2node/run0/n2`, PBS `8811748`, is now
+**accepted qualification evidence, not a 405B paper measurement**. It uses
+commit `0a83547`, source snapshot
 `5d85794f26a54596dc4ddb237996652171b9cd78d21751c8235bf0e25f8d365f`.
-It requires two raw-result replays with 1,536 records per client rank and
-512-token prompts to force multiple large chunks. Its outcome is pending.
+Both raw-result replays completed 3,072/3,072 requests with zero errors,
+1,536 records per client rank and 512-token prompts. Both gathers authenticated
+ranks 0 and 1, with no missing shard. Replay 0's rank-0/rank-1 byte totals
+are 4,178,207/4,174,243; replay 1's totals are 4,178,195/4,174,237. The
+remote rank's data required multiple real MPI chunks above the former
+32-KiB receive limit. The complete four-entry ResultManifest hash is
+`075e8c966de5d09cfd4d6f9a51da61f7813691f72d84c0fc158a9fc1bc4e2fba`,
+published at `2026-09-08T20:43:28.998169+00:00`. Artifact byte lengths and
+hashes match. PBS finished with state `F`, exit 0 and used walltime
+`00:02:50`; all 2/2 ranks acknowledged DRAIN and GOODBYE. The deployment
+published `STOPPED`, with clean shutdown, no errors and no exhausted
+deadline. This closes the large-message application qualification gate.
+
+Fresh 405B `run11/n256` was submitted as PBS `8811810` at
+`2026-09-08T20:45:34.856363+00:00`, scheduler identity `es-f95c91077a52`,
+from the same `0a83547` source snapshot. Its deployment-plan hash is
+`6d766b70b742eaec6006460d0953638bd1baf47cffb620bdf0eaa835b6573464`
+and run-semantic hash is
+`79eb6bfb8a4666e5c6f99dfb2555f74a619a65325d2a9132bd6af89d786f0b3e`.
+It is `SUBMITTED` and not yet accepted. The next step is to monitor this
+256-node attempt and validate both replays and terminal evidence. The
+rejected `run10/n256` is preserved; the completed probe, 1,701-test suite and
+two-rank canary justify returning directly to n256 without an intermediate
+node-count ladder.
