@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,11 @@ from eval.lib.manifest import (
     TraceGeneratorConfig,
     load_eval_manifest,
 )
-from eval.lib.replay_engine import _verify_local_replay_filesystem, replay_from_manifest
+from eval.lib.replay_engine import (
+    _decode_mpi_message,
+    _verify_local_replay_filesystem,
+    replay_from_manifest,
+)
 from exaserve.plan.compiler import compile_deployment_plan
 from exaserve.plan.contracts import (
     SCHEMA_VERSION,
@@ -287,7 +292,7 @@ def test_non_root_replay_never_opens_shared_manifest_trace_or_result(tmp_path, m
     monkeypatch.setenv("EXASERVE_LOCAL_RUNTIME_ROOT", str(runtime))
     monkeypatch.setenv("EXASERVE_LOCAL_GO_DISPATCH", str(go_binary))
     monkeypatch.setenv("EXASERVE_LOCAL_STATE_ROOT", str(state))
-    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", __import__("sys").executable)
+    monkeypatch.setenv("EXASERVE_QUALIFIED_PYTHON", sys.executable)
 
     replay = ReplayClientConfig(
         config_path="/shared/runtime.yaml",
@@ -303,12 +308,22 @@ def test_non_root_replay_never_opens_shared_manifest_trace_or_result(tmp_path, m
         "saturation": dict(replay.saturation),
     }
 
+    class Status:
+        def Get_count(self, datatype):
+            assert datatype is mpi.BYTE
+            return 0
+
+    mpi = SimpleNamespace(BYTE=object(), Status=Status)
+    monkeypatch.setitem(sys.modules, "mpi4py", SimpleNamespace(MPI=mpi))
+
     class Immediate:
-        def test(self):
-            return True, None
+        def Test(self, status=None):
+            assert isinstance(status, Status)
+            return True
 
     class WorkerComm:
         def __init__(self):
+            self.sent = []
             self.broadcasts = [
                 {"context": context, "error": None},
                 {"ok": True, "error": None, "total": 0, "last_timestamp": 0.0},
@@ -332,8 +347,11 @@ def test_non_root_replay_never_opens_shared_manifest_trace_or_result(tmp_path, m
         def Barrier(self):
             return None
 
-        def isend(self, _value, *, dest, tag):
+        def Isend(self, buffer, *, dest, tag):
             assert dest == 0 and tag > 0
+            assert buffer[1] is mpi.BYTE
+            assert type(buffer[0]) is bytes
+            self.sent.append(buffer[0])
             return Immediate()
 
     comm = WorkerComm()
@@ -388,16 +406,18 @@ def test_non_root_replay_never_opens_shared_manifest_trace_or_result(tmp_path, m
             raise AssertionError(f"non-root opened shared path {path}")
         return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", guarded_open)
-    monkeypatch.setattr(os, "open", guard("os.open", real_os_open))
-    monkeypatch.setattr(os, "stat", guard("stat", real_stat))
-    monkeypatch.setattr(os, "lstat", guard("lstat", real_lstat))
-    monkeypatch.setattr(os, "listdir", guard("listdir", real_listdir))
-    monkeypatch.setattr(os, "scandir", guard("scandir", real_scandir))
-    monkeypatch.setattr(os, "access", guard("access", real_access))
-    asyncio.run(replay_from_manifest("/shared/runtime.yaml", base_urls_override="ignored"))
+    with monkeypatch.context() as filesystem_guards:
+        filesystem_guards.setattr(builtins, "open", guarded_open)
+        filesystem_guards.setattr(os, "open", guard("os.open", real_os_open))
+        filesystem_guards.setattr(os, "stat", guard("stat", real_stat))
+        filesystem_guards.setattr(os, "lstat", guard("lstat", real_lstat))
+        filesystem_guards.setattr(os, "listdir", guard("listdir", real_listdir))
+        filesystem_guards.setattr(os, "scandir", guard("scandir", real_scandir))
+        filesystem_guards.setattr(os, "access", guard("access", real_access))
+        asyncio.run(replay_from_manifest("/shared/runtime.yaml", base_urls_override="ignored"))
     assert shared_ops == []
     assert comm.broadcasts == []
+    assert [_decode_mpi_message(frame)[:4] for frame in comm.sent] == [("end", 0, 0, 0)]
 
 
 def _rewrite_manifest(path, change):

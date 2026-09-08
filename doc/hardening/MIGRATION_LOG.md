@@ -2194,3 +2194,33 @@ returning to n256 under a fresh immutable run-group identity. The failed
 The remaining current-snapshot PP n8/n16/n32/n64/n128 cells and corrected null
 n64/n128 pairs are still required for a homogeneous curve; they are not
 prerequisites for the largest-scale rerun.
+
+The receive correction is code commit `0a83547`: raw-result and summary
+messages now use explicitly sized `MPI.BYTE` buffers, a canonical JSON header
+bounded to 4 KiB, and a payload bounded to 1 MiB. Pending requests retain their
+buffers on failure; unfinished collectives prohibit retries and are retained
+until process teardown. Native replay failures also enable Python stack dumps.
+The focused transport/failure suite passed 98 tests.
+
+A differential compute probe on PBS `8811712`, node `x4613c1s6b0n0`, verified
+the old object receive at 16 KiB, reproduced `MPI.Exception: Message truncated`
+at 128 KiB, and verified a 1 MiB transfer with explicit `MPI.BYTE` buffers.
+The runs took approximately 0.62 seconds each; their return codes were 0, 1,
+and 0 respectively. This proves the size-dependent API failure on Aurora;
+it does not retroactively prove the precise native SIGSEGV mechanism in
+`8809332`. Probe source, logs, and hashed observations are retained under
+`artifacts/diagnostics/mpi_receive_20260908/`.
+
+The full compute-node suite then passed 1,701 tests in 157.51 seconds.
+Qualification uses a short private test root under `/tmp`: PBS's long default
+temporary path otherwise exceeds the Unix-socket limit in test fixtures.
+The remaining filesystem-guard test fake was updated to typed MPI and scoped
+so assertion reporting restores its guards. Log SHA-256:
+`05e710af9538be4fabad8b99011300d884bfb4706bfe66ec993492104d35323e`.
+
+The application-level large-message canary
+`nullcompute_haproxy_mpi_large_raw_2node/run0/n2`, PBS `8811748`, is submitted
+from `0a83547`, source snapshot
+`5d85794f26a54596dc4ddb237996652171b9cd78d21751c8235bf0e25f8d365f`.
+It requires two raw-result replays with 1,536 records per client rank and
+512-token prompts to force multiple large chunks. Its outcome is pending.
