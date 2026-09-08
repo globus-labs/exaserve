@@ -11,6 +11,7 @@ import os
 import pathlib
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -127,6 +128,172 @@ _SUMMARY_BYTES = 1 << 20
 _TRACE_BATCH_BYTES = 1 << 20
 _TRACE_ROW_BYTES = 16 << 20
 _UINT64_MAX = (1 << 64) - 1
+_MPI_HEADER_BYTES = 4 << 10
+_MPI_FRAME_BYTES = 4 + _MPI_HEADER_BYTES + max(_RESULT_CHUNK_BYTES, _SUMMARY_BYTES)
+_CANCELLED_MPI_MESSAGES = []
+_FAILED_MPI_COLLECTIVE = None
+
+
+def _require_mpi_collective_ready() -> None:
+    if _FAILED_MPI_COLLECTIVE is not None:
+        raise RuntimeError(
+            "cannot start MPI collective after an unfinished collective failed; "
+            "the replay process must terminate"
+        )
+
+
+def _retain_failed_mpi_collective(request, send_buffer, receive_buffer) -> None:
+    global _FAILED_MPI_COLLECTIVE
+    # A collective cannot portably be cancelled. Keep its request and arrays
+    # alive until supervised process teardown. This single fail-stop slot also
+    # prevents a caller from accumulating abandoned collectives by retrying.
+    if _FAILED_MPI_COLLECTIVE is None:
+        _FAILED_MPI_COLLECTIVE = (request, send_buffer, receive_buffer)
+
+
+def _encode_mpi_message(message: tuple) -> bytes:
+    """Frame the existing result protocol without implicit pickle buffers."""
+    if not isinstance(message, tuple) or not message:
+        raise ValueError("MPI message must be a protocol tuple")
+    kind = message[0]
+    header = {"schema_version": 1, "kind": kind}
+    if kind in ("data", "summary") and len(message) == 4:
+        _, run_index, index, content = message
+        if type(content) is not bytes:
+            raise ValueError("MPI message payload must be bytes")
+        header.update(
+            run_index=run_index,
+            **{"sequence" if kind == "data" else "rank": index},
+        )
+    elif kind == "end" and len(message) == 5:
+        _, run_index, chunks, records, evidence = message
+        header.update(run_index=run_index, chunks=chunks, records=records, evidence=evidence)
+        content = b""
+    else:
+        raise ValueError("MPI message has an unknown kind or invalid shape")
+    if len(content) > max(_RESULT_CHUNK_BYTES, _SUMMARY_BYTES):
+        raise ValueError("MPI message payload exceeds its byte bound")
+    header["payload_bytes"] = len(content)
+    encoded = json.dumps(header, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
+    if not encoded or len(encoded) > _MPI_HEADER_BYTES:
+        raise ValueError("MPI message header exceeds its byte bound")
+    frame = struct.pack("!I", len(encoded)) + encoded + content
+    # Sender and receiver use the same schema checks, including integer types.
+    _decode_mpi_message(frame)
+    return frame
+
+
+def _decode_mpi_message(frame: bytes) -> tuple:
+    from exaserve.state.atomic import strict_json_loads
+
+    if type(frame) is not bytes or not 4 < len(frame) <= _MPI_FRAME_BYTES:
+        raise ValueError("MPI message frame is truncated or exceeds its byte bound")
+    header_size = struct.unpack("!I", frame[:4])[0]
+    if not 0 < header_size <= _MPI_HEADER_BYTES or 4 + header_size > len(frame):
+        raise ValueError("MPI message header is truncated or exceeds its byte bound")
+    encoded = frame[4 : 4 + header_size]
+    header = strict_json_loads(encoded.decode("utf-8"))
+    if not isinstance(header, dict):
+        raise ValueError("MPI message header must be an object")
+    kind = header.get("kind")
+    fields = {"schema_version", "kind", "run_index", "payload_bytes"}
+    if kind == "data":
+        fields.add("sequence")
+        integer_fields = ("run_index", "sequence", "payload_bytes")
+    elif kind == "summary":
+        fields.add("rank")
+        integer_fields = ("run_index", "rank", "payload_bytes")
+    elif kind == "end":
+        fields.update(("chunks", "records", "evidence"))
+        integer_fields = ("run_index", "chunks", "records", "payload_bytes")
+    else:
+        raise ValueError("MPI message header has an unknown kind")
+    if (
+        set(header) != fields
+        or type(header["schema_version"]) is not int
+        or header["schema_version"] != 1
+        or any(type(header[field]) is not int or header[field] < 0 for field in integer_fields)
+        or json.dumps(header, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+        != encoded
+    ):
+        raise ValueError("MPI message header has invalid or non-canonical fields")
+    content = frame[4 + header_size :]
+    if len(content) != header["payload_bytes"]:
+        raise ValueError("MPI message payload length disagrees with its header")
+    if kind in ("data", "summary"):
+        bound = _RESULT_CHUNK_BYTES if kind == "data" else _SUMMARY_BYTES
+        if not content or len(content) > bound:
+            raise ValueError("MPI message payload is empty or exceeds its byte bound")
+        return (
+            kind,
+            header["run_index"],
+            header["sequence" if kind == "data" else "rank"],
+            content,
+        )
+    if content or not isinstance(header["evidence"], dict):
+        raise ValueError("MPI terminal must have evidence and no payload")
+    return (kind, header["run_index"], header["chunks"], header["records"], header["evidence"])
+
+
+class _MPIMessageRequest:
+    """Own a typed MPI request and its buffer through completion or shutdown."""
+
+    def __init__(self, request, buffer, mpi, *, receiving: bool):
+        self.request = request
+        self.buffer = buffer
+        self.status = mpi.Status()
+        self.datatype = mpi.BYTE
+        self.receiving = receiving
+        self.complete = False
+        self.value = None
+
+    def test(self):
+        if self.complete:
+            return True, self.value
+        if not self.request.Test(self.status):
+            return False, None
+        self.complete = True
+        if self.receiving:
+            count = self.status.Get_count(self.datatype)
+            if type(count) is not int or not 0 <= count <= len(self.buffer):
+                raise RuntimeError("MPI message receive count exceeds its explicit byte buffer")
+            self.value = _decode_mpi_message(bytes(memoryview(self.buffer)[:count]))
+        return True, self.value
+
+    def cancel(self):
+        if self.complete:
+            return
+        # Cancel is only a request, not proof that MPI has stopped using the
+        # buffer.  Retain failed transfers until process-group teardown rather
+        # than freeing storage still reachable by MPI.  Never block in Wait.
+        if self not in _CANCELLED_MPI_MESSAGES:
+            _CANCELLED_MPI_MESSAGES.append(self)
+        self.request.Cancel()
+        if self.request.Test(self.status):
+            self.complete = True
+            _CANCELLED_MPI_MESSAGES.remove(self)
+
+
+def _mpi_isend_message(comm, message, *, dest: int, tag: int):
+    from mpi4py import MPI
+
+    frame = _encode_mpi_message(message)
+    return _MPIMessageRequest(
+        comm.Isend([frame, MPI.BYTE], dest=dest, tag=tag), frame, MPI, receiving=False
+    )
+
+
+def _mpi_irecv_message(comm, *, source: int, tag: int):
+    from mpi4py import MPI
+
+    buffer = bytearray(_MPI_FRAME_BYTES)
+    return _MPIMessageRequest(
+        comm.Irecv([buffer, MPI.BYTE], source=source, tag=tag), buffer, MPI, receiving=True
+    )
 
 
 def _request_test(request):
@@ -158,11 +325,15 @@ def _cancel_requests(requests) -> None:
 
 
 def _wait_request(request, *, deadline: float, label: str):
-    while time.monotonic() < deadline:
-        complete, value = _request_test(request)
-        if complete:
-            return value
-        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    try:
+        while time.monotonic() < deadline:
+            complete, value = _request_test(request)
+            if complete:
+                return value
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    except BaseException:
+        _cancel_requests([request])
+        raise
     _cancel_requests([request])
     raise RuntimeError(f"{label} exceeded its absolute MPI deadline")
 
@@ -306,7 +477,9 @@ def _gather_raw_results_via_mpi(
         size_bytes = 0
         chunk_count = 0
         for sequence, content in enumerate(_iter_result_chunks(local_results)):
-            request = comm.isend(("data", run_index, sequence, content), dest=0, tag=_RESULT_TAG)
+            request = _mpi_isend_message(
+                comm, ("data", run_index, sequence, content), dest=0, tag=_RESULT_TAG
+            )
             _wait_request(
                 request,
                 deadline=deadline,
@@ -329,7 +502,7 @@ def _gather_raw_results_via_mpi(
             local_evidence,
         )
         _wait_request(
-            comm.isend(terminal, dest=0, tag=_RESULT_TAG),
+            _mpi_isend_message(comm, terminal, dest=0, tag=_RESULT_TAG),
             deadline=deadline,
             label=f"rank {rank} result terminal",
         )
@@ -357,8 +530,10 @@ def _gather_raw_results_via_mpi(
         }
         for other in range(1, mpi_size)
     }
-    pending = {other: comm.irecv(source=other, tag=_RESULT_TAG) for other in range(1, mpi_size)}
+    pending = {}
     try:
+        for other in range(1, mpi_size):
+            pending[other] = _mpi_irecv_message(comm, source=other, tag=_RESULT_TAG)
         while pending and time.monotonic() < deadline:
             progressed = False
             for other, request in list(pending.items()):
@@ -383,7 +558,7 @@ def _gather_raw_results_via_mpi(
                     state["digest"].update(content)
                     state["size"] += len(content)
                     state["next"] += 1
-                    pending[other] = comm.irecv(source=other, tag=_RESULT_TAG)
+                    pending[other] = _mpi_irecv_message(comm, source=other, tag=_RESULT_TAG)
                 elif message[0] == "end":
                     if len(message) != 5 or message[1] != run_index:
                         raise RuntimeError(f"rank {other} sent an invalid result terminal")
@@ -562,11 +737,10 @@ def _reduce_summary_via_mpi(
 ):
     """Reduce fixed-size totals and transfer bounded exact rank summaries.
 
-    mpi4py exposes nonblocking object point-to-point operations, but only
-    typed-buffer nonblocking collectives.  Keep the fixed counters in one
-    ``UINT64_T`` reduction and carry each canonical summary as one bounded
-    object message.  Root validates both paths against one another before it
-    publishes completeness evidence.
+    Keep the fixed counters in one ``UINT64_T`` reduction and carry each
+    canonical summary as one bounded, explicitly sized ``MPI.BYTE`` message.
+    Root validates both paths against one another before it publishes
+    completeness evidence.
     """
     _LAST_GATHER_META.clear()
     if comm is None or mpi_size <= 1:
@@ -648,18 +822,12 @@ def _reduce_summary_via_mpi(
     totals = [summary[field] for field in sum_fields]
     if any(value > _UINT64_MAX for value in totals):
         raise ValueError(f"rank {rank} MPI summary counter exceeds UINT64_MAX")
+    _require_mpi_collective_ready()
     send_totals = array("Q", totals)
     if send_totals.itemsize != 8:
         raise RuntimeError("platform unsigned-long-long is not a 64-bit MPI counter")
     receive_totals = array("Q", [0] * len(sum_fields)) if is_root else None
     deadline = time.monotonic() + timeout_s
-    reduction = comm.Ireduce(
-        [send_totals, MPI.UINT64_T],
-        [receive_totals, MPI.UINT64_T] if receive_totals is not None else None,
-        op=MPI.SUM,
-        root=0,
-    )
-    reduction_pending = True
     summaries = {0: summary} if is_root else {}
     evidence = (
         {
@@ -673,19 +841,25 @@ def _reduce_summary_via_mpi(
         if is_root
         else {}
     )
-    if is_root:
-        pending = {
-            other: comm.irecv(source=other, tag=_SUMMARY_TAG) for other in range(1, mpi_size)
-        }
-    else:
-        pending = {
-            rank: comm.isend(
+    pending = {}
+    reduction = comm.Ireduce(
+        [send_totals, MPI.UINT64_T],
+        [receive_totals, MPI.UINT64_T] if receive_totals is not None else None,
+        op=MPI.SUM,
+        root=0,
+    )
+    reduction_pending = True
+    try:
+        if is_root:
+            for other in range(1, mpi_size):
+                pending[other] = _mpi_irecv_message(comm, source=other, tag=_SUMMARY_TAG)
+        else:
+            pending[rank] = _mpi_isend_message(
+                comm,
                 ("summary", run_index, rank, encoded),
                 dest=0,
                 tag=_SUMMARY_TAG,
             )
-        }
-    try:
         while (reduction_pending or pending) and time.monotonic() < deadline:
             progressed = False
             if reduction_pending and _buffer_request_test(reduction):
@@ -732,11 +906,15 @@ def _reduce_summary_via_mpi(
                 time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
     except BaseException:
         # MPI does not portably cancel a nonblocking collective.  Cancel only
-        # object point-to-point requests; the enclosing replay process-group
+        # framed point-to-point requests; the enclosing replay process-group
         # supervisor supplies the hard failure/termination bound.
+        if reduction_pending:
+            _retain_failed_mpi_collective(reduction, send_totals, receive_totals)
         _cancel_requests(pending.values())
         raise
     if reduction_pending or pending:
+        if reduction_pending:
+            _retain_failed_mpi_collective(reduction, send_totals, receive_totals)
         _cancel_requests(pending.values())
         if is_root:
             _LAST_GATHER_META.update(
@@ -815,6 +993,7 @@ def _reduce_dispatch_end_via_mpi(
         return float(local_last_fire_time)
     from mpi4py import MPI
 
+    _require_mpi_collective_ready()
     send_value = array("d", [float(local_last_fire_time)])
     receive_value = array("d", [0.0]) if is_root else None
     deadline = time.monotonic() + timeout_s
@@ -824,17 +1003,25 @@ def _reduce_dispatch_end_via_mpi(
         op=MPI.MAX,
         root=0,
     )
-    while time.monotonic() < deadline:
-        if _buffer_request_test(request):
-            if not is_root:
-                return None
-            assert receive_value is not None
-            reduced = float(receive_value[0])
-            _result_number(reduced, field="global dispatch last_fire_time")
-            return reduced
-        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    complete = False
+    try:
+        while time.monotonic() < deadline:
+            if _buffer_request_test(request):
+                complete = True
+                if not is_root:
+                    return None
+                assert receive_value is not None
+                reduced = float(receive_value[0])
+                _result_number(reduced, field="global dispatch last_fire_time")
+                return reduced
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    except BaseException:
+        if not complete:
+            _retain_failed_mpi_collective(request, send_value, receive_value)
+        raise
     # Nonblocking collective cancellation is not portable.  Raising lets the
     # supervised mpiexec boundary terminate the complete rank set.
+    _retain_failed_mpi_collective(request, send_value, receive_value)
     raise RuntimeError("distributed dispatch-end reduction exceeded its absolute MPI deadline")
 
 

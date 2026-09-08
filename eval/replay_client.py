@@ -48,4 +48,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Preserve the Python stack in the head-collected MPI stderr stream when
+    # a native dependency terminates a rank before it can raise an exception.
+    import faulthandler
+
+    faulthandler.enable()
     raise SystemExit(main())

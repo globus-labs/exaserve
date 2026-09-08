@@ -1,6 +1,6 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress; last updated 2026-09-07**. This document is an evidence
+Status: **in progress; last updated 2026-09-08**. This document is an evidence
 ledger, not a completed paper reproduction claim. A number appears in an
 accepted table only after the immutable run bundle, terminal state, result
 manifest, readiness evidence, and shutdown evidence all pass the repository's
@@ -476,15 +476,73 @@ complete four-entry ResultManifest hash is
 PBS exited 0 after 01:08:50, and teardown published clean `STOPPED` after 4/4
 DRAIN and GOODBYE, with no errors or exhausted deadline.
 
-The same immutable `run10` group has submitted its n256 cell as PBS `8809332`.
-It binds the same commit, source snapshot, compatibility profile and
-compatibility manifest; its deployment-plan hash is
+### Rejected n256 replay attempt after successful full-scale service startup
+
+The same immutable `run10` group's n256 cell ran as PBS `8809332` on
+2026-09-07. It binds the same commit, source snapshot, compatibility profile
+and compatibility manifest; its deployment-plan hash is
 `344e3591c8a0dfc6853e7cead2a409e64b6808db81691a9f155729f5f8d8527b`
 and run-semantic hash is
 `d748a4d24176cb806a305eae45d3e4e3576d5dd3148bccfbc4808ad2ce3bd848`.
-It is currently queued for 256 nodes with a four-hour walltime and has not
-started. It has no READY, replay, result-manifest or cleanup evidence and is
-therefore **not accepted**; scheduler state alone is not a paper result.
+Its exact generation is `1788796285881926827`, allocation-binding hash is
+`5da465615692f538a91f581c723a6c9cb9684a1515ee2292f7e7c2f4dda258d6`,
+and source capsule manifest is
+`3fabecc263d1674287373f05df8f8099310f4902010942948982a514f7c4cb1e`.
+PBS records start `15:50:38 UTC`, finish `17:03:09 UTC`, used walltime
+`01:11:08`, terminal state `F` and exit 143. This was a replay failure, not
+walltime exhaustion, and is **rejected paper evidence**.
+
+Source distribution passed on exactly 256/256 allocation-bound ranks in
+4.6199 seconds (5.8 seconds at the composition boundary). Every rank
+verified the same 414-file, 25,065,308-byte capsule, both VC-01 seed entries,
+and node-local `tmpfs` runtime/state paths. Head-owned model verification took
+867.48 seconds. MPI distributed the 408,748,312,778-byte stage 0 only to the
+128 even ranks in 394.07 seconds and the 407,607,560,984-byte stage 1 only to
+the 128 odd ranks in 353.38 seconds. The 256 publication receipts cover each
+planned rank exactly once, with the correct stage, 102 files and a `tmpfs`
+target. Stage manifest hashes are
+`5884c67e4de4b0ce65905eda1f5472b6c885dd8bbee5e5bc62f215eceadfc5b1`
+and `12103a751d11c20c0540fbed4f51414c0c4403ba37ad0460ec7add74dfa999ec`.
+The sealed model-broadcast duration is 2,885.7061 seconds (2,886.5 seconds at
+the composition boundary), including a 2,016.8851-second model entry.
+
+Canonical READY was published at `2026-09-07T16:53:14.095000+00:00`,
+3,708.213 seconds after the generation anchor. It proved 256 exact Ray nodes,
+384 applications, 128/128 TP8 x PP2 405B replicas with 2,048 engine workers,
+256 healthy proxies, HAProxy health and a routed model canary. The exact
+2,818-slot receipt set has manifest hash
+`a3f88b3b999ee692e0b697141087c9d0a4d89eca945183f5f563904cc5d06fce`;
+every receipt records mpi4py 4.1.1. Canonical model deployment took 758.81
+seconds. These are diagnostic startup facts, not accepted paper measurements.
+
+Replay 0 used four MPI client ranks with four Go processes each. All 16 Go
+processes logged completion and saving of 384 local rows apiece. The MPI
+parent on rank 0 then died from signal 11 (`SIGSEGV`), and PALS terminated
+peers. This does not establish globally authenticated request counts,
+successful throughput, latency or zero errors. Global aggregation did not
+publish a result, replay 1 never ran, `results/` is empty and no ResultManifest
+exists. The retained replay diagnostic has SHA-256
+`33c4a098f3cfd8f8670f9facd2e7407f95f5880de97e7f686de24b484e62cac3`.
+
+Failure cleanup completed: all 256 ranks acknowledged DRAIN and GOODBYE,
+and the deployment published `STOPPED` at
+`2026-09-07T17:02:14.034156+00:00`. Its shutdown report records `clean=true`,
+no errors and no exhausted deadline; its byte hash is
+`d71c89f9752e0d43c99a22142de2b0088a08fb2e5b34a4d007725687332127c9`.
+The run state became `FAILED`/`REPLAY_PROCESS_EXITED` at
+`2026-09-07T17:02:14.709944+00:00`, retaining the replay-client exit 143.
+
+Inspection confirms a receive-size contract defect in the producing source:
+raw result chunks can be 1 MiB, while `comm.irecv()` has no explicit buffer
+and mpi4py 4.1.1 defaults to 32 KiB. Its serialized message also includes the
+tuple/pickle envelope. The small accepted n4 and summary canaries did not
+qualify this larger-message case. The retained signal report has no native
+backtrace, so this mismatch is a confirmed code defect and a candidate cause,
+**not yet proof of the n256 SIGSEGV's cause**. Reproduce and qualify the fix
+with actual MPI messages above 32 KiB before the next large submission. The
+failed cell remains immutable. Unsubmitted `run10` cells bind the same
+defective receive path and must not be submitted; subsequent source changes
+require a fresh run-group identity.
 
 ## Current accepted results
 
@@ -578,7 +636,7 @@ accepted cell.
 | 32 | 16 | 768/768 | 0 | 5.339415 | 15.106 | 29.495 | accepted |
 | 64 | 32 | 1,536/1,536 | 0 | 10.750777 | 14.785 | 24.624 | accepted |
 | 128 | 64 | 3,072/3,072 | 0 | 20.739459 | 15.071 | 31.018 | accepted |
-| 256 | 128 | pending | pending | pending | pending | pending | queued as PBS `8809332`; not accepted |
+| 256 | 128 | pending | pending | pending | pending | pending | PBS `8809332` rejected after replay-parent SIGSEGV; rerun required |
 
 The accepted n4 cell is now the immutable `run10` artifact from source snapshot
 `7efc01f898e51f72c73f84bc6c044d29516c02cfd8780a7cfc393dd041cb5059`
@@ -592,8 +650,8 @@ snapshot
 at commit `eabf59c`. The accepted n32 through n128 cells are pinned to
 `run4`, snapshot
 `a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1`
-at commit `4d009c1`. The queued n256 cell returns to `run10` and is not part of
-the accepted table until its complete evidence passes. This split is a
+at commit `4d009c1`. The rejected n256 cell is `run10`; it has no accepted
+result and requires a fresh identity after the receive-path fix. This split is a
 reviewed compatibility waiver, not an
 unnoticed mix: the grouped-application behavior is admitted only for dense
 TP1/PP1 `null_compute` plans. Its shared HAProxy route renderer retains `_r` as
@@ -819,6 +877,14 @@ throughput for a 2x node/replica increase.
   never ran. The locally saved rank-0 request records and READY evidence are
   diagnostic only, not a paper measurement. All unsubmitted larger `run9`
   cells bind the same defective source snapshot and are superseded.
+- PP2 `run10/n256`, PBS job `8809332`, proved exact 256-node 405B READY and
+  clean 256/256 DRAIN/GOODBYE shutdown. Its 16 Go subprocesses each logged
+  384 completed local rows during replay 0, but MPI rank 0 died from signal 11
+  before global result publication. Replay 1 never ran, `results/` is empty,
+  and no ResultManifest exists. Local completion logs, service readiness and
+  successful model staging provide no accepted throughput or error count.
+  The confirmed 1-MiB-send/32-KiB-default-receive mismatch requires a fix and
+  live MPI qualification; its responsibility for this SIGSEGV is not yet proven.
 - PP2 `run2` 4- and 8-node successes use the superseded 0.90 setting; the final
   low-node values come from `run3` at 0.95.
 - Three historical streaming PP2 cells were produced while their nominal
@@ -846,12 +912,13 @@ collective. Its replacement gates are now complete: full-replay MPI canary
 `run10/n4`, PBS `8809232`, passed as an accepted paper cell. Rejected `run7`,
 `run8` and `run9` identities remain immutable and must not be reset or reused.
 
-1. Monitor the already-submitted 405B `run10/n256`, PBS `8809332`. It is the
-   only active prerequisite for the current largest-scale bring-up objective.
-   At this update it remains queued and unaccepted; accept it only after exact
-   READY, both complete replays, a complete authenticated ResultManifest, and
-   clean terminal evidence. Do not submit a duplicate merely because it is
-   waiting for 256 free nodes.
+1. Preserve the rejected 405B `run10/n256`, PBS `8809332`, and correct the
+   replay receive-size contract. Use a discriminating compute-node MPI test
+   above 32 KiB, including bounded failure handling, before materializing a
+   fresh run group and returning directly to n256. Exact READY, both complete
+   replays, a complete authenticated ResultManifest and clean terminal
+   evidence remain mandatory; successful service startup alone does not
+   complete the largest-scale objective.
 2. After the n256 disposition is sealed, fill the intermediate homogeneous
    curve: corrected-snapshot null-compute n64/n128 pairs and current-snapshot
    PP n8/n16/n32/n64/n128 cells. These are still required for the final curve,

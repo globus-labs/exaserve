@@ -2124,14 +2124,73 @@ four-entry ResultManifest hash is
 PBS exited 0 after 01:08:50; shutdown published clean `STOPPED` after 4/4 DRAIN
 and GOODBYE, with no errors or exhausted deadline.
 
-The MPI canary and n4 paper gate are therefore complete. The same immutable
-`run10` group submitted n256 as PBS `8809332`; its deployment-plan hash is
+The MPI canary and n4 paper gate are complete. The same immutable `run10`
+group's n256 cell ran as PBS `8809332`; its deployment-plan hash is
 `344e3591c8a0dfc6853e7cead2a409e64b6808db81691a9f155729f5f8d8527b`
 and run-semantic hash is
 `d748a4d24176cb806a305eae45d3e4e3576d5dd3148bccfbc4808ad2ce3bd848`.
-It is queued for 256 nodes and four hours and has not started, so it has no
-READY, replay, result-manifest or cleanup evidence and is not accepted. This is
-the only queued prerequisite for the current largest-scale objective. Once its
-disposition is sealed, the remaining current-snapshot PP n8/n16/n32/n64/n128
-cells and corrected null n64/n128 pairs are still required to complete a
-homogeneous curve; they are not prerequisites for launching n256.
+
+## 256-node service success and rejected replay aggregation (2026-09-08)
+
+PBS `8809332` started at `2026-09-07 15:50:38 UTC`, finished at `17:03:09
+UTC`, and records terminal state `F`, exit 143 and used walltime `01:11:08`.
+The exact deployment generation is `1788796285881926827` and allocation
+binding is
+`5da465615692f538a91f581c723a6c9cb9684a1515ee2292f7e7c2f4dda258d6`.
+This n256 cell is rejected paper evidence; the corrected null n256 pair and
+accepted `run10/n4` paper cell remain unchanged.
+
+The source capsule manifest
+`3fabecc263d1674287373f05df8f8099310f4902010942948982a514f7c4cb1e`
+passed on all 256 bound ranks in 4.6199 seconds (5.8 seconds at the
+composition boundary). Every rank verified the same 414 files/25,065,308
+bytes, both VC-01 entries and `tmpfs` runtime/state locations. Head-owned
+model verification took 867.48 seconds. Stage 0's 408,748,312,778 bytes went
+only to the 128 even ranks in 394.07 seconds; stage 1's 407,607,560,984 bytes
+went only to the 128 odd ranks in 353.38 seconds. All 256 stage publication
+receipts match their allocation-bound rank/node and expected 102-file stage
+on `tmpfs`. The model entry took 2,016.8851 seconds and the sealed complete
+model-broadcast duration was 2,885.7061 seconds (2,886.5 seconds at the
+composition boundary).
+
+Canonical READY was published at `2026-09-07T16:53:14.095000+00:00`,
+3,708.213 seconds after the generation anchor, proving 256 exact Ray nodes,
+384 applications, 128/128 405B TP8 x PP2 engines with 2,048 workers, 256
+healthy proxies, HAProxy health and a successful routed model canary.
+The exact 2,818-slot compatibility receipt manifest is
+`a3f88b3b999ee692e0b697141087c9d0a4d89eca945183f5f563904cc5d06fce`;
+all 2,818 receipts record mpi4py 4.1.1. Canonical model deployment took
+758.81 seconds. This establishes successful service startup at the largest
+scale, but it does not establish an accepted paper result.
+
+Replay 0 used four MPI ranks, each with four Go processes. All 16 Go processes
+logged completion and saving of 384 local rows apiece. MPI rank 0 then died
+from signal 11 (`SIGSEGV`) and PALS terminated peers. No globally
+authenticated result or ResultManifest was published, replay 1 never ran and
+`results/` is empty. Neither global successful-request counts nor throughput,
+latency or zero errors may be inferred from those local completion logs.
+The retained replay diagnostic SHA-256 is
+`33c4a098f3cfd8f8670f9facd2e7407f95f5880de97e7f686de24b484e62cac3`.
+
+Teardown remained bounded and clean: 256/256 DRAIN and GOODBYE, deployment
+`STOPPED` at `2026-09-07T17:02:14.034156+00:00`, no shutdown errors and no
+exhausted deadline. The shutdown report byte hash is
+`d71c89f9752e0d43c99a22142de2b0088a08fb2e5b34a4d007725687332127c9`.
+The run published `FAILED`/`REPLAY_PROCESS_EXITED` at
+`2026-09-07T17:02:14.709944+00:00`, retaining exit 143. This is clean failure
+cleanup, not successful replay qualification or walltime exhaustion.
+
+Code inspection confirms the producing source allows raw chunks up to 1 MiB
+but calls object `comm.irecv()` without an explicit receive buffer. The bound
+mpi4py 4.1.1 runtime defaults that buffer to 32 KiB, and the serialized tuple
+also adds pickle-envelope bytes. This is a confirmed receive-size contract
+defect that small-message qualification missed. The signal-only retained
+diagnostic has no native backtrace, so causality for the observed n256
+SIGSEGV remains to be established on compute. The next qualification must
+exercise real MPI payloads above 32 KiB and bounded failure handling before
+returning to n256 under a fresh immutable run-group identity. The failed
+`run10/n256` cannot be reset, reused or promoted to paper evidence.
+
+The remaining current-snapshot PP n8/n16/n32/n64/n128 cells and corrected null
+n64/n128 pairs are still required for a homogeneous curve; they are not
+prerequisites for the largest-scale rerun.

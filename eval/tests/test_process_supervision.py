@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -22,15 +23,22 @@ from eval.lib.run_executor import (
 )
 from eval.lib.replay_engine import (
     _LAST_GATHER_META,
+    _MPI_FRAME_BYTES,
+    _MPI_HEADER_BYTES,
+    _RESULT_CHUNK_BYTES,
     TraceRequest,
     _apply_direct_topology,
     _decode_gather_payload,
+    _decode_mpi_message,
     _distribute_trace_requests,
     _encode_gather_payload,
+    _encode_mpi_message,
     _gather_raw_results_via_mpi,
     _init_mpi,
     _load_trace_requests,
     _merge_go_process_summaries,
+    _mpi_irecv_message,
+    _mpi_isend_message,
     _next_result_path,
     _port_from_manifest,
     _read_go_results,
@@ -39,6 +47,7 @@ from eval.lib.replay_engine import (
     _send_run_t0_and_wait,
     _stop_replay_process,
     _validate_base_urls,
+    _wait_request,
 )
 
 
@@ -641,25 +650,39 @@ def test_result_mpi_payload_decoder_rejects_pickle_and_unknown_shapes():
         _decode_gather_payload(b'{"schema_version":1,"kind":"summary","summary":{},"extra":true}')
 
 
-class _ImmediateRequest:
-    def __init__(self, value=None):
-        self.value = value
+class _MessageRequest:
+    """Model real MPI typed-buffer completion, including its capacity bound."""
 
-    def test(self):
-        return True, self.value
+    def __init__(self, *, buffer=None, frame=None, never=False, polls=0, count=None):
+        self.buffer = buffer
+        self.frame = frame
+        self.never = never
+        self.polls = polls
+        self.count = count
+        self.cancelled = False
+
+    def Test(self, status=None):
+        if self.never:
+            return False
+        if self.polls:
+            self.polls -= 1
+            return False
+        if self.frame is not None:
+            assert self.buffer is not None
+            if len(self.frame) > len(self.buffer):
+                raise RuntimeError("MPI_ERR_TRUNCATE: frame exceeds posted receive capacity")
+            self.buffer[: len(self.frame)] = self.frame
+            assert status is not None
+            status.count = len(self.frame) if self.count is None else self.count
+        return True
+
+    def Cancel(self):
+        self.cancelled = True
 
 
 class _ImmediateBufferRequest:
     def Test(self):
         return True
-
-
-class _NeverRequest:
-    def test(self):
-        return False, None
-
-    def cancel(self):
-        return None
 
 
 class _NeverBufferRequest:
@@ -670,22 +693,36 @@ class _NeverBufferRequest:
 class _SendComm:
     def __init__(self):
         self.messages = []
+        self.frames = []
 
-    def isend(self, message, *, dest, tag):
+    def Isend(self, buffer, *, dest, tag):
+        from mpi4py import MPI
+
         assert (dest, tag) == (0, 27181)
-        self.messages.append(message)
-        return _ImmediateRequest()
+        assert buffer[1] is MPI.BYTE
+        self.frames.append(bytes(buffer[0]))
+        self.messages.append(_decode_mpi_message(bytes(buffer[0])))
+        return _MessageRequest()
 
 
 class _ReceiveComm:
     def __init__(self, messages):
         self.messages = {rank: list(items) for rank, items in messages.items()}
+        self.requests = []
 
-    def irecv(self, *, source, tag):
+    def Irecv(self, buffer, *, source, tag):
+        from mpi4py import MPI
+
         assert tag == 27181
+        assert buffer[1] is MPI.BYTE and len(buffer[0]) == _MPI_FRAME_BYTES
         if not self.messages[source]:
-            return _NeverRequest()
-        return _ImmediateRequest(self.messages[source].pop(0))
+            request = _MessageRequest(never=True)
+        else:
+            message = self.messages[source].pop(0)
+            frame = message if isinstance(message, bytes) else _encode_mpi_message(message)
+            request = _MessageRequest(buffer=buffer[0], frame=frame)
+        self.requests.append(request)
+        return request
 
 
 class _SummaryComm:
@@ -703,12 +740,18 @@ class _SummaryComm:
             receive[0][index] = (value * 2 + self.reduction_offset) & ((1 << 64) - 1)
         return _NeverBufferRequest() if self.reduction_never else _ImmediateBufferRequest()
 
-    def irecv(self, *, source, tag):
+    def Irecv(self, buffer, *, source, tag):
+        from mpi4py import MPI
+
         assert source == 1 and tag == 27182
+        assert buffer[1] is MPI.BYTE and len(buffer[0]) == _MPI_FRAME_BYTES
         if self.remote_summary is None:
-            return _NeverRequest()
-        return _ImmediateRequest(
-            ("summary", 0, source, _encode_gather_payload(self.remote_summary))
+            return _MessageRequest(never=True)
+        return _MessageRequest(
+            buffer=buffer[0],
+            frame=_encode_mpi_message(
+                ("summary", 0, source, _encode_gather_payload(self.remote_summary))
+            ),
         )
 
 
@@ -723,10 +766,13 @@ class _SummarySenderComm:
         assert op == MPI.SUM and root == 0
         return _ImmediateBufferRequest()
 
-    def isend(self, message, *, dest, tag):
+    def Isend(self, buffer, *, dest, tag):
+        from mpi4py import MPI
+
         assert dest == 0 and tag == 27182
-        self.messages.append(message)
-        return _ImmediateRequest()
+        assert buffer[1] is MPI.BYTE
+        self.messages.append(_decode_mpi_message(bytes(buffer[0])))
+        return _MessageRequest()
 
 
 class _SummaryMessageComm(_SummaryComm):
@@ -734,9 +780,15 @@ class _SummaryMessageComm(_SummaryComm):
         super().__init__(remote_summary)
         self.message = message
 
-    def irecv(self, *, source, tag):
+    def Irecv(self, buffer, *, source, tag):
+        from mpi4py import MPI
+
         assert source == 1 and tag == 27182
-        return _ImmediateRequest(self.message)
+        assert buffer[1] is MPI.BYTE
+        frame = (
+            self.message if isinstance(self.message, bytes) else _encode_mpi_message(self.message)
+        )
+        return _MessageRequest(buffer=buffer[0], frame=frame)
 
 
 class _MaxComm:
@@ -756,7 +808,8 @@ def _raw_record(request_id="request-1"):
     return (request, 0.5, True, "", 2.0, 2, 3, 0.1, 1.6, 0.01, 0.02, 0.03, 3)
 
 
-def test_multi_rank_mpi_transfer_emits_complete_evidence_without_files(tmp_path):
+def test_multi_rank_mpi_transfer_emits_complete_evidence_without_files(tmp_path, monkeypatch):
+    _install_fake_mpi(monkeypatch)
     remote_comm = _SendComm()
     remote_record = _raw_record("remote")
     assert (
@@ -791,7 +844,8 @@ def test_multi_rank_mpi_transfer_emits_complete_evidence_without_files(tmp_path)
     assert _valid_gather_evidence(_LAST_GATHER_META, 2)
 
 
-def test_multi_rank_mpi_transfer_timeout_fails_closed():
+def test_multi_rank_mpi_transfer_timeout_fails_closed(monkeypatch):
+    _install_fake_mpi(monkeypatch)
     with pytest.raises(RuntimeError, match=r"timed out.*missing.*\[1\]"):
         _gather_raw_results_via_mpi(
             _ReceiveComm({1: []}),
@@ -807,9 +861,341 @@ def test_multi_rank_mpi_transfer_timeout_fails_closed():
 
 
 def _install_fake_mpi(monkeypatch):
-    mpi = SimpleNamespace(SUM=object(), MAX=object(), UINT64_T=object(), DOUBLE=object())
+    class Status:
+        count = 0
+
+        def Get_count(self, datatype):
+            assert datatype is mpi.BYTE
+            return self.count
+
+    mpi = SimpleNamespace(
+        SUM=object(), MAX=object(), UINT64_T=object(), DOUBLE=object(), BYTE=object(), Status=Status
+    )
     monkeypatch.setitem(sys.modules, "mpi4py", SimpleNamespace(MPI=mpi))
+    monkeypatch.setattr("eval.lib.replay_engine._CANCELLED_MPI_MESSAGES", [])
+    monkeypatch.setattr("eval.lib.replay_engine._FAILED_MPI_COLLECTIVE", None)
     return mpi
+
+
+@pytest.mark.parametrize("kind", ["data", "summary"])
+@pytest.mark.parametrize("payload_bytes", [32769, _RESULT_CHUNK_BYTES])
+def test_mpi_message_round_trip_crosses_default_object_receive_limit(
+    monkeypatch, kind, payload_bytes
+):
+    _install_fake_mpi(monkeypatch)
+    message = (kind, 4, 1, b"x" * payload_bytes)
+    frame = _encode_mpi_message(message)
+    receive = _mpi_irecv_message(_ReceiveComm({1: [frame]}), source=1, tag=27181)
+
+    assert len(frame) > payload_bytes
+    assert receive.test() == (True, message)
+    assert receive.test() == (True, message)
+
+
+def _frame_with_header(header, payload=b"", *, canonical=True):
+    encoded = json.dumps(
+        header,
+        sort_keys=canonical,
+        separators=(",", ":") if canonical else None,
+    ).encode()
+    return struct.pack("!I", len(encoded)) + encoded + payload
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        b"",
+        b"abc",
+        struct.pack("!I", 0),
+        struct.pack("!I", _MPI_HEADER_BYTES + 1) + b"x" * (_MPI_HEADER_BYTES + 1),
+        struct.pack("!I", 100) + b"{}",
+        b"x" * (_MPI_FRAME_BYTES + 1),
+        _frame_with_header([]),
+        _frame_with_header(
+            {
+                "schema_version": 2,
+                "kind": "data",
+                "run_index": 0,
+                "sequence": 0,
+                "payload_bytes": 1,
+            },
+            b"x",
+        ),
+        _frame_with_header(
+            {
+                "schema_version": True,
+                "kind": "data",
+                "run_index": 0,
+                "sequence": 0,
+                "payload_bytes": 1,
+            },
+            b"x",
+        ),
+        _frame_with_header(
+            {
+                "schema_version": 1,
+                "kind": "data",
+                "run_index": False,
+                "sequence": 0,
+                "payload_bytes": 1,
+            },
+            b"x",
+        ),
+        _frame_with_header(
+            {
+                "schema_version": 1,
+                "kind": "data",
+                "run_index": 0,
+                "sequence": -1,
+                "payload_bytes": 1,
+            },
+            b"x",
+        ),
+        _frame_with_header(
+            {
+                "schema_version": 1,
+                "kind": "data",
+                "run_index": 0,
+                "sequence": 0,
+                "payload_bytes": 2,
+            },
+            b"x",
+        ),
+        _frame_with_header(
+            {"schema_version": 1, "kind": "unknown", "run_index": 0, "payload_bytes": 1}, b"x"
+        ),
+        _frame_with_header(
+            {
+                "schema_version": 1,
+                "kind": "data",
+                "run_index": 0,
+                "sequence": 0,
+                "payload_bytes": 1,
+                "extra": 1,
+            },
+            b"x",
+        ),
+        _frame_with_header(
+            {
+                "schema_version": 1,
+                "kind": "data",
+                "run_index": 0,
+                "sequence": 0,
+                "payload_bytes": 1,
+            },
+            b"x",
+            canonical=False,
+        ),
+        _frame_with_header(
+            {
+                "schema_version": 1,
+                "kind": "end",
+                "run_index": 0,
+                "chunks": 0,
+                "records": 0,
+                "evidence": {},
+                "payload_bytes": 1,
+            },
+            b"x",
+        ),
+    ],
+)
+def test_mpi_message_rejects_malformed_truncated_or_oversized_frames(frame):
+    with pytest.raises(ValueError, match="MPI message|MPI terminal"):
+        _decode_mpi_message(frame)
+
+
+def test_mpi_message_rejects_duplicate_header_keys():
+    header = b'{"kind":"data","payload_bytes":1,"run_index":0,"schema_version":1,"sequence":0,"sequence":1}'
+    with pytest.raises(ValueError):
+        _decode_mpi_message(struct.pack("!I", len(header)) + header + b"x")
+
+
+def test_mpi_message_sender_rejects_payload_or_header_overflow_before_posting(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    sender = _SendComm()
+    with pytest.raises(ValueError, match="payload exceeds"):
+        _mpi_isend_message(
+            sender, ("data", 0, 0, b"x" * (_RESULT_CHUNK_BYTES + 1)), dest=0, tag=27181
+        )
+    with pytest.raises(ValueError, match="header exceeds"):
+        _mpi_isend_message(
+            sender, ("end", 0, 0, 0, {"padding": "x" * _MPI_HEADER_BYTES}), dest=0, tag=27181
+        )
+    assert sender.frames == []
+
+
+@pytest.mark.parametrize("count", [-1, _MPI_FRAME_BYTES + 1])
+def test_mpi_message_receive_rejects_invalid_status_count(monkeypatch, count):
+    _install_fake_mpi(monkeypatch)
+    comm = _ReceiveComm({1: [("data", 0, 0, b"x")]})
+    request = _mpi_irecv_message(comm, source=1, tag=27181)
+    comm.requests[0].count = count
+    with pytest.raises(RuntimeError, match="receive count exceeds"):
+        request.test()
+
+
+def test_mpi_message_timeout_cancels_without_releasing_live_buffers(monkeypatch):
+    import eval.lib.replay_engine as replay
+
+    _install_fake_mpi(monkeypatch)
+    comm = _ReceiveComm({1: []})
+    request = _mpi_irecv_message(comm, source=1, tag=27181)
+    with pytest.raises(RuntimeError, match="absolute MPI deadline"):
+        _wait_request(request, deadline=time.monotonic() - 1, label="test receive")
+    assert comm.requests[0].cancelled
+    assert replay._CANCELLED_MPI_MESSAGES == [request]
+    assert len(request.buffer) == _MPI_FRAME_BYTES
+
+
+def test_mpi_message_send_keeps_its_buffer_until_cancel_completes(monkeypatch):
+    import eval.lib.replay_engine as replay
+
+    _install_fake_mpi(monkeypatch)
+
+    class Sender:
+        def Isend(self, buffer, *, dest, tag):
+            self.buffer = buffer[0]
+            return _MessageRequest(never=True)
+
+    sender = Sender()
+    request = _mpi_isend_message(sender, ("data", 0, 0, b"x" * 40000), dest=0, tag=27181)
+    assert request.buffer is sender.buffer
+    assert request.test() == (False, None)
+    request.cancel()
+    assert replay._CANCELLED_MPI_MESSAGES == [request]
+    request.request.never = False
+    request.cancel()
+    assert replay._CANCELLED_MPI_MESSAGES == []
+
+
+def test_mpi_message_send_test_exception_retains_active_buffer(monkeypatch):
+    import eval.lib.replay_engine as replay
+
+    _install_fake_mpi(monkeypatch)
+
+    class FailedTestRequest(_MessageRequest):
+        def Test(self, status=None):
+            raise RuntimeError("injected MPI Test failure")
+
+    class Sender:
+        def Isend(self, buffer, *, dest, tag):
+            self.buffer = buffer[0]
+            self.request = FailedTestRequest()
+            return self.request
+
+    sender = Sender()
+    request = _mpi_isend_message(sender, ("data", 0, 0, b"x" * 40000), dest=0, tag=27181)
+    with pytest.raises(RuntimeError, match="injected MPI Test failure"):
+        _wait_request(request, deadline=time.monotonic() + 1, label="test send")
+    assert sender.request.cancelled
+    assert replay._CANCELLED_MPI_MESSAGES == [request]
+    assert request.buffer is sender.buffer
+
+
+def test_multi_rank_mpi_frame_failure_cancels_other_pending_receives(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    comm = _ReceiveComm({1: [b"invalid"], 2: []})
+    with pytest.raises(ValueError, match="MPI message header"):
+        _gather_raw_results_via_mpi(
+            comm, [], run_index=0, rank=0, mpi_size=3, is_root=True, timeout_s=1
+        )
+    assert comm.requests[1].cancelled
+    assert not _LAST_GATHER_META.get("complete", False)
+
+
+def test_multi_rank_mpi_receive_setup_failure_cancels_already_posted_receives(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+
+    class FailedReceiveComm(_ReceiveComm):
+        def Irecv(self, buffer, *, source, tag):
+            if source == 2:
+                raise RuntimeError("injected post failure")
+            return super().Irecv(buffer, source=source, tag=tag)
+
+    comm = FailedReceiveComm({1: []})
+    with pytest.raises(RuntimeError, match="injected post failure"):
+        _gather_raw_results_via_mpi(
+            comm, [], run_index=0, rank=0, mpi_size=3, is_root=True, timeout_s=1
+        )
+    assert comm.requests[0].cancelled
+    assert not _LAST_GATHER_META.get("complete", False)
+
+
+def test_multi_rank_mpi_large_chunks_and_empty_shards(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    sender = _SendComm()
+    records = []
+    for index in range(3):
+        row = _raw_record(f"large-{index}")
+        request = TraceRequest(1.5, "model", "x" * (700 << 10), 2, 3, 1, f"large-{index}", "chat")
+        records.append((request, *row[1:]))
+    _gather_raw_results_via_mpi(
+        sender, records, run_index=0, rank=1, mpi_size=3, is_root=False, timeout_s=1
+    )
+    empty_sender = _SendComm()
+    _gather_raw_results_via_mpi(
+        empty_sender, [], run_index=0, rank=2, mpi_size=3, is_root=False, timeout_s=1
+    )
+    assert [message[0] for message in sender.messages] == ["data", "data", "data", "end"]
+    assert all(32768 < len(frame) <= _MPI_FRAME_BYTES for frame in sender.frames[:-1])
+    assert [message[0] for message in empty_sender.messages] == ["end"]
+
+    gathered = _gather_raw_results_via_mpi(
+        _ReceiveComm({1: sender.frames, 2: empty_sender.frames}),
+        [_raw_record("root")],
+        run_index=0,
+        rank=0,
+        mpi_size=3,
+        is_root=True,
+        timeout_s=1,
+    )
+    assert [_encode_gather_payload(shard) for shard in gathered] == [
+        _encode_gather_payload([_raw_record("root")]),
+        _encode_gather_payload(records),
+        _encode_gather_payload([]),
+    ]
+    assert _LAST_GATHER_META["complete"] is True
+    assert _LAST_GATHER_META["shards"][1]["size_bytes"] > 2 << 20
+    assert _LAST_GATHER_META["shards"][2]["sha256"] == hashlib.sha256(b"").hexdigest()
+
+
+def test_multi_rank_summary_large_evidence_progresses_alongside_reduction(monkeypatch):
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+    summary.update(requests_completed=1, requests_scheduled=1, errors=1)
+    summary["error_samples"] = {"synthetic": "x" * 40000}
+    assert len(_encode_gather_payload(summary)) > 32768
+
+    class ConcurrentSummaryComm(_SummaryComm):
+        def Ireduce(self, send, receive, *, op, root):
+            super().Ireduce(send, receive, op=op, root=root)
+            owner = self
+
+            class Reduction:
+                def Test(self):
+                    return owner.message.polls == 0
+
+            return Reduction()
+
+        def Irecv(self, buffer, *, source, tag):
+            self.message = super().Irecv(buffer, source=source, tag=tag)
+            self.message.polls = 2
+            return self.message
+
+    reduced = _reduce_summary_via_mpi(
+        ConcurrentSummaryComm(summary),
+        summary,
+        run_index=0,
+        rank=0,
+        mpi_size=2,
+        is_root=True,
+        timeout_s=1,
+    )
+    assert reduced["requests_completed"] == 2
+    assert reduced["errors"] == 2
+    assert _LAST_GATHER_META["shards"][1]["size_bytes"] > 32768
+    assert _LAST_GATHER_META["complete"] is True
 
 
 def test_multi_rank_summary_uses_bounded_mpi_reductions(monkeypatch):
@@ -889,6 +1275,66 @@ def test_multi_rank_summary_timeout_fails_closed(monkeypatch):
     assert _LAST_GATHER_META["complete"] is False
 
 
+@pytest.mark.parametrize("failure", ["receive_post", "receive_test", "collective_test", "timeout"])
+def test_pending_summary_collective_retains_buffers_and_rejects_retry(monkeypatch, failure):
+    import eval.lib.replay_engine as replay
+
+    _install_fake_mpi(monkeypatch)
+    summary = _go_summary_row()
+
+    class Collective:
+        cancelled = False
+
+        def Test(self):
+            if failure == "collective_test":
+                raise RuntimeError("injected collective test failure")
+            return False
+
+        def Cancel(self):
+            self.cancelled = True
+
+    class Comm(_SummaryComm):
+        posts = 0
+
+        def Ireduce(self, send, receive, *, op, root):
+            self.posts += 1
+            self.send = send[0]
+            self.receive = receive[0]
+            self.collective = Collective()
+            return self.collective
+
+        def Irecv(self, buffer, *, source, tag):
+            if failure == "receive_post":
+                raise RuntimeError("injected receive post failure")
+            if failure == "receive_test":
+
+                class ReceiveFailure(_MessageRequest):
+                    def Test(self, status=None):
+                        raise RuntimeError("injected receive test failure")
+
+                return ReceiveFailure()
+            return super().Irecv(buffer, source=source, tag=tag)
+
+    comm = Comm(summary)
+    with pytest.raises(RuntimeError, match="deadline|injected"):
+        _reduce_summary_via_mpi(
+            comm, summary, run_index=0, rank=0, mpi_size=2, is_root=True, timeout_s=0.01
+        )
+    held = replay._FAILED_MPI_COLLECTIVE
+    assert held is not None
+    assert held[0] is comm.collective
+    assert held[1] is comm.send
+    assert held[2] is comm.receive
+    assert not comm.collective.cancelled
+    assert not _LAST_GATHER_META.get("complete", False)
+    with pytest.raises(RuntimeError, match="unfinished collective failed"):
+        _reduce_summary_via_mpi(
+            comm, summary, run_index=1, rank=0, mpi_size=2, is_root=True, timeout_s=0.01
+        )
+    assert comm.posts == 1
+    assert replay._FAILED_MPI_COLLECTIVE is held
+
+
 def test_multi_rank_summary_missing_rank_fails_closed(monkeypatch):
     _install_fake_mpi(monkeypatch)
     summary = _go_summary_row()
@@ -923,9 +1369,8 @@ def test_multi_rank_summary_rejects_reduction_disagreement(monkeypatch):
 @pytest.mark.parametrize(
     "message",
     [
-        ("wrong-kind", 0, 1, b"{}"),
+        ("data", 0, 1, b"{}"),
         ("summary", 0, 7, b"{}"),
-        ("summary", 0, 1, b"x" * ((1 << 20) + 1)),
     ],
 )
 def test_multi_rank_summary_rejects_malformed_or_oversized_evidence(monkeypatch, message):
@@ -1025,6 +1470,69 @@ def test_dispatch_end_non_root_uses_no_receive_buffer(monkeypatch):
         _reduce_dispatch_end_via_mpi(_MaxComm(), 2.0, mpi_size=2, is_root=False, timeout_s=0.1)
         is None
     )
+
+
+@pytest.mark.parametrize("is_root", [False, True])
+@pytest.mark.parametrize("test_raises", [False, True])
+def test_pending_dispatch_collective_retains_buffers_and_rejects_retry(
+    monkeypatch, is_root, test_raises
+):
+    import eval.lib.replay_engine as replay
+
+    _install_fake_mpi(monkeypatch)
+
+    class Collective:
+        cancelled = False
+
+        def Test(self):
+            if test_raises:
+                raise RuntimeError("injected collective test failure")
+            return False
+
+        def Cancel(self):
+            self.cancelled = True
+
+    class Comm:
+        posts = 0
+
+        def Ireduce(self, send, receive, *, op, root):
+            self.posts += 1
+            self.send = send[0]
+            self.receive = receive[0] if receive is not None else None
+            self.collective = Collective()
+            return self.collective
+
+    comm = Comm()
+    with pytest.raises(RuntimeError, match="deadline|injected"):
+        _reduce_dispatch_end_via_mpi(comm, 2.0, mpi_size=2, is_root=is_root, timeout_s=0.01)
+    held = replay._FAILED_MPI_COLLECTIVE
+    assert held is not None
+    assert held[0] is comm.collective
+    assert held[1] is comm.send
+    assert held[2] is comm.receive
+    assert not comm.collective.cancelled
+    with pytest.raises(RuntimeError, match="unfinished collective failed"):
+        _reduce_dispatch_end_via_mpi(comm, 2.0, mpi_size=2, is_root=is_root, timeout_s=0.01)
+    assert comm.posts == 1
+    assert replay._FAILED_MPI_COLLECTIVE is held
+
+
+def test_completed_collective_is_not_retained_when_result_validation_fails(monkeypatch):
+    import eval.lib.replay_engine as replay
+
+    _install_fake_mpi(monkeypatch)
+
+    class InvalidResultComm(_MaxComm):
+        def Ireduce(self, send, receive, *, op, root):
+            request = super().Ireduce(send, receive, op=op, root=root)
+            receive[0][0] = float("nan")
+            return request
+
+    with pytest.raises(ValueError, match="global dispatch last_fire_time"):
+        _reduce_dispatch_end_via_mpi(
+            InvalidResultComm(), 2.0, mpi_size=2, is_root=True, timeout_s=0.1
+        )
+    assert replay._FAILED_MPI_COLLECTIVE is None
 
 
 def test_dispatch_end_rejects_unbounded_deadline(monkeypatch):
