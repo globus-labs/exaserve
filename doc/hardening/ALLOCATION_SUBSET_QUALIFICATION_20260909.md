@@ -112,6 +112,45 @@ against the frozen executor. The 1,768-test full-suite result below belongs to
 the initial `8c59f51` candidate; it is not relabeled as a full-suite run of this
 later correction.
 
+### Replacement proof candidate
+
+Campaign B is materialized at
+`/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/allocation_campaigns/subset-proof-20260909-b/campaign.json`,
+hash `aafcfe1b37d839361ef4a4d7213b6d1b0773b06428226016371889dc88371607`.
+It retains the four-physical/two-logical-node, one-hour, eight-minute-per-child
+budgets and the two still-unexecuted frozen child bundles. Its controller is
+commit `6d0e1e536e8bf5995334b75014b548218e4cb84b`, source snapshot
+`20ddd971afc3887a4f03d8db031105cdfcd3f8558a03670294bc8c2bb17ec86c`,
+with scheduler identity `ac-aafcfe1b37d8`. A fresh one-node interactive
+regression session, PBS `8814870`, has also been requested to test the complete
+corrected candidate; the same per-candidate regression budget above applies.
+
+Campaign B was submitted as PBS `8814875`, then also withdrawn while still Q.
+A final cold-start review found that the parent asked the filesystem validator
+to inspect `/tmp/exaserve` before any child had created that directory. The
+parent now validates the existing declared `/tmp` mount and creates its own
+private temporary directory there. This removes dependence on an earlier job
+having warmed the node. The failure-gating test now asserts this bootstrap path.
+No B child ran; both frozen child bundles still have PLANNED revision 0 and may
+be referenced by the replacement campaign. No old campaign or output was reset
+or deleted, and neither A nor B is qualification evidence.
+
+### Corrected-candidate regression and cold bootstrap
+
+On the validated one-node interactive session PBS `8814870`, head
+`x4217c7s0b0n0`, `/tmp/exaserve` was actually absent. The corrected validator
+accepted the declared `/tmp` mount and created/removed a private temporary
+directory successfully, without requiring an existing ExaServe tree.
+
+The complete corrected working-tree suite then passed: **1,773 tests,
+27 warnings, 166.40 seconds, exit 0**, including all 72 controller tests and
+the cold-bootstrap assertion. Environment setup was repeated inside the
+allocation, and the session was released after testing. Log:
+`artifacts/diagnostics/allocation_subset_20260909/pbs8814870/pytest.log`;
+SHA-256 `8d8433751f38406a03360e4b3944ba49fd5257b3ab150da7c812cf8eea809dd3`.
+The next immutable controller snapshot will include exactly this code. Native
+subset qualification remains pending; neither withdrawn request is a substitute.
+
 ## Current evidence
 
 - Frozen launcher and eval executor support direct in-allocation execution and

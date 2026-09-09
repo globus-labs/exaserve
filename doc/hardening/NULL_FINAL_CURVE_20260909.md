@@ -1,6 +1,6 @@
 # Final-snapshot null-compute startup curve — 2026-09-09
 
-Status: monitoring; both 32-node trials and `run12/n64` are accepted. Five trials remain.
+Status: monitoring; both 32- and 64-node trials are accepted. Four trials remain.
 
 This record covers two independent startup-only deployment lifecycles per
 32, 64, 128 and 256 nodes for `nullcompute_haproxy_scale_to256_v040`.
@@ -83,8 +83,8 @@ generation and run-provenance hashes must differ.
 | run12/n32 | 8814592 | ACCEPTED; PBS F, exit 0, used 00:01:32 | 28.961413 / 23.5403 / 19.8505 / 19.8576 | 1788985796176521479 |
 | run13/n32 | 8814635 | ACCEPTED; PBS F, exit 0, used 00:01:33 | 29.888999 / 23.4858 / 19.7354 / 19.7419 | 1788987869969436504 |
 | run12/n64 | 8814767 | ACCEPTED; PBS F, exit 0, used 00:01:45 | 39.743597 / 33.3837 / 29.5892 / 29.5984 | 1788991595698760076 |
-| run13/n64 | 8814812 | SUBMITTED after accepted run12/n64; attempt 1 | pending | pending |
-| run12/n128 | none | PLANNED; gated on accepted run13/n64 | pending | pending |
+| run13/n64 | 8814812 | ACCEPTED; PBS F, exit 0, used 00:01:49 | 39.892151 / 32.8885 / 29.1468 / 29.1561 | 1788994137184423338 |
+| run12/n128 | 8814880 | SUBMITTED after accepted run13/n64; attempt 1 | pending | pending |
 | run13/n128 | none | PLANNED; gated on accepted run12/n128 | pending | pending |
 | run12/n256 | none | PLANNED; gated on accepted run13/n128 | pending | pending |
 | run13/n256 | none | PLANNED; gated on accepted run12/n256 | pending | pending |
@@ -189,3 +189,33 @@ After acceptance, canonical submission of fresh `run13/n64` returned PBS
 `8814812`. Preflight again proved PLANNED revision 0, no prior PBS/result
 output or scheduler ID, exact final source and the clean frozen checkout.
 The queued-start helper uses the explicit 10,800-second bound.
+
+### Accepted run13/n64
+
+The queued-start helper began at `2026-09-09 22:09:54 UTC`;
+PBS started at `22:48:32 UTC`, allocation head `x4709c4s7b0n0`.
+Live logs verified exact 64-node membership/resources, 768 measured replicas,
+128 applications and 898 receipt slots, followed by 64/64 DRAIN and GOODBYE.
+The first final check correctly withheld acceptance while PBS was still E;
+after the observed transition to F, the complete check passed. This was a
+read-only gate recheck, not a second experiment attempt. PBS finished at
+`22:51:05 UTC`, F / exit 0 / run_count 1, reported walltime `00:01:49`.
+
+Explicit `_load_trial(root, "run13", 64)` authenticates all seven result
+entries and final source identity. Supplemental checks pass exact physical
+PBS host equality with allocation binding
+`c6a775622257bb8226366f26d09e3c9ab649810778edd03e5d58ade61de55ee4`,
+all 64 current-layout/VC-01 source receipts (4.314303 s), and clean published
+STOPPED with no errors or exhausted deadline. ResultManifest semantic hash:
+`1b005f40bbfe0d84a04f0ac70fa39fbb3244517a2462c09f5013c4f9e2083ad1`.
+Run-provenance hash:
+`4db74b1c01536d5f95573166c9b12897505c7264ab034ea81d23c461b2c42f4f`.
+The two 64-node trials have distinct generations and provenance hashes,
+and the identical frozen source. Their READY times are 39.743597 and
+39.892151 seconds.
+
+After acceptance, canonical submission of fresh `run12/n128` returned PBS
+`8814880`. Preflight verified PLANNED revision 0, no prior PBS/result output,
+no scheduler ID, exact final source and a clean frozen checkout. The sealed
+job requests exactly 128 nodes in debug-scaling for one hour. Its dedicated
+start helper uses the explicit 10,800-second bound.

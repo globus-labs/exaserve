@@ -171,3 +171,20 @@ Generation is `1788991595757467635`; allocation-binding hash is
 Exact rank-order nodes are `x4115c3s4b0n0`, `x4209c5s7b0n0`,
 `x4302c6s7b0n0`, `x4312c0s5b0n0`, `x4401c0s3b0n0`, `x4401c1s6b0n0`,
 `x4201c3s2b0n0`, and `x4315c2s7b0n0`.
+
+At approximately `23:00 UTC`, model staging completed in 3192.6 seconds.
+Shared model validation took 786.37 seconds; PP stage 0 transferred
+380.68 GiB in 847.18 seconds (0.45 GiB/s), and stage 1 transferred
+379.61 GiB in 294.83 seconds (1.29 GiB/s). The cause of the stage-0/1
+throughput difference is not established. Candidate-only clean staging had
+8/8 receipts and removed zero paths; immutable caches were preserved.
+The composition then established all eight planned rank sessions, verified
+exact eight-node Ray membership/resources, and registered 96/96 GPUs before
+deploying the four TP=8, PP=2 replicas. At `23:01:03 UTC`, canonical deployment
+state was `DEPLOYING`, detail null, with no terminal first cause.
+
+Ray event/metrics-exporter `RpcError` code 14 warnings were observed and
+preserved in stdout. The same warnings occur in accepted n4; these indicate
+unavailable Ray telemetry export, and are not treated as proof that model
+startup succeeded or failed. Deployment/readiness and replay gates remain
+required; no n8 paper point is accepted at this checkpoint.

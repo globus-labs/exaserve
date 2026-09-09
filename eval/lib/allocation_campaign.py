@@ -1530,7 +1530,7 @@ def execute_campaign(path: str) -> int:
                 from exaserve.source_staging import qualify_runtime_staging_base
 
                 local_base = qualify_runtime_staging_base(
-                    Path("/tmp/exaserve"), load_site_profile(plan.site_profile_path)
+                    Path("/tmp"), load_site_profile(plan.site_profile_path)
                 )
                 with tempfile.TemporaryDirectory(
                     prefix="allocation-campaign-", dir=local_base

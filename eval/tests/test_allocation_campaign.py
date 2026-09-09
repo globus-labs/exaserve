@@ -335,7 +335,14 @@ def test_failed_child_prevents_remaining_children_from_launching(tmp_path, monke
     monkeypatch.setattr(campaign, "_audit_paths", lambda *args: ["/tmp/owned-generation"])
     monkeypatch.setattr(campaign.socket, "gethostname", lambda: "head")
     monkeypatch.setattr(io, "load_site_profile", lambda path: None)
-    monkeypatch.setattr(source_staging, "qualify_runtime_staging_base", lambda *args: scratch)
+
+    def qualify_scratch(path, profile):
+        # The parent starts before source staging creates any ExaServe tree.
+        # Bootstrap must work on a cold node, not depend on /tmp/exaserve.
+        assert path == Path("/tmp")
+        return scratch
+
+    monkeypatch.setattr(source_staging, "qualify_runtime_staging_base", qualify_scratch)
 
     def run_child(*args):
         index = args[2]
