@@ -955,8 +955,7 @@ def _accept_child(
     record = StatusStore.run(plan.bundle.state_path).load()
     manifest_hash = None
     if cancelled:
-        if record is None or record.state != "CANCELLED":
-            raise RuntimeError("qualification cancellation lacks canonical CANCELLED RunStatus")
+        _require_clean_cancelled_status(plan, record)
     else:
         replay = _validate_replay_results(plan)
         if replay["incomplete_reasons"] or replay.get("errors"):
@@ -1037,6 +1036,46 @@ def _accept_child(
     }
 
 
+def _require_child_status_identity(plan, record) -> None:
+    expected = {
+        "run_id": plan.run_id,
+        "run_group_id": plan.run_group_id,
+        "run_semantic_hash": plan.run_semantic_hash,
+        "deployment_plan_hash": plan.deployment_plan_hash,
+        "source_snapshot_hash": plan.source_snapshot_hash,
+    }
+    if (
+        record is None
+        or record.record_id != f"{plan.run_group_id}/{plan.run_id}"
+        or record.provenance != expected
+    ):
+        raise RuntimeError("cancellation checkpoint RunStatus identity mismatch")
+
+
+def _require_clean_cancelled_status(plan, record) -> None:
+    _require_child_status_identity(plan, record)
+    if record.state != "CANCELLED" or "cleanup_error" in record.data:
+        raise RuntimeError("qualification cancellation lacks clean canonical CANCELLED RunStatus")
+
+
+def _can_cancel_after_ready(plan, status) -> bool:
+    """Wait for the frozen executor to acknowledge READY before injecting SIGINT.
+
+    Its readiness observer polls independently of this controller. A READY
+    publication alone can precede its observed-readiness teardown contract;
+    the typed replay phase proves that wait_ready has actually returned.
+    """
+    if status is None or not status.ready:
+        return False
+    from exaserve.state.status import StatusStore
+
+    record = StatusStore.run(plan.bundle.state_path).load()
+    if record is None:
+        return False
+    _require_child_status_identity(plan, record)
+    return record.state == "RUNNING" and record.data.get("phase") == "replaying"
+
+
 def _run_child(
     campaign,
     child,
@@ -1113,7 +1152,7 @@ def _run_child(
                             raise RuntimeError(
                                 f"child deployment failed early: {status.reason_code}: {status.detail}"
                             )
-                        if cancel_test and status is not None and status.ready:
+                        if cancel_test and _can_cancel_after_ready(plan, status):
                             capture_ready_evidence(
                                 status_dir=status_dir,
                                 destination_dir=str(receipt_dir),

@@ -568,3 +568,57 @@ def test_exited_sentinel_does_not_attest_survival(sentinel_fixture):
     process.poll = lambda: 0
     with pytest.raises(RuntimeError):
         campaign._sentinel_witness(process, log, **kwargs)
+
+
+@pytest.fixture
+def cancellation_checkpoint(monkeypatch):
+    from exaserve.state.status import StatusStore
+
+    plan = SimpleNamespace(
+        run_group_id="run0",
+        run_id="n2",
+        run_semantic_hash="a" * 64,
+        deployment_plan_hash="b" * 64,
+        source_snapshot_hash="c" * 64,
+        bundle=SimpleNamespace(state_path="unused"),
+    )
+    record = SimpleNamespace(
+        record_id="run0/n2",
+        state="RUNNING",
+        data={"phase": "running"},
+        provenance={
+            "run_id": "n2",
+            "run_group_id": "run0",
+            "run_semantic_hash": "a" * 64,
+            "deployment_plan_hash": "b" * 64,
+            "source_snapshot_hash": "c" * 64,
+        },
+    )
+    monkeypatch.setattr(StatusStore, "run", lambda path: SimpleNamespace(load=lambda: record))
+    return plan, record
+
+
+def test_ready_alone_does_not_race_executor_cancellation(cancellation_checkpoint):
+    plan, record = cancellation_checkpoint
+    status = SimpleNamespace(ready=True)
+    assert campaign._can_cancel_after_ready(plan, status) is False
+    record.data["phase"] = "replaying"
+    assert campaign._can_cancel_after_ready(plan, status) is True
+    assert campaign._can_cancel_after_ready(plan, SimpleNamespace(ready=False)) is False
+
+
+def test_cancellation_checkpoint_rejects_stale_run_identity(cancellation_checkpoint):
+    plan, record = cancellation_checkpoint
+    record.record_id = "another-run/n2"
+    with pytest.raises(RuntimeError, match="identity"):
+        campaign._can_cancel_after_ready(plan, SimpleNamespace(ready=True))
+
+
+@pytest.mark.parametrize("error", ["cleanup failed", "", None])
+def test_cancellation_never_hides_a_recorded_cleanup_error(cancellation_checkpoint, error):
+    plan, record = cancellation_checkpoint
+    record.state = "CANCELLED"
+    campaign._require_clean_cancelled_status(plan, record)
+    record.data["cleanup_error"] = error
+    with pytest.raises(RuntimeError, match="clean canonical"):
+        campaign._require_clean_cancelled_status(plan, record)

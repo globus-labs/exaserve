@@ -1,7 +1,8 @@
 # Finite allocation subset qualification — 2026-09-09
 
-Status: implementation, review and regression tests passed; **not qualified**,
-no parent allocation submitted, no subset paper measurements accepted.
+Status: initial candidate passed regression; a cancellation-checkpoint fix is
+being qualified. **Not qualified**; the first parent request was withdrawn
+while queued, and no subset paper measurements are accepted.
 
 This evidence record accompanies the full-scaling continuation. The authoritative
 design is WP12 in `doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md`; this file does
@@ -73,6 +74,43 @@ Parent acquisition, physical/subset inventories, immutable-input hashes, exact
 commands, source identities, result references, timings and cleanup verdicts
 will be stored in a fresh campaign output directory recorded here before submit.
 No worker reads the parent manifest or writes a shared-filesystem receipt.
+
+The first proof campaign has been materialized at
+`/lus/flare/projects/AuroraGPT/wenyiw/data/experiments/allocation_campaigns/subset-proof-20260909-a/campaign.json`.
+It requests exactly four capacity nodes for one hour, with an eight-minute
+execution deadline per child and separately reserved canonical cleanup budgets.
+Campaign hash:
+`67dfb2946f44f917a14e38f6bbfccf1909729d14124744817f728571cd5fb447`.
+Controller commit `8c59f5130e642cfc3d23619e8933b548e6aa2bae`, controller source
+hash `18603db557a3b663282a1c696603566f11857097f0a17f6c8f0e4a591da8f9a5`.
+Only the unrelated design drafts were explicitly excluded from its committed
+snapshot. Scheduler identity is `ac-67dfb2946f44`; native stdout/stderr are
+directed to `/home/wenyiw/aurora_rayserver/tmp/`. Per-child executor logs and
+parent proof sidecars live in the campaign directory; canonical child evidence
+remains in the two original child bundle directories above.
+
+### First request withdrawn before execution
+
+Campaign A was submitted as PBS `8814852`, then verified still in Q and
+cancelled before allocation on 2026-09-09. No child started: both retain
+PLANNED revision 0. The campaign and its scheduler history are preserved;
+it is not qualification evidence and must not be resubmitted.
+
+A final inspection found that canonical READY can be visible to the parent
+before the frozen executor's two-second observer has acknowledged it. Injecting
+SIGINT in that interval can cause the executor to record a cleanup-contract
+mismatch. The replacement waits for identity-bound RunStatus RUNNING with
+phase `replaying`, as well as canonical READY, before cancellation. That phase
+proves the executor's readiness wait returned; it does not claim the replay
+subprocess has already started. Cancellation acceptance now rejects any
+`cleanup_error` field and requires the exact RunStatus identity. This is a
+controller-only correction; child runtime and all child input hashes stay fixed.
+
+The updated controller passed all **72 targeted tests in 1.02 seconds** and
+correctness lint. An independent review confirmed the new checkpoint ordering
+against the frozen executor. The 1,768-test full-suite result below belongs to
+the initial `8c59f51` candidate; it is not relabeled as a full-suite run of this
+later correction.
 
 ## Current evidence
 
