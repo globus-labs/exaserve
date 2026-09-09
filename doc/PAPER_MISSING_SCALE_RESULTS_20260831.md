@@ -45,9 +45,9 @@ editing the sealed source or prior bundles.
 
 | Series | Final campaign selection | Execution disposition |
 |---|---|---|
-| Null startup, two independent lifecycles at each of 32/64/128/256 nodes | `run12` and `run13`, all eight cells | n32 pair and `run12/n64` accepted; `run13/n64` submitted as PBS `8814812`; later pairs gated on acceptance |
-| 405B non-stream, 4/8/16 nodes | Existing `run11` cells | `run11/n4` accepted; n8 running as PBS `8814766`; n16 remains gated on accepted n8 |
-| 405B non-stream, 32/64/128 nodes | Existing `run11` cells, still unsubmitted | Held for the allocation feasibility decision below |
+| Null startup, two independent lifecycles at each of 32/64/128/256 nodes | `run12` and `run13`, all eight cells | n32 and n64 pairs accepted; `run12/n128` submitted as PBS `8814880`; later trials gated on acceptance |
+| 405B non-stream, 4/8/16 nodes | Existing `run11` cells | n4 and n8 accepted; n16 submitted as PBS `8814926` |
+| 405B non-stream, 32/64/128 nodes | Existing `run11` cells | Qualified 256-physical-node parent submitted as PBS `8814939`; sequential exact logical subsets |
 | 405B non-stream, 256 nodes | Accepted `run11/n256`, PBS `8811810` | Reuse unchanged; no redundant n256 405B rerun is planned |
 
 The older accepted null `run10`/`run11` n32/n256 pairs remain valid evidence
@@ -64,7 +64,7 @@ lanes and submit no duplicate identities. A queued job is pending, not a passed
 experiment. Submission/start monitoring is distinct from canonical READY and
 terminal paper acceptance.
 
-### Held PP middle scales: confirmed walltime/allocation constraint
+### PP middle scales: queue constraint and qualified acquisition route
 
 Live scheduler inspection on 2026-09-09 confirmed capacity is limited to 16
 nodes, debug-scaling permits at most one hour, and production begins at 256
@@ -86,10 +86,10 @@ A 256-node production parent is not a supported drop-in workaround today:
   and recording both physical and logical sizes (WP12). Historical subset
   figures do not qualify the current implementation automatically.
 
-The middle PP scales require either an approved sufficiently long allocation
+Resolving the middle PP scales required either an approved sufficiently long allocation
 with qualified exact-size leases, a site-approved longer exact-size reservation,
-or explicit approval to implement and qualify a canonical production-parent
-subset workflow. That decision does not block the feasible null and low-node
+or implementation and qualification of a canonical production-parent
+subset workflow. That work did not block the feasible null and low-node
 PP lanes. Do not shorten workloads, relax evidence checks, bypass staging
 integrity, or count failed/partial runs to fit the one-hour queue.
 
@@ -99,8 +99,28 @@ it does not edit child RunPlans or create a replacement deployment lifecycle.
 Implementation/review and a bounded four-physical/two-logical-node success plus
 cancellation proof must pass before the production parent may be submitted.
 Current evidence, budgets and exact proof child paths are recorded in
-`doc/hardening/ALLOCATION_SUBSET_QUALIFICATION_20260909.md`. No large subset
-run or completed subset qualification is claimed yet.
+`doc/hardening/ALLOCATION_SUBSET_QUALIFICATION_20260909.md`.
+
+The gate is now satisfied by proof C, PBS `8814899` (native F, explicit exit 0):
+controller commit `97e8283`, source
+`7f7f864bcebcf5780f56a39cec8f9b12fd3437100207c60f0cd48cac915f6a08`,
+with unchanged child source `5d85794f...`. Both logical two-node lifecycles
+stayed within their exact subset of four physical nodes; MPI rejected a third
+rank, the happy child completed both full replays, and the separate cancellation
+child cleaned up without error. The same excluded-node sentinel survived both
+cleanups and was then reaped; every physical-node process audit was clean.
+The report was revalidated from the sealed controller after native completion.
+Its qualification JSON SHA-256 is
+`fe233da1cd9c5278c92d9da043deb66d2e572ac23eca937bf23b431da96eb34d`.
+The corrected controller also passed the complete 1,773-test compute regression
+suite. No larger subset measurement is claimed until its own result passes.
+
+The resulting finite production parent is PBS `8814939`, requesting 256 physical
+nodes for six hours. It owns the ordered `run11/n32`, `run11/n64`, and
+`run11/n128` executions, with exact active membership and fresh lifecycle
+evidence per child. Accepted `run11/n256` is not rerun. The acquisition manifest
+and its qualified controller are separately recorded in the linked proof ledger;
+the children retain the same `5d85794f...` source as the other final PP points.
 
 The paper consumers still select their historical campaigns. Retarget the null
 table and PP figure only after the selected final cells pass strict acceptance;

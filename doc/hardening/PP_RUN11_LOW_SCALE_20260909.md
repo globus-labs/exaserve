@@ -1,7 +1,7 @@
 # Final-snapshot PP405B low-scale completion — 2026-09-09
 
-Status: n4 accepted on 2026-09-09 after independent strict validation; n8
-running as PBS 8814766, with n16 still gated on accepted n8.
+Status: n4 and n8 accepted on 2026-09-09 after independent strict validation;
+n16 queued as PBS 8814926 after both lower gates passed.
 
 This execution record covers the existing immutable `run11` n4, n8 and n16
 cells of `pp405b_pp2_haproxy_nostream_v040`. It is evidence/context; the
@@ -19,8 +19,8 @@ Run-group root:
 | Cell | PBS job | Queue / walltime | Observed status | Expected requests per replay |
 |---|---|---|---|---:|
 | n4 | 8814589 | capacity / 02:00:00 | Accepted; PBS finished 21:31:50 UTC, exit 0 | 96 |
-| n8 | 8814766 | capacity / 02:00:00 | Running since 22:05:53 UTC; startup under observation | 192 |
-| n16 | none | capacity / 02:00:00 | PLANNED; gated on accepted n8 | 384 |
+| n8 | 8814766 | capacity / 02:00:00 | Accepted; PBS finished 23:23:28 UTC, exit 0 | 192 |
+| n16 | 8814926 | capacity / 02:00:00 | Queued; submitted once at 23:25:33 UTC after accepted n8 | 384 |
 
 ## WP12 execution budgets
 
@@ -65,8 +65,8 @@ that their existing identities remain unsubmitted and queue capacity exists.
 
 No n32-or-larger submission is authorized by this record. Their one-hour
 walltime is insufficient under current staging observations, and no compliant
-long-allocation acquisition/subset-proof route is presently available; the
-root task is requesting user direction for that distinct blocker.
+long-allocation acquisition/subset-proof route is established by this record.
+The root task separately owns investigation and qualification of that route.
 
 ## n4 live execution
 
@@ -188,3 +188,67 @@ preserved in stdout. The same warnings occur in accepted n4; these indicate
 unavailable Ray telemetry export, and are not treated as proof that model
 startup succeeded or failed. Deployment/readiness and replay gates remain
 required; no n8 paper point is accepted at this checkpoint.
+
+Canonical READY was published at `2026-09-09 23:10:47 UTC`, after runtime
+bring-up of 612.08 seconds. The durable readiness snapshot proves eight exact
+nodes/sessions, twelve exact applications, eight healthy proxies, 90/90
+receipt slots, 4/4 model replicas, healthy HAProxy and successful canary, with
+empty blocker, missing-identity and unhealthy-identity lists. At
+`23:11:20 UTC`, RunStatus was `RUNNING`, phase `replaying`; both declared
+192-request replays and clean terminal shutdown still must pass before n16.
+
+## n8 acceptance — 2026-09-09 23:24 UTC
+
+The same independent frozen-worktree checks used for n4 passed for n8:
+`require_accepted_paper_run`, authenticated reads of every manifest entry,
+`_validate_replay_results`, exact per-replay request counts and identity checks,
+exact topology/replica layout, and clean shutdown. Canonical RunStatus is
+`SUCCEEDED`; complete ResultManifest hash is
+`ac6a24c4019f780956be210c501cd61f6dd41249d58382fb87cb7884e73a5edd`.
+
+| Replay | Role | Scheduled / completed | Errors | Duration (s) | RPS | p50 (s) | p99 (s) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 0 | Warmup | 192 / 192 | 0 | 141.234403 | 1.359442 | 14.719949 | 28.903259 |
+| 1 | Reported measurement | 192 / 192 | 0 | 136.668377 | 1.404860 | 14.782410 | 23.925875 |
+
+Both gathers exactly cover the plan's four **client ranks** `[0,1,2,3]` with
+no missing ranks; the deployment separately binds eight compute nodes.
+`meta.completed_runs=2`, and `overall` exactly mirrors replay 1. Authenticated
+READY evidence binds generation `1788991595757467635` and the exact allocation,
+with no blocker/missing/unhealthy identities, four TP=8/PP=2 replicas on
+disjoint rank pairs `(0,1)`, `(2,3)`, `(4,5)`, `(6,7)`, eight healthy proxies,
+twelve applications and 90 compatibility receipts.
+
+The shutdown report is published, `clean=true`, `errors=[]`, and
+`deadline_exhausted=false`; canonical deployment is `STOPPED`, reason
+`DRAINED_AND_REAPED`. DRAIN and GOODBYE cover 8/8 ranks. Expected teardown
+SIGTERM/143 and Ray actor-killed messages remain preserved in the logs.
+PBS historical state is `F`, `Exit_status=0`, reported runtime `01:16:18`, and
+`obittime=2026-09-09 23:23:28 UTC`. Verdict: **PASS** for this n8 paper cell,
+not a complete production-release claim.
+
+## n16 submission preflight
+
+The existing n16 identity remained `PLANNED`, revision 0, phase `materialized`,
+with no prior scheduler ID/attempt. Its semantic hash is
+`50b9495e4a9133cabddab0aa4013ea198bfefe867af4f67ad316710c26b3ef19`;
+the source snapshot matches accepted n4/n8. The exact sixteen-node capacity
+job requests `02:00:00` and uses the same sealed-snapshot/environment entry
+point. Required bundle/trace/runtime/plan/profile files and output directories
+exist. The submission worktree remains clean at `0a83547`.
+
+At the `23:24:16 UTC` scheduler check, only the root task's separate four-node
+capacity proof was running, with its independent debug-scaling job queued;
+there was capacity queue headroom and no sixteen-node keepalive lease source.
+Neither unrelated job was changed by this monitor. Exact submission command:
+
+```bash
+PYTHONPATH=src python3 -m eval.cli run submit /lus/flare/projects/AuroraGPT/wenyiw/data/experiments/runs/sc26workshop/full/pp405b_pp2_haproxy_nostream_v040/run11/n16/run.yaml
+```
+
+Submitted once at `2026-09-09 23:25:33 UTC` as
+`8814926.aurora-pbs-0001.hostmgmt.cm.aurora.alcf.anl.gov`, scheduler name
+`es-bfbc7508671f`. The post-submit record is `SUBMITTED`, revision 2,
+`submit_attempt=1`; PBS was `Q` at `23:25:46 UTC`, with exactly sixteen nodes
+and two hours. The Aurora wait helper is active with the explicit bound:
+`WAITING|job=8814926|queue=capacity|max_wait=7d|started=2026-09-09T23:25:48+00:00`.
