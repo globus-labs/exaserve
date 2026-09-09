@@ -17,7 +17,7 @@ Run-group root:
 
 | Cell | PBS job | Queue / walltime | Observed status | Expected requests per replay |
 |---|---|---|---|---:|
-| n4 | 8814589 | capacity / 02:00:00 | Submitted; scheduler Q at 2026-09-09 20:03 UTC | 96 |
+| n4 | 8814589 | capacity / 02:00:00 | Running since 2026-09-09 20:29:18 UTC; source stage passed 4/4 | 96 |
 | n8 | none | capacity / 02:00:00 | PLANNED; gated on accepted n4 | 192 |
 | n16 | none | capacity / 02:00:00 | PLANNED; gated on accepted n8 | 384 |
 
@@ -66,3 +66,17 @@ No n32-or-larger submission is authorized by this record. Their one-hour
 walltime is insufficient under current staging observations, and no compliant
 long-allocation acquisition/subset-proof route is presently available; the
 root task is requesting user direction for that distinct blocker.
+
+## n4 live execution
+
+PBS `8814589` entered `R` at `2026-09-09 20:29:18 UTC`, with exactly four
+nodes and a two-hour allocation. The exact bound nodes are `x4312c4s4b0n0`,
+`x4312c6s1b0n0`, `x4312c6s5b0n0` and `x4312c7s3b0n0`. Generation is
+`1788985796180450420`; the logged allocation-binding prefix is `528fb16f0c6e`.
+
+By `20:30:01 UTC`, head-rooted source distribution and verification passed on
+all 4/4 ranks: each published the same 415-file, 22,829,930-byte source capsule,
+verified two model-info cache seeds, node-local `tmpfs` runtime/state, and the
+qualified framework Python on `squashfs`. Capsule manifest:
+`f40883b0602db3790d4ca1e4dab75eaf6fad9fedb3222a8d5db2297fc3f31d32`.
+This is early healthy staging evidence, not READY or an accepted replay result.
