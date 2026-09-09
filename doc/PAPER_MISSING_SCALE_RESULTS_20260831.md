@@ -28,6 +28,76 @@ The authoritative specifications are:
 - `eval/specs/sc26workshop/full/nullcompute_haproxy_scale_to256_v040.yaml`
 - `eval/specs/sc26workshop/full/pp405b_pp2_haproxy_nostream_v040.yaml`
 
+## 2026-09-09 full-curve continuation
+
+The fixes and accepted n256 evidence were pushed to
+`origin/paper/missing-scale-v0.4.0` at commit `9b409fc`. Unrelated working-tree
+edits in `doc/design/README.md` and `doc/design/interaction_map.md` were left
+untouched and excluded from that push.
+
+The final homogeneous campaign is pinned to runtime commit
+`0a835470421bfabba744688061ad6ef70ed6752c` and source snapshot
+`5d85794f26a54596dc4ddb237996652171b9cd78d21751c8235bf0e25f8d365f`.
+The later commits record tests and evidence; materializing from their HEAD
+would nevertheless change the strict source identity. New null bundles are
+therefore materialized from the existing clean worktree at `0a83547`, without
+editing the sealed source or prior bundles.
+
+| Series | Final campaign selection | Execution disposition |
+|---|---|---|
+| Null startup, two independent lifecycles at each of 32/64/128/256 nodes | `run12` and `run13`, all eight cells | `run12/n32` submitted as PBS `8814592`; remaining cells advance through paired increasing scales after strict acceptance |
+| 405B non-stream, 4/8/16 nodes | Existing `run11` cells | `run11/n4` submitted as PBS `8814589`; n8 then n16 advance after strict acceptance |
+| 405B non-stream, 32/64/128 nodes | Existing `run11` cells, still unsubmitted | Held for the allocation feasibility decision below |
+| 405B non-stream, 256 nodes | Accepted `run11/n256`, PBS `8811810` | Reuse unchanged; no redundant n256 405B rerun is planned |
+
+The older accepted null `run10`/`run11` n32/n256 pairs remain valid evidence
+for their own `7298aef...` snapshot, not cells in the final `5d85794f...` curve.
+This continuation reruns them explicitly to obtain strict final-snapshot
+homogeneity; it does not invalidate or overwrite their results. The PP protocol
+remains one warmup replay and one reported replay per deployment.
+
+Live execution records, including exact output roots, acceptance criteria and
+bounded retry/node-hour plans, are maintained in
+`doc/hardening/PP_RUN11_LOW_SCALE_20260909.md` and
+`doc/hardening/NULL_FINAL_CURVE_20260909.md`. Separate monitors own those two
+lanes and submit no duplicate identities. A queued job is pending, not a passed
+experiment. Submission/start monitoring is distinct from canonical READY and
+terminal paper acceptance.
+
+### Held PP middle scales: confirmed walltime/allocation constraint
+
+Live scheduler inspection on 2026-09-09 confirmed capacity is limited to 16
+nodes, debug-scaling permits at most one hour, and production begins at 256
+nodes. Hardened accepted `run10/n4` already used 1:08:50, including about
+46.7 minutes of model staging and READY at about 57 minutes. Accepted
+`run11/n256` used 1:14:28. Consequently, submitting the existing n32/n64/n128
+one-hour bundles cannot be justified merely by their smaller node counts.
+No eligible user-managed long-lived allocation was available at submission.
+
+A 256-node production parent is not a supported drop-in workaround today:
+
+- `subjob` discovers user-managed allocation slots or qualifying `debug-*`
+  allocations, not an arbitrary production job. Do not alter keepalive state
+  or disguise a data job as an interactive debug allocation.
+- Eval requires scheduler/deployment node-count agreement; the allocation
+  binder rejects an oversized nodefile rather than silently truncating it.
+- The authoritative plan permits a larger physical allocation only after
+  proving logical-subset launcher, membership, cleanup and artifact isolation,
+  and recording both physical and logical sizes (WP12). Historical subset
+  figures do not qualify the current implementation automatically.
+
+The middle PP scales require either an approved sufficiently long allocation
+with qualified exact-size leases, a site-approved longer exact-size reservation,
+or explicit approval to implement and qualify a canonical production-parent
+subset workflow. That decision does not block the feasible null and low-node
+PP lanes. Do not shorten workloads, relax evidence checks, bypass staging
+integrity, or count failed/partial runs to fit the one-hour queue.
+
+The paper consumers still select their historical campaigns. Retarget the null
+table and PP figure only after the selected final cells pass strict acceptance;
+until then no complete final-snapshot curve is claimed. Preserve the separate
+historical streaming-overlay caveat when regenerating the PP figure.
+
 ## 2026-09-05 corrected-snapshot attempt
 
 The first post-fan-out snapshot, commit `4d204ce` with source snapshot hash
@@ -1042,10 +1112,11 @@ Together with the corrected null-compute n256 pair, this closes the request
 to run until both largest-scale targets work. The failed `run10/n256`, PBS
 `8809332`, remains immutable negative evidence.
 
-1. Fill the intermediate homogeneous curve: corrected-snapshot null-compute
-   n64/n128 pairs and current-snapshot
-   PP n8/n16/n32/n64/n128 cells. These are still required for the final curve,
-   even though n256 is now accepted. Until they exist, preserve prior
+1. Complete the final-snapshot selections in the 2026-09-09 continuation above:
+   all eight null-compute cells in `run12`/`run13`, and PP `run11`
+   n4/n8/n16/n32/n64/n128, retaining accepted `run11/n256`. Resolve the
+   documented middle-scale PP allocation constraint before submitting those
+   three cells. Until the final curve exists, preserve prior
    measurements separately and label any combined output explicitly as a
    mixed-campaign comparison. For PP, strict source homogeneity also requires
    n4 on the chosen final snapshot; retaining the accepted `run10/n4` needs
