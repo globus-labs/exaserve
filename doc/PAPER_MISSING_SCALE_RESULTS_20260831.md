@@ -45,8 +45,8 @@ editing the sealed source or prior bundles.
 
 | Series | Final campaign selection | Execution disposition |
 |---|---|---|
-| Null startup, two independent lifecycles at each of 32/64/128/256 nodes | `run12` and `run13`, all eight cells | `run12/n32` submitted as PBS `8814592`; remaining cells advance through paired increasing scales after strict acceptance |
-| 405B non-stream, 4/8/16 nodes | Existing `run11` cells | `run11/n4` submitted as PBS `8814589`; n8 then n16 advance after strict acceptance |
+| Null startup, two independent lifecycles at each of 32/64/128/256 nodes | `run12` and `run13`, all eight cells | n32 pair and `run12/n64` accepted; `run13/n64` submitted as PBS `8814812`; later pairs gated on acceptance |
+| 405B non-stream, 4/8/16 nodes | Existing `run11` cells | `run11/n4` accepted; n8 running as PBS `8814766`; n16 remains gated on accepted n8 |
 | 405B non-stream, 32/64/128 nodes | Existing `run11` cells, still unsubmitted | Held for the allocation feasibility decision below |
 | 405B non-stream, 256 nodes | Accepted `run11/n256`, PBS `8811810` | Reuse unchanged; no redundant n256 405B rerun is planned |
 
@@ -92,6 +92,15 @@ or explicit approval to implement and qualify a canonical production-parent
 subset workflow. That decision does not block the feasible null and low-node
 PP lanes. Do not shorten workloads, relax evidence checks, bypass staging
 integrity, or count failed/partial runs to fit the one-hour queue.
+
+The renewed full-curve continuation is now implementing the finite acquisition
+adapter described in WP12. The controller invokes the frozen child executor;
+it does not edit child RunPlans or create a replacement deployment lifecycle.
+Implementation/review and a bounded four-physical/two-logical-node success plus
+cancellation proof must pass before the production parent may be submitted.
+Current evidence, budgets and exact proof child paths are recorded in
+`doc/hardening/ALLOCATION_SUBSET_QUALIFICATION_20260909.md`. No large subset
+run or completed subset qualification is claimed yet.
 
 The paper consumers still select their historical campaigns. Retarget the null
 table and PP figure only after the selected final cells pass strict acceptance;

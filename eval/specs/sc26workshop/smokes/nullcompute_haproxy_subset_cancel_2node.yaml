@@ -1,0 +1,70 @@
+name: nullcompute_haproxy_subset_cancel_2node
+# Deliberate cancellation qualification, not a paper throughput measurement.
+# The finite allocation parent interrupts this independent lifecycle after
+# canonical READY; the 60-second replay provides a clear cancellation window.
+matrix:
+  name_template: 'n{num_nodes}'
+  axes:
+  - name: num_nodes
+    values: [2]
+    targets: [deployment.num_nodes, client.num_nodes, scheduler.nodes]
+trace:
+  kind: weak_scaling
+workload:
+  duration: 60.0
+  input_len: 64
+  output_len: 64
+  rate_per_node: 1.0
+  arrival: fixed
+  generation_mode: deterministic
+deployment:
+  validation_mode: true
+  num_nodes: 2
+  num_gpus_per_node: 12
+  control:
+    watchdog_cleanup_deadline_s: 300.0
+  readiness:
+    initial_deadline_s: 1200.0
+  models:
+  - model_id: meta-llama/Meta-Llama-3-8B-Instruct
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_model_len: 4096
+    size: 8
+    num_cpus_per_replica: 1
+    gpu_memory_utilization: 0.90
+    enforce_eager: true
+    max_num_seqs: 64
+  replica_max_ongoing_requests: 256
+client:
+  num_runs: 2
+  startup_only: false
+  dest: proxy
+  stream: false
+  sum_only: false
+  num_nodes: 2
+  num_go_procs: 1
+  num_go_workers: 4
+  request_timeout_s: 120.0
+  drain_wait_timeout_s: 180.0
+backend:
+  default: ray
+  args:
+    ray:
+      launch:
+        ray_node_cpus: 64
+        clean_stage: true
+        null_compute: true
+        instrumentation: true
+      proxy:
+        type: haproxy
+        port: 4001
+        backend_port: 8000
+        num_workers: 1
+        options:
+          balance: leastconn
+          maxconn: 8000
+scheduler:
+  type: pbs
+  queue: debug
+  walltime: 00:30:00

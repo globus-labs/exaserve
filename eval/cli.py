@@ -10,10 +10,11 @@ Subcommands:
   run submit <target>               — qsub the PBS job for a materialized run bundle
   run submit-all <spec_name>       — submit all pending runs for a spec, respecting queue limits
   run execute <run.yaml>            — execute a run inside a PBS job (called by job.pbs)
+  allocation materialize/submit/execute — finite parent allocation for frozen logical children
 
-Scheduler job bodies are rendered by the shared scheduler backend and invoke
-``run execute`` directly. There is no intermediate lifecycle shell or second
-submission orchestrator.
+Scheduler job bodies are rendered by the shared scheduler backend. A finite
+allocation controller may invoke frozen ``run execute`` children; only those
+canonical children own deployment lifecycle.
 """
 
 from __future__ import annotations
@@ -109,6 +110,22 @@ def build_parser() -> argparse.ArgumentParser:
     run_execute.add_argument("run_yaml")
     run_execute.add_argument("--dry-run", action="store_true")
 
+    allocation = subparsers.add_parser("allocation", help="Finite logical-subset campaigns")
+    allocation_commands = allocation.add_subparsers(dest="command", required=True)
+    allocation_materialize = allocation_commands.add_parser("materialize")
+    allocation_materialize.add_argument("children", nargs="+")
+    allocation_materialize.add_argument("--output-dir", required=True)
+    allocation_materialize.add_argument("--physical-nodes", required=True, type=int)
+    allocation_materialize.add_argument("--queue", required=True)
+    allocation_materialize.add_argument("--walltime", required=True)
+    allocation_materialize.add_argument("--child-timeout-s", required=True, type=float)
+    allocation_materialize.add_argument("--qualification", default=None)
+    allocation_materialize.add_argument("--qualification-mode", action="store_true")
+    allocation_materialize.add_argument("--repo-root", default=None)
+    allocation_materialize.add_argument("--allow-dirty", action="store_true")
+    for name in ("submit", "execute"):
+        allocation_commands.add_parser(name).add_argument("campaign")
+
     # derive-params: compute client config from Phase 0 saturation results
     derive_parser = subparsers.add_parser(
         "derive-params",
@@ -130,6 +147,34 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.area == "allocation":
+        from eval.lib.allocation_campaign import (
+            execute_campaign,
+            materialize_campaign,
+            submit_campaign,
+        )
+
+        if args.command == "materialize":
+            print(
+                materialize_campaign(
+                    args.children,
+                    output_dir=args.output_dir,
+                    physical_nodes=args.physical_nodes,
+                    queue=args.queue,
+                    walltime=args.walltime,
+                    child_timeout_s=args.child_timeout_s,
+                    qualification_path=args.qualification,
+                    qualification_mode=args.qualification_mode,
+                    repo_root=args.repo_root,
+                    allow_dirty=args.allow_dirty,
+                )
+            )
+            return 0
+        if args.command == "submit":
+            print(submit_campaign(args.campaign))
+            return 0
+        return execute_campaign(args.campaign)
 
     if args.area == "spec":
         if args.command == "list":

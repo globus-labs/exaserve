@@ -276,6 +276,15 @@ Python control plane:
 - `python3 -m eval.cli run submit <run.yaml>` — submit one exact run identity
 - `python3 -m eval.cli run submit-all <spec>` — bounded, idempotent batch submission
 
+For queue-limited logical subsets, the finite `eval.cli allocation` control
+plane may materialize and submit a physical allocation campaign referencing
+existing immutable child runs. This is a native PBS batch session, not a
+fabricated keepalive or `subjob` lease. Production use requires the current
+controller/runtime-bound small isolation proof specified in WP12; an unqualified
+controller may submit only its bounded qualification campaign. Physical and
+logical node counts must be reported separately. Child lifecycle, readiness,
+staging and cleanup remain owned by the existing canonical executor.
+
 Job bodies are rendered by `src/exaserve/schedulers/`; no shell template owns
 deployment lifecycle, readiness, or cleanup.
 

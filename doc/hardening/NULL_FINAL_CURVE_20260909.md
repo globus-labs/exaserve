@@ -1,6 +1,6 @@
 # Final-snapshot null-compute startup curve — 2026-09-09
 
-Status: monitoring; both 32-node trials are accepted. Six trials remain.
+Status: monitoring; both 32-node trials and `run12/n64` are accepted. Five trials remain.
 
 This record covers two independent startup-only deployment lifecycles per
 32, 64, 128 and 256 nodes for `nullcompute_haproxy_scale_to256_v040`.
@@ -82,8 +82,8 @@ generation and run-provenance hashes must differ.
 |---|---|---|---|---|
 | run12/n32 | 8814592 | ACCEPTED; PBS F, exit 0, used 00:01:32 | 28.961413 / 23.5403 / 19.8505 / 19.8576 | 1788985796176521479 |
 | run13/n32 | 8814635 | ACCEPTED; PBS F, exit 0, used 00:01:33 | 29.888999 / 23.4858 / 19.7354 / 19.7419 | 1788987869969436504 |
-| run12/n64 | none | PLANNED; gated on accepted run13/n32 | pending | pending |
-| run13/n64 | none | PLANNED; gated on accepted run12/n64 | pending | pending |
+| run12/n64 | 8814767 | ACCEPTED; PBS F, exit 0, used 00:01:45 | 39.743597 / 33.3837 / 29.5892 / 29.5984 | 1788991595698760076 |
+| run13/n64 | 8814812 | SUBMITTED after accepted run12/n64; attempt 1 | pending | pending |
 | run12/n128 | none | PLANNED; gated on accepted run13/n64 | pending | pending |
 | run13/n128 | none | PLANNED; gated on accepted run12/n128 | pending | pending |
 | run12/n256 | none | PLANNED; gated on accepted run13/n128 | pending | pending |
@@ -157,3 +157,35 @@ Before the next submission, `subjob status` reports no active leases,
 `qstat -u wenyiw` reports no jobs, and the user-managed keepalive record remains
 stopped with no source allocation. Canonical batch fallback therefore remains
 the acquisition path. The clean frozen checkout remains at `0a83547`.
+
+Canonical `python3 -m eval.cli run submit .../run12/n64/run.yaml` succeeded
+as PBS `8814767`, scheduler identity `es-579a4ab7bb1c`, after the n32 gates.
+The submission preflight verified fresh PLANNED revision 0, no scheduler ID
+or prior PBS/result output, and the exact final source. The sealed job requests
+exactly 64 nodes in debug-scaling for one hour; no overrides were applied.
+
+### Accepted run12/n64
+
+The three-hour start helper began at `2026-09-09 21:51:14 UTC`;
+PBS started at `22:05:53 UTC`, allocation head `x4116c1s0b0n0`.
+The sealed body initialized the intended Aurora environment. Live logs showed
+successful source staging, exact 64-node Ray membership/resources, 768 null
+replica measurements and 128 applications at target, followed by clean STOPPED
+and 64/64 DRAIN and GOODBYE. The immutable result has 898 receipt slots.
+PBS finished at `22:08:40 UTC`, F / exit 0 / run_count 1, walltime `00:01:45`.
+
+Explicit `_load_trial(root, "run12", 64)` and all supplementary checks pass:
+seven authenticated result entries, exact final source, exact 64 physical
+PBS hosts matching allocation binding
+`e02d096d59afa56f1cb5dd26789a5a7fdb40234a761ac7a1ec8a75804c4e60aa`,
+current-layout and VC-01 source staging with 64 ordered receipts (4.176613 s),
+and clean published STOPPED with no errors or exhausted shutdown deadline.
+ResultManifest semantic hash:
+`b409b1f6f233091595380ae0f61b71ff0f3ac1ce835a7cd5203fcc2d38c00fdb`.
+Run-provenance hash:
+`9dc23220bb93688d4c332f0425bc88342b5a0473eedacce293c9ec90a4719f31`.
+
+After acceptance, canonical submission of fresh `run13/n64` returned PBS
+`8814812`. Preflight again proved PLANNED revision 0, no prior PBS/result
+output or scheduler ID, exact final source and the clean frozen checkout.
+The queued-start helper uses the explicit 10,800-second bound.

@@ -2089,6 +2089,52 @@ allocation only after a small proof shows that the substituted nodefile,
 MPI/srun launcher, network membership, process cleanup, and artifact namespace
 are isolated to the logical subset. Record logical and physical sizes separately.
 
+#### Finite allocation campaigns for queue-limited logical subsets
+
+The full paper curve exposes an acquisition constraint: hardened 405B cold
+execution exceeds Aurora's one-hour exact-size queue at 32/64/128 nodes, while
+long production allocations begin at 256 nodes. A finite allocation campaign
+may acquire that physical allocation through the shared Python eval/scheduler
+control plane, then execute an ordered list of existing immutable RunPlans in
+exact logical subsets. It is an acquisition adapter, not a second serving
+lifecycle or a replacement RunPlan. This route remains unqualified until the
+small isolation proof below passes.
+
+- Represent physical acquisition with the existing canonical SchedulerPlan and
+  shared scheduler JobSpec. The campaign artifact binds that request, the
+  controller's sealed source identity, exact child artifact hashes, finite
+  budgets, and required qualification evidence. Its scheduler body only prepares
+  the environment and execs the Python controller. Do not start or manage
+  keepalive, disguise a data job as `debug-*`, or create SSH launch fan-out.
+- The native batch head is the sole controller and shared-filesystem reader.
+  Preserve the original PBS job/PALS environment and physical node inventory;
+  select an explicit exact subset containing that same head, and supply its
+  node-local nodefile to both PBS/MPI and ExaServe. Never change PBS_JOBID, fake
+  a subjob lease, or silently truncate a nodefile inside a DeploymentPlan binder.
+- A child's original SchedulerPlan is not submitted in this attach/reuse mode.
+  Its deployment, logical scheduler count, source snapshot, and immutable inputs
+  remain unchanged. Execute the canonical child CLI from its sealed source,
+  not the controller's checkout. Record actual parent queue/walltime, physical
+  nodes, logical subset and allocation-binding hashes separately; consumers
+  must not mistake an active-node measurement for an exact-size physical job.
+- Fence parent submission and execution, reconcile ambiguous scheduler results
+  by exact identity, and fence child submission while directly executing it.
+  Reject any child already submitted, executing, terminal, or carrying unresolved
+  submit intent. An ownership conflict aborts the campaign before that child
+  launches; it does not authorize cancellation of someone else's job.
+- One parent owns at most one child executor at a time. Forward cancellation
+  through the executor's graceful interrupt path and reserve its full canonical
+  watchdog cleanup budget. Do not infer cleanup from its process-group exit:
+  the backend/replay have distinct ownership trees. Any failure, timeout,
+  ambiguous teardown, or incomplete result prevents later children from starting.
+- Before production use, a four-physical/two-logical-node proof must establish
+  exact native MPI placement and over-launch rejection, a complete successful
+  lifecycle, an independently materialized cancellation lifecycle, an excluded-
+  node sentinel surviving child cleanup, isolated artifact/generation namespaces,
+  and unchanged child inputs. Qualification binds controller and child source
+  identities and complete acquisition/result/cleanup evidence; it is not a paper
+  throughput sample or a general multi-tenant reservation qualification.
+
 Validation order:
 
 1. Login-node-safe checks: schema/unit tests, static checks, package build,
