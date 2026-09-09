@@ -1,7 +1,8 @@
 # Missing Paper Scale Campaign — 2026-08-31
 
-Status: **in progress; last updated 2026-09-08**. This document is an evidence
-ledger, not a completed paper reproduction claim. A number appears in an
+Status: **largest-scale targets accepted; full curve in progress; last updated
+2026-09-09**. This document is an evidence ledger, not a completed paper
+reproduction claim. A number appears in an
 accepted table only after the immutable run bundle, terminal state, result
 manifest, readiness evidence, and shutdown evidence all pass the repository's
 fail-closed acceptance checks.
@@ -592,8 +593,72 @@ canary. Its deployment-plan hash is
 `6d766b70b742eaec6006460d0953638bd1baf47cffb620bdf0eaa835b6573464`
 and run-semantic hash is
 `79eb6bfb8a4666e5c6f99dfb2555f74a619a65325d2a9132bd6af89d786f0b3e`.
-Its state is `SUBMITTED`; no accepted n256 result exists yet. The rejected
+It completed successfully on 2026-09-09 and is accepted below. The rejected
 `run10/n256` remains immutable negative evidence.
+
+### Accepted 256-node 405B replay after the MPI receive correction
+
+PBS `8811810` started at `2026-09-09 07:43:42 UTC` and finished at
+`08:59:32 UTC`, with terminal state `F`, exit 0 and reported used walltime
+`01:14:28`. The exact generation is `1788939883350530388`; its allocation
+binding is
+`650803d343c6bddef63b47642958f413c2420ab4825a467cc57d6043ba78a3b1`.
+The frozen-snapshot paper acceptance and replay validators passed, all four
+result entries were authenticated by byte length and SHA-256, and a second
+independent audit confirmed the source, staging, READY and result identities.
+
+Source distribution passed on all 256 bound ranks in 5.609384 seconds
+(6.7 seconds at the composition boundary). Each rank verified the same
+415-file, 25,092,758-byte source capsule, both VC-01 seeds, node-local `tmpfs`
+runtime/state and the qualified site Python on `squashfs`. The source capsule
+manifest is
+`5d6d3e8cfb8c69103483f14eb073623a87dffacd74ee1040f5d76b42f7642c2c`.
+Head-owned model verification took 932.71 seconds. MPI sent stage 0's
+408,748,312,778 bytes only to the 128 even ranks in 402.02 seconds and stage
+1's 407,607,560,984 bytes only to the 128 odd ranks in 303.73 seconds. All
+256 publication receipts prove the expected 102-file stage on `tmpfs` and
+the exact allocation-bound node; cleanup receipts removed zero owned paths.
+Complete model staging took 2,908.6227 seconds, or 2,909.4 seconds at the
+composition boundary.
+
+Canonical READY was published at `2026-09-09T08:46:06.162767+00:00`,
+3,682.812236 seconds after generation creation. It proved 256 exact Ray
+nodes/3,072 GPUs, 384 Serve applications, 128/128 TP8 x PP2 engines with
+128 EngineCore and 2,048 worker receipts, 256 healthy proxies, HAProxy health
+and a successful routed model canary. All 2,818 exact compatibility slots
+passed and every receipt reports mpi4py 4.1.1. Canonical model deployment
+took 714.60 seconds. The compatibility receipt manifest semantic hash is
+`62d54b6229b89304d76aeb271c4f6f3ba2296199386475eca008fa3ec17e6217`.
+
+Both non-streaming replays completed 6,144/6,144 requests with zero errors.
+Warmup replay 0 recorded 38.140176 successful RPS, p50 15.472807 seconds and
+p99 33.737963 seconds. Reported replay 1 recorded **40.049510 successful
+RPS**, p50 **15.096415 seconds** and p99 **29.848243 seconds**. Both typed MPI
+gathers authenticated client ranks `[0, 1, 2, 3]`, with no missing shard and
+`mpi_chunked` transport; each rank contributed approximately 935–941 KB.
+`overall` mirrors replay 1, not the sum of both executions. This is one
+deployment with one warmup and one reported replay, not two independent
+deployment measurements.
+
+The complete four-entry ResultManifest semantic hash is
+`d4ccbac79b3d84c1ce02798d5bcf58836b3c5ba4b38c3188fe26c1dd408b4e04`;
+its file hash is
+`3748dc5c593983ba81f61b99a9306d20d4a873f1742d58d206de77bb999c37ff`.
+The replay result SHA-256 is
+`2696e9407666a22a022c8d951b1f07172557e082bd6cf4485a4226dfc4dba0e8`.
+All 256 ranks acknowledged DRAIN and GOODBYE. Teardown published clean
+`STOPPED` at `2026-09-09T08:58:37.981623+00:00`, with no errors or exhausted
+deadline; RunStatus became `SUCCEEDED` at `08:58:38.975650 UTC`. Shutdown
+report SHA-256 is
+`b9d8a4abb66cac4df32829da4d5a10f4e671b3209f4f5ff7f5cbdaea03bf3e49`.
+The supervisor/rank-launcher SIGTERM/143 and HAProxy -15 are controlled
+cleanup outcomes; the producing PBS job exited 0.
+
+The largest-scale execution goal is now met for both paper series. No code
+repair or retry was needed in this attempt. The plan still uses
+`validation_mode=true`, so this is accepted paper evidence on Aurora, not a
+claim of qualification on other platforms or a complete release gate. The
+homogeneous intermediate-node curve and final figure work remain below.
 
 ## Current accepted results
 
@@ -621,8 +686,8 @@ Both corrected n256 lifecycles passed the fail-closed paper consumer and proved
 clean `STOPPED` terminal evidence and a shutdown report with 256/256 DRAIN and
 GOODBYE, no errors and no exhausted deadline. PBS jobs `8808097` and `8808106`
 exited 0 after 16:02 and 16:24, respectively. Corrected-snapshot n64 and n128
-pairs remain unrun; they are not prerequisites for the current largest-scale
-bring-up objective but remain necessary for a homogeneous final curve.
+pairs remain unrun and remain necessary for a homogeneous final curve. The
+largest-scale bring-up objective is now complete.
 
 ### Preserved pre-hardening HAProxy null-compute startup
 
@@ -687,7 +752,7 @@ accepted cell.
 | 32 | 16 | 768/768 | 0 | 5.339415 | 15.106 | 29.495 | accepted |
 | 64 | 32 | 1,536/1,536 | 0 | 10.750777 | 14.785 | 24.624 | accepted |
 | 128 | 64 | 3,072/3,072 | 0 | 20.739459 | 15.071 | 31.018 | accepted |
-| 256 | 128 | pending | pending | pending | pending | pending | `run10` rejected; fresh `run11` submitted as PBS `8811810`, not accepted |
+| 256 | 128 | 6,144/6,144 | 0 | 40.049510 | 15.096 | 29.848 | accepted current-snapshot `run11`, PBS `8811810` |
 
 The accepted n4 cell is now the immutable `run10` artifact from source snapshot
 `7efc01f898e51f72c73f84bc6c044d29516c02cfd8780a7cfc393dd041cb5059`
@@ -701,14 +766,22 @@ snapshot
 at commit `eabf59c`. The accepted n32 through n128 cells are pinned to
 `run4`, snapshot
 `a6e383094c6320e83fa0f290298ca0510be5f21a2ffcb358868d8eb5aa8a82e1`
-at commit `4d009c1`. The rejected n256 cell is `run10`; its fresh replacement
-is `run11`, PBS `8811810`, and has no accepted result yet. This split is a
-reviewed compatibility waiver, not an
-unnoticed mix: the grouped-application behavior is admitted only for dense
-TP1/PP1 `null_compute` plans. Its shared HAProxy route renderer retains `_r` as
-the default and therefore preserves the PP2 route/configuration behavior; the
-remaining change replaces lossy materialized deployment IDs. The PP2 model,
-placement, gateway, replay, and offered-load semantics are unchanged. The
+at commit `4d009c1`. The accepted n256 replacement is `run11`, PBS `8811810`,
+from commit `0a83547`, source snapshot
+`5d85794f26a54596dc4ddb237996652171b9cd78d21751c8235bf0e25f8d365f`.
+Its complete ResultManifest hash is
+`d4ccbac79b3d84c1ce02798d5bcf58836b3c5ba4b38c3188fe26c1dd408b4e04`;
+rejected `run10/n256` remains preserved separately. This is explicitly a
+mixed-campaign table. The earlier `run3`/`run4` compatibility waiver covered
+grouping for dense TP1/PP1 `null_compute` plans and collision-resistant
+deployment identities, with PP2's `_r` routes preserved. It does not make
+those snapshots identical to the subsequent filesystem and MPI hardening
+used by the accepted n4/n256 replacements. PP2 model, placement, gateway,
+replay and offered-load semantics remain unchanged, but current-snapshot
+n8/n16/n32/n64/n128 cells remain to be filled. Accepted n4 also predates the
+final MPI receive correction: a strictly single-snapshot curve requires n4
+from the chosen final snapshot as well. Retaining `run10/n4` instead requires
+an explicit compatibility waiver and a mixed-snapshot label. The
 figure consumer must pin the exact node-to-source mapping above and reject any
 unreviewed snapshot. `run3/n128` must never be selected because its legacy truncated
 deployment ID aliases `run3/n16`; all `run4` identities are bounded and
@@ -963,20 +1036,21 @@ collective. Its replacement gates are now complete: full-replay MPI canary
 `run10/n4`, PBS `8809232`, passed as an accepted paper cell. Rejected `run7`,
 `run8` and `run9` identities remain immutable and must not be reset or reused.
 
-1. Monitor the submitted 405B `run11/n256`, PBS `8811810`. The receive fix,
-   differential compute probe, full suite and application-level large-message
-   MPI canary have passed; the fresh campaign returns directly to n256.
-   Exact READY, both complete replays, a complete authenticated ResultManifest
-   and clean terminal evidence remain mandatory. Preserve rejected
-   `run10/n256`, PBS `8809332`, as immutable negative evidence; the new
-   submission is not an accepted result until its own evidence passes.
-2. After the n256 disposition is sealed, fill the intermediate homogeneous
-   curve: corrected-snapshot null-compute n64/n128 pairs and current-snapshot
+The fresh 405B `run11/n256`, PBS `8811810`, is now accepted after exact READY,
+both complete replays, authenticated results and clean terminal evidence.
+Together with the corrected null-compute n256 pair, this closes the request
+to run until both largest-scale targets work. The failed `run10/n256`, PBS
+`8809332`, remains immutable negative evidence.
+
+1. Fill the intermediate homogeneous curve: corrected-snapshot null-compute
+   n64/n128 pairs and current-snapshot
    PP n8/n16/n32/n64/n128 cells. These are still required for the final curve,
-   but they are not launch prerequisites for n256. Until they exist, preserve
-   prior measurements separately and label any combined output explicitly as
-   a mixed-campaign comparison.
-3. Render the strict null startup table and full PP2 figure. Both consumers must
+   even though n256 is now accepted. Until they exist, preserve prior
+   measurements separately and label any combined output explicitly as a
+   mixed-campaign comparison. For PP, strict source homogeneity also requires
+   n4 on the chosen final snapshot; retaining the accepted `run10/n4` needs
+   an explicit compatibility waiver and continued mixed-snapshot labeling.
+2. Render the strict null startup table and full PP2 figure. Both consumers must
    reject missing, partial, malformed, or provenance-mismatched cells.
-4. Replace all `pending` rows in this ledger with sealed evidence or an explicit
+3. Replace all `pending` rows in this ledger with sealed evidence or an explicit
    externally blocked disposition, then run the complete release gate.

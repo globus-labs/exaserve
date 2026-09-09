@@ -2242,8 +2242,82 @@ from the same `0a83547` source snapshot. Its deployment-plan hash is
 `6d766b70b742eaec6006460d0953638bd1baf47cffb620bdf0eaa835b6573464`
 and run-semantic hash is
 `79eb6bfb8a4666e5c6f99dfb2555f74a619a65325d2a9132bd6af89d786f0b3e`.
-It is `SUBMITTED` and not yet accepted. The next step is to monitor this
-256-node attempt and validate both replays and terminal evidence. The
+It subsequently completed and is accepted below. The
 rejected `run10/n256` is preserved; the completed probe, 1,701-test suite and
 two-rank canary justify returning directly to n256 without an intermediate
 node-count ladder.
+
+## Accepted 256-node 405B replay and clean terminal evidence (2026-09-09)
+
+PBS `8811810`, immutable `pp405b_pp2_haproxy_nostream_v040/run11/n256`,
+started at `2026-09-09 07:43:42 UTC` and finished at `08:59:32 UTC` with
+state `F`, exit 0 and used walltime `01:14:28`. Its source remains commit
+`0a83547`, snapshot
+`5d85794f26a54596dc4ddb237996652171b9cd78d21751c8235bf0e25f8d365f`.
+No additional repair or retry was required in this attempt. The frozen
+`require_accepted_paper_run` and `_validate_replay_results` checks passed;
+all four manifest entries were independently authenticated, and a second
+audit confirmed source, staging, READY, receipt and result identity edges.
+
+Generation `1788939883350530388` binds exactly 256 allocated nodes under
+allocation hash
+`650803d343c6bddef63b47642958f413c2420ab4825a467cc57d6043ba78a3b1`.
+The 415-file, 25,092,758-byte source capsule passed on all 256 ranks in
+5.609384 seconds (6.7 seconds at the composition boundary); every rank
+verified both VC-01 seeds and node-local `tmpfs` runtime/state. Capsule hash:
+`5d6d3e8cfb8c69103483f14eb073623a87dffacd74ee1040f5d76b42f7642c2c`.
+Head-owned model verification took 932.71 seconds. Stage 0 distributed
+408,748,312,778 bytes to the 128 even ranks in 402.02 seconds; stage 1
+distributed 407,607,560,984 bytes to the 128 odd ranks in 303.73 seconds.
+All 256 expected 102-file stage publications passed on `tmpfs`; cleanup
+receipts removed zero owned paths. Complete model staging took 2,908.6227
+seconds (2,909.4 seconds at the composition boundary). The aggregate model
+evidence file SHA-256 is
+`a9d14bddadb754928c30a7edb1af8628fe9cdf7972fd483f71c0434d1e823d2d`.
+
+READY was published at `2026-09-09T08:46:06.162767+00:00`, 3,682.812236
+seconds after generation creation, and model deployment took 714.60 seconds.
+Exact proofs cover 256 Ray nodes/3,072 GPUs, 384 Serve applications, 128
+TP8 x PP2 replicas, 128 EngineCore processes, 2,048 engine workers, 256 healthy
+proxies, HAProxy health and a routed model canary. All 2,818 planned receipt
+slots passed, and every receipt reports mpi4py 4.1.1. Receipt manifest hash:
+`62d54b6229b89304d76aeb271c4f6f3ba2296199386475eca008fa3ec17e6217`.
+
+Both client replays completed 6,144/6,144 requests with zero errors. Warmup
+replay 0 recorded 38.140176 successful RPS, p50 15.472807 seconds and p99
+33.737963 seconds. Reported replay 1 recorded 40.049510 successful RPS, p50
+15.096415 seconds and p99 29.848243 seconds. Both typed MPI gathers
+authenticated all four client ranks with no missing shard; each rank
+contributed approximately 935–941 KB through `mpi_chunked` transport. This
+passes the former large-message receive failure point at the actual 256-node
+paper workload. `overall` mirrors replay 1, and the two executions remain one
+warmup plus one reported replay from one deployment.
+
+The complete ResultManifest semantic hash is
+`d4ccbac79b3d84c1ce02798d5bcf58836b3c5ba4b38c3188fe26c1dd408b4e04`;
+its file SHA-256 is
+`3748dc5c593983ba81f61b99a9306d20d4a873f1742d58d206de77bb999c37ff`.
+Replay result SHA-256:
+`2696e9407666a22a022c8d951b1f07172557e082bd6cf4485a4226dfc4dba0e8`.
+Sealed READY evidence SHA-256:
+`4800a7da39a2411eeb0bcdddc06ba51a8b162028d586be135434b9d6c40a5686`.
+
+All 256 ranks acknowledged DRAIN and GOODBYE. Deployment state became
+`STOPPED` at `2026-09-09T08:58:37.981623+00:00`; RunStatus became
+`SUCCEEDED` at `08:58:38.975650 UTC`. Shutdown was clean with no errors or
+exhausted deadline; report SHA-256:
+`b9d8a4abb66cac4df32829da4d5a10f4e671b3209f4f5ff7f5cbdaea03bf3e49`.
+The supervisor/rank-launcher SIGTERM/143 and HAProxy -15 are controlled
+cleanup outcomes; PBS exited 0.
+
+Together with the already accepted null-compute n256 pair, this closes the
+largest-scale execution goal. Intermediate corrected null n64/n128 pairs,
+current-snapshot PP n8/n16/n32/n64/n128 cells, final paper rendering and the
+complete release gate remain pending. The current PP table explicitly spans
+multiple source snapshots; it is not a homogeneous rerun. Accepted n4 is
+still `run10` on snapshot `7efc01f8...b5059`, so filling n8–n128 alone cannot
+make the full curve source-homogeneous. A single-snapshot curve also needs
+n4 on the chosen final snapshot; retaining `run10/n4` instead requires an
+explicit compatibility waiver and continued mixed-snapshot labeling. Aurora paper
+acceptance with `validation_mode=true` also does not claim qualification on
+other HPC platforms. Failed `run10/n256` remains immutable negative evidence.
