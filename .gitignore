@@ -3,6 +3,11 @@ __pycache__/
 .env
 .DS_Store
 venv/
+.venv/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 .vscode/
 data_local/
 CLAUDE.md

@@ -2,10 +2,13 @@
 # used by the unit/package/static gates is exact. Regenerate deliberately and
 # exercise both supported portable interpreters before changing a pin.
 pip==26.2.1
+uv==0.10.1
 PyYAML==6.0.3
 packaging==25.0
 pytest==8.3.5
 pytest-randomly==4.0.1
+pytest-cov==7.1.0
+coverage==7.14.0
 iniconfig==2.3.0
 pluggy==1.6.0
 Pygments==2.19.2

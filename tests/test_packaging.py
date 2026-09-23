@@ -3,6 +3,7 @@ import io
 from pathlib import Path
 import runpy
 import tarfile
+import zipfile
 
 import pytest
 
@@ -16,6 +17,7 @@ _extract_sdist = _RELEASE_BUILDER["_extract_sdist"]
 _copy_release_input = _RELEASE_BUILDER["_copy_release_input"]
 _atomic_copy = _RELEASE_BUILDER["_atomic_copy"]
 _verified_local_build_environment = _RELEASE_BUILDER["_verified_local_build_environment"]
+_audit_wheel = _RELEASE_BUILDER["_audit_wheel"]
 
 
 def test_packaged_runtime_resources_are_present():
@@ -80,6 +82,39 @@ def test_release_builder_stages_only_declared_inputs(tmp_path):
     assert not (staged / "doc").exists()
     assert not (staged / "scripts").exists()
     assert (staged / "src/exaserve/resources/vllm_modelinfo/manifest.json").is_file()
+    for name in ("LICENSE", "NOTICE", "uv.lock", "CONTRIBUTING.md", "SECURITY.md"):
+        assert (staged / name).read_bytes() == (repo / name).read_bytes()
+
+
+@pytest.mark.parametrize("defect", [None, "missing-license", "changed-notice", "wrong-spdx"])
+def test_release_wheel_audits_license_metadata_and_bytes(tmp_path, defect):
+    repo = tmp_path / "repo"
+    package = repo / "src/exaserve"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "LICENSE").write_text("license fixture", encoding="utf-8")
+    (repo / "NOTICE").write_text("notice fixture", encoding="utf-8")
+    wheel = tmp_path / "exaserve-0.4.0-py3-none-any.whl"
+    info = "exaserve-0.4.0.dist-info"
+    spdx = "MIT" if defect == "wrong-spdx" else "Apache-2.0"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("exaserve/__init__.py", "")
+        archive.writestr(
+            f"{info}/METADATA",
+            f"Metadata-Version: 2.4\nName: exaserve\nVersion: 0.4.0\n"
+            f"License-Expression: {spdx}\nLicense-File: LICENSE\nLicense-File: NOTICE\n\n",
+        )
+        if defect != "missing-license":
+            archive.writestr(f"{info}/licenses/LICENSE", (repo / "LICENSE").read_bytes())
+        archive.writestr(
+            f"{info}/licenses/NOTICE",
+            b"changed" if defect == "changed-notice" else (repo / "NOTICE").read_bytes(),
+        )
+    if defect is None:
+        assert _audit_wheel(wheel, repo) == ["exaserve/__init__.py"]
+    else:
+        with pytest.raises(RuntimeError, match="license"):
+            _audit_wheel(wheel, repo)
 
 
 def test_release_artifact_publication_never_replaces_an_existing_identity(tmp_path):

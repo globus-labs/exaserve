@@ -1,6 +1,13 @@
 include README.md
 include pyproject.toml
 include MANIFEST.in
+include LICENSE
+include NOTICE
+include CHANGELOG.md
+include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+include SECURITY.md
+include uv.lock
 recursive-include requirements *.lock README.md
 recursive-include src/exaserve *.py
 recursive-include src/exaserve/resources *.c *.Makefile *.json

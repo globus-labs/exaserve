@@ -1,0 +1,17 @@
+ExaServe
+
+Copyright holders retain their copyrights. Individual source notices and
+the repository contribution history identify existing contributions.
+
+Repository infrastructure and community guidance were adapted for ExaServe
+from AI-ModCon/BaseTemplate, Apache License 2.0, at commit
+fcfc042ffe287af9526520dd3e10b88dcd127d3b:
+https://github.com/AI-ModCon/BaseTemplate
+
+These adaptations add ExaServe-specific development, HPC safety, qualification,
+contribution, and reporting guidance. They do not change third-party licenses.
+
+The vendored yyjson sources in clientlab/targets/cpp_server/vendor retain
+their MIT license and YaoYuan copyright notices in the source files.
+External dependencies and model weights remain subject to their own terms;
+the project's Apache-2.0 license does not relicense those materials.

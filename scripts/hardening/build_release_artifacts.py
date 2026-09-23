@@ -12,6 +12,8 @@ exactly.
 from __future__ import annotations
 
 import argparse
+from email.parser import BytesParser
+from email.policy import default as email_policy
 import hashlib
 from importlib import metadata
 import json
@@ -37,7 +39,18 @@ _BUILD_BACKEND_ENTRY_POINT_GROUPS = (
     "distutils.setup_keywords",
     "setuptools.finalize_distribution_options",
 )
-_RELEASE_ROOT_FILES = ("MANIFEST.in", "README.md", "pyproject.toml")
+_RELEASE_ROOT_FILES = (
+    "MANIFEST.in",
+    "README.md",
+    "pyproject.toml",
+    "LICENSE",
+    "NOTICE",
+    "uv.lock",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
+)
 _GENERATED_SDIST_FILES = {
     "PKG-INFO",
     "setup.cfg",
@@ -166,6 +179,26 @@ def _audit_sdist(sdist: Path, repo_root: Path) -> list[str]:
 def _audit_wheel(wheel: Path, repo_root: Path) -> list[str]:
     expected = _expected_package_members(repo_root)
     with zipfile.ZipFile(wheel) as archive:
+        metadata_members = [
+            name
+            for name in archive.namelist()
+            if name.endswith(".dist-info/METADATA") and len(Path(name).parts) == 2
+        ]
+        if len(metadata_members) != 1:
+            raise RuntimeError("wheel must contain exactly one distribution metadata file")
+        metadata_name = metadata_members[0]
+        metadata = BytesParser(policy=email_policy).parsebytes(archive.read(metadata_name))
+        if metadata.get("Name") != "exaserve" or metadata.get("License-Expression") != "Apache-2.0":
+            raise RuntimeError("wheel lacks the declared ExaServe Apache-2.0 license metadata")
+        if set(metadata.get_all("License-File", [])) != {"LICENSE", "NOTICE"}:
+            raise RuntimeError("wheel metadata must declare LICENSE and NOTICE")
+        distribution_root = metadata_name.rsplit("/", 1)[0]
+        for license_name in ("LICENSE", "NOTICE"):
+            member = f"{distribution_root}/licenses/{license_name}"
+            if archive.namelist().count(member) != 1:
+                raise RuntimeError(f"wheel must contain one exact license artifact: {license_name}")
+            if archive.read(member) != (repo_root / license_name).read_bytes():
+                raise RuntimeError(f"wheel license artifact differs from source: {license_name}")
         names = {
             name
             for name in archive.namelist()

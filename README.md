@@ -7,16 +7,31 @@ trusted allocation-internal network. Slurm, CUDA/ROCm, SGLang, streaming, direct
 Serve exposure, and alternate gateways are rejected or validation-only unless a
 separately qualified `SiteProfile` says otherwise.
 
-The active successor source is `release-v0.4.0`. Final43 remains the last
-packaged one/two-node hardware-qualified artifact until that branch passes a
-clean wheel gate and the owner-approved scale ladder; preview results are not
-silently promoted into release evidence.
+The shared development baseline is `main`, which includes the scaling and
+hardening history previously developed on `paper/missing-scale-v0.4.0`.
+Historical package and hardware receipts qualify their exact artifacts, not
+every later commit. Paper measurements are not silently promoted into release
+evidence or cross-platform support claims.
 
 Qualification is immutable-candidate and dimension specific. The proposed
 64-node target is not a support claim: it needs product-owner scope approval
 and the predeclared exact-candidate ladder. See
 [`doc/hardening/STATUS.md`](doc/hardening/STATUS.md) for the current artifact,
 evidence-backed maximum, and unresolved gates.
+
+## Documentation and AI-ModCon preparation
+
+Start with the [documentation index](docs/index.md),
+[getting-started guide](docs/getting_started.md), [usage examples](docs/usage.md),
+and [API reference](docs/api.md). The existing `doc/` tree remains the home of
+the authoritative architecture plan, design notes, and historical evidence;
+the `docs/` entry points do not replace those contracts.
+
+This repository is being prepared for transfer to AI-ModCon. The
+[compliance and transfer checklist](docs/modcon_compliance.md) records the
+BaseTemplate revision, implemented requirements, validation limits, and GitHub
+administrator steps. Repository links continue to identify the current
+`globus-labs/exaserve` location until the transfer is actually completed.
 
 ## Architecture
 
@@ -88,12 +103,10 @@ generation publishes canonical `READY`, its compiled advertised endpoint. It
 does not infer readiness from PBS `RUNNING`, a listening proxy, a log line, or a
 newest file.
 
-For plans admitted by the current SiteProfile, the topology policy defaults to
-Aurora's `capacity` queue and `01:00:00` through sixteen nodes and to
-`debug-scaling` from 17 through the 64-node candidate ceiling. Normal
-production plans above the evidence-backed two-node maximum are rejected; the
-default profile rejects every plan above 64 before scheduler rendering. Queue
-and walltime can be overridden by CLI arguments or
+Scheduler requests are validated against the selected SiteProfile. Aurora's
+physical/validation ceiling is distinct from an approved production envelope;
+neither a larger allocation limit nor a successful paper run automatically
+widens production support. Queue and walltime can be overridden by CLI arguments or
 `EXASERVE_DEFAULT_QUEUE` / `EXASERVE_DEFAULT_WALLTIME` only within an approved
 or explicitly authorized validation envelope.
 
@@ -201,8 +214,11 @@ instead of copying serving fields.
 ```bash
 python3 -m eval.cli spec validate eval/specs/smoke_haproxy_1node.yaml
 python3 -m eval.cli run materialize eval/specs/smoke_haproxy_1node.yaml
-python3 -m eval.cli run submit-all smoke_haproxy_1node
+python3 -m eval.cli run submit-all smoke_haproxy_1node --run-group run0
 ```
+
+Use the exact `runN` group returned by materialization, not an assumed `run0`.
+Execution occurs in the generated compute job, not on the login node.
 
 ClientLab uses `python3 -m clientlab`. Synthetic studies are explicitly
 diagnostic-only. A real ExaServe study must bind one RunPlan, trace, generation,
@@ -212,16 +228,40 @@ explained in [`clientlab/scripts/README.md`](clientlab/scripts/README.md).
 
 ## Testing and release gates
 
-Lightweight checks on the login node require Aurora's project toolchain:
+For a portable Linux development environment, use the pinned uv version and
+the repository's locked tooling. No server/GPU extras are selected by default:
 
 ```bash
-module load frameworks
-module load go
-python3 -m pytest -q
-ruff check .
-ruff format --check .
-(cd eval/go_client && go test ./...)
+python3 -m pip install uv==0.10.1
+make install-dev
+make lock-check
+make lint
+make format-check
+make type-check
 ```
+
+The uv resolution envelope is Linux with Python 3.10–3.13 because the existing
+optional vLLM version excludes Python 3.14. CI tests the portable core on Python
+3.10 and 3.12; this is not a claim that a GPU stack or every interpreter is
+qualified. `requirements/aurora-frameworks-2025.3.1.lock` remains the separate
+site runtime record. Do not use `uv sync --all-extras` to replace the Aurora
+frameworks environment.
+
+On Aurora, load `frameworks` and `go` before brief static checks. Full test
+suites, package builds, MPI and GPU work require a validated compute session
+and fresh environment setup under [AGENTS.md](AGENTS.md). Once in that session
+(or on a suitable non-HPC development machine), use:
+
+```bash
+make test
+make test-cov
+make build
+```
+
+Coverage is reported for the portable Python code, with XML artifacts retained
+by CI. It does not measure or certify real GPU, native MPI, scheduler, or scale
+behavior. The independently installed-wheel and randomized-order gates remain
+separate from the editable development environment.
 
 The release gate also builds an sdist and wheel, installs the wheel into a clean
 Python environment outside the source tree, runs deterministic and randomized
@@ -234,3 +274,26 @@ The authoritative architecture and implementation contract is
 [`doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md`](doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md).
 Historical audits, `KNOWN_ISSUES`, and TODO material are context only and cannot
 override it.
+
+## Contributing and reporting issues
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, required
+human review, and AI-assisted contribution policy, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards.
+Use the repository's issue templates for ordinary bugs and feature requests.
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+The current maintainer contact is Wenyi Wang, `wenyiw@uchicago.edu`.
+
+## Acknowledgments
+
+Repository infrastructure and community guidance draw on
+[AI-ModCon/BaseTemplate](https://github.com/AI-ModCon/BaseTemplate).
+We acknowledge the U.S. Department of Energy's Genesis Mission support for
+the ModCon Base collaboration. This statement does not assert a project-specific
+award or a completed repository transfer.
+
+## License
+
+ExaServe is licensed under [Apache-2.0](LICENSE), except where individual files
+state otherwise. See [NOTICE](NOTICE) for attribution. External dependencies,
+vendored third-party code, and model weights retain their respective terms.
