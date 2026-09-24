@@ -1,8 +1,9 @@
 # Usage
 
 Run examples from the repository root. Commands that start serving, replay,
-benchmarks, or full tests require the compute-session workflow in
-[AGENTS.md](../AGENTS.md). The canonical submission commands may prepare and
+benchmarks, or full tests on HPC require the
+[environment and compute-session setup](getting_started.md#aurora-development-and-serving).
+The canonical submission commands may prepare and
 submit native PBS jobs from a login node; execution remains in the allocated
 batch session, not on the login node.
 
@@ -129,7 +130,9 @@ Inspect an example specification without launching it:
 python3 -m eval.cli spec validate eval/specs/smoke_haproxy_1node.yaml
 ```
 
-The example is explicitly validation-only. Before materializing or running it,
+The example is explicitly validation-only. First configure an
+[operator-owned environment file](getting_started.md#configure-evaluation-environment-preparation).
+Before materializing or running it,
 review its model paths, site settings, resource requirements, output roots, and
 authorization. See [site override examples](../eval/site_config_local.example.py)
 and [the eval design](../eval/DESIGN.md).
@@ -164,7 +167,9 @@ the canonical executor; do not reconstruct deployment lifecycle in a shell
 wrapper.
 
 The separate `eval.cli allocation` controller can pack logical child runs into
-a finite physical allocation campaign. Its WP12 isolation proof and
+a finite physical allocation campaign. It currently has
+[operator-specific bootstrap limitations](getting_started.md#current-bootstrap-limitations)
+and does not honor the ordinary eval environment override. Its WP12 isolation proof and
 qualification requirements still apply. Report physical allocation nodes and
 logical child nodes separately; this is not a keepalive or fabricated lease.
 

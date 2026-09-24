@@ -21,7 +21,7 @@ help:
 	  '  build                  Audit an sdist and wheel; BUILD_OUTPUT must be new/empty' \
 	  '' \
 	  'Aurora: full tests and builds require a validated compute session and environment.' \
-	  'Follow AGENTS.md: prefer subjob, then source ~/script/env_aurora inside the session.' \
+	  'Use a verified interactive PBS compute shell; see docs/getting_started.md#aurora-development-and-serving.' \
 	  'The session guard is a safety check, not allocation or environment setup.' \
 	  'Portable CI covers Linux Python 3.10 and 3.12, not GPU/runtime qualification.'
 
@@ -49,18 +49,18 @@ type-check:
 
 # Aurora uses non-"aurora" compute hostnames too, so also detect the site tree.
 # Non-Aurora developer machines and hosted CI do not need a PBS allocation.
-# A verified interactive PBS shell is accepted alongside the preferred lease.
+# Accept verified interactive PBS shells and retain legacy lease compatibility.
 check-compute-session:
 	@node=$$(hostname -s); \
 	if [[ -d /opt/aurora || "$$node" == aurora-* ]]; then \
 	  if [[ "$$node" == aurora-uan-* || -z "$${PBS_JOBID:-}" || ! -r "$${PBS_NODEFILE:-}" ]]; then \
-	    printf '%s\n' 'Aurora tests/builds require a validated compute session; follow AGENTS.md.' >&2; exit 1; \
+	    printf '%s\n' 'Aurora tests/builds require a validated compute session; see docs/getting_started.md#aurora-development-and-serving and AGENTS.md.' >&2; exit 1; \
 	  fi; \
 	  if ! awk -v node="$$node" '{ split($$1, host, "."); if (host[1] == node) found = 1 } END { exit !found }' "$$PBS_NODEFILE"; then \
 	    printf '%s\n' 'Current host is not in PBS_NODEFILE; refusing tests/builds.' >&2; exit 1; \
 	  fi; \
 	  if [[ "$${AURORA_SUBJOB:-}" != 1 && "$${PBS_ENVIRONMENT:-}" != PBS_INTERACTIVE ]]; then \
-	    printf '%s\n' 'Use a subjob lease or verified interactive PBS compute shell; follow AGENTS.md.' >&2; exit 1; \
+	    printf '%s\n' 'Use a verified interactive PBS compute shell; see docs/getting_started.md#aurora-development-and-serving.' >&2; exit 1; \
 	  fi; \
 	fi
 

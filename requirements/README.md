@@ -51,9 +51,12 @@ directory must be new or empty (`BUILD_OUTPUT=...` selects another directory).
 There is no destructive cleanup target.
 
 On Aurora, full `make test`, `make test-cov`, and `make build` runs belong in a
-validated compute session, not on a login node. Follow [`AGENTS.md`](../AGENTS.md):
-prefer a `subjob` lease and source `~/script/env_aurora` inside that session
-before preparing the portable environment. These targets check allocation
-membership and lease/interactive markers on Aurora; the check neither
-obtains resources nor replaces the required session and environment preflight.
-Generic developer machines and hosted CI do not require an Aurora allocation.
+validated compute session, not on a login node. Follow the safety rules in
+[`AGENTS.md`](../AGENTS.md) and the
+[Aurora setup guide](../docs/getting_started.md#aurora-development-and-serving)
+for a scheduler-created interactive PBS allocation, toolchain setup, and
+separation of the portable environment from the site-provided serving runtime.
+These targets check allocation membership and interactive/legacy lease markers
+on Aurora; the check neither obtains resources nor replaces the required
+session and environment preflight. Generic developer machines and hosted CI
+do not require an Aurora allocation.

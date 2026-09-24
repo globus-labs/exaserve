@@ -21,8 +21,10 @@ profile uses Python 3.12.12, Ray 2.53.0, and vLLM 0.15.0+xpu. See
 No. `make install-dev` creates the portable development/test environment. The
 module-provided Aurora Ray/vLLM/XPU stack is a separate environment. Do not
 replace it with `uv sync --all-extras` or a generic `server` extra installation.
-An isolated LiteLLM gateway does not change the requirement to source
-`~/script/env_aurora` for the ExaServe parent. See [getting started](getting_started.md).
+An isolated LiteLLM gateway does not replace the site-provided Ray/vLLM
+environment required by the ExaServe parent. Standalone LiteLLM diagnostics
+and the serving parent use separate environments. See
+[Aurora setup](getting_started.md#aurora-development-and-serving).
 
 ## Can I run the full test suite on an Aurora login node?
 
@@ -33,13 +35,19 @@ needed. A command named `smoke` or an option named `--local` is not sufficient
 evidence that it is safe for a shared login node. [AGENTS.md](../AGENTS.md)
 governs the execution location.
 
-## What if no compute lease is available?
+## How do I obtain Aurora compute resources?
 
-Reuse an existing valid session or use `subjob N` with the smallest adequate
-node count. The keepalive source is managed by the user, not by this project
-workflow. If `subjob` has no available keepalive/debug source, use the approved
-`~/script/srundbg` or `~/script/srundsc N` fallback. Do not bypass session
-validation with plain SSH or improvise PBS parameters.
+Reuse an existing valid session or request a scheduler-created interactive
+PBS allocation using current site-approved instructions and only the nodes
+needed. Validate the job ID, readable nodefile, current-host membership,
+expected node count, interactive session provenance, and remaining walltime
+before running work. Plain SSH does not establish a valid allocation. See
+[Aurora setup](getting_started.md#aurora-development-and-serving) for toolchain,
+runtime, and preflight guidance; personal helper scripts are not required.
+
+Canonical batch campaigns use `python3 -m eval.cli run materialize`, `submit`,
+and `submit-all`; their workloads execute in native PBS batch allocations,
+not fabricated interactive sessions. See [usage](usage.md).
 
 ## Why does submission say production execution is not qualified?
 

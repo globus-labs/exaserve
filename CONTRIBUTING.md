@@ -5,8 +5,9 @@ Contributions to ExaServe are welcome. Please read the [README](README.md) and
 
 ## Project scope and sources of authority
 
-[AGENTS.md](AGENTS.md) governs safety, permissions, allocation/session handling,
-and where commands may run. The
+[AGENTS.md](AGENTS.md) governs agent execution safety and where commands may run.
+[Getting started](docs/getting_started.md) documents environment preparation and
+compute-session checks for contributors and deployers. The
 [production-hardening execution plan](doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md)
 is the authoritative architecture and implementation specification. Historical
 audits, Known Issues, TODOs, and design drafts provide context, not overrides.
@@ -46,12 +47,10 @@ file to create or update the managed `.venv` development environment:
 make install-dev
 ```
 
-On Aurora, first follow [AGENTS.md](AGENTS.md) for the permitted location and
-toolchain. Brief login-node Python or Go checks require
-`module load frameworks && module load go`. Do not substitute a generic virtual
-environment for the prescribed compute-session environment. Server dependencies
-and the vendor runtime have their own qualified environment; installing
-development dependencies does not install or validate that stack.
+On Aurora, follow the [environment preparation guide](docs/getting_started.md#aurora-development-and-serving)
+before running checks. Server dependencies and the vendor runtime have their
+own qualified environment; installing development dependencies does not install
+or validate that stack. No maintainer-private allocation helpers are required.
 
 The common development commands are:
 
@@ -65,10 +64,10 @@ make build
 ```
 
 Run full test suites, coverage runs, and any nontrivial experiment in a validated
-compute session on Aurora, following [AGENTS.md](AGENTS.md). Only clearly brief,
-lightweight checks belong on a login node. GPU, MPI, distributed, and
+compute session on Aurora, following [getting started](docs/getting_started.md#aurora-development-and-serving).
+Only clearly brief, lightweight checks belong on a login node. GPU, MPI, distributed, and
 resource-intensive work must never run there. Allocation, environment setup,
-preflight, monitoring, walltime, and cleanup requirements remain in AGENTS.md;
+preflight, monitoring, walltime, and cleanup requirements are documented there;
 these commands do not bypass them. CI's hermetic checks are a separate lane
 from live hardware and installed-wheel qualification.
 
@@ -114,6 +113,9 @@ checks; repository files alone cannot enable those settings.
 - **Disclose AI assistance.** State in the pull request whether AI tools were
   used, which parts they helped produce or review, and how a human checked the
   output. Clearly identify primarily AI-generated code, analysis, and artifacts.
+  When there is no pull request, disclose assistance in the commit description.
+  Keep human author metadata; do not add agent co-author trailers by default.
+  Disclosure does not attest that human review has occurred.
 - **Keep review human-accountable.** AI feedback is optional supporting input.
   A human reviewer must review every pull request and is responsible for any
   review feedback they adopt.

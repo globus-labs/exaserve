@@ -56,80 +56,162 @@ and dependency profile are correct.
 
 ## Aurora development and serving
 
-On Aurora, follow [AGENTS.md](../AGENTS.md) before executing code. Login nodes
-are for editing, inspection, configuration preparation, submission, and brief
-lightweight checks. Full test suites, package/build gates, benchmarks,
-evaluations, MPI, and GPU work belong in an allocated compute session.
+This section is the operator setup guide, not a requirement to install a
+maintainer's personal scripts. Use the site's scheduler and module system.
+Portable development dependencies and the serving runtime are separate.
 
-For a brief permitted login-node Python or Go check, first load the project
-toolchain:
+### Obtain compute resources
+
+Login nodes are for editing, inspection, configuration preparation, submission
+and brief lightweight checks. Full suites, package/build gates, benchmarks,
+evaluations, MPI and GPU work belong on allocated compute nodes.
+
+For ad-hoc work, reuse an authorized allocation or request an interactive PBS
+session using the site's published instructions and your project's account,
+queue, node count and walltime. ExaServe does not supply or require a personal
+lease manager. Do not guess allocation settings or enter a compute node through
+plain SSH and assume that creates a valid scheduler session.
+
+Before using an interactive session, verify:
+
+- `PBS_JOBID` is set and `PBS_NODEFILE` is readable.
+- The current hostname belongs to the nodefile and the node count is correct.
+- The shell was entered through the scheduler's interactive workflow
+  (`PBS_ENVIRONMENT=PBS_INTERACTIVE` for native PBS), not fabricated exports.
+- The remaining allocation walltime is sufficient; inspect
+  `qstat -f "$PBS_JOBID"`. If your site offers an approved lease service, check
+  its deadline too and preserve its real scheduler state.
+
+For normal serving/evaluation, the [canonical submission commands](usage.md)
+create native PBS batch jobs; a separate interactive allocation is not required
+to submit them. Those jobs execute in their own allocation. Do not set
+interactive/lease markers in a batch job to bypass checks. SSH from an allocated
+head is limited to nodes actually assigned to that session.
+
+### Prepare the runtime
+
+Load Aurora's site toolchain in every fresh session. Brief permitted login-node
+Python/Go checks also need these modules rather than the old system Python:
 
 ```bash
 module load frameworks
 module load go
-```
-
-Do not use the old system Python. Loading modules does not make a login node
-appropriate for a full test suite or experiment.
-
-### Obtain and validate a session
-
-Reuse a valid existing session when possible. Otherwise, lease only the nodes
-needed from the user's existing keepalive/debug allocation:
-
-```bash
-subjob 1
-```
-
-The keepalive allocation is user-managed; do not start or manage it as part of
-this workflow. If no source is available to `subjob`, use `~/script/srundbg`
-for one node or `~/script/srundsc N` for an interactive PBS fallback. Do not
-invent scheduler parameters or replace the lease with a plain SSH shell.
-
-A valid session requires all of the following:
-
-- `PBS_JOBID` is set.
-- `PBS_NODEFILE` exists and is readable.
-- The current hostname matches a host in that nodefile.
-- `AURORA_SUBJOB=1`, or the shell is the verified interactive PBS compute shell.
-
-Check the leased node count against the intended workload, and inspect
-`subjob status` for lease time remaining. Account for the underlying PBS job
-deadline as well as the lease TTL before starting work.
-
-### Initialize the runtime inside that session
-
-```bash
-source ~/script/env_aurora
 unset ONEAPI_DEVICE_SELECTOR
-cd /path/to/exaserve
-command -v python3
+```
+
+The serving profile records Python 3.12.12, Ray 2.53.0 and vLLM 0.15.0+xpu.
+Compare the loaded module with the
+[site dependency record](../requirements/aurora-frameworks-2025.3.1.lock) and
+[compatibility matrix](../doc/hardening/COMPATIBILITY_MATRIX.md). The unversioned
+module name can change; a version mismatch requires an approved runtime update,
+not bypassing compatibility checks. These are site-built distributions, not
+a public-PyPI installation recipe.
+
+Use the qualified module-provided interpreter. Canonical launch requires its
+executable to be non-shared and inside a declared read-only site root
+(`/opt/aurora` in the current profile). A home-directory virtualenv can fail this
+check even if its Python symlinks to the module interpreter. This is stricter
+than merely being able to import Ray.
+
+The operator must provision the exact approved ExaServe artifact and dependencies
+for that interpreter and its batch bootstrap. Do not modify the shared module
+installation yourself. The [README preflight](../README.md#install-on-aurora)
+checks imports, not installation or qualification. The setup must provide:
+
+- ExaServe and its control-plane dependencies to that Python with
+  `PYTHONNOUSERSITE=1` and `PYTHONSAFEPATH=1`. A `pip install --user` alone is
+  insufficient. Regular eval supplies its immutable source snapshot explicitly;
+  this is distinct from installed-wheel serving.
+- The compatible Ray/vLLM/XPU/MPI libraries, MPI compiler/launcher and required
+  shared libraries.
+- HAProxy on the batch runtime's `PATH`, or the configured gateway executable.
+  The repo's [build helper](../scripts/build_haproxy.sh) requires an audited
+  `HAPROXY_SOURCE_SHA256`; compile on compute, not a login node.
+- Readable model inputs and writable run/scratch paths with sufficient space.
+- Site-approved proxy/network settings when downloads require them, without
+  routing allocation-internal serving traffic through an external proxy.
+
+Do not install the `server` extra over the site stack or use
+`uv sync --all-extras` to prepare it. Keep the portable `.venv` separate.
+An isolated LiteLLM gateway uses its own configured Python; the parent stays
+in the Ray/vLLM runtime. Use `ZE_AFFINITY_MASK` for Aurora device visibility,
+never `ONEAPI_DEVICE_SELECTOR`.
+
+Before launching, check the selected interpreter and tools without starting
+Ray or importing the GPU stack:
+
+```bash
+python3 --version
+PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 python3 -c 'import sys, exaserve; print(sys.executable); print(exaserve.__file__)'
 command -v mpiexec
+command -v mpicc
 command -v haproxy
 ```
 
-Replace `/path/to/exaserve` with the checkout path. Verify the active
-environment, input files, model/checkpoint access, executables, and writable
-output locations before proceeding. Use `ZE_AFFINITY_MASK` for Aurora GPU
-visibility; do not introduce `ONEAPI_DEVICE_SELECTOR`.
+Check the printed paths against the intended interpreter and artifact; an
+inherited checkout `PYTHONPATH` must not masquerade as an installed-wheel check.
+Successful command lookup is a preflight check, not hardware qualification.
 
-Aurora's module-provided compatibility profile records Python 3.12.12,
-Ray 2.53.0, and vLLM 0.15.0+xpu. See the
-[site dependency record](../requirements/aurora-frameworks-2025.3.1.lock) and
-[compatibility matrix](../doc/hardening/COMPATIBILITY_MATRIX.md). These are
-site-specific distributions, not a generic PyPI installation recipe. Their
-presence alone does not satisfy current-candidate release gates.
+### Configure evaluation environment preparation
 
-Do not run `uv sync --all-extras`, install the `server` extra over the module
-stack, or use the portable `.venv` as the Aurora Ray/vLLM parent environment.
-Keep the portable development environment separate. After an approved package
-is built, install that exact artifact into the intended site environment
-without replacing its module-provided dependencies, following the applicable
-package/qualification procedure.
+For ordinary Ray evaluation jobs, explicitly select your own setup file instead
+of relying on a home-directory default. Save a site-reviewed shell file at an
+absolute path readable by the job head. Its job is only environment preparation;
+it must not launch daemons, implement readiness/cleanup, or stage data per node.
+For example, adapting the paths to your installation:
 
-Use `source ~/script/env_aurora` for ExaServe runs even when they use an isolated
-LiteLLM gateway. `source ~/script/env_litellm` is only for standalone LiteLLM
-diagnostics that do not import or run Ray/vLLM in the parent process.
+```bash
+# Contents of your operator-owned environment.sh; sourced by the job head.
+module load frameworks || return 1
+module load go || return 1
+unset ONEAPI_DEVICE_SELECTOR
+export PATH="/absolute/path/to/haproxy/bin:$PATH"
+```
+
+Keep the module-provided `python3`; do not prepend a home virtualenv's Python.
+Select the setup file before materializing the run:
+
+```bash
+export EXASERVE_ENV_SCRIPT_AURORA=/absolute/path/to/environment.sh
+export EXASERVE_PROJECT_ROOT=/lus/flare/projects/YOUR_PROJECT
+python3 -m eval.site_config get env_script_aurora
+```
+
+Set model/data/output paths in your
+[local site configuration](../eval/site_config_local.example.py).
+`EXASERVE_SITE_CONFIG_LOCAL` can select another override file.
+A per-spec `backend.args.ray.launch.env_script` takes precedence over the
+environment variable, which takes precedence over local `SITE_OVERRIDES`;
+use an absolute path in the spec too. The field names are existing API names,
+not required filenames. If using the validation-only LiteLLM gateway, configure
+`EXASERVE_LITELLM_PYTHON_PATH` (or its per-spec Python override) separately.
+
+### Current bootstrap limitations
+
+Environment preparation is not yet uniform across all entry points:
+
+- **Serving CLI:** captures the submitting interpreter's `sys.executable`.
+  Its job bootstrap still checks `$HOME/script/env_aurora` and otherwise loads
+  `frameworks`; no custom setup-file CLI option exists. That private file is
+  optional, but if present it is executed. The eval environment override above
+  does not affect this entry point. Ensure the recorded interpreter, required
+  libraries and gateway are available after that bootstrap; inspect the rendered
+  job with `--dry-run` before submission. Loading a different module in the job
+  does not change the recorded interpreter.
+- **Allocation campaigns:** currently hard-code a private environment-script
+  path, spool location and account assumptions in
+  [the controller](../eval/lib/allocation_campaign.py). They do not honor the
+  ordinary eval override. Treat that path as operator-specific, not a portable
+  deployment recipe. Making it configurable must bind the setup to the immutable
+  campaign identity and re-run the WP12 proof; do not edit a generated campaign
+  or fabricate private helper files to make it pass.
+- **Historical hardening helpers and the mock eval backend:** some retain
+  maintainer-local paths. They are not the general installation interface.
+
+These limitations are recorded, not fixed by changing documentation. Use the
+ordinary explicit-config Ray evaluation path where applicable; do not advertise
+the allocation controller as portable until its bootstrap is corrected and
+qualified.
 
 ### Before the first run
 
@@ -138,6 +220,9 @@ Production admission is fail-closed; `production execution is not qualified`
 is a qualification gate, not a request to bypass checks. Only predeclared,
 authorized validation work may enable `validation_mode`.
 
-Use unique output directories, keep prior artifacts, and actively monitor
-stdout/stderr and canonical deployment status. Stop to diagnose an early
-failure instead of waiting for a broken process to exit on its own.
+Verify the working directory, configs, inputs, environment, output paths and
+walltime. Use unique output directories and preserve prior artifacts. Monitor
+stdout/stderr and canonical status; diagnose early errors and safely stop
+clearly broken work. Report the exact command, session and evidence paths;
+distinguish scheduler walltime expiry from application failure. Cleanup belongs
+to the canonical executor, not a second shell lifecycle.

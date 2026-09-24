@@ -21,7 +21,8 @@ entry point, not a replacement specification.
 
 | Topic | Authoritative document or entry point |
 | --- | --- |
-| Safety, permissions, and Aurora compute sessions | [Repository operating rules](../AGENTS.md) |
+| Site-neutral safety and permissions | [Repository operating rules](../AGENTS.md) |
+| Aurora allocation, toolchain, and runtime setup | [Aurora setup guide](getting_started.md#aurora-development-and-serving) |
 | Architecture, implementation, and acceptance gates | [Production-hardening execution plan](../doc/PRODUCTION_HARDENING_EXECUTION_PLAN.md) |
 | Candidate identities and qualification caveats | [Hardening status](../doc/hardening/STATUS.md) |
 | Implemented boundaries and design notes | [Design index](../doc/design/README.md) |

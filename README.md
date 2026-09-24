@@ -62,18 +62,35 @@ function by function, worked against the canonical two-node HAProxy example.
 
 ## Install on Aurora
 
+Prepare the site runtime using the
+[deployment setup guide](docs/getting_started.md#aurora-development-and-serving).
+The current serving profile requires the qualified site-local interpreter, not
+a home-directory virtualenv. In a validated compute session, check the
+site-provisioned environment:
+
 ```bash
 module load frameworks
-python3 -m pip install --user .
-
-SCRIPTS_DIR="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))')"
-export PATH="$SCRIPTS_DIR:$PATH"
+unset ONEAPI_DEVICE_SELECTOR
+PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 python3 -c 'import sys, exaserve; print(sys.executable); print(exaserve.__file__)'
+command -v mpiexec
+command -v haproxy
 ```
 
 Ray, vLLM, MPI, and the XPU stack come from Aurora's `frameworks` module. The
-wheel supplies the Python control plane plus the source for its small native MPI
+selected Python and package paths must match the intended approved runtime and
+ExaServe artifact, not an incidental checkout. If the package is unavailable,
+have the operator provision the exact wheel and control-plane dependencies for
+that interpreter and batch bootstrap without replacing the site stack. Do not
+modify the read-only module installation yourself or install ExaServe only with
+`--user`: job isolation disables Python's user-site packages. A home-directory
+venv is not a workaround for the qualified-interpreter requirement.
+Submission captures its interpreter's executable; review the
+[current bootstrap limitations](docs/getting_started.md#current-bootstrap-limitations).
+
+The wheel supplies the Python control plane plus the source for its small native MPI
 broadcast helper. HAProxy must be available on `PATH`; the repository includes
-`scripts/build_haproxy.sh` as an operator setup helper.
+`scripts/build_haproxy.sh` as an operator setup helper. Build it on compute with
+an audited source hash, not on the login node.
 
 ## Candidate inspection and eventual submission
 
@@ -249,7 +266,7 @@ frameworks environment.
 
 On Aurora, load `frameworks` and `go` before brief static checks. Full test
 suites, package builds, MPI and GPU work require a validated compute session
-and fresh environment setup under [AGENTS.md](AGENTS.md). Once in that session
+and fresh [environment setup](docs/getting_started.md#aurora-development-and-serving). Once in that session
 (or on a suitable non-HPC development machine), use:
 
 ```bash
@@ -285,6 +302,11 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 The current maintainer contact is Wenyi Wang, `wenyiw@uchicago.edu`.
 
 ## Acknowledgments
+
+ExaServe development has included assistance from coding agents, including
+OpenAI Codex and Claude Code, for implementation, audits, tests and documentation.
+Human contributors remain responsible for the work; see the
+[AI-assistance and attribution policy](CONTRIBUTING.md#ai-generated-and-ai-assisted-contributions).
 
 Repository infrastructure and community guidance draw on
 [AI-ModCon/BaseTemplate](https://github.com/AI-ModCon/BaseTemplate).
