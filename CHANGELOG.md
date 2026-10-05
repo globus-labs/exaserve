@@ -6,6 +6,17 @@ passed hardware qualification. Exact artifacts and scope are recorded in
 
 ## Unreleased
 
+### Serve application layout
+
+- Deploy a dense real-engine model (one HAProxy model, TP=1, PP=1, every GPU of
+  every node) as one Serve application with one multi-replica deployment
+  instead of one application per replica. Each replica still resolves and
+  attests its exact rank/device slot; HAProxy no longer selects a replica
+  route for this layout, Serve's router does. Sparse, multi-device,
+  pipeline-parallel and multi-model topologies keep one application per
+  replica, and dense null-compute keeps its node-grouped applications.
+  Covered by hermetic tests only; no hardware qualification is implied.
+
 ### Repository preparation for AI-ModCon
 
 - Adopt Apache-2.0 licensing and explicit maintainer/contact metadata.

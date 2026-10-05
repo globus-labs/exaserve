@@ -346,10 +346,27 @@ rank/device tuple back to one precompiled logical replica and publishes the same
 per-replica receipt/lifecycle identity. HAProxy selects uniformly among the
 node-group routes. Proxy anchors remain one per rank, so the exact application
 predicate is `2 * num_nodes` while replica/receipt/trace predicates remain
-`num_nodes * num_gpus_per_node`. Any partial, unequal, multi-model, non-HAProxy,
-non-null, or non-TP1/PP1 topology retains the per-replica application layout.
-This rule is deterministic for the schema/source pair; it is not an ambient
-switch and cannot be selected at runtime.
+`num_nodes * num_gpus_per_node`.
+
+The same dense topology with a real engine has a second mandatory derived
+layout: one model application that holds every replica. One HAProxy model with
+TP=1, PP=1, exactly `num_nodes * num_gpus_per_node` replicas and exact device
+coverage `0..num_gpus_per_node-1` on every allocation rank is deployed as one
+Serve deployment with that many replicas. Ray places one replica per GPU, and
+each actor resolves its live rank/device tuple back to one precompiled logical
+replica and publishes the same per-replica receipt/lifecycle identity, as in the
+native HeadOnly layout. HAProxy spreads connections over the per-rank Serve
+proxies without rewriting the route, and Serve's router selects the replica.
+Proxy anchors remain one per rank, so the exact application predicate is
+`num_nodes + 1` while replica/receipt/trace predicates remain
+`num_nodes * num_gpus_per_node`. The reason is bring-up: Serve confirms
+applications one after another, and with one application per replica that
+confirmation, not engine start-up, set the time to READY at scale.
+
+Any partial, unequal, multi-model, non-HAProxy, or non-TP1/PP1 topology retains
+the per-replica application layout. These rules are deterministic for the
+schema/source pair; they are not an ambient switch and cannot be selected at
+runtime.
 
 #### 3.2.1 Binding cutover resolutions (2026-08-07)
 

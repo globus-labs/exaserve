@@ -485,6 +485,8 @@ def _canonical_direct_replica_urls(
     n_rep = model.num_replicas
     if n_rep <= 1:
         return None
+    if plan.uses_single_serve_application(model):
+        return None  # one root-route application: every node proxy reaches it
     route = model.route_name
     urls = [
         f"http://{addresses_by_rank[replica.planned_ranks[0]]}:"

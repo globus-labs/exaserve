@@ -41,6 +41,7 @@ def _run(tmp_path: Path):
         receipt_requirements=("a", "b", "c"),
         runtime=SimpleNamespace(null_compute=True),
         uses_head_only_serve_proxy=lambda: False,
+        uses_single_serve_application=lambda _model: False,
         node_grouped_null_application_groups=lambda _model: (),
     )
     run_plan = SimpleNamespace(

@@ -97,11 +97,26 @@ def planned_proxy_anchor_names(plan) -> frozenset[str]:
     return frozenset(f"{PROXY_ANCHOR_APP_PREFIX}{rank}" for rank in range(plan.num_nodes))
 
 
+def serve_application_layout(plan) -> str:
+    """Name the plan's derived model-application layout.
+
+    The server records this name with its start-up measurements and the
+    executor checks the record against the plan, so both read it here.
+    """
+    if any(plan.node_grouped_null_application_groups(model) for model in plan.models):
+        return "node_grouped_null"
+    if plan.uses_head_only_serve_proxy():
+        return "native_head_only"
+    if any(plan.uses_single_serve_application(model) for model in plan.models):
+        return "single_application"
+    return "per_replica"
+
+
 def planned_application_names(plan) -> frozenset[str]:
     """Return the exact model and infrastructure Serve application set."""
     names: set[str] = set(planned_proxy_anchor_names(plan))
     for model in plan.models:
-        if plan.uses_head_only_serve_proxy():
+        if plan.uses_single_serve_application(model):
             names.add(model.route_name)
         elif groups := plan.node_grouped_null_application_groups(model):
             names.update(

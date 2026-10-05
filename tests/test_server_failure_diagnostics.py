@@ -270,6 +270,7 @@ def test_run_many_failure_includes_and_prints_public_status(monkeypatch, capsys)
     config = SimpleNamespace(
         models=[model],
         uses_head_only_serve_proxy=lambda: False,
+        uses_single_serve_application=lambda _model: False,
         node_grouped_null_application_groups=lambda _model: ((0, (0,)),),
     )
     binding = SimpleNamespace(models=[bound_model])
@@ -317,6 +318,7 @@ def test_serve_run_failure_includes_tail_preserved_phase_for_every_branch(
     config = SimpleNamespace(
         models=[model],
         uses_head_only_serve_proxy=lambda: head_only,
+        uses_single_serve_application=lambda _model: head_only,
         node_grouped_null_application_groups=lambda _model: (),
     )
     binding = SimpleNamespace(models=[bound_model])

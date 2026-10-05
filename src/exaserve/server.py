@@ -2163,11 +2163,16 @@ def deploy_from_canonical_binding(
 
         safe_name = model_config.route_name
         n_rep = model_plan.assigned_replicas
-        if config.uses_head_only_serve_proxy():
-            # Preserve the paper's native Ray Serve baseline: one root-route
-            # deployment with N replicas, so Ray Serve's own HeadOnly proxy
-            # performs request-to-replica balancing. Each actor derives and
-            # proves its canonical slot from its live rank/device assignment.
+        if config.uses_single_serve_application(model_config):
+            # One root-route deployment with N replicas, Ray Serve's own
+            # layout: Serve's router performs request-to-replica balancing,
+            # behind its HeadOnly proxy in the paper's native baseline and
+            # behind the per-node proxies in the dense HAProxy layout. Each
+            # actor derives and proves its canonical slot from its live
+            # rank/device assignment.
+            layout = (
+                "native HeadOnly" if config.uses_head_only_serve_proxy() else "single-application"
+            )
             deployment, model_id = deploy_model(
                 model_config,
                 model_path_map,
@@ -2181,11 +2186,11 @@ def deploy_from_canonical_binding(
                     serve.run(deployment, name=safe_name, route_prefix="/")
                 except Exception as deploy_exc:
                     raise _serve_deployment_failure(
-                        f"native HeadOnly deployment failed for {n_rep} replicas of {model_id}",
+                        f"{layout} deployment failed for {n_rep} replicas of {model_id}",
                         deploy_exc,
                     ) from None
             print(
-                f"[ExaServe] ✓ native HeadOnly route http://localhost:8000/v1 "
+                f"[ExaServe] ✓ {layout} route http://localhost:8000/v1 "
                 f"(model: {model_id}, replicas={n_rep})",
                 flush=True,
             )
@@ -2466,19 +2471,11 @@ def main() -> None:
         expected_model_replicas=sum(model.num_replicas for model in canonical_plan.models),
         expected_receipt_requirements=len(canonical_plan.receipt_requirements),
     )
-    from .control.plan_readiness import planned_application_names
+    from .control.plan_readiness import planned_application_names, serve_application_layout
 
-    application_layout = (
-        "node_grouped_null"
-        if any(
-            canonical_plan.node_grouped_null_application_groups(model)
-            for model in canonical_plan.models
-        )
-        else ("native_head_only" if canonical_plan.uses_head_only_serve_proxy() else "per_replica")
-    )
     tracer.set_metadata(
         expected_serve_applications=len(planned_application_names(canonical_plan)),
-        serve_application_layout=application_layout,
+        serve_application_layout=serve_application_layout(canonical_plan),
     )
     print(
         f"[ExaServe] Serve Init: Connecting to Ray cluster at {ray_address}...",

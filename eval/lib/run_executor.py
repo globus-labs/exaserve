@@ -1455,15 +1455,14 @@ def _capture_startup_measurement(run_plan, launched, *, ready_evidence_path: str
         raise RuntimeError("startup scaling trace metadata is malformed")
 
     plan = run_plan.semantic_plan.deployment
-    from exaserve.control.plan_readiness import planned_application_names
+    from exaserve.control.plan_readiness import (
+        planned_application_names,
+        serve_application_layout,
+    )
 
     expected_replicas = sum(model.num_replicas for model in plan.models)
     expected_applications = len(planned_application_names(plan))
-    application_layout = (
-        "node_grouped_null"
-        if any(plan.node_grouped_null_application_groups(model) for model in plan.models)
-        else ("native_head_only" if plan.uses_head_only_serve_proxy() else "per_replica")
-    )
+    application_layout = serve_application_layout(plan)
     expected_metadata = {
         "deployment_plan_hash": run_plan.deployment_plan_hash,
         "generation": launched.monitor.expected_generation,

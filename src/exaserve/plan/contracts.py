@@ -1359,6 +1359,54 @@ class DeploymentPlan:
     def uses_head_only_serve_proxy(self) -> bool:
         return self.exposure.mode == ExposureMode.RAY_SERVE_HEAD_ONLY.value
 
+    def uses_single_serve_application(self, model: ModelPlan) -> bool:
+        """Return whether one Serve application holds every replica of ``model``.
+
+        One deployment with N replicas is Ray Serve's own layout: the
+        controller creates one application and Serve's router balances
+        requests over its replicas. With one application per logical replica
+        the controller confirms the applications one after another, and that
+        confirmation dominated bring-up at scale. The single application is
+        therefore the default for the dense real-engine layout behind
+        HAProxy: one model whose one-device replicas occupy every GPU of
+        every node. Ray then places exactly one replica per GPU, and each
+        live actor still resolves and attests its exact rank/device/replica
+        identity, so every compiled slot is filled.
+
+        Native HeadOnly always uses this layout. Sparse or multi-device
+        placements, pipeline stages and several models keep one exact
+        application per replica, because one shared placement template
+        cannot express them; dense HAProxy null-compute keeps its node groups.
+        """
+        if model not in self.models:
+            return False
+        if self.uses_head_only_serve_proxy():
+            return True
+        if (
+            self.runtime.null_compute
+            or self.gateway is None
+            or self.gateway.kind != GatewayKind.HAPROXY.value
+            or len(self.models) != 1
+            or model.num_replicas <= 1
+            or model.num_replicas != self.num_nodes * self.num_gpus_per_node
+            or model.tensor_parallel_size != 1
+            or model.pipeline_parallel_size != 1
+        ):
+            return False
+        slots: set[tuple[int, int]] = set()
+        for replica in model.replicas:
+            if len(replica.planned_ranks) != 1 or len(replica.planned_device_ids) != 1:
+                return False
+            devices = tuple(replica.planned_device_ids[0])
+            if len(devices) != 1:
+                return False
+            slots.add((replica.planned_ranks[0], devices[0]))
+        return slots == {
+            (rank, device)
+            for rank in range(self.num_nodes)
+            for device in range(self.num_gpus_per_node)
+        }
+
     def node_grouped_null_application_groups(
         self, model: ModelPlan
     ) -> tuple[tuple[int, tuple[int, ...]], ...]:

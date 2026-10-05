@@ -40,7 +40,7 @@ def _site():
     ).finalize()
 
 
-def _plan(nodes=2, *, runtime=None):
+def _plan(nodes=2, *, runtime=None, replicas=None):
     raw = {
         "num_nodes": nodes,
         "models": [
@@ -48,6 +48,8 @@ def _plan(nodes=2, *, runtime=None):
         ],
         "gateway": {"kind": "haproxy", "port": 4001},
     }
+    if replicas is not None:
+        raw["models"][0]["num_replicas"] = replicas
     if runtime:
         raw["runtime"] = runtime
         raw["validation_mode"] = True
@@ -1203,8 +1205,12 @@ def test_python_launcher_sanitizes_retired_overlay_paths(monkeypatch):
 
 
 def test_multi_replica_application_evidence_requires_every_sibling(tmp_path):
-    root = _root(tmp_path)
+    # Half of the GPUs: a sparse placement keeps one application per replica.
+    root = CompositionRoot(
+        plan=_plan(2, replicas=12), generation=7, run_dir=str(tmp_path), log=lambda *_: None
+    )
     model = root.plan.models[0]
+    assert not root.plan.uses_single_serve_application(model)
     applications = {
         f"{model.route_name}_r{index}": {
             "running": 1,
@@ -1221,6 +1227,22 @@ def test_multi_replica_application_evidence_requires_every_sibling(tmp_path):
     incomplete = root.application_for_model(model, applications)
     assert incomplete["_observation_state"] == "STARTING"
     assert incomplete["running"] == model.num_replicas - 1
+
+
+def test_dense_model_is_ready_through_its_one_application(tmp_path):
+    root = _root(tmp_path)
+    model = root.plan.models[0]
+    assert root.plan.uses_single_serve_application(model)
+    application = {
+        "running": model.num_replicas,
+        "target": model.num_replicas,
+        "route_prefix": "/",
+        "status": "RUNNING",
+        "_observation_state": "READY",
+    }
+    assert root.application_for_model(model, {model.route_name: application}) is application
+    siblings = {f"{model.route_name}_r{index}": application for index in range(2)}
+    assert root.application_for_model(model, siblings) is None
 
 
 def test_head_only_uses_one_native_multi_replica_application(tmp_path):

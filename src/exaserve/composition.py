@@ -1490,7 +1490,7 @@ class CompositionRoot:
         app_items = {
             name: info for name, info in applications.items() if name != "__cluster_snapshot__"
         }
-        if model.num_replicas > 1 and not self.plan.uses_head_only_serve_proxy():
+        if model.num_replicas > 1 and not self.plan.uses_single_serve_application(model):
             groups = self.plan.node_grouped_null_application_groups(model)
             expected_names = (
                 {f"{model.route_name}_g{group_index}" for group_index, _group in enumerate(groups)}
@@ -1737,8 +1737,17 @@ class CompositionRoot:
         for _rank, node in self.binding.rank_to_node:
             for model in self.plan.models:
                 groups = grouped_routes[model.model_id]
+                # One application holding every replica has a single route;
+                # Serve's router, not the gateway, then selects the replica.
                 replica_routes = (
-                    len(groups) if groups else (model.num_replicas if model.num_replicas > 1 else 0)
+                    len(groups)
+                    if groups
+                    else (
+                        model.num_replicas
+                        if model.num_replicas > 1
+                        and not self.plan.uses_single_serve_application(model)
+                        else 0
+                    )
                 )
                 endpoints.append(
                     BackendEndpoint(
@@ -2031,7 +2040,7 @@ class CompositionRoot:
         if (
             self.plan.gateway is None
             and model.num_replicas > 1
-            and not self.plan.uses_head_only_serve_proxy()
+            and not self.plan.uses_single_serve_application(model)
         ):
             # DIRECT_VALIDATION has no gateway to select a replica route. Probe
             # a concrete bound application; exact receipt/Serve evidence still
